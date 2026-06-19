@@ -128,3 +128,14 @@ pnpm build       # builds the web app
 
 > This README is engineering guidance, not legal advice. Money transmission is the box you do
 > not want to back into by accident.
+
+---
+
+## Docs & contributing
+
+- **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
+- **[Contributing](CONTRIBUTING.md)** — setup, the check suite, and PR guidelines.
+- **[Security policy](SECURITY.md)** — how to report a vulnerability privately.
+- **[Code of conduct](CODE_OF_CONDUCT.md)**.
+
+Licensed under the [Apache License 2.0](LICENSE).
