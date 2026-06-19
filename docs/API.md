@@ -194,6 +194,14 @@ When a link changes state, the API POSTs a JSON event to each registered URL:
 - `x-checkout-signature` — `sha256=<hex>`, an HMAC-SHA256 of the **exact raw body**
   using your webhook secret.
 
+Delivery is retried with exponential backoff (default 4 attempts) on transient
+failures — network errors and `5xx`/`429` responses. A `4xx` (other than `429`) is
+treated as permanent and not retried. Return `2xx` quickly to acknowledge receipt.
+
+For **replay protection**, reject events whose in-body `sentAt` is older than a
+small window (e.g. 5 minutes). `sentAt` is part of the signed body, so it cannot be
+forged without the secret.
+
 **Verifying** (recompute over the raw body and compare in constant time):
 
 ```js
