@@ -1,0 +1,70 @@
+import { readFileSync, existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Minimal dependency-free .env loader. Walks up from this file and the cwd,
+// loading the first .env it finds without overwriting already-set vars.
+function loadEnvFiles(): void {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(process.cwd(), ".env"),
+    resolve(process.cwd(), "../../.env"),
+    resolve(here, "../../../.env"),
+    resolve(here, "../../../../.env"),
+  ];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    const text = readFileSync(path, "utf8");
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      let value = line.slice(eq + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (process.env[key] === undefined) process.env[key] = value;
+    }
+    break;
+  }
+}
+
+loadEnvFiles();
+
+function req(name: string, fallback?: string): string {
+  const v = process.env[name] ?? fallback;
+  if (v === undefined || v === "") throw new Error(`Missing required env var: ${name}`);
+  return v;
+}
+
+export type StellarNetwork = "testnet" | "public";
+
+const network = (process.env.STELLAR_NETWORK ?? "testnet") as StellarNetwork;
+if (network !== "testnet" && network !== "public") {
+  throw new Error(`STELLAR_NETWORK must be "testnet" or "public", got "${network}"`);
+}
+
+export const env = {
+  network,
+  horizonUrl: process.env.HORIZON_URL || undefined,
+  usdcIssuer:
+    network === "public"
+      ? req("USDC_ISSUER_PUBLIC")
+      : req("USDC_ISSUER_TESTNET"),
+  databaseUrl: process.env.DATABASE_URL || "file:./local.db",
+  apiPort: Number(process.env.API_PORT ?? "8787"),
+  pollMs: Number(process.env.WATCH_POLL_MS ?? "6000"),
+  corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:3000")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  // Seller wallet that receives funds. If unset on testnet, the app generates a
+  // throwaway keypair on first boot and prints it. Required on public network.
+  defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
+  defaultSellerName: process.env.DEFAULT_SELLER_NAME || "Demo Seller",
+} as const;

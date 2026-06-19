@@ -1,0 +1,9 @@
+{
+  "name": "@checkout/offramp",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "main": "./src/index.ts",
+  "scripts": { "typecheck": "tsc -p tsconfig.json" },
+  "dependencies": { "@checkout/core": "workspace:*" }
+}
