@@ -5,12 +5,14 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { rateLimit } from "./middleware/rate-limit";
 
 async function main(): Promise<void> {
   const container = await createContainer();
 
   const app = new Hono();
   app.use("*", cors({ origin: env.corsOrigins, allowMethods: ["GET", "POST", "OPTIONS"] }));
+  app.use("*", rateLimit({ windowMs: env.rateLimitWindowMs, max: env.rateLimitMax }));
 
   app.get("/health", (ctx) =>
     ctx.json({

@@ -63,6 +63,9 @@ export const env = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
+  // Fixed-window rate limit per client IP. Set RATE_LIMIT_MAX=0 to disable.
+  rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? "60000"),
+  rateLimitMax: Number(process.env.RATE_LIMIT_MAX ?? "120"),
   // Seller wallet that receives funds. If unset on testnet, the app generates a
   // throwaway keypair on first boot and prints it. Required on public network.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
