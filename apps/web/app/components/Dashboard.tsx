@@ -3,6 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type PaymentLink } from "../../lib/api";
 
+// Mirrors the API's OFFRAMP setting (see .env.example) so this button never
+// claims a real payout when the backend is still running MockAnchorOffRamp.
+const OFFRAMP_CURRENCY = process.env.NEXT_PUBLIC_OFFRAMP_CURRENCY ?? "NGN";
+const OFFRAMP_IS_MOCK = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "testanchor";
+const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
+  ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
+  : `Cash out to ${OFFRAMP_CURRENCY}`;
+
 function StatusPill({ status }: { status: string }) {
   const label = status.replace("offramp_", "off-ramp ").replace("_", " ");
   return <span className={`pill pill--${status}`}>{label}</span>;
@@ -65,7 +73,7 @@ export default function Dashboard() {
   async function cashOut(id: string) {
     setError(null);
     try {
-      await api.cashOut(id, "NGN");
+      await api.cashOut(id, OFFRAMP_CURRENCY);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Cash-out failed");
@@ -141,7 +149,7 @@ export default function Dashboard() {
                       <>
                         {" · "}
                         <button className="linkbtn" onClick={() => cashOut(link.id)}>
-                          Cash out to NGN
+                          {CASH_OUT_LABEL}
                         </button>
                       </>
                     )}

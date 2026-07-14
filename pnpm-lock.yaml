@@ -101,6 +101,13 @@ importers:
       '@checkout/core':
         specifier: workspace:*
         version: link:../core
+      '@stellar/stellar-sdk':
+        specifier: 16.0.1
+        version: 16.0.1
+    devDependencies:
+      vitest:
+        specifier: 4.1.9
+        version: 4.1.9(@types/node@25.9.3)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(tsx@4.22.4))
 
   packages/stellar:
     dependencies:

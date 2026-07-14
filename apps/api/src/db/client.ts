@@ -35,8 +35,8 @@ const BOOTSTRAP_SQL = [
    )`,
 ];
 
-export function createDb(databaseUrl: string): { db: DB; client: Client } {
-  const client = createClient({ url: databaseUrl });
+export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {
+  const client = createClient({ url: databaseUrl, authToken });
   const db = drizzle(client, { schema });
   return { db, client };
 }

@@ -106,7 +106,7 @@ pnpm build       # builds the web app
 | Horizon payment watching + memo matching | **Real** logic against the Stellar SDK v16 API. Polling (restart-safe), idempotent via persisted cursor + processed-tx ledger. |
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
 | Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
-| Off-ramp (`@checkout/offramp`) | **MOCK.** `MockAnchorOffRamp` simulates an FX quote and a payout with a fake rate. It exists so the seam is exercisable end-to-end; it moves no money. |
+| Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
 | Auth | **Not implemented.** Single hard-coded demo seller, no API keys / login. Fine for a demo, not for production. |
 
 ---
@@ -117,10 +117,10 @@ pnpm build       # builds the web app
    public. Confirm the current issuer for your network before relying on it — a wrong issuer
    silently matches nothing (or the wrong asset).
 2. **Get a real anchor relationship first.** A checkout that dead-ends in USDC isn't the
-   product. Replace `MockAnchorOffRamp` with an adapter implementing the same `OffRampPort`
-   against a licensed Nigerian anchor's SEP endpoints (`quote` → SEP-38, `initiate` → SEP-24/31,
-   `status` → poll to settlement). Validate the anchor will actually onboard you and pay out
-   **before** building further.
+   product. `packages/offramp/src/testanchor.ts` is a real SEP-10 → SEP-38 → SEP-6 adapter, but
+   against Stellar's public *testnet reference sandbox* — not a licensed anchor. Fork its shape
+   for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
+   anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
 4. **Add auth** (API keys per seller + a real login) before anyone but you touches it.
 5. **Multiple sellers / scale:** the watcher polls per active destination account; for many

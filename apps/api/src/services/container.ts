@@ -1,6 +1,7 @@
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { resolveStellarConfig, StellarRail, HorizonWatcher } from "@checkout/stellar";
-import { MockAnchorOffRamp } from "@checkout/offramp";
+import { MockAnchorOffRamp, TestAnchorOffRamp } from "@checkout/offramp";
+import type { OffRampPort } from "@checkout/core";
 import { env } from "../env";
 import { createDb, bootstrap } from "../db/client";
 import {
@@ -29,7 +30,7 @@ export async function createContainer(): Promise<Container> {
     usdcIssuer: env.usdcIssuer,
   });
 
-  const { db, client } = createDb(env.databaseUrl);
+  const { db, client } = createDb(env.databaseUrl, env.databaseAuthToken);
   await bootstrap(client);
 
   const linksRepo = new DrizzleLinkRepository(db);
@@ -37,13 +38,13 @@ export async function createContainer(): Promise<Container> {
   const webhooksRepo = new DrizzleWebhookRepository(db);
   const stateRepo = new DrizzleWatcherStateRepository(db);
 
-  const sellerWallet = resolveSellerWallet();
+  const seller = resolveSellerKeypairOrWallet();
+  const sellerWallet = seller.publicKey;
   await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
 
   const rail = new StellarRail(stellar);
   const watcher = new HorizonWatcher(stellar.horizonUrl);
-  // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
-  const offramp = new MockAnchorOffRamp({ settleAfterMs: 8000 });
+  const offramp = createOffRamp(seller.keypair);
 
   const service = new LinkService({
     links: linksRepo,
@@ -82,12 +83,25 @@ export async function createContainer(): Promise<Container> {
   };
 }
 
-function resolveSellerWallet(): string {
+/**
+ * Resolves the seller's public key, plus its Keypair when we actually hold the
+ * secret in-memory (auto-generated testnet keypair, or DEFAULT_SELLER_SECRET
+ * explicitly supplied). The Keypair is only needed to sign the SEP-10 auth
+ * challenge for `OFFRAMP=testanchor` — never persisted beyond this process.
+ */
+function resolveSellerKeypairOrWallet(): { keypair: Keypair | null; publicKey: string } {
   if (env.defaultSellerWallet) {
     if (!StrKey.isValidEd25519PublicKey(env.defaultSellerWallet)) {
       throw new Error("DEFAULT_SELLER_WALLET is not a valid Stellar G-address");
     }
-    return env.defaultSellerWallet;
+    if (!env.defaultSellerSecret) {
+      return { keypair: null, publicKey: env.defaultSellerWallet };
+    }
+    const kp = Keypair.fromSecret(env.defaultSellerSecret);
+    if (kp.publicKey() !== env.defaultSellerWallet) {
+      throw new Error("DEFAULT_SELLER_SECRET does not match DEFAULT_SELLER_WALLET");
+    }
+    return { keypair: kp, publicKey: kp.publicKey() };
   }
   if (env.network === "public") {
     throw new Error("Set DEFAULT_SELLER_WALLET to your wallet address before running on public network");
@@ -108,5 +122,20 @@ function resolveSellerWallet(): string {
       "",
     ].join("\n"),
   );
-  return pub;
+  return { keypair: kp, publicKey: pub };
+}
+
+function createOffRamp(sellerKeypair: Keypair | null): OffRampPort {
+  if (env.offramp === "mock") {
+    // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
+    return new MockAnchorOffRamp({ settleAfterMs: 8000 });
+  }
+  if (!sellerKeypair) {
+    throw new Error(
+      "OFFRAMP=testanchor requires the seller's secret key to sign SEP-10 auth: " +
+        "set DEFAULT_SELLER_SECRET (matching DEFAULT_SELLER_WALLET), or leave " +
+        "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
+    );
+  }
+  return new TestAnchorOffRamp({ sellerKeypair });
 }

@@ -57,6 +57,8 @@ export const env = {
       ? req("USDC_ISSUER_PUBLIC")
       : req("USDC_ISSUER_TESTNET"),
   databaseUrl: process.env.DATABASE_URL || "file:./local.db",
+  // Turso auth token. Unused for local file: URLs.
+  databaseAuthToken: process.env.DATABASE_AUTH_TOKEN || undefined,
   apiPort: Number(process.env.API_PORT ?? "8787"),
   pollMs: Number(process.env.WATCH_POLL_MS ?? "6000"),
   corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:3000")
@@ -70,4 +72,10 @@ export const env = {
   // throwaway keypair on first boot and prints it. Required on public network.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
   defaultSellerName: process.env.DEFAULT_SELLER_NAME || "Demo Seller",
+  // "mock" (default, offline-safe) or "testanchor" (real SEP-10/38/6 flow against
+  // https://testanchor.stellar.org). See packages/offramp/src/testanchor.ts.
+  offramp: (process.env.OFFRAMP ?? "mock") as "mock" | "testanchor",
+  // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
+  // needs the seller's secret key to sign the auth challenge). Never persisted.
+  defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
 } as const;
