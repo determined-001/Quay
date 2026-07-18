@@ -3,6 +3,12 @@
 Non-custodial stablecoin **checkout + payment links** on Stellar, with a deliberately
 **swappable off-ramp seam** so the seller can later cash out to local currency without a rewrite.
 
+**Live demo (Stellar testnet):** [dashboard](https://quay-web.vercel.app) ·
+[API](https://quay-api.onrender.com/health) — create a link, pay it from any
+testnet wallet with the shown memo, and watch it flip to **paid**. Cash-out runs
+a real SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org` (USD quotes;
+testnet only, no real money moves).
+
 The loop, end to end:
 
 1. A seller creates a payment link in the dashboard (title + amount + asset).
