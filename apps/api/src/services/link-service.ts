@@ -7,6 +7,7 @@ import {
   type MatchOutcome,
   type NormalizedPayment,
   type OffRampJob,
+  type OffRampQuote,
   type OffRampPort,
   type PaymentLink,
   type PaymentRequest,
@@ -124,16 +125,24 @@ export class LinkService {
     }
 
     const sourceAmount = link.paidAmount ?? link.amount;
-    const quote = await this.deps.offramp.quote({
-      sourceAsset: link.asset,
-      sourceAmount,
-      targetCurrency: body.targetCurrency,
-    });
-    const job = await this.deps.offramp.initiate({
-      linkId: link.id,
-      quoteId: quote.quoteId,
-      payout: { currency: body.targetCurrency, fields: body.payoutFields },
-    });
+    let quote: OffRampQuote;
+    let job: OffRampJob;
+    try {
+      quote = await this.deps.offramp.quote({
+        sourceAsset: link.asset,
+        sourceAmount,
+        targetCurrency: body.targetCurrency,
+      });
+      job = await this.deps.offramp.initiate({
+        linkId: link.id,
+        quoteId: quote.quoteId,
+        payout: { currency: body.targetCurrency, fields: body.payoutFields },
+      });
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp error: ${message}`);
+    }
 
     link.status = "offramp_pending";
     link.offrampJobId = job.jobId;

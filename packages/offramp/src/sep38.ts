@@ -9,7 +9,8 @@ export interface Sep38QuoteResult {
 }
 
 function assetIdentifier(asset: AssetRef): string {
-  return asset.issuer === null ? `stellar:${asset.code}:native` : `stellar:${asset.code}:${asset.issuer}`;
+  // SEP-38 asset identification format: native XLM is "stellar:native".
+  return asset.issuer === null ? "stellar:native" : `stellar:${asset.code}:${asset.issuer}`;
 }
 
 /** SEP-38: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0038.md */

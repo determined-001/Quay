@@ -76,6 +76,11 @@ export class TestAnchorOffRamp implements OffRampPort {
     sourceAmount: string;
     targetCurrency: string;
   }): Promise<OffRampQuote> {
+    if (input.sourceAsset.issuer === null) {
+      throw new Error(
+        'The test anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
+      );
+    }
     const jwt = await this.auth.token();
     const q = await getSep38Quote(this.baseUrl, jwt, {
       sellAsset: input.sourceAsset,

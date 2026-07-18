@@ -7,6 +7,19 @@ import { TestAnchorOffRamp } from "../src/testanchor";
 //   RUN_LIVE_ANCHOR_TESTS=1 pnpm --filter @checkout/offramp test
 const USDC_TESTNET_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
+describe("TestAnchorOffRamp (offline)", () => {
+  it("quote() rejects native XLM with a clear error before any network call", async () => {
+    const offramp = new TestAnchorOffRamp({ sellerKeypair: Keypair.random() });
+    await expect(
+      offramp.quote({
+        sourceAsset: { code: "XLM", issuer: null },
+        sourceAmount: "25",
+        targetCurrency: "USD",
+      }),
+    ).rejects.toThrow(/only off-ramps USDC/);
+  });
+});
+
 describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", () => {
   it("quote() returns a positive rate with a future expiry and a valid SEP-10 JWT underneath", async () => {
     const offramp = new TestAnchorOffRamp({ sellerKeypair: Keypair.random() });
