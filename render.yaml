@@ -1,0 +1,39 @@
+# Render Blueprint — deploys apps/api (Hono API + ledger watcher + cash-out
+# poller) as ONE always-on Docker web service. Starter plan is mandatory: the
+# free tier spins down after 15 min idle, which stops the watcher loop.
+# The web app deploys separately to Vercel; the database is Turso (external).
+#
+# Secrets (sync: false) to set in the Render dashboard on first deploy:
+#   DATABASE_URL          libsql://<db-name>-<org>.turso.io
+#   DATABASE_AUTH_TOKEN   from `turso db tokens create <db>` or the Turso dashboard
+#   DEFAULT_SELLER_SECRET S... secret for DEFAULT_SELLER_WALLET (SEP-10 signing)
+
+services:
+  - type: web
+    name: quay-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: API_PORT
+        value: "8787"
+      - key: STELLAR_NETWORK
+        value: testnet
+      - key: USDC_ISSUER_TESTNET
+        value: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+      - key: WATCH_POLL_MS
+        value: "6000"
+      - key: OFFRAMP
+        value: testanchor
+      - key: CORS_ORIGINS
+        value: https://quay-web.vercel.app
+      - key: DEFAULT_SELLER_WALLET
+        value: GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_AUTH_TOKEN
+        sync: false
+      - key: DEFAULT_SELLER_SECRET
+        sync: false
