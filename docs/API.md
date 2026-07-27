@@ -3,9 +3,12 @@
 The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by default
 (`API_PORT`). All request and response bodies are JSON.
 
-> **Auth:** there is currently **no authentication**. Every request operates on a
-> single hard-coded demo seller. This is fine for local development and demos, not
-> for production. See the README's "Before you go live" section.
+> **Auth:** `POST /auth` (below) issues a session JWT after a wallet-signed SEP-10
+> challenge, and a seller row is created for the wallet on first login. `/links`
+> and `/webhooks` do not check this token yet and still operate on the single
+> demo seller — scoping them by authenticated seller is tracked separately. This
+> is fine for local development and demos, not for production. See the README's
+> "Before you go live" section.
 
 CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 
@@ -26,6 +29,53 @@ Liveness + basic config echo.
 ```json
 { "ok": true, "network": "testnet", "sellerWallet": "G..." }
 ```
+
+---
+
+## `GET /auth?account=G...`
+
+Step 1 of [SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md)
+wallet login: builds a challenge transaction for the given account to sign.
+
+**200**
+```json
+{ "transaction": "AAAAAgAAAAA...", "network_passphrase": "Test SDF Network ; September 2015" }
+```
+**400** — `{ "error": "missing_account" }` or `{ "error": "account must be a valid Stellar G-address" }`
+
+---
+
+## `POST /auth`
+
+Step 2: submit the challenge transaction signed by the account's wallet(s).
+Verifies the server's own signature, timebounds, domain fields, and that
+signature weight from the account's actual signers (via Horizon, M-of-N aware)
+meets its medium threshold — the account's master key if it isn't funded yet.
+Each challenge can be redeemed exactly once.
+
+On success, a seller row is created for the wallet if one doesn't exist yet
+(the wallet address **is** the identity).
+
+**Request**
+```json
+{ "transaction": "AAAAAgAAAAA..." }
+```
+
+**200**
+```json
+{ "token": "<session JWT>" }
+```
+**401** — `{ "error": "<reason>" }`, e.g. signature verification failed, challenge
+already used, or the transaction doesn't match what we issued.
+
+---
+
+## `GET /.well-known/stellar.toml`
+
+[SEP-1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)
+descriptor advertising `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`, and `NETWORK_PASSPHRASE`
+so wallets can discover this service's SEP-10 endpoint — the server-side mirror of
+how `packages/offramp/src/sep10.ts` discovers anchors.
 
 ---
 

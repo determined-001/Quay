@@ -136,6 +136,10 @@ export interface Seller {
 export interface SellerRepository {
   getDefault(): Promise<Seller>;
   findById(id: string): Promise<Seller | null>;
+  findByWallet(wallet: string): Promise<Seller | null>;
+  /** Wallet-native signup: SEP-10 proved control of `wallet`, so it IS the identity.
+   *  Idempotent — returns the existing seller if one is already registered for it. */
+  createIfAbsent(wallet: string): Promise<Seller>;
 }
 
 export interface Webhook {

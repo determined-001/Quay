@@ -113,7 +113,7 @@ pnpm build       # builds the web app
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
 | Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
-| Auth | **Not implemented.** Single hard-coded demo seller, no API keys / login. Fine for a demo, not for production. |
+| Auth | **Partial.** Wallet-native login is real: `GET/POST /auth` implements the server side of SEP-10 (challenge, signature + M-of-N threshold verification via Horizon, single-use, session JWT), and `/.well-known/stellar.toml` makes it discoverable. A seller row is created for a wallet on first login, but `/links` and `/webhooks` don't check the session yet — every request still operates on the single demo seller. See [`docs/API.md`](docs/API.md#get-authaccountg). |
 
 ---
 
@@ -128,7 +128,10 @@ pnpm build       # builds the web app
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Add auth** (API keys per seller + a real login) before anyone but you touches it.
+4. **Wire the login through.** SEP-10 wallet login (`/auth`) works, but scope
+   `/links` and `/webhooks` to the authenticated seller (from the session JWT)
+   before anyone but you touches it — right now they still hit the single demo
+   seller regardless of who's logged in. Add API keys for programmatic access.
 5. **Multiple sellers / scale:** the watcher polls per active destination account; for many
    sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
 
