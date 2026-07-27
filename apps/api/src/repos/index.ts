@@ -12,7 +12,7 @@ import type {
   AssetRef,
 } from "@checkout/core";
 import type { DB } from "../db/client";
-import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx } from "../db/schema";
+import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx, offrampTelemetry } from "../db/schema";
 import { newId } from "../services/ids";
 
 type LinkRow = typeof links.$inferSelect;
@@ -227,4 +227,169 @@ export class DrizzleWatcherStateRepository implements WatcherStateRepository {
       .values({ txHash, linkId, createdAt: Date.now() })
       .onConflictDoNothing();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Off-ramp telemetry repository
+// ---------------------------------------------------------------------------
+
+export interface TelemetryRow {
+  id: string;
+  anchorDomain: string;
+  corridor: string;
+  sellAsset: string;
+  sellAmount: string;
+  indicativeRate: string | null;
+  quotedRate: string;
+  quotedAt: number;
+  initiatedAt: number | null;
+  settledAt: number | null;
+  effectiveRate: string | null;
+  feeAmount: string | null;
+  status: "quoted" | "initiated" | "settled" | "failed";
+  failureReason: string | null;
+}
+
+export interface TelemetrySummary {
+  anchorDomain: string;
+  corridor: string;
+  count: number;
+  settledCount: number;
+  failedCount: number;
+  /** p50 settlement latency in ms (null when < 1 settled row). */
+  latencyP50Ms: number | null;
+  /** p95 settlement latency in ms (null when < 1 settled row). */
+  latencyP95Ms: number | null;
+  /** mean of (quotedRate - effectiveRate) / quotedRate, as a fraction (null when no data). */
+  meanSpread: number | null;
+}
+
+export class DrizzleOfframpTelemetryRepository {
+  constructor(private readonly db: DB) {}
+
+  async upsert(row: TelemetryRow): Promise<void> {
+    await this.db
+      .insert(offrampTelemetry)
+      .values({
+        id: row.id,
+        anchorDomain: row.anchorDomain,
+        corridor: row.corridor,
+        sellAsset: row.sellAsset,
+        sellAmount: row.sellAmount,
+        indicativeRate: row.indicativeRate,
+        quotedRate: row.quotedRate,
+        quotedAt: row.quotedAt,
+        initiatedAt: row.initiatedAt,
+        settledAt: row.settledAt,
+        effectiveRate: row.effectiveRate,
+        feeAmount: row.feeAmount,
+        status: row.status,
+        failureReason: row.failureReason,
+      })
+      .onConflictDoUpdate({
+        target: offrampTelemetry.id,
+        set: {
+          initiatedAt: row.initiatedAt,
+          settledAt: row.settledAt,
+          effectiveRate: row.effectiveRate,
+          feeAmount: row.feeAmount,
+          status: row.status,
+          failureReason: row.failureReason,
+        },
+      });
+  }
+
+  async findById(id: string): Promise<TelemetryRow | null> {
+    const rows = await this.db
+      .select()
+      .from(offrampTelemetry)
+      .where(eq(offrampTelemetry.id, id))
+      .limit(1);
+    return rows[0] ? this.toRow(rows[0]) : null;
+  }
+
+  async findByJobId(jobId: string): Promise<TelemetryRow | null> {
+    // id is the telemetry row id which equals "tel_<jobId>" by convention in LinkService.
+    return this.findById(`tel_${jobId}`);
+  }
+
+  async summary(): Promise<TelemetrySummary[]> {
+    const all = await this.db.select().from(offrampTelemetry);
+    // Group by (anchorDomain, corridor)
+    const groups = new Map<string, (typeof all)[number][]>();
+    for (const r of all) {
+      const key = `${r.anchorDomain}||${r.corridor}`;
+      const g = groups.get(key) ?? [];
+      g.push(r);
+      groups.set(key, g);
+    }
+
+    const result: TelemetrySummary[] = [];
+    for (const rows of groups.values()) {
+      const first = rows[0]!;
+      const settled = rows.filter((r) => r.status === "settled");
+      const failed = rows.filter((r) => r.status === "failed");
+
+      // Settlement latency: initiatedAt -> settledAt
+      const latencies = settled
+        .filter((r) => r.initiatedAt != null && r.settledAt != null)
+        .map((r) => r.settledAt! - r.initiatedAt!)
+        .sort((a, b) => a - b);
+
+      // Spread: (quotedRate - effectiveRate) / quotedRate
+      const spreads = settled
+        .filter((r) => r.effectiveRate != null)
+        .map((r) => {
+          const q = Number(r.quotedRate);
+          const e = Number(r.effectiveRate!);
+          return q === 0 ? 0 : (q - e) / q;
+        });
+
+      result.push({
+        anchorDomain: first.anchorDomain,
+        corridor: first.corridor,
+        count: rows.length,
+        settledCount: settled.length,
+        failedCount: failed.length,
+        latencyP50Ms: percentile(latencies, 50),
+        latencyP95Ms: percentile(latencies, 95),
+        meanSpread: spreads.length > 0 ? spreads.reduce((a, b) => a + b, 0) / spreads.length : null,
+      });
+    }
+    return result;
+  }
+
+  /** All rows ordered by quotedAt ascending — for CSV export. */
+  async all(): Promise<TelemetryRow[]> {
+    const rows = await this.db.select().from(offrampTelemetry);
+    return rows
+      .sort((a, b) => a.quotedAt - b.quotedAt)
+      .map((r) => this.toRow(r));
+  }
+
+  private toRow(r: typeof offrampTelemetry.$inferSelect): TelemetryRow {
+    return {
+      id: r.id,
+      anchorDomain: r.anchorDomain,
+      corridor: r.corridor,
+      sellAsset: r.sellAsset,
+      sellAmount: r.sellAmount,
+      indicativeRate: r.indicativeRate,
+      quotedRate: r.quotedRate,
+      quotedAt: r.quotedAt,
+      initiatedAt: r.initiatedAt,
+      settledAt: r.settledAt,
+      effectiveRate: r.effectiveRate,
+      feeAmount: r.feeAmount,
+      status: r.status as TelemetryRow["status"],
+      failureReason: r.failureReason,
+    };
+  }
+}
+
+/** Nearest-rank percentile. Returns null for empty arrays. */
+function percentile(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, idx)]!;
 }

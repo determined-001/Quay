@@ -9,6 +9,7 @@ import {
   DrizzleSellerRepository,
   DrizzleWebhookRepository,
   DrizzleWatcherStateRepository,
+  DrizzleOfframpTelemetryRepository,
 } from "../repos/index";
 import { LinkService } from "./link-service";
 import { WatcherLoop, startCashOutPoller } from "../worker/watcher-loop";
@@ -18,6 +19,7 @@ export interface Container {
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
+  telemetry: DrizzleOfframpTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   start(): void;
   stop(): void;
@@ -37,6 +39,7 @@ export async function createContainer(): Promise<Container> {
   const sellersRepo = new DrizzleSellerRepository(db);
   const webhooksRepo = new DrizzleWebhookRepository(db);
   const stateRepo = new DrizzleWatcherStateRepository(db);
+  const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
 
   const seller = resolveSellerKeypairOrWallet();
   const sellerWallet = seller.publicKey;
@@ -53,6 +56,7 @@ export async function createContainer(): Promise<Container> {
     rail,
     offramp,
     stellar,
+    telemetry: telemetryRepo,
   });
 
   const loop = new WatcherLoop({
@@ -71,6 +75,7 @@ export async function createContainer(): Promise<Container> {
     links: linksRepo,
     sellers: sellersRepo,
     webhooks: webhooksRepo,
+    telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     start() {
       loop.start();

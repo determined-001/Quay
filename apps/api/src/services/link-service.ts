@@ -18,6 +18,7 @@ import {
 import { resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { newId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
+import type { DrizzleOfframpTelemetryRepository, TelemetryRow } from "../repos/index";
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -35,6 +36,7 @@ export class LinkService {
       rail: RailPort;
       offramp: OffRampPort;
       stellar: StellarConfig;
+      telemetry: DrizzleOfframpTelemetryRepository;
     },
   ) {
     this.sender = new WebhookSender(deps.webhooks);
@@ -133,11 +135,44 @@ export class LinkService {
         sourceAmount,
         targetCurrency: body.targetCurrency,
       });
+
+      // Write "quoted" telemetry row immediately after getting the firm quote.
+      const anchorDomain = anchorDomainFromOfframp(this.deps.offramp);
+      const corridor = `${link.asset.code}/${body.targetCurrency}`;
+      const telRow: TelemetryRow = {
+        id: `tel_${quote.quoteId}`,
+        anchorDomain,
+        corridor,
+        sellAsset: link.asset.issuer
+          ? `stellar:${link.asset.code}:${link.asset.issuer}`
+          : `stellar:native`,
+        sellAmount: sourceAmount,
+        indicativeRate: null,
+        quotedRate: quote.rate,
+        quotedAt: Date.now(),
+        initiatedAt: null,
+        settledAt: null,
+        effectiveRate: null,
+        feeAmount: null,
+        status: "quoted",
+        failureReason: null,
+      };
+      await this.deps.telemetry.upsert(telRow).catch(() => {/* telemetry must never block the cashout */});
+
       job = await this.deps.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
         payout: { currency: body.targetCurrency, fields: body.payoutFields },
       });
+
+      // Update telemetry to "initiated" now that we have the jobId.
+      await this.deps.telemetry.upsert({
+        ...telRow,
+        // remap id so subsequent status polls can look it up by jobId
+        id: `tel_${job.jobId}`,
+        initiatedAt: Date.now(),
+        status: "initiated",
+      }).catch(() => {});
     } catch (err) {
       if (err instanceof HttpError) throw err;
       const message = err instanceof Error ? err.message : String(err);
@@ -171,11 +206,62 @@ export class LinkService {
           targetCurrency: job.targetCurrency,
           targetAmount: job.targetAmount,
         });
+        // Derive effective_rate from anchor-reported amount_out (not the quote).
+        const sellAmount = link.paidAmount ?? link.amount;
+        const effectiveRate =
+          job.targetAmount && Number(sellAmount) > 0
+            ? String(Number(job.targetAmount) / Number(sellAmount))
+            : null;
+        const feeAmount =
+          effectiveRate && job.rate
+            ? String(
+                Math.max(
+                  0,
+                  Number(sellAmount) * Number(job.rate) - Number(job.targetAmount),
+                ).toFixed(6),
+              )
+            : null;
+        await this.deps.telemetry.upsert({
+          id: `tel_${link.offrampJobId}`,
+          anchorDomain: anchorDomainFromOfframp(this.deps.offramp),
+          corridor: `${link.asset.code}/${link.offrampTargetCurrency ?? job.targetCurrency}`,
+          sellAsset: link.asset.issuer
+            ? `stellar:${link.asset.code}:${link.asset.issuer}`
+            : `stellar:native`,
+          sellAmount,
+          indicativeRate: null,
+          quotedRate: job.rate,
+          quotedAt: 0, // already set on the row from initiate step; onConflict won't overwrite it
+          initiatedAt: null,
+          settledAt: Date.now(),
+          effectiveRate,
+          feeAmount,
+          status: "settled",
+          failureReason: null,
+        }).catch(() => {});
       } else if (job.status === "failed") {
         link.status = "offramp_failed";
         link.offrampStatus = "failed";
         await this.deps.links.save(link);
         await this.fireWebhook(link, "offramp.failed", { reason: job.reason });
+        await this.deps.telemetry.upsert({
+          id: `tel_${link.offrampJobId}`,
+          anchorDomain: anchorDomainFromOfframp(this.deps.offramp),
+          corridor: `${link.asset.code}/${link.offrampTargetCurrency ?? job.targetCurrency}`,
+          sellAsset: link.asset.issuer
+            ? `stellar:${link.asset.code}:${link.asset.issuer}`
+            : `stellar:native`,
+          sellAmount: link.paidAmount ?? link.amount,
+          indicativeRate: null,
+          quotedRate: job.rate,
+          quotedAt: 0,
+          initiatedAt: null,
+          settledAt: null,
+          effectiveRate: null,
+          feeAmount: null,
+          status: "failed",
+          failureReason: job.reason ?? "unknown",
+        }).catch(() => {});
       }
     }
   }
@@ -210,4 +296,19 @@ export class HttpError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * Best-effort: extract a human-readable anchor domain from the offramp adapter.
+ * Falls back to the constructor name so mock/test adapters still produce a label.
+ */
+function anchorDomainFromOfframp(offramp: { constructor: { name: string } } & Record<string, unknown>): string {
+  if (typeof offramp["baseUrl"] === "string") {
+    try {
+      return new URL(offramp["baseUrl"] as string).hostname;
+    } catch {
+      // fall through
+    }
+  }
+  return offramp.constructor.name; // "MockAnchorOffRamp" or "TestAnchorOffRamp"
 }
