@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { resolveStellarConfig, StellarRail, HorizonWatcher } from "@checkout/stellar";
 import { MockAnchorOffRamp, TestAnchorOffRamp } from "@checkout/offramp";
@@ -12,6 +13,7 @@ import {
 } from "../repos/index";
 import { LinkService } from "./link-service";
 import { WatcherLoop, startCashOutPoller } from "../worker/watcher-loop";
+import { CircuitBreakerOffRamp } from "./circuit-breaker";
 
 export interface Container {
   service: LinkService;
@@ -19,6 +21,9 @@ export interface Container {
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string };
+  metricsToken: string;
+  watcherLagSeconds(): number;
+  circuitBreakerState(): number;
   start(): void;
   stop(): void;
 }
@@ -44,7 +49,7 @@ export async function createContainer(): Promise<Container> {
 
   const rail = new StellarRail(stellar);
   const watcher = new HorizonWatcher(stellar.horizonUrl);
-  const offramp = createOffRamp(seller.keypair);
+  const offramp = new CircuitBreakerOffRamp(createOffRamp(seller.keypair));
 
   const service = new LinkService({
     links: linksRepo,
@@ -64,6 +69,8 @@ export async function createContainer(): Promise<Container> {
     log: (m) => console.log(`[watcher] ${m}`),
   });
 
+  const metricsToken = resolveMetricsToken();
+
   let stopPoller: (() => void) | null = null;
 
   return {
@@ -72,6 +79,9 @@ export async function createContainer(): Promise<Container> {
     sellers: sellersRepo,
     webhooks: webhooksRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
+    metricsToken,
+    watcherLagSeconds: () => loop.getLagSeconds(),
+    circuitBreakerState: () => offramp.getStateNumeric(),
     start() {
       loop.start();
       stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
@@ -138,4 +148,14 @@ function createOffRamp(sellerKeypair: Keypair | null): OffRampPort {
     );
   }
   return new TestAnchorOffRamp({ sellerKeypair });
+}
+
+/** Resolves the bearer token that gates `GET /metrics`. Auto-generates an
+ *  ephemeral one (printed once at boot) if METRICS_TOKEN isn't set — the
+ *  endpoint is always gated, never open by default. */
+function resolveMetricsToken(): string {
+  if (env.metricsToken) return env.metricsToken;
+  const token = randomBytes(24).toString("hex");
+  console.log(` No METRICS_TOKEN set — generated an ephemeral one for /metrics: ${token}`);
+  return token;
 }

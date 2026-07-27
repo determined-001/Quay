@@ -29,6 +29,52 @@ Liveness + basic config echo.
 
 ---
 
+## `GET /metrics`
+
+Prometheus text-format metrics (`content-type: text/plain; version=0.0.4`).
+Guarded by `METRICS_TOKEN` — pass `Authorization: Bearer <token>` or `?token=`.
+If `METRICS_TOKEN` isn't set, the API generates an ephemeral one at boot and
+prints it once (so the endpoint is never open by default, even locally).
+
+**401** — wrong or missing token: `unauthorized`
+
+**Counters**
+| Metric | Labels |
+| --- | --- |
+| `payments_matched_total` | `outcome` (`paid`, `underpaid`, `asset_mismatch`, `no_memo`, `unknown_reference`) |
+| `link_status_transitions_total` | `to` |
+| `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
+| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
+
+**Histograms**
+| Metric | Labels |
+| --- | --- |
+| `watcher_tick_duration_seconds` | — |
+| `payment_to_paid_latency_seconds` | — |
+| `anchor_call_duration_seconds` | `method` |
+| `quote_to_settlement_duration_seconds` | `outcome` (`settled`, `failed`) |
+
+**Gauges**
+| Metric | Meaning |
+| --- | --- |
+| `accounts_watched` | distinct destinations the watcher is currently polling |
+| `pending_cash_outs` | links in `offramp_pending` |
+| `webhook_deliveries_in_flight` | webhook deliveries currently being attempted, including retries |
+| `offramp_circuit_breaker_state` | `0`=closed, `1`=half_open, `2`=open — see below |
+| `watcher_lag_seconds` | seconds since the watcher's last completed poll tick |
+
+A ready-made dashboard for these is at [`docs/grafana-dashboard.json`](grafana-dashboard.json)
+(import directly into Grafana, point it at your Prometheus data source).
+
+**Off-ramp circuit breaker:** every off-ramp adapter call (mock or
+`testanchor`) is routed through `CircuitBreakerOffRamp`
+(`apps/api/src/services/circuit-breaker.ts`), which opens after 3 consecutive
+failures and stays open for 30s before allowing a half-open trial call — so a
+down anchor can't be hammered by every cash-out poll. This is also the single
+seam `anchor_calls_total` / `anchor_call_duration_seconds` are recorded from.
+
+---
+
 ## `POST /links`
 
 Create a payment link.

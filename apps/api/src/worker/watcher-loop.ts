@@ -6,6 +6,7 @@ import {
   type WatcherStateRepository,
 } from "@checkout/core";
 import type { LinkService } from "../services/link-service";
+import { metrics } from "../metrics";
 
 /**
  * Polling settlement watcher.
@@ -19,6 +20,7 @@ import type { LinkService } from "../services/link-service";
 export class WatcherLoop {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private lastTickCompletedAt = Date.now();
 
   constructor(
     private readonly deps: {
@@ -53,8 +55,15 @@ export class WatcherLoop {
     this.timer = null;
   }
 
+  /** Seconds since the last fully-completed poll tick, computed at call time. */
+  getLagSeconds(): number {
+    return (Date.now() - this.lastTickCompletedAt) / 1000;
+  }
+
   async runOnce(): Promise<void> {
+    const start = Date.now();
     const accounts = await this.deps.links.activeDestinations();
+    metrics.accountsWatched.set(accounts.length);
     for (const account of accounts) {
       try {
         await this.processAccount(account);
@@ -62,6 +71,8 @@ export class WatcherLoop {
         this.deps.log?.(`watcher account ${short(account)} error: ${stringifyErr(err)}`);
       }
     }
+    metrics.watcherTickDurationSeconds.observe((Date.now() - start) / 1000);
+    this.lastTickCompletedAt = Date.now();
   }
 
   private async processAccount(account: string): Promise<void> {
@@ -87,6 +98,7 @@ export class WatcherLoop {
       if (await this.deps.state.isProcessed(payment.txHash)) continue;
 
       const outcome = matchPayment(payment, (ref) => byRef.get(ref));
+      metrics.paymentsMatchedTotal.inc({ outcome: outcome.kind });
       const linkId =
         outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
           ? outcome.link.id

@@ -78,4 +78,7 @@ export const env = {
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Bearer token required to read GET /metrics. Auto-generates an ephemeral one
+  // (printed once at boot) if unset — the endpoint is always gated.
+  metricsToken: process.env.METRICS_TOKEN || undefined,
 } as const;
