@@ -78,4 +78,8 @@ export const env = {
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Optional: preferred SEP-6 withdrawal type (e.g. "bank_account").
+  // When unset, the testanchor adapter reads /sep6/info and selects the single
+  // enabled type, or fails with the list if multiple are available.
+  offrampType: process.env.OFFRAMP_TYPE || undefined,
 } as const;

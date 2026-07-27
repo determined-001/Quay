@@ -5,6 +5,7 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { offrampRoutes } from "./routes/offramp";
 import { rateLimit } from "./middleware/rate-limit";
 
 async function main(): Promise<void> {
@@ -24,6 +25,7 @@ async function main(): Promise<void> {
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
+  app.route("/offramp", offrampRoutes(container));
 
   container.start();
 

@@ -17,7 +17,13 @@ function assetIdentifier(asset: AssetRef): string {
 export async function getSep38Quote(
   baseUrl: string,
   jwt: string,
-  input: { sellAsset: AssetRef; sellAmount: string; buyCurrency: string },
+  input: {
+    sellAsset: AssetRef;
+    sellAmount: string;
+    buyCurrency: string;
+    /** Delivery method for the buy asset. Discovered from /sep6/info or configured explicitly. */
+    buyDeliveryMethod?: string;
+  },
 ): Promise<Sep38QuoteResult> {
   const res = await fetch(new URL("/sep38/quote", baseUrl), {
     method: "POST",
@@ -26,7 +32,9 @@ export async function getSep38Quote(
       sell_asset: assetIdentifier(input.sellAsset),
       sell_amount: input.sellAmount,
       buy_asset: `iso4217:${input.buyCurrency}`,
-      buy_delivery_method: "WIRE",
+      ...(input.buyDeliveryMethod
+        ? { buy_delivery_method: input.buyDeliveryMethod }
+        : {}),
       context: "sep6",
     }),
   });

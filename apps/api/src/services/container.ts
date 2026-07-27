@@ -137,5 +137,8 @@ function createOffRamp(sellerKeypair: Keypair | null): OffRampPort {
         "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
     );
   }
-  return new TestAnchorOffRamp({ sellerKeypair });
+  return new TestAnchorOffRamp({
+    sellerKeypair,
+    preferredWithdrawType: env.offrampType,
+  });
 }

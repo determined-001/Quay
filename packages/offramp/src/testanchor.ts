@@ -10,7 +10,14 @@ import type {
 } from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { getSep38Quote } from "./sep38";
-import { getSep6Transaction, putSep12Customer, startSep6Withdraw } from "./sep6";
+import {
+  getSep6Transaction,
+  putSep12Customer,
+  resolveWithdrawType,
+  Sep6ValidationError,
+  startSep6Withdraw,
+  type Sep6WithdrawTypeInfo,
+} from "./sep6";
 
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
@@ -33,6 +40,13 @@ export interface TestAnchorOptions {
   sellerKeypair: Keypair;
   baseUrl?: string;
   homeDomain?: string;
+  /**
+   * Preferred SEP-6 withdrawal type (e.g. "bank_account").
+   * If omitted the adapter reads /sep6/info and uses the single enabled type,
+   * or fails with the list when the anchor offers more than one.
+   * Maps to the OFFRAMP_TYPE env var.
+   */
+  preferredWithdrawType?: string;
 }
 
 function mapSep6Status(status: string): OffRampJobStatus {
@@ -46,6 +60,14 @@ interface StoredQuote {
   sellAmount: string;
   buyCurrency: string;
   price: string;
+  /** Resolved SEP-6 withdrawal type (discovered from /sep6/info). */
+  withdrawType: string;
+  /** Required/optional field descriptors for the resolved type (for the payout form). */
+  typeInfo: Sep6WithdrawTypeInfo;
+  /** Effective fee_fixed from /sep6/info (0 if not published). */
+  feeFixed: number;
+  /** Effective fee_percent from /sep6/info (0 if not published). */
+  feePercent: number;
 }
 
 interface StoredJob {
@@ -60,11 +82,13 @@ export class TestAnchorOffRamp implements OffRampPort {
 
   private readonly baseUrl: string;
   private readonly auth: Sep10Client;
+  private readonly preferredWithdrawType: string | undefined;
   private readonly quotes = new Map<string, StoredQuote>();
   private readonly jobs = new Map<string, StoredJob>();
 
   constructor(opts: TestAnchorOptions) {
     this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    this.preferredWithdrawType = opts.preferredWithdrawType;
     this.auth = new Sep10Client(opts.sellerKeypair, {
       baseUrl: this.baseUrl,
       homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
@@ -81,11 +105,24 @@ export class TestAnchorOffRamp implements OffRampPort {
         'The test anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
       );
     }
+
+    // Validate amount against /sep6/info and discover the withdrawal type.
+    // Sep6ValidationError propagates as-is so callers can surface anchor limits.
+    const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
+      this.baseUrl,
+      input.sourceAsset.code,
+      input.sourceAmount,
+      this.preferredWithdrawType,
+    );
+
     const jwt = await this.auth.token();
     const q = await getSep38Quote(this.baseUrl, jwt, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
+      // Use the delivery method matching the resolved withdraw type when the
+      // anchor publishes one; fall back to omitting it so the anchor chooses.
+      buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
     });
 
     this.quotes.set(q.id, {
@@ -93,6 +130,10 @@ export class TestAnchorOffRamp implements OffRampPort {
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
       price: q.price,
+      withdrawType,
+      typeInfo,
+      feeFixed,
+      feePercent,
     });
 
     return {
@@ -121,7 +162,8 @@ export class TestAnchorOffRamp implements OffRampPort {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,
       account: this.auth.publicKey,
-      type: input.payout.fields.type ?? "bank_account",
+      // Use the type discovered from /sep6/info — never assume "bank_account".
+      type: q.withdrawType,
       dest: input.payout.fields.dest,
       destExtra: input.payout.fields.dest_extra,
     });
