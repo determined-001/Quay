@@ -1,4 +1,6 @@
 import { createHmac } from "node:crypto";
+import type { Logger } from "@checkout/core";
+import { NOOP_LOGGER } from "@checkout/core";
 import type { Webhook, WebhookRepository } from "@checkout/core";
 
 export interface WebhookEvent {
@@ -13,6 +15,8 @@ export interface WebhookSenderOptions {
   baseDelayMs?: number;
   /** Per-request timeout in ms (default 8000). */
   timeoutMs?: number;
+  /** Optional logger; emits one line per attempt (success / retry / terminal failure). */
+  logger?: Logger;
 }
 
 /**
@@ -33,6 +37,7 @@ export class WebhookSender {
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
   private readonly timeoutMs: number;
+  private readonly logger: Logger;
 
   constructor(
     private readonly repo: WebhookRepository,
@@ -41,21 +46,37 @@ export class WebhookSender {
     this.maxAttempts = Math.max(1, opts.maxAttempts ?? 4);
     this.baseDelayMs = opts.baseDelayMs ?? 500;
     this.timeoutMs = opts.timeoutMs ?? 8000;
+    this.logger = opts.logger ?? NOOP_LOGGER;
   }
 
-  async dispatch(hooks: Webhook[], linkId: string, event: WebhookEvent): Promise<void> {
+  async dispatch(
+    hooks: Webhook[],
+    linkId: string,
+    event: WebhookEvent,
+    opts?: { logger?: Logger },
+  ): Promise<void> {
+    const baseLog = (opts?.logger ?? this.logger);
     const body = JSON.stringify({ ...event, id: linkId, sentAt: new Date().toISOString() });
 
-    await Promise.all(hooks.map((hook) => this.deliver(hook, linkId, event.event, body)));
+    await Promise.all(hooks.map((hook) => this.deliver(baseLog, hook, linkId, event.event, body)));
   }
 
   private async deliver(
+    baseLog: Logger,
     hook: Webhook,
     linkId: string,
     event: string,
     body: string,
   ): Promise<void> {
     const signature = createHmac("sha256", hook.secret).update(body).digest("hex");
+    const child = baseLog.child({
+      linkId,
+      webhookId: hook.id,
+      eventType: event,
+      // We log the URL host only — the path might carry signed data the receiver
+      // treats as sensitive, and we already record the link + event for grep.
+      url: safeHost(hook.url),
+    });
 
     let statusCode: number | null = null;
     let error: string | null = null;
@@ -75,21 +96,37 @@ export class WebhookSender {
 
         if (res.ok) {
           await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
+          child.info(
+            { event: "webhook.attempt", attempt, statusCode: res.status, delivered: true },
+            "webhook delivered",
+          );
           return;
         }
 
         statusCode = res.status;
         error = `HTTP ${res.status}`;
+        child.info(
+          { event: "webhook.attempt", attempt, statusCode: res.status, delivered: false, willRetry: attempt < this.maxAttempts && (res.status >= 500 || res.status === 429) },
+          "webhook attempt failed",
+        );
         // 4xx (except 429) is a client error the receiver won't fix on retry.
         if (res.status < 500 && res.status !== 429) break;
       } catch (err) {
         statusCode = null;
         error = err instanceof Error ? err.message : String(err);
+        child.info(
+          { event: "webhook.attempt", attempt, statusCode: null, delivered: false, willRetry: attempt < this.maxAttempts, error },
+          "webhook attempt errored",
+        );
       }
 
       if (attempt < this.maxAttempts) await sleep(this.backoff(attempt));
     }
 
+    child.error(
+      { event: "webhook.failed", attempts: this.maxAttempts, statusCode, error },
+      "webhook delivery failed",
+    );
     await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error });
   }
 
@@ -97,6 +134,15 @@ export class WebhookSender {
   private backoff(attempt: number): number {
     const ceiling = this.baseDelayMs * 2 ** (attempt - 1);
     return Math.floor(Math.random() * ceiling);
+  }
+}
+
+/** Keep the host (and optional port); drop the path so a paranoid grep never lands on us. */
+function safeHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "<unparsable>";
   }
 }
 

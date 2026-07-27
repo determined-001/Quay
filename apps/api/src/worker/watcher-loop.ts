@@ -1,9 +1,11 @@
 import {
   matchPayment,
   type LinkRepository,
+  type Logger,
   type PaymentLink,
   type WatcherPort,
   type WatcherStateRepository,
+  NOOP_LOGGER,
 } from "@checkout/core";
 import type { LinkService } from "../services/link-service";
 
@@ -27,19 +29,22 @@ export class WatcherLoop {
       state: WatcherStateRepository;
       service: LinkService;
       pollMs: number;
-      log?: (msg: string) => void;
+      logger?: Logger;
     },
-  ) {}
+  ) {
+    this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
+  }
 
   start(): void {
     if (this.running) return;
     this.running = true;
     const tick = async () => {
       if (!this.running) return;
+      const tickLogger = this.deps.logger!.child({ tick: Date.now(), component: "watcher" });
       try {
-        await this.runOnce();
+        await this.runOnce(tickLogger);
       } catch (err) {
-        this.deps.log?.(`watcher tick error: ${stringifyErr(err)}`);
+        tickLogger.error({ event: "watcher.tick.error", error: stringifyErr(err) }, "watcher tick error");
       } finally {
         if (this.running) this.timer = setTimeout(tick, this.deps.pollMs);
       }
@@ -53,18 +58,20 @@ export class WatcherLoop {
     this.timer = null;
   }
 
-  async runOnce(): Promise<void> {
+  async runOnce(parentLogger?: Logger): Promise<void> {
+    const log = parentLogger ?? this.deps.logger!;
     const accounts = await this.deps.links.activeDestinations();
+    if (accounts.length === 0) return;
     for (const account of accounts) {
       try {
-        await this.processAccount(account);
+        await this.processAccount(account, log.child({ destination: account }));
       } catch (err) {
-        this.deps.log?.(`watcher account ${short(account)} error: ${stringifyErr(err)}`);
+        log.error({ event: "watcher.account.error", destination: account, error: stringifyErr(err) }, "watcher account error");
       }
     }
   }
 
-  private async processAccount(account: string): Promise<void> {
+  private async processAccount(account: string, log: Logger): Promise<void> {
     const cursor = await this.deps.state.getCursor(account);
 
     // First time we watch this account: seed the cursor to "now" so we only
@@ -72,11 +79,19 @@ export class WatcherLoop {
     if (cursor === null) {
       const latest = await this.deps.watcher.latestCursor(account);
       await this.deps.state.setCursor(account, latest ?? "");
+      log.info(
+        { event: "watcher.account.seeded", fromCursor: null, toCursor: latest },
+        "watcher account seeded",
+      );
       return;
     }
 
     const payments = await this.deps.watcher.fetchSince(account, cursor);
-    if (payments.length === 0) return;
+    if (payments.length === 0) {
+      log.debug({ event: "watcher.account.idle", cursor }, "no new payments");
+      return;
+    }
+    log.info({ event: "watcher.account.batch", cursor, count: payments.length }, "fetched payments");
 
     const open = await this.deps.links.openLinksForDestination(account);
     const byRef = new Map<string, PaymentLink>(open.map((l) => [l.reference, l]));
@@ -84,20 +99,26 @@ export class WatcherLoop {
     let lastToken = cursor;
     for (const payment of payments) {
       lastToken = payment.pagingToken;
-      if (await this.deps.state.isProcessed(payment.txHash)) continue;
+      const child = log.child({ txHash: payment.txHash, pagingToken: payment.pagingToken });
+      if (await this.deps.state.isProcessed(payment.txHash)) {
+        child.info({ event: "payment.duplicate" }, "skipping already-processed payment");
+        continue;
+      }
 
       const outcome = matchPayment(payment, (ref) => byRef.get(ref));
       const linkId =
         outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
           ? outcome.link.id
           : null;
+      child.info(
+        { event: "payment.matched", outcome: outcome.kind, linkId, amount: payment.amount, memo: payment.memo },
+        `payment ${outcome.kind}`,
+      );
 
       if (outcome.kind === "paid" || outcome.kind === "underpaid") {
-        const becamePaid = await this.deps.service.applyMatch(payment, outcome);
-        this.deps.log?.(
-          `payment ${short(payment.txHash)} -> ${outcome.kind}` +
-            (becamePaid ? ` (link ${linkId} PAID)` : ""),
-        );
+        // applyMatch will emit its own link.transition line if it commits.
+        // Pass the per-payment child so requestId (if any) flows with it.
+        await this.deps.service.applyMatch(payment, outcome, { logger: child });
       }
 
       await this.deps.state.markProcessed(payment.txHash, linkId);
@@ -108,16 +129,17 @@ export class WatcherLoop {
 }
 
 /** Periodically advance any pending seller cash-outs. */
-export function startCashOutPoller(service: LinkService, intervalMs: number): () => void {
+export function startCashOutPoller(service: LinkService, intervalMs: number, logger?: Logger): () => void {
+  const log = logger ?? NOOP_LOGGER;
+  const pollerLogger = log.child({ component: "cashout-poller" });
   const timer = setInterval(() => {
-    void service.pollCashOuts().catch(() => {});
+    void service.pollCashOuts().catch((err) => {
+      pollerLogger.error({ event: "cashout.tick.error", error: stringifyErr(err) }, "cash-out tick error");
+    });
   }, intervalMs);
   return () => clearInterval(timer);
 }
 
-function short(s: string): string {
-  return s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
-}
 function stringifyErr(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

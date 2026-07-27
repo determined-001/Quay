@@ -1,6 +1,10 @@
 import type { AssetRef, PaymentLink } from "../domain/payment-link";
 import type { NormalizedPayment } from "../matching/match-payment";
 
+import type { Logger } from "./logger";
+export type { Logger } from "./logger";
+export { NOOP_LOGGER } from "./logger";
+
 // ---------------------------------------------------------------------------
 // Settlement rail port
 // ---------------------------------------------------------------------------
@@ -92,9 +96,16 @@ export interface OffRampJob {
 
 export interface OffRampPort {
   readonly mode: OffRampMode;
-  quote(input: { sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string }): Promise<OffRampQuote>;
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob>;
-  status(jobId: string): Promise<OffRampJob>;
+  /** Optional ambient logger: thread the caller's logger so requestId / linkId flows into anchor.* events. */
+  quote(
+    input: { sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampQuote>;
+  initiate(
+    input: { linkId: string; quoteId: string; payout: SellerPayoutRef },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampJob>;
+  status(jobId: string, opts?: { logger?: Logger }): Promise<OffRampJob>;
 }
 
 // ---------------------------------------------------------------------------

@@ -78,4 +78,6 @@ export const env = {
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Pino log level: trace|debug|info|warn|error|fatal. Default "info".
+  logLevel: process.env.LOG_LEVEL || "info",
 } as const;

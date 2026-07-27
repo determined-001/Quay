@@ -1,11 +1,13 @@
 import type {
   AssetRef,
+  Logger,
   OffRampJob,
   OffRampMode,
   OffRampPort,
   OffRampQuote,
   SellerPayoutRef,
 } from "@checkout/core";
+import { NOOP_LOGGER } from "@checkout/core";
 
 // ===========================================================================
 //  MOCK ANCHOR — NOT A REAL OFF-RAMP.
@@ -43,6 +45,8 @@ export interface MockAnchorOptions {
   settleAfterMs?: number;
   /** force every payout to fail, to exercise the retry path. */
   alwaysFail?: boolean;
+  /** Optional logger; emits anchor.mock.* events. */
+  logger?: Logger;
 }
 
 export class MockAnchorOffRamp implements OffRampPort {
@@ -53,18 +57,23 @@ export class MockAnchorOffRamp implements OffRampPort {
   private readonly quoteTtlMs: number;
   private readonly settleAfterMs: number;
   private readonly alwaysFail: boolean;
+  private readonly logger: Logger;
 
   constructor(opts: MockAnchorOptions = {}) {
     this.quoteTtlMs = opts.quoteTtlMs ?? 5 * 60_000;
     this.settleAfterMs = opts.settleAfterMs ?? 8_000;
     this.alwaysFail = opts.alwaysFail ?? false;
+    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.mock" });
   }
 
-  async quote(input: {
-    sourceAsset: AssetRef;
-    sourceAmount: string;
-    targetCurrency: string;
-  }): Promise<OffRampQuote> {
+  async quote(
+    input: {
+      sourceAsset: AssetRef;
+      sourceAmount: string;
+      targetCurrency: string;
+    },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampQuote> {
     const rate = MOCK_RATES[input.targetCurrency];
     if (rate === undefined) {
       throw new Error(`Mock anchor has no rate for ${input.targetCurrency}`);
@@ -80,14 +89,28 @@ export class MockAnchorOffRamp implements OffRampPort {
       expiresAt: Date.now() + this.quoteTtlMs,
     };
     this.quotes.set(q.quoteId, q);
+    (opts?.logger ?? this.logger).info(
+      {
+        event: "anchor.mock.quote",
+        quoteId: q.quoteId,
+        sourceAmount: q.sourceAmount,
+        targetCurrency: q.targetCurrency,
+        targetAmount: q.targetAmount,
+        rate: q.rate,
+      },
+      "mock quote",
+    );
     return q;
   }
 
-  async initiate(input: {
-    linkId: string;
-    quoteId: string;
-    payout: SellerPayoutRef;
-  }): Promise<OffRampJob> {
+  async initiate(
+    input: {
+      linkId: string;
+      quoteId: string;
+      payout: SellerPayoutRef;
+    },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampJob> {
     const q = this.quotes.get(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
     if (Date.now() > q.expiresAt) throw new Error("Quote expired");
@@ -102,15 +125,30 @@ export class MockAnchorOffRamp implements OffRampPort {
       createdAt: Date.now(),
     };
     this.jobs.set(job.jobId, job);
+    (opts?.logger ?? this.logger).info(
+      {
+        event: "anchor.mock.initiate",
+        jobId: job.jobId,
+        linkId: input.linkId,
+        quoteId: input.quoteId,
+        targetCurrency: job.targetCurrency,
+        settleAfterMs: this.settleAfterMs,
+      },
+      "mock initiate",
+    );
     return job;
   }
 
-  async status(jobId: string): Promise<OffRampJob> {
+  async status(jobId: string, opts?: { logger?: Logger }): Promise<OffRampJob> {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error("Unknown off-ramp job");
     if (job.status === "pending" && Date.now() - job.createdAt >= this.settleAfterMs) {
       job.status = this.alwaysFail ? "failed" : "settled";
       if (job.status === "failed") job.reason = "mock anchor: simulated payout failure";
+      (opts?.logger ?? this.logger).info(
+        { event: "anchor.mock.status.transition", jobId, from: "pending", to: job.status },
+        "mock settle",
+      );
     }
     return { ...job };
   }

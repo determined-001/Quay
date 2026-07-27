@@ -1,6 +1,7 @@
 import type { Keypair } from "@stellar/stellar-sdk";
 import type {
   AssetRef,
+  Logger,
   OffRampJob,
   OffRampJobStatus,
   OffRampMode,
@@ -8,6 +9,7 @@ import type {
   OffRampQuote,
   SellerPayoutRef,
 } from "@checkout/core";
+import { NOOP_LOGGER } from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { getSep38Quote } from "./sep38";
 import { getSep6Transaction, putSep12Customer, startSep6Withdraw } from "./sep6";
@@ -33,6 +35,8 @@ export interface TestAnchorOptions {
   sellerKeypair: Keypair;
   baseUrl?: string;
   homeDomain?: string;
+  /** Optional logger; if absent, all anchor.* events are dropped (NOOP_LOGGER). */
+  logger?: Logger;
 }
 
 function mapSep6Status(status: string): OffRampJobStatus {
@@ -60,33 +64,39 @@ export class TestAnchorOffRamp implements OffRampPort {
 
   private readonly baseUrl: string;
   private readonly auth: Sep10Client;
+  private readonly logger: Logger;
   private readonly quotes = new Map<string, StoredQuote>();
   private readonly jobs = new Map<string, StoredJob>();
 
   constructor(opts: TestAnchorOptions) {
     this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.testanchor", baseUrl: this.baseUrl });
     this.auth = new Sep10Client(opts.sellerKeypair, {
       baseUrl: this.baseUrl,
       homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
-    });
+    }, this.logger);
   }
 
-  async quote(input: {
-    sourceAsset: AssetRef;
-    sourceAmount: string;
-    targetCurrency: string;
-  }): Promise<OffRampQuote> {
+  async quote(
+    input: {
+      sourceAsset: AssetRef;
+      sourceAmount: string;
+      targetCurrency: string;
+    },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampQuote> {
     if (input.sourceAsset.issuer === null) {
       throw new Error(
         'The test anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
       );
     }
-    const jwt = await this.auth.token();
+    const log = (opts?.logger ?? this.logger);
+    const jwt = await this.auth.token({ logger: log });
     const q = await getSep38Quote(this.baseUrl, jwt, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
-    });
+    }, log);
 
     this.quotes.set(q.id, {
       sellAsset: input.sourceAsset,
@@ -106,16 +116,21 @@ export class TestAnchorOffRamp implements OffRampPort {
     };
   }
 
-  async initiate(input: {
-    linkId: string;
-    quoteId: string;
-    payout: SellerPayoutRef;
-  }): Promise<OffRampJob> {
+  async initiate(
+    input: {
+      linkId: string;
+      quoteId: string;
+      payout: SellerPayoutRef;
+    },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampJob> {
     const q = this.quotes.get(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
 
-    const jwt = await this.auth.token();
-    await putSep12Customer(this.baseUrl, jwt, input.payout.fields);
+    const baseLog = (opts?.logger ?? this.logger);
+    const child = baseLog.child({ linkId: input.linkId, quoteId: input.quoteId });
+    const jwt = await this.auth.token({ logger: baseLog });
+    await putSep12Customer(this.baseUrl, jwt, input.payout.fields, baseLog);
 
     const withdraw = await startSep6Withdraw(this.baseUrl, jwt, {
       assetCode: q.sellAsset.code,
@@ -124,7 +139,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       type: input.payout.fields.type ?? "bank_account",
       dest: input.payout.fields.dest,
       destExtra: input.payout.fields.dest_extra,
-    });
+    }, baseLog);
 
     this.jobs.set(withdraw.id, {
       linkId: input.linkId,
@@ -132,6 +147,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       targetAmount: "",
       rate: q.price,
     });
+    child.info({ event: "anchor.sep6.withdraw.init", withdrawId: withdraw.id, linkId: input.linkId }, "testanchor withdraw init");
 
     return {
       jobId: withdraw.id,
@@ -143,12 +159,14 @@ export class TestAnchorOffRamp implements OffRampPort {
     };
   }
 
-  async status(jobId: string): Promise<OffRampJob> {
+  async status(jobId: string, opts?: { logger?: Logger }): Promise<OffRampJob> {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error("Unknown off-ramp job");
 
-    const jwt = await this.auth.token();
-    const tx = await getSep6Transaction(this.baseUrl, jwt, jobId);
+    const baseLog = (opts?.logger ?? this.logger);
+    const child = baseLog.child({ jobId, linkId: job.linkId });
+    const jwt = await this.auth.token({ logger: baseLog });
+    const tx = await getSep6Transaction(this.baseUrl, jwt, jobId, baseLog);
     const status = mapSep6Status(tx.status);
     if (tx.amountOut) job.targetAmount = tx.amountOut;
 
