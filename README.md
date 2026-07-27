@@ -1,5 +1,8 @@
 # Stellar Checkout
 
+[![CI](https://github.com/chris-ostrovskis/Quay/actions/workflows/ci.yml/badge.svg)](https://github.com/chris-ostrovskis/Quay/actions/workflows/ci.yml)
+[![Anchor Probe](https://github.com/chris-ostrovskis/Quay/actions/workflows/anchor-probe.yml/badge.svg)](https://github.com/chris-ostrovskis/Quay/actions/workflows/anchor-probe.yml)
+
 Non-custodial stablecoin **checkout + payment links** on Stellar, with a deliberately
 **swappable off-ramp seam** so the seller can later cash out to local currency without a rewrite.
 
