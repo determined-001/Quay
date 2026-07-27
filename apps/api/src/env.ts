@@ -52,6 +52,12 @@ if (network !== "testnet" && network !== "public") {
 export const env = {
   network,
   horizonUrl: process.env.HORIZON_URL || undefined,
+  // Optional standby Horizon endpoint. The watcher switches to it after
+  // several consecutive failures on the primary, and back on recovery.
+  horizonUrlFallback: process.env.HORIZON_URL_FALLBACK || undefined,
+  // Consecutive Horizon failures (after retries) before /health reports
+  // degraded and (if HORIZON_URL_FALLBACK is set) the watcher switches to it.
+  horizonDegradedThreshold: Number(process.env.HORIZON_DEGRADED_THRESHOLD ?? "3"),
   usdcIssuer:
     network === "public"
       ? req("USDC_ISSUER_PUBLIC")

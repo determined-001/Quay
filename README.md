@@ -109,7 +109,7 @@ pnpm build       # builds the web app
 | Piece | Status |
 | --- | --- |
 | SEP-7 payment-request URIs | **Real**, spec-correct (native vs issued asset, memo ≤28 bytes, %20 encoding, network passphrase). |
-| Horizon payment watching + memo matching | **Real** logic against the Stellar SDK v16 API. Polling (restart-safe), idempotent via persisted cursor + processed-tx ledger. |
+| Horizon payment watching + memo matching | **Real** logic against the Stellar SDK v16 API. Polling (restart-safe), idempotent via persisted cursor + processed-tx ledger. Every Horizon call retries transient failures (3 attempts, exponential backoff + full jitter, honors `Retry-After` on 429) and can fail over to `HORIZON_URL_FALLBACK`; sustained failure shows up in `GET /health` instead of silently going idle. |
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
 | Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |

@@ -19,6 +19,7 @@ async function main(): Promise<void> {
       ok: true,
       network: container.config.network,
       sellerWallet: container.config.sellerWallet,
+      horizon: container.horizonStatus(),
     }),
   );
 

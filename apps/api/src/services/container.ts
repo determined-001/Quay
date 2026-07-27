@@ -1,5 +1,5 @@
-import { Keypair, StrKey } from "@stellar/stellar-sdk";
-import { resolveStellarConfig, StellarRail, HorizonWatcher } from "@checkout/stellar";
+import { Horizon, Keypair, StrKey } from "@stellar/stellar-sdk";
+import { resolveStellarConfig, StellarRail, HorizonWatcher, type HorizonStatus } from "@checkout/stellar";
 import { MockAnchorOffRamp, TestAnchorOffRamp } from "@checkout/offramp";
 import type { OffRampPort } from "@checkout/core";
 import { env } from "../env";
@@ -19,6 +19,7 @@ export interface Container {
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string };
+  horizonStatus(): HorizonStatus;
   start(): void;
   stop(): void;
 }
@@ -43,7 +44,12 @@ export async function createContainer(): Promise<Container> {
   await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
 
   const rail = new StellarRail(stellar);
-  const watcher = new HorizonWatcher(stellar.horizonUrl);
+  const watcher = new HorizonWatcher({
+    primaryServer: new Horizon.Server(stellar.horizonUrl),
+    fallbackServer: env.horizonUrlFallback ? new Horizon.Server(env.horizonUrlFallback) : undefined,
+    degradedThreshold: env.horizonDegradedThreshold,
+    log: (m) => console.log(`[horizon] ${m}`),
+  });
   const offramp = createOffRamp(seller.keypair);
 
   const service = new LinkService({
@@ -72,6 +78,7 @@ export async function createContainer(): Promise<Container> {
     sellers: sellersRepo,
     webhooks: webhooksRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
+    horizonStatus: () => watcher.getStatus(),
     start() {
       loop.start();
       stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));

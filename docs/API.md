@@ -20,12 +20,29 @@ CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 
 ## `GET /health`
 
-Liveness + basic config echo.
+Liveness + basic config echo, plus the watcher's Horizon health.
 
 **200**
 ```json
-{ "ok": true, "network": "testnet", "sellerWallet": "G..." }
+{
+  "ok": true,
+  "network": "testnet",
+  "sellerWallet": "G...",
+  "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 }
+}
 ```
+`ok` is pure liveness (the process is up) — check `horizon.degraded` for whether
+the ledger watcher is actually keeping up. Every Horizon call (`packages/stellar`)
+goes through a retry policy first — 3 attempts, exponential backoff with full
+jitter, honoring `Retry-After` on `429` — so a single blip never surfaces here at
+all. `horizon.degraded` only flips to `true` once retries have been exhausted
+`HORIZON_DEGRADED_THRESHOLD` times in a row (default 3): a transient 429 that
+recovers on retry #2 never trips this, but a sustained outage does, instead of
+silently degrading to "nothing is ever marked paid." `usingFallback` is `true`
+once it has switched to `HORIZON_URL_FALLBACK` (if configured); it switches back
+to the primary automatically on the next successful call. `400`/`404` responses
+(e.g. an account that doesn't exist yet) are treated as a normal, prompt answer —
+never retried, never counted against `consecutiveFailures`.
 
 ---
 
