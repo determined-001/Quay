@@ -44,7 +44,7 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
       targetCurrency: "USD",
     });
 
-    const job = await offramp.initiate({
+    const initiation = await offramp.initiate({
       linkId: "test-link",
       quoteId: quote.quoteId,
       payout: {
@@ -52,11 +52,12 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
         fields: { type: "bank_account", dest: "1234", dest_extra: "021000021" },
       },
     });
-    expect(job.jobId).toBeTruthy();
+    expect(initiation.kind).toBe("fields");
+    expect(initiation.jobId).toBeTruthy();
 
     // Sandbox settlement timing is not deterministic — only assert the shape,
     // never assert eventual "settled".
-    const polled = await offramp.status(job.jobId);
+    const polled = await offramp.status(initiation.jobId);
     expect(["pending", "settled", "failed"]).toContain(polled.status);
   });
 });

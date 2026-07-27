@@ -6,6 +6,7 @@ import {
   type LinkRepository,
   type MatchOutcome,
   type NormalizedPayment,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampQuote,
   type OffRampPort,
@@ -117,7 +118,7 @@ export class LinkService {
   }
 
   /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
-  async triggerCashOut(linkId: string, body: CashOutBody): Promise<OffRampJob> {
+  async triggerCashOut(linkId: string, body: CashOutBody): Promise<{ job: OffRampJob; initiation: OffRampInitiation }> {
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
     if (link.status !== "paid") {
@@ -126,14 +127,14 @@ export class LinkService {
 
     const sourceAmount = link.paidAmount ?? link.amount;
     let quote: OffRampQuote;
-    let job: OffRampJob;
+    let initiation: OffRampInitiation;
     try {
       quote = await this.deps.offramp.quote({
         sourceAsset: link.asset,
         sourceAmount,
         targetCurrency: body.targetCurrency,
       });
-      job = await this.deps.offramp.initiate({
+      initiation = await this.deps.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
         payout: { currency: body.targetCurrency, fields: body.payoutFields },
@@ -144,12 +145,23 @@ export class LinkService {
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
 
+    const jobId = initiation.jobId;
     link.status = "offramp_pending";
-    link.offrampJobId = job.jobId;
-    link.offrampTargetCurrency = job.targetCurrency;
+    link.offrampJobId = jobId;
+    link.offrampTargetCurrency = quote.targetCurrency;
     link.offrampStatus = "pending";
     await this.deps.links.save(link);
-    return job;
+
+    const job: OffRampJob = {
+      jobId,
+      linkId: link.id,
+      status: "pending",
+      targetCurrency: quote.targetCurrency,
+      targetAmount: quote.targetAmount,
+      rate: quote.rate,
+    };
+
+    return { job, initiation };
   }
 
   /** Advance any pending cash-outs by polling the off-ramp adapter. */

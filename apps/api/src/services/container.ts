@@ -1,6 +1,6 @@
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { resolveStellarConfig, StellarRail, HorizonWatcher } from "@checkout/stellar";
-import { MockAnchorOffRamp, TestAnchorOffRamp } from "@checkout/offramp";
+import { MockAnchorOffRamp, TestAnchorOffRamp, AnchorOffRamp } from "@checkout/offramp";
 import type { OffRampPort } from "@checkout/core";
 import { env } from "../env";
 import { createDb, bootstrap } from "../db/client";
@@ -132,10 +132,20 @@ function createOffRamp(sellerKeypair: Keypair | null): OffRampPort {
   }
   if (!sellerKeypair) {
     throw new Error(
-      "OFFRAMP=testanchor requires the seller's secret key to sign SEP-10 auth: " +
+      `OFFRAMP=${env.offramp} requires the seller's secret key to sign SEP-10 auth: ` +
         "set DEFAULT_SELLER_SECRET (matching DEFAULT_SELLER_WALLET), or leave " +
         "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
     );
   }
-  return new TestAnchorOffRamp({ sellerKeypair });
+  if (env.offramp === "testanchor") {
+    return new TestAnchorOffRamp({ sellerKeypair });
+  }
+  if (env.offramp === "anchor") {
+    return new AnchorOffRamp({
+      homeDomain: env.anchorHomeDomain,
+      sellerKeypair,
+      horizonUrl: env.horizonUrl,
+    });
+  }
+  throw new Error(`Unsupported OFFRAMP configuration: ${env.offramp}`);
 }

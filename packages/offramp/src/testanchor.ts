@@ -1,6 +1,7 @@
 import type { Keypair } from "@stellar/stellar-sdk";
 import type {
   AssetRef,
+  OffRampInitiation,
   OffRampJob,
   OffRampJobStatus,
   OffRampMode,
@@ -110,7 +111,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     linkId: string;
     quoteId: string;
     payout: SellerPayoutRef;
-  }): Promise<OffRampJob> {
+  }): Promise<OffRampInitiation> {
     const q = this.quotes.get(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
 
@@ -134,12 +135,8 @@ export class TestAnchorOffRamp implements OffRampPort {
     });
 
     return {
+      kind: "fields",
       jobId: withdraw.id,
-      linkId: input.linkId,
-      status: "pending",
-      targetCurrency: q.buyCurrency,
-      targetAmount: "",
-      rate: q.price,
     };
   }
 

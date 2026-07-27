@@ -90,10 +90,14 @@ export interface OffRampJob {
   reason?: string; // set when failed
 }
 
+export type OffRampInitiation =
+  | { kind: "fields"; jobId: string }
+  | { kind: "interactive"; jobId: string; url: string };
+
 export interface OffRampPort {
   readonly mode: OffRampMode;
   quote(input: { sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string }): Promise<OffRampQuote>;
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob>;
+  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampInitiation>;
   status(jobId: string): Promise<OffRampJob>;
 }
 

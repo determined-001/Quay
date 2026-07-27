@@ -72,10 +72,9 @@ export const env = {
   // throwaway keypair on first boot and prints it. Required on public network.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
   defaultSellerName: process.env.DEFAULT_SELLER_NAME || "Demo Seller",
-  // "mock" (default, offline-safe) or "testanchor" (real SEP-10/38/6 flow against
-  // https://testanchor.stellar.org). See packages/offramp/src/testanchor.ts.
-  offramp: (process.env.OFFRAMP ?? "mock") as "mock" | "testanchor",
-  // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
-  // needs the seller's secret key to sign the auth challenge). Never persisted.
+  // "mock" (default, offline-safe), "testanchor" (SEP-6), or "anchor" (production SEP-24).
+  offramp: (process.env.OFFRAMP ?? "mock") as "mock" | "testanchor" | "anchor",
+  anchorHomeDomain: process.env.ANCHOR_HOME_DOMAIN || "ngnc.online",
+  // Required only when OFFRAMP=testanchor or OFFRAMP=anchor and DEFAULT_SELLER_WALLET is set.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
 } as const;

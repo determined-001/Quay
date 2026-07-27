@@ -31,8 +31,8 @@ export function linkRoutes(c: Container): Hono {
     const parsed = cashOutSchema.safeParse(await safeJson(ctx));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
     try {
-      const job = await c.service.triggerCashOut(ctx.req.param("id"), parsed.data);
-      return ctx.json({ job });
+      const { job, initiation } = await c.service.triggerCashOut(ctx.req.param("id"), parsed.data);
+      return ctx.json({ job, initiation });
     } catch (err) {
       if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
       throw err;
