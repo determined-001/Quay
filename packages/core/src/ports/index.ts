@@ -41,7 +41,11 @@ export interface WatcherPort {
   latestCursor(account: string): Promise<string | null>;
 
   /** Incoming payments to `account` strictly after `cursor`, oldest-first. */
-  fetchSince(account: string, cursor: string, limit?: number): Promise<NormalizedPayment[]>;
+  fetchSince(
+    account: string,
+    cursor: string,
+    limit?: number,
+  ): Promise<NormalizedPayment[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +96,16 @@ export interface OffRampJob {
 
 export interface OffRampPort {
   readonly mode: OffRampMode;
-  quote(input: { sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string }): Promise<OffRampQuote>;
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob>;
+  quote(input: {
+    sourceAsset: AssetRef;
+    sourceAmount: string;
+    targetCurrency: string;
+  }): Promise<OffRampQuote>;
+  initiate(input: {
+    linkId: string;
+    quoteId: string;
+    payout: SellerPayoutRef;
+  }): Promise<OffRampJob>;
   status(jobId: string): Promise<OffRampJob>;
 }
 
@@ -124,6 +136,14 @@ export interface LinkRepository {
   /** Active (or underpaid) links whose value lands in `destination`. */
   openLinksForDestination(destination: string): Promise<PaymentLink[]>;
   save(link: PaymentLink): Promise<void>;
+  recordPayment(payment: {
+    linkId: string;
+    txHash: string;
+    payer: string;
+    amount: string;
+    asset: AssetRef;
+  }): Promise<void>;
+  sumPaymentsForLink(linkId: string): Promise<string>;
 }
 
 export interface Seller {
@@ -156,7 +176,11 @@ export interface WebhookDelivery {
 }
 
 export interface WebhookRepository {
-  create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
+  create(input: {
+    sellerId: string;
+    url: string;
+    secret: string;
+  }): Promise<Webhook>;
   listBySeller(sellerId: string): Promise<Webhook[]>;
   recordDelivery(d: WebhookDelivery): Promise<void>;
 }

@@ -1,6 +1,8 @@
 import {
   canTransition,
   normalizeAmount,
+  toStroops,
+  fromStroops,
   type CashOutBody,
   type CreateLinkBody,
   type LinkRepository,
@@ -88,32 +90,55 @@ export class LinkService {
    * (processed-tx ledger) is the caller's responsibility; here we additionally
    * guard the domain transition so a duplicate can never double-apply.
    */
-  async applyMatch(payment: NormalizedPayment, outcome: MatchOutcome): Promise<boolean> {
-    if (outcome.kind === "paid") {
-      const link = outcome.link;
-      if (!canTransition(link.status, "paid")) return false; // already settled/terminal
+  async applyMatch(
+    payment: NormalizedPayment,
+    outcome: MatchOutcome,
+  ): Promise<boolean> {
+    if (outcome.kind !== "paid" && outcome.kind !== "partial") return false;
+
+    const link = outcome.link;
+    const paymentAmount = normalizeAmount(payment.amount);
+
+    await this.deps.links.recordPayment({
+      linkId: link.id,
+      txHash: payment.txHash,
+      payer: payment.from,
+      amount: paymentAmount,
+      asset: payment.asset,
+    });
+
+    const cumulativePaid = await this.deps.links.sumPaymentsForLink(link.id);
+    const requested = toStroops(link.amount);
+    const paidStroops = toStroops(cumulativePaid);
+    const overpaidStroops =
+      paidStroops > requested ? paidStroops - requested : 0n;
+
+    link.paidAmount = cumulativePaid;
+    link.overpaidAmount =
+      overpaidStroops > 0n ? fromStroops(overpaidStroops) : null;
+    link.txHash = payment.txHash;
+    link.payer = payment.from;
+
+    if (paidStroops >= requested) {
+      if (!canTransition(link.status, "paid")) return false;
       link.status = "paid";
-      link.txHash = payment.txHash;
-      link.payer = payment.from;
-      link.paidAmount = normalizeAmount(payment.amount);
       await this.deps.links.save(link);
-      await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid });
+      await this.fireWebhook(link, "link.paid", {
+        overpaid: overpaidStroops > 0n,
+        receivedTotal: cumulativePaid,
+        outstanding: "0",
+      });
       return true;
     }
 
-    if (outcome.kind === "underpaid") {
-      const link = outcome.link;
-      if (!canTransition(link.status, "underpaid")) return false;
-      link.status = "underpaid";
-      link.txHash = payment.txHash;
-      link.payer = payment.from;
-      link.paidAmount = normalizeAmount(payment.amount);
-      await this.deps.links.save(link);
-      await this.fireWebhook(link, "link.underpaid", {});
-      return false;
-    }
-
-    return false; // no_memo / unknown_reference / asset_mismatch — nothing to apply
+    if (!canTransition(link.status, "underpaid")) return false;
+    link.status = "underpaid";
+    await this.deps.links.save(link);
+    await this.fireWebhook(link, "link.underpaid", {
+      receivedTotal: cumulativePaid,
+      outstanding: outcome.outstanding,
+    });
+    return false;
   }
 
   /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
@@ -121,7 +146,10 @@ export class LinkService {
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
     if (link.status !== "paid") {
-      throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
+      throw new HttpError(
+        409,
+        `Link must be paid to cash out (is "${link.status}")`,
+      );
     }
 
     const sourceAmount = link.paidAmount ?? link.amount;

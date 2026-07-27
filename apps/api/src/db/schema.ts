@@ -20,6 +20,7 @@ export const links = sqliteTable("links", {
   txHash: text("tx_hash"),
   payer: text("payer"),
   paidAmount: text("paid_amount"),
+  overpaidAmount: text("overpaid_amount"),
   offrampJobId: text("offramp_job_id"),
   offrampTargetCurrency: text("offramp_target_currency"),
   offrampStatus: text("offramp_status"),
@@ -44,6 +45,17 @@ export const webhookDeliveries = sqliteTable("webhook_deliveries", {
   statusCode: integer("status_code"),
   ok: integer("ok", { mode: "boolean" }).notNull(),
   error: text("error"),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const linkPayments = sqliteTable("link_payments", {
+  id: text("id").primaryKey(),
+  linkId: text("link_id").notNull(),
+  txHash: text("tx_hash").notNull().unique(),
+  payer: text("payer").notNull(),
+  amount: text("amount").notNull(),
+  assetCode: text("asset_code").notNull(),
+  assetIssuer: text("asset_issuer"),
   createdAt: integer("created_at").notNull(),
 });
 

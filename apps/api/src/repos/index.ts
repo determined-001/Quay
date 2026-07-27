@@ -11,8 +11,17 @@ import type {
   WatcherStateRepository,
   AssetRef,
 } from "@checkout/core";
+import { fromStroops, toStroops } from "@checkout/core";
 import type { DB } from "../db/client";
-import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx } from "../db/schema";
+import {
+  links,
+  sellers,
+  webhooks,
+  webhookDeliveries,
+  watcherCursors,
+  processedTx,
+  linkPayments,
+} from "../db/schema";
 import { newId } from "../services/ids";
 
 type LinkRow = typeof links.$inferSelect;
@@ -36,6 +45,7 @@ function rowToLink(row: LinkRow): PaymentLink {
     txHash: row.txHash ?? null,
     payer: row.payer ?? null,
     paidAmount: row.paidAmount ?? null,
+    overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
     offrampStatus: row.offrampStatus ?? null,
@@ -63,6 +73,7 @@ export class DrizzleLinkRepository implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
@@ -75,22 +86,36 @@ export class DrizzleLinkRepository implements LinkRepository {
   }
 
   async findById(id: string): Promise<PaymentLink | null> {
-    const rows = await this.db.select().from(links).where(eq(links.id, id)).limit(1);
+    const rows = await this.db
+      .select()
+      .from(links)
+      .where(eq(links.id, id))
+      .limit(1);
     return rows[0] ? rowToLink(rows[0]) : null;
   }
 
   async findByReference(reference: string): Promise<PaymentLink | null> {
-    const rows = await this.db.select().from(links).where(eq(links.reference, reference)).limit(1);
+    const rows = await this.db
+      .select()
+      .from(links)
+      .where(eq(links.reference, reference))
+      .limit(1);
     return rows[0] ? rowToLink(rows[0]) : null;
   }
 
   async listBySeller(sellerId: string): Promise<PaymentLink[]> {
-    const rows = await this.db.select().from(links).where(eq(links.sellerId, sellerId));
+    const rows = await this.db
+      .select()
+      .from(links)
+      .where(eq(links.sellerId, sellerId));
     return rows.map(rowToLink).sort((a, b) => b.createdAt - a.createdAt);
   }
 
   async listByStatus(status: PaymentLink["status"]): Promise<PaymentLink[]> {
-    const rows = await this.db.select().from(links).where(eq(links.status, status));
+    const rows = await this.db
+      .select()
+      .from(links)
+      .where(eq(links.status, status));
     return rows.map(rowToLink);
   }
 
@@ -106,7 +131,12 @@ export class DrizzleLinkRepository implements LinkRepository {
     const rows = await this.db
       .select()
       .from(links)
-      .where(and(eq(links.destination, destination), inArray(links.status, OPEN_STATUSES)));
+      .where(
+        and(
+          eq(links.destination, destination),
+          inArray(links.status, OPEN_STATUSES),
+        ),
+      );
     return rows.map(rowToLink);
   }
 
@@ -118,12 +148,45 @@ export class DrizzleLinkRepository implements LinkRepository {
         txHash: link.txHash,
         payer: link.payer,
         paidAmount: link.paidAmount,
+        overpaidAmount: link.overpaidAmount,
         offrampJobId: link.offrampJobId,
         offrampTargetCurrency: link.offrampTargetCurrency,
         offrampStatus: link.offrampStatus,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
+  }
+
+  async recordLinkPayment(payment: {
+    linkId: string;
+    txHash: string;
+    payer: string;
+    amount: string;
+    asset: AssetRef;
+  }): Promise<void> {
+    await this.db
+      .insert(linkPayments)
+      .values({
+        id: newId("lpm"),
+        linkId: payment.linkId,
+        txHash: payment.txHash,
+        payer: payment.payer,
+        amount: payment.amount,
+        assetCode: payment.asset.code,
+        assetIssuer: payment.asset.issuer,
+        createdAt: Date.now(),
+      })
+      .onConflictDoNothing();
+  }
+
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const rows = await this.db
+      .select({ amount: linkPayments.amount })
+      .from(linkPayments)
+      .where(eq(linkPayments.linkId, linkId));
+
+    const total = rows.reduce((acc, row) => acc + toStroops(row.amount), 0n);
+    return fromStroops(total);
   }
 }
 
@@ -136,11 +199,19 @@ export class DrizzleSellerRepository implements SellerRepository {
     if (existing[0]) {
       // keep the wallet in sync if it changed in env
       if (existing[0].wallet !== wallet) {
-        await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
+        await this.db
+          .update(sellers)
+          .set({ wallet })
+          .where(eq(sellers.id, existing[0].id));
       }
       return { ...existing[0], wallet };
     }
-    const seller: Seller = { id: newId("sel"), name, wallet, createdAt: Date.now() };
+    const seller: Seller = {
+      id: newId("sel"),
+      name,
+      wallet,
+      createdAt: Date.now(),
+    };
     await this.db.insert(sellers).values(seller);
     return seller;
   }
@@ -152,7 +223,11 @@ export class DrizzleSellerRepository implements SellerRepository {
   }
 
   async findById(id: string): Promise<Seller | null> {
-    const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
+    const rows = await this.db
+      .select()
+      .from(sellers)
+      .where(eq(sellers.id, id))
+      .limit(1);
     return rows[0] ?? null;
   }
 }
@@ -160,7 +235,11 @@ export class DrizzleSellerRepository implements SellerRepository {
 export class DrizzleWebhookRepository implements WebhookRepository {
   constructor(private readonly db: DB) {}
 
-  async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
+  async create(input: {
+    sellerId: string;
+    url: string;
+    secret: string;
+  }): Promise<Webhook> {
     const hook: Webhook = {
       id: newId("whk"),
       sellerId: input.sellerId,
@@ -173,7 +252,10 @@ export class DrizzleWebhookRepository implements WebhookRepository {
   }
 
   async listBySeller(sellerId: string): Promise<Webhook[]> {
-    return this.db.select().from(webhooks).where(eq(webhooks.sellerId, sellerId));
+    return this.db
+      .select()
+      .from(webhooks)
+      .where(eq(webhooks.sellerId, sellerId));
   }
 
   async recordDelivery(d: WebhookDelivery): Promise<void> {

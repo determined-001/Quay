@@ -14,9 +14,15 @@ const BOOTSTRAP_SQL = [
      id TEXT PRIMARY KEY, reference TEXT NOT NULL UNIQUE, seller_id TEXT NOT NULL,
      destination TEXT NOT NULL, title TEXT NOT NULL, amount TEXT NOT NULL,
      asset_code TEXT NOT NULL, asset_issuer TEXT, status TEXT NOT NULL,
-     tx_hash TEXT, payer TEXT, paid_amount TEXT,
+     tx_hash TEXT, payer TEXT, paid_amount TEXT, overpaid_amount TEXT,
      offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS link_payments (
+     id TEXT PRIMARY KEY, link_id TEXT NOT NULL, tx_hash TEXT NOT NULL UNIQUE,
+     payer TEXT NOT NULL, amount TEXT NOT NULL,
+     asset_code TEXT NOT NULL, asset_issuer TEXT,
+     created_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS webhooks (
      id TEXT PRIMARY KEY, seller_id TEXT NOT NULL, url TEXT NOT NULL,
@@ -35,7 +41,10 @@ const BOOTSTRAP_SQL = [
    )`,
 ];
 
-export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {
+export function createDb(
+  databaseUrl: string,
+  authToken?: string,
+): { db: DB; client: Client } {
   const client = createClient({ url: databaseUrl, authToken });
   const db = drizzle(client, { schema });
   return { db, client };

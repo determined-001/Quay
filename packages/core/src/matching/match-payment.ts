@@ -1,6 +1,6 @@
 import type { AssetRef, PaymentLink } from "../domain/payment-link";
 import { assetEquals, isNative } from "../domain/payment-link";
-import { compareAmount } from "../domain/money";
+import { compareAmount, fromStroops, toStroops } from "../domain/money";
 
 // A Horizon payment, normalized into the shape the matcher needs.
 // (The Stellar adapter is responsible for producing this from a raw Horizon record.)
@@ -17,11 +17,22 @@ export interface NormalizedPayment {
 }
 
 export type MatchOutcome =
-  | { kind: "paid"; link: PaymentLink; overpaid: boolean } // exact or over -> treat as paid
-  | { kind: "underpaid"; link: PaymentLink } // arrived, but for less than requested
-  | { kind: "asset_mismatch"; link: PaymentLink } // memo matched a link, wrong asset
-  | { kind: "no_memo" } // payment carried no usable memo
-  | { kind: "unknown_reference" }; // memo present but no link with that reference
+  | {
+      kind: "paid";
+      link: PaymentLink;
+      overpaid: boolean;
+      receivedTotal: string;
+      outstanding: string;
+    }
+  | {
+      kind: "partial";
+      link: PaymentLink;
+      receivedTotal: string;
+      outstanding: string;
+    }
+  | { kind: "asset_mismatch"; link: PaymentLink }
+  | { kind: "no_memo" }
+  | { kind: "unknown_reference" };
 
 /**
  * Match a single incoming payment against the link identified by its memo.
@@ -32,6 +43,7 @@ export type MatchOutcome =
 export function matchPayment(
   payment: NormalizedPayment,
   findLinkByReference: (reference: string) => PaymentLink | undefined,
+  alreadyPaidStroops: bigint = 0n,
 ): MatchOutcome {
   // Correlation is via MEMO_TEXT carrying the link reference.
   if (!payment.memo || payment.memoType === "none") {
@@ -52,9 +64,22 @@ export function matchPayment(
     return { kind: "asset_mismatch", link };
   }
 
-  const cmp = compareAmount(payment.amount, link.amount);
-  if (cmp === "under") return { kind: "underpaid", link };
-  return { kind: "paid", link, overpaid: cmp === "over" };
+  const requested = toStroops(link.amount);
+  const outstandingStroops =
+    requested > alreadyPaidStroops ? requested - alreadyPaidStroops : 0n;
+  const outstanding = fromStroops(outstandingStroops);
+  const receivedTotal = normalizeAmount(payment.amount);
+  const cmp = compareAmount(payment.amount, outstanding);
+  if (cmp === "under") {
+    return { kind: "partial", link, receivedTotal, outstanding };
+  }
+  return {
+    kind: "paid",
+    link,
+    overpaid: cmp === "over",
+    receivedTotal,
+    outstanding,
+  };
 }
 
 function assetMatches(received: AssetRef, expected: AssetRef): boolean {

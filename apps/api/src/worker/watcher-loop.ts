@@ -4,6 +4,7 @@ import {
   type PaymentLink,
   type WatcherPort,
   type WatcherStateRepository,
+  toStroops,
 } from "@checkout/core";
 import type { LinkService } from "../services/link-service";
 
@@ -59,7 +60,9 @@ export class WatcherLoop {
       try {
         await this.processAccount(account);
       } catch (err) {
-        this.deps.log?.(`watcher account ${short(account)} error: ${stringifyErr(err)}`);
+        this.deps.log?.(
+          `watcher account ${short(account)} error: ${stringifyErr(err)}`,
+        );
       }
     }
   }
@@ -79,20 +82,32 @@ export class WatcherLoop {
     if (payments.length === 0) return;
 
     const open = await this.deps.links.openLinksForDestination(account);
-    const byRef = new Map<string, PaymentLink>(open.map((l) => [l.reference, l]));
+    const byRef = new Map<string, PaymentLink>(
+      open.map((l) => [l.reference, l]),
+    );
 
     let lastToken = cursor;
     for (const payment of payments) {
       lastToken = payment.pagingToken;
       if (await this.deps.state.isProcessed(payment.txHash)) continue;
 
-      const outcome = matchPayment(payment, (ref) => byRef.get(ref));
+      const link = byRef.get(payment.memo ?? "");
+      const alreadyPaidStroops = link
+        ? toStroops(await this.deps.links.sumPaymentsForLink(link.id))
+        : 0n;
+      const outcome = matchPayment(
+        payment,
+        (ref) => byRef.get(ref),
+        alreadyPaidStroops,
+      );
       const linkId =
-        outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
+        outcome.kind === "paid" ||
+        outcome.kind === "partial" ||
+        outcome.kind === "asset_mismatch"
           ? outcome.link.id
           : null;
 
-      if (outcome.kind === "paid" || outcome.kind === "underpaid") {
+      if (outcome.kind === "paid" || outcome.kind === "partial") {
         const becamePaid = await this.deps.service.applyMatch(payment, outcome);
         this.deps.log?.(
           `payment ${short(payment.txHash)} -> ${outcome.kind}` +
@@ -108,7 +123,10 @@ export class WatcherLoop {
 }
 
 /** Periodically advance any pending seller cash-outs. */
-export function startCashOutPoller(service: LinkService, intervalMs: number): () => void {
+export function startCashOutPoller(
+  service: LinkService,
+  intervalMs: number,
+): () => void {
   const timer = setInterval(() => {
     void service.pollCashOuts().catch(() => {});
   }, intervalMs);

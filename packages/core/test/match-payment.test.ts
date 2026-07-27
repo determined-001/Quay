@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { matchPayment, type NormalizedPayment } from "../src/matching/match-payment";
+import {
+  matchPayment,
+  type NormalizedPayment,
+} from "../src/matching/match-payment";
+import { toStroops } from "../src/domain/money";
 import type { PaymentLink } from "../src/domain/payment-link";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -43,7 +47,8 @@ function payment(over: Partial<NormalizedPayment> = {}): NormalizedPayment {
   };
 }
 
-const byRef = (l: PaymentLink) => (ref: string) => (ref === l.reference ? l : undefined);
+const byRef = (l: PaymentLink) => (ref: string) =>
+  ref === l.reference ? l : undefined;
 
 describe("matchPayment", () => {
   it("marks exact payment as paid", () => {
@@ -68,7 +73,10 @@ describe("matchPayment", () => {
 
   it("rejects wrong asset even if memo matches", () => {
     const l = link();
-    const r = matchPayment(payment({ asset: { code: "XLM", issuer: null } }), byRef(l));
+    const r = matchPayment(
+      payment({ asset: { code: "XLM", issuer: null } }),
+      byRef(l),
+    );
     expect(r.kind).toBe("asset_mismatch");
   });
 
@@ -88,5 +96,36 @@ describe("matchPayment", () => {
     const l = link();
     const r = matchPayment(payment({ to: "GSOMEONEELSE" }), byRef(l));
     expect(r.kind).toBe("unknown_reference");
+  });
+
+  it("marks a second payment as paid when the prior amount covers the remainder", () => {
+    const l = link({ amount: "25" });
+    const first = matchPayment(payment({ amount: "10" }), byRef(l));
+    expect(first.kind).toBe("partial");
+
+    const second = matchPayment(
+      payment({ amount: "15", txHash: "tx2" }),
+      byRef(l),
+      toStroops("10"),
+    );
+    expect(second.kind).toBe("paid");
+    if (second.kind === "paid") {
+      expect(second.overpaid).toBe(false);
+      expect(second.outstanding).toBe("15");
+    }
+  });
+
+  it("records overpayment on the final leg", () => {
+    const l = link({ amount: "25" });
+    const second = matchPayment(
+      payment({ amount: "30", txHash: "tx2" }),
+      byRef(l),
+      toStroops("10"),
+    );
+    expect(second.kind).toBe("paid");
+    if (second.kind === "paid") {
+      expect(second.overpaid).toBe(true);
+      expect(second.outstanding).toBe("15");
+    }
   });
 });
