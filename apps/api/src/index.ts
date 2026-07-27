@@ -22,6 +22,24 @@ async function main(): Promise<void> {
     }),
   );
 
+  app.get("/ready", (ctx) => {
+    const circuitBreakers = container.getWatcherCircuitBreakerStatus();
+    const metrics = container.getWatcherMetrics();
+    
+    const hasOpenCircuitBreakers = circuitBreakers.some((cb) => cb.isOpen);
+    
+    return ctx.json({
+      ok: !hasOpenCircuitBreakers,
+      circuitBreakers,
+      metrics: {
+        accountsWatched: metrics.accountsWatched,
+        tickDurationMs: metrics.tickDurationMs,
+        circuitBreakersOpen: metrics.circuitBreakersOpen,
+        perAccountLag: Object.fromEntries(metrics.perAccountLag),
+      },
+    });
+  });
+
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
 

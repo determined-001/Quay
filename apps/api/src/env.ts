@@ -78,4 +78,11 @@ export const env = {
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Watcher concurrency and fairness settings
+  watcherConcurrency: Number(process.env.WATCHER_CONCURRENCY ?? "10"),
+  watcherMaxAccountsPerTick: Number(process.env.WATCHER_MAX_ACCOUNTS_PER_TICK ?? "50"),
+  watcherCircuitBreakerThreshold: Number(process.env.WATCHER_CIRCUIT_BREAKER_THRESHOLD ?? "5"),
+  watcherCircuitBreakerCooldownMs: Number(process.env.WATCHER_CIRCUIT_BREAKER_COOLDOWN_MS ?? "60000"),
+  watcherIdleBackoffTicks: Number(process.env.WATCHER_IDLE_BACKOFF_TICKS ?? "10"),
+  watcherAggressivePollTicks: Number(process.env.WATCHER_AGGRESSIVE_POLL_TICKS ?? "5"),
 } as const;

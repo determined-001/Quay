@@ -11,7 +11,7 @@ import {
   DrizzleWatcherStateRepository,
 } from "../repos/index";
 import { LinkService } from "./link-service";
-import { WatcherLoop, startCashOutPoller } from "../worker/watcher-loop";
+import { WatcherLoop, startCashOutPoller, type AccountCircuitBreakerStatus, type WatcherMetrics } from "../worker/watcher-loop";
 
 export interface Container {
   service: LinkService;
@@ -21,6 +21,8 @@ export interface Container {
   config: { network: string; horizonUrl: string; sellerWallet: string };
   start(): void;
   stop(): void;
+  getWatcherCircuitBreakerStatus(): AccountCircuitBreakerStatus[];
+  getWatcherMetrics(): WatcherMetrics;
 }
 
 export async function createContainer(): Promise<Container> {
@@ -79,6 +81,12 @@ export async function createContainer(): Promise<Container> {
     stop() {
       loop.stop();
       stopPoller?.();
+    },
+    getWatcherCircuitBreakerStatus() {
+      return loop.getCircuitBreakerStatus();
+    },
+    getWatcherMetrics() {
+      return loop.getMetrics();
     },
   };
 }
