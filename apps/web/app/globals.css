@@ -90,6 +90,10 @@ a { color: inherit; }
 .empty { color: var(--muted); font-size: 14px; padding: 28px 0; text-align: center; }
 .err { color: var(--red); font-size: 13px; margin-top: 10px; }
 
+.banner { border-radius: var(--radius); padding: 14px 16px; font-size: 13px; margin-bottom: 20px; }
+.banner--warn { background: rgba(232, 184, 75, 0.1); border: 1px solid rgba(232, 184, 75, 0.35); color: var(--text); }
+.banner strong { color: var(--amber); }
+
 /* ---------- checkout ---------- */
 .checkout { text-align: center; }
 .checkout .merchant { font-size: 13px; color: var(--muted); margin-bottom: 4px; }

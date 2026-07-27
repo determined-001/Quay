@@ -14,13 +14,17 @@ async function main(): Promise<void> {
   app.use("*", cors({ origin: env.corsOrigins, allowMethods: ["GET", "POST", "OPTIONS"] }));
   app.use("*", rateLimit({ windowMs: env.rateLimitWindowMs, max: env.rateLimitMax }));
 
-  app.get("/health", (ctx) =>
-    ctx.json({
+  app.get("/health", async (ctx) => {
+    const usdcTrustline = await container.service
+      .checkSellerUsdcTrustline()
+      .catch(() => ({ ok: false as const, reason: "check_failed", message: "trustline preflight check failed" }));
+    return ctx.json({
       ok: true,
       network: container.config.network,
       sellerWallet: container.config.sellerWallet,
-    }),
-  );
+      usdcTrustline,
+    });
+  });
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));

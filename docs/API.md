@@ -20,11 +20,32 @@ CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 
 ## `GET /health`
 
-Liveness + basic config echo.
+Liveness + basic config echo, plus a re-check of the seller's own USDC trustline
+(cached up to 60s — see the account/trustline preflight note below) so a revoked
+trustline shows up in ops without anyone touching logs.
 
 **200**
 ```json
-{ "ok": true, "network": "testnet", "sellerWallet": "G..." }
+{
+  "ok": true,
+  "network": "testnet",
+  "sellerWallet": "G...",
+  "usdcTrustline": { "ok": true }
+}
+```
+When the seller's own wallet can't currently receive USDC:
+```json
+{
+  "ok": true,
+  "network": "testnet",
+  "sellerWallet": "G...",
+  "usdcTrustline": {
+    "ok": false,
+    "reason": "no_trustline",
+    "message": "Account G... has no trustline for USDC (issuer G...) — add one before this link can be paid.",
+    "trustlineUri": "web+stellar:tx?xdr=...&network_passphrase=..."
+  }
+}
 ```
 
 ---
@@ -71,6 +92,29 @@ Create a payment link.
 The `request.uri` is a spec-correct SEP-7 payment URI for the buyer's wallet/QR.
 The buyer **must** pay with the given `memo` — that is how the watcher correlates
 the on-chain payment back to this link.
+
+**422** — the destination (the seller's wallet) can't currently receive this
+asset: not yet created/funded on-chain, no trustline for an issued asset, the
+trustline is unauthorized (frozen by the issuer), or it's already at its limit.
+Checked on every `POST /links` (an unfunded/trustline-less seller wallet used to
+mean a checkout page that could never actually be paid — see
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for why this matters). Cached 60s per
+(account, asset) so this stays cheap.
+```json
+{
+  "error": "destination_cannot_receive",
+  "message": "Account G... has no trustline for USDC (issuer G...) — add one before this link can be paid.",
+  "reason": "no_trustline",
+  "asset": { "code": "USDC", "issuer": "G..." },
+  "trustlineUri": "web+stellar:tx?xdr=...&network_passphrase=..."
+}
+```
+- `reason` — `account_not_found` | `no_trustline` | `trustline_not_authorized` | `trustline_limit_exceeded`.
+- `trustlineUri` — present for `no_trustline` (and any reason where a trustline
+  exists to sign for): a SEP-7 `tx` deep link wrapping an unsigned `changeTrust`
+  operation. The seller's wallet can sign it directly — nothing server-side ever
+  touches their key. Absent for `account_not_found` (no account yet, so no
+  sequence number to build a transaction from).
 
 ---
 

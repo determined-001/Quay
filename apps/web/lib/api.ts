@@ -17,6 +17,20 @@ export function apiBase(): string {
   return BROWSER_BASE;
 }
 
+/** Thrown for API error responses that carry a machine-readable `error` code
+ *  (the `{ "error": "<code>", ... }` convention — see docs/API.md). `details`
+ *  is everything else in the body (e.g. `reason`, `trustlineUri`). */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+  }
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     ...init,
@@ -24,10 +38,25 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
   });
   if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`API ${res.status}: ${detail || res.statusText}`);
+    const raw = await res.text().catch(() => "");
+    const parsed = parseJsonObject(raw);
+    if (parsed && typeof parsed.error === "string") {
+      const { error: code, message, ...details } = parsed;
+      throw new ApiError(res.status, code, typeof message === "string" ? message : code, details);
+    }
+    throw new Error(`API ${res.status}: ${raw || res.statusText}`);
   }
   return res.json() as Promise<T>;
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface CreateLinkInput {
@@ -37,6 +66,17 @@ export interface CreateLinkInput {
   expiresInMinutes?: number;
 }
 
+export type UsdcTrustlineStatus =
+  | { ok: true }
+  | { ok: false; reason: string; message: string; trustlineUri?: string };
+
+export interface HealthResponse {
+  ok: boolean;
+  network: string;
+  sellerWallet: string;
+  usdcTrustline: UsdcTrustlineStatus;
+}
+
 export const api = {
   createLink: (input: CreateLinkInput) =>
     http<LinkWithRequest>("/links", { method: "POST", body: JSON.stringify(input) }),
@@ -44,6 +84,8 @@ export const api = {
   listLinks: () => http<{ links: PaymentLink[] }>("/links"),
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
+
+  health: () => http<HealthResponse>("/health"),
 
   cashOut: (id: string, targetCurrency: string, payoutFields: Record<string, string> = {}) =>
     http<{ job: { jobId: string; status: string; targetAmount: string; targetCurrency: string } }>(
