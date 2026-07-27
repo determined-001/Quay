@@ -31,6 +31,18 @@ export function linkRoutes(c: Container): Hono {
     return ctx.json(result);
   });
 
+  // Seller-initiated cash-out quote.
+  app.get("/:id/cash-out/quote", async (ctx) => {
+    const targetCurrency = ctx.req.query("targetCurrency") || "NGN";
+    try {
+      const quote = await c.service.quoteCashOut(ctx.req.param("id"), targetCurrency);
+      return ctx.json(quote);
+    } catch (err) {
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      throw err;
+    }
+  });
+
   // Seller-initiated cash-out to local currency.
   app.post("/:id/cash-out", async (ctx) => {
     const parsed = cashOutSchema.safeParse(await safeJson(ctx));

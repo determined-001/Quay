@@ -100,6 +100,8 @@ export interface OffRampQuote {
   targetAmount: string; // what the seller will receive
   rate: string; // sourceAsset -> targetCurrency
   expiresAt: number; // epoch ms — after this the quote is void
+  fee: { amount: string; currency: string; source: "anchor" | "estimated" };
+  netTargetAmount: string;
 }
 
 /** Where the seller wants their local-currency payout to land. */

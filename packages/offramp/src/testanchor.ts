@@ -100,14 +100,20 @@ export class TestAnchorOffRamp implements OffRampPort {
       createdAt: Date.now(),
     });
 
+    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
+    const netTargetAmount = q.buyAmount;
+    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+
     return {
       quoteId: q.id,
       sourceAsset: input.sourceAsset,
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
-      targetAmount: q.buyAmount,
+      targetAmount: grossTargetAmount,
       rate: q.price,
       expiresAt,
+      fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
+      netTargetAmount,
     };
   }
 

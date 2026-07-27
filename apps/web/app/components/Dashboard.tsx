@@ -157,6 +157,14 @@ export default function Dashboard() {
   const [copied, setCopied] = useState<string | null>(null);
   const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
   const [kyc, setKyc] = useState<KycView | null>(null);
+  const [cashOutQuote, setCashOutQuote] = useState<{
+    linkId: string;
+    gross: string;
+    fee: string;
+    net: string;
+    currency: string;
+    source: string;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -250,7 +258,26 @@ export default function Dashboard() {
   async function cashOut(id: string) {
     setActionError(null);
     try {
-      await api.cashOut(id, OFFRAMP_CURRENCY);
+      const q = await api.quoteCashOut(id, OFFRAMP_CURRENCY);
+      setCashOutQuote({
+        linkId: id,
+        gross: q.targetAmount,
+        fee: q.fee.amount,
+        net: q.netTargetAmount,
+        currency: q.fee.currency,
+        source: q.fee.source,
+      });
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to get cash-out quote");
+    }
+  }
+
+  async function confirmCashOut() {
+    if (!cashOutQuote) return;
+    setActionError(null);
+    try {
+      await api.cashOut(cashOutQuote.linkId, OFFRAMP_CURRENCY);
+      setCashOutQuote(null);
       await refresh();
     } catch (e) {
       if (e instanceof CheckoutError && e.code === "kyc_required") {
@@ -368,6 +395,32 @@ export default function Dashboard() {
           />
         )}
       </section>
+
+      {cashOutQuote && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+          <div className="panel" style={{ width: 400, maxWidth: "90%", margin: 0 }}>
+            <h2>Confirm cash out</h2>
+            <div className="memo-note" style={{ margin: "24px 0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <span>Gross proceeds</span>
+                <span>{cashOutQuote.gross} {cashOutQuote.currency}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <span>Fee {cashOutQuote.source === "estimated" ? "(estimated)" : ""}</span>
+                <span>-{cashOutQuote.fee} {cashOutQuote.currency}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+                <strong>Net to bank</strong>
+                <strong>{cashOutQuote.net} {cashOutQuote.currency}</strong>
+              </div>
+            </div>
+            <div className="row">
+              <button className="btn btn--block" onClick={() => setCashOutQuote(null)}>Cancel</button>
+              <button className="btn btn--primary btn--block" onClick={confirmCashOut}>Confirm cash out</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

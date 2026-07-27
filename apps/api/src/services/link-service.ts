@@ -379,6 +379,27 @@ export class LinkService {
     return false; // no_memo / unknown_reference / asset_mismatch — nothing to apply
   }
 
+  /** Seller-initiated cash-out quote */
+  async quoteCashOut(linkId: string, targetCurrency: string): Promise<OffRampQuote> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+    if (link.status !== "paid") {
+      throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
+    }
+
+    const sourceAmount = link.paidAmount ?? link.amount;
+    try {
+      return await this.deps.offramp.quote({
+        sourceAsset: link.asset,
+        sourceAmount,
+        targetCurrency,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp quote error: ${message}`);
+    }
+  }
+
   /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
   async triggerCashOut(linkId: string, body: CashOutBody): Promise<OffRampJob> {
     const link = await this.deps.links.findById(linkId);
@@ -427,6 +448,10 @@ export class LinkService {
     link.offrampJobId = job.jobId;
     link.offrampTargetCurrency = job.targetCurrency;
     link.offrampStatus = "pending";
+    link.offrampFeeAmount = quote.fee.amount;
+    link.offrampFeeCurrency = quote.fee.currency;
+    link.offrampFeeSource = quote.fee.source;
+    link.offrampNetTargetAmount = quote.netTargetAmount;
     await this.deps.links.save(link);
     metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
     this.cashOutStartedAt.set(link.id, Date.now());

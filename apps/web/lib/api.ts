@@ -161,11 +161,18 @@ export const api = {
 
   health: () => http<HealthResponse>("/health"),
 
-  cashOut: (
-    id: string,
-    targetCurrency: string,
-    payoutFields: Record<string, string> = {},
-  ) =>
+  quoteCashOut: (id: string, targetCurrency: string) =>
+    http<{
+      quoteId: string;
+      sourceAmount: string;
+      targetCurrency: string;
+      targetAmount: string; // Gross
+      rate: string;
+      fee: { amount: string; currency: string; source: string };
+      netTargetAmount: string; // Net
+    }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+
+  cashOut: (id: string, targetCurrency: string, payoutFields: Record<string, string> = {}) =>
     http<{ job: { jobId: string; status: string; targetAmount: string; targetCurrency: string } }>(
       `/links/${id}/cash-out`,
       { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }) },

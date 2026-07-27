@@ -40,6 +40,10 @@ export interface PaymentLink {
   offrampJobId: string | null;
   offrampTargetCurrency: string | null;
   offrampStatus: string | null;
+  offrampFeeAmount: string | null;
+  offrampFeeCurrency: string | null;
+  offrampFeeSource: string | null;
+  offrampNetTargetAmount: string | null;
   expiresAt: number | null; // epoch ms
   createdAt: number;
   updatedAt: number;
