@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type PaymentLink } from "../../lib/api";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
@@ -80,6 +81,29 @@ export default function Dashboard() {
     }
   }
 
+  const [csvFrom, setCsvFrom] = useState("");
+  const [csvTo, setCsvTo] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  async function handleCsvExport() {
+    setExporting(true);
+    try {
+      const blob = await api.exportCsv(csvFrom || undefined, csvTo || undefined);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `quay-links-export-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <>
       <section className="panel">
@@ -137,7 +161,11 @@ export default function Dashboard() {
             <tbody>
               {links.map((link) => (
                 <tr key={link.id}>
-                  <td>{link.title}</td>
+                  <td>
+                    <Link href={`/links/${link.id}`} className="dash-link-title">
+                      {link.title}
+                    </Link>
+                  </td>
                   <td className="amt">{amountLabel(link)}</td>
                   <td><StatusPill status={link.status} /></td>
                   <td className="hide-sm"><span className="mono muted">{link.reference}</span></td>
@@ -159,6 +187,36 @@ export default function Dashboard() {
             </tbody>
           </table>
         )}
+      </section>
+
+      <section className="panel">
+        <h2>Export</h2>
+        <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          Download all links as CSV for your accounting. Optionally filter by date range.
+        </p>
+        <div className="csv-export-row">
+          <div className="field csv-field">
+            <label htmlFor="csv-from">From</label>
+            <input
+              id="csv-from"
+              type="date"
+              value={csvFrom}
+              onChange={(e) => setCsvFrom(e.target.value)}
+            />
+          </div>
+          <div className="field csv-field">
+            <label htmlFor="csv-to">To</label>
+            <input
+              id="csv-to"
+              type="date"
+              value={csvTo}
+              onChange={(e) => setCsvTo(e.target.value)}
+            />
+          </div>
+          <button className="btn" onClick={handleCsvExport} disabled={exporting}>
+            {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+        </div>
       </section>
     </>
   );

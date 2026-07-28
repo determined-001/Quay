@@ -188,6 +188,23 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       createdAt: Date.now(),
     });
   }
+
+  async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
+    const rows = await this.db
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.linkId, linkId))
+      .orderBy(webhookDeliveries.createdAt);
+    return rows.map((r) => ({
+      webhookId: r.webhookId,
+      linkId: r.linkId,
+      event: r.event,
+      statusCode: r.statusCode,
+      ok: r.ok,
+      error: r.error,
+      createdAt: r.createdAt,
+    }));
+  }
 }
 
 export class DrizzleWatcherStateRepository implements WatcherStateRepository {

@@ -5,6 +5,7 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { publicRoutes } from "./routes/public";
 import { rateLimit } from "./middleware/rate-limit";
 
 async function main(): Promise<void> {
@@ -24,6 +25,10 @@ async function main(): Promise<void> {
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
+  app.route("/r", publicRoutes(container));
+
+  // CORS for public receipt endpoint (accessible from any origin).
+  app.use("/r/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"] }));
 
   container.start();
 

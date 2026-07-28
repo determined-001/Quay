@@ -39,6 +39,56 @@ export function linkRoutes(c: Container): Hono {
     }
   });
 
+  // Link detail with webhook deliveries (for the timeline page).
+  app.get("/:id/detail", async (ctx) => {
+    const result = await c.service.getLink(ctx.req.param("id"));
+    if (!result) return ctx.json({ error: "not_found" }, 404);
+    const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
+    return ctx.json({ link: result.link, request: result.request, deliveries });
+  });
+
+  // CSV export of links for a date range.
+  app.get("/export/csv", async (ctx) => {
+    const from = ctx.req.query("from");
+    const to = ctx.req.query("to");
+    const links = await c.service.listLinks();
+
+    // Filter by date range if provided.
+    let filtered = links;
+    if (from) {
+      const fromMs = new Date(from).getTime();
+      if (!isNaN(fromMs)) filtered = filtered.filter((l) => l.createdAt >= fromMs);
+    }
+    if (to) {
+      const toMs = new Date(to).getTime();
+      if (!isNaN(toMs)) filtered = filtered.filter((l) => l.createdAt <= toMs);
+    }
+
+    const header = "id,reference,title,amount,asset,status,payer,tx_hash,paid_amount,created_at,updated_at\n";
+    const rows = filtered.map(
+      (l) =>
+        [
+          l.id,
+          l.reference,
+          `"${l.title.replace(/"/g, '""')}"`,
+          l.amount,
+          l.asset.code,
+          l.status,
+          l.payer ?? "",
+          l.txHash ?? "",
+          l.paidAmount ?? "",
+          new Date(l.createdAt).toISOString(),
+          new Date(l.updatedAt).toISOString(),
+        ].join(","),
+    );
+    const csv = header + rows.join("\n");
+
+    return ctx.newResponse(csv, 200, {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="quay-links-export.csv"`,
+    });
+  });
+
   return app;
 }
 

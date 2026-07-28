@@ -153,12 +153,14 @@ export interface WebhookDelivery {
   statusCode: number | null;
   ok: boolean;
   error: string | null;
+  createdAt: number;
 }
 
 export interface WebhookRepository {
   create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
   listBySeller(sellerId: string): Promise<Webhook[]>;
   recordDelivery(d: WebhookDelivery): Promise<void>;
+  listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]>;
 }
 
 /** Watcher bookkeeping: per-account cursor + processed-tx ledger for idempotency. */
