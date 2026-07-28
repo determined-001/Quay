@@ -78,4 +78,7 @@ export const env = {
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Maximum time (ms) to wait for in-flight work to drain during graceful shutdown.
+  // Default: 15 000 ms (15 seconds).
+  shutdownTimeoutMs: Number(process.env.SHUTDOWN_TIMEOUT_MS ?? "15000"),
 } as const;

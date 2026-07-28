@@ -20,7 +20,8 @@ export interface Container {
   webhooks: DrizzleWebhookRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   start(): void;
-  stop(): void;
+  /** Gracefully stops services, awaiting in-flight work. */
+  stop(): Promise<void>;
 }
 
 export async function createContainer(): Promise<Container> {
@@ -76,9 +77,12 @@ export async function createContainer(): Promise<Container> {
       loop.start();
       stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
     },
-    stop() {
-      loop.stop();
+    async stop() {
+      await loop.stop();
       stopPoller?.();
+      stopPoller = null;
+      await client.close();
+      console.log("[api] all services stopped");
     },
   };
 }
