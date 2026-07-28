@@ -17,14 +17,34 @@ export function apiBase(): string {
   return BROWSER_BASE;
 }
 
+// Session token lives ONLY in memory for the lifetime of the page — never
+// localStorage/sessionStorage (a persistent, JS-readable store is exactly what
+// an XSS payload would go looking for). It's lost on a hard refresh; the
+// httpOnly `session` cookie the API also sets is what survives that (sent
+// automatically via `credentials: "include"`, never readable by this code).
+let sessionToken: string | null = null;
+
+export function setSessionToken(token: string | null): void {
+  sessionToken = token;
+}
+
+export function getSessionToken(): string | null {
+  return sessionToken;
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { "content-type": "application/json", ...(init?.headers as Record<string, string> ?? {}) };
+  if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
+
   const res = await fetch(`${apiBase()}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers,
     cache: "no-store",
+    credentials: "include", // send the httpOnly session cookie cross-origin
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
+    if (res.status === 401) setSessionToken(null); // the session is no longer good for anything
     throw new Error(`API ${res.status}: ${detail || res.statusText}`);
   }
   return res.json() as Promise<T>;
@@ -35,6 +55,11 @@ export interface CreateLinkInput {
   amount: string;
   assetCode: "USDC" | "XLM";
   expiresInMinutes?: number;
+}
+
+export interface AuthChallenge {
+  transaction: string;
+  network_passphrase: string;
 }
 
 export const api = {
@@ -50,4 +75,16 @@ export const api = {
       `/links/${id}/cash-out`,
       { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }) },
     ),
+
+  // Wallet-native login (SEP-10): getAuthChallenge() -> sign with the wallet ->
+  // submitAuthChallenge() -> setSessionToken(token) on success.
+  getAuthChallenge: (account: string) => http<AuthChallenge>(`/auth?account=${encodeURIComponent(account)}`),
+
+  submitAuthChallenge: (transaction: string) =>
+    http<{ token: string; expiresAt: number }>("/auth", { method: "POST", body: JSON.stringify({ transaction }) }).then((res) => {
+      setSessionToken(res.token);
+      return res;
+    }),
+
+  logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
 };

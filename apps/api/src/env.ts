@@ -78,4 +78,20 @@ export const env = {
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Domain we identify as in SEP-10 challenges + stellar.toml. Should match where
+  // this API is actually reachable in production.
+  homeDomain: process.env.HOME_DOMAIN || `localhost:${Number(process.env.API_PORT ?? "8787")}`,
+  webAuthDomain: process.env.WEB_AUTH_DOMAIN || process.env.HOME_DOMAIN || `localhost:${Number(process.env.API_PORT ?? "8787")}`,
+  // Secret key for the identity that SIGNS SEP-10 challenges (our server, not any
+  // seller). Auto-generates a throwaway testnet keypair if unset. Required on
+  // public network — a login server's signing key must be stable across restarts.
+  serverSigningSecret: process.env.SERVER_SIGNING_SECRET || undefined,
+  // Symmetric secret for session JWTs minted after a SEP-10 login. Auto-generates
+  // an ephemeral one on testnet if unset (sessions won't survive a restart);
+  // required on public network.
+  jwtSecret: process.env.JWT_SECRET || undefined,
+  // Whether the session cookie gets the `Secure` attribute (only sent over
+  // HTTPS). Defaults on; set COOKIE_SECURE=false for plain-http local dev,
+  // where a Secure cookie would otherwise silently never be sent at all.
+  cookieSecure: (process.env.COOKIE_SECURE ?? "true") !== "false",
 } as const;

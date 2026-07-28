@@ -5,13 +5,25 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { authRoutes } from "./routes/auth";
+import { wellKnownRoutes } from "./routes/well-known";
 import { rateLimit } from "./middleware/rate-limit";
 
 async function main(): Promise<void> {
   const container = await createContainer();
 
   const app = new Hono();
-  app.use("*", cors({ origin: env.corsOrigins, allowMethods: ["GET", "POST", "OPTIONS"] }));
+  app.use(
+    "*",
+    cors({
+      origin: env.corsOrigins,
+      allowMethods: ["GET", "POST", "OPTIONS"],
+      // The session cookie is sent cross-origin (API and web app are separate
+      // hosts) — credentials: true plus an explicit (non-"*") origin list is
+      // required for the browser to actually attach/accept it.
+      credentials: true,
+    }),
+  );
   app.use("*", rateLimit({ windowMs: env.rateLimitWindowMs, max: env.rateLimitMax }));
 
   app.get("/health", (ctx) =>
@@ -24,6 +36,17 @@ async function main(): Promise<void> {
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
+  app.route(
+    "/auth",
+    authRoutes({
+      challenge: container.auth.challenge,
+      session: container.auth.session,
+      sellers: container.sellers,
+      revocations: container.auth.revocations,
+      secureCookie: container.auth.secureCookie,
+    }),
+  );
+  app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
 
   container.start();
 

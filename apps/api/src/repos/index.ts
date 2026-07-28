@@ -1,10 +1,11 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, lt } from "drizzle-orm";
 import type {
   CreateLinkInput,
   LinkRepository,
   PaymentLink,
   Seller,
   SellerRepository,
+  TokenRevocationRepository,
   Webhook,
   WebhookDelivery,
   WebhookRepository,
@@ -12,7 +13,7 @@ import type {
   AssetRef,
 } from "@checkout/core";
 import type { DB } from "../db/client";
-import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx } from "../db/schema";
+import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx, revokedTokens } from "../db/schema";
 import { newId } from "../services/ids";
 
 type LinkRow = typeof links.$inferSelect;
@@ -155,6 +156,25 @@ export class DrizzleSellerRepository implements SellerRepository {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
     return rows[0] ?? null;
   }
+
+  async findByWallet(wallet: string): Promise<Seller | null> {
+    const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
+    return rows[0] ?? null;
+  }
+
+  async createIfAbsent(wallet: string): Promise<Seller> {
+    await this.db
+      .insert(sellers)
+      .values({ id: newId("sel"), name: shortWallet(wallet), wallet, createdAt: Date.now() })
+      .onConflictDoNothing({ target: sellers.wallet });
+    const seller = await this.findByWallet(wallet);
+    if (!seller) throw new Error(`failed to create or find seller for wallet ${wallet}`);
+    return seller;
+  }
+}
+
+function shortWallet(wallet: string): string {
+  return `${wallet.slice(0, 4)}…${wallet.slice(-4)}`;
 }
 
 export class DrizzleWebhookRepository implements WebhookRepository {
@@ -226,5 +246,25 @@ export class DrizzleWatcherStateRepository implements WatcherStateRepository {
       .insert(processedTx)
       .values({ txHash, linkId, createdAt: Date.now() })
       .onConflictDoNothing();
+  }
+}
+
+export class DrizzleTokenRevocationRepository implements TokenRevocationRepository {
+  constructor(private readonly db: DB) {}
+
+  async revoke(jti: string, expiresAt: number): Promise<void> {
+    await this.db
+      .insert(revokedTokens)
+      .values({ jti, expiresAt, revokedAt: Date.now() })
+      .onConflictDoNothing();
+  }
+
+  async isRevoked(jti: string): Promise<boolean> {
+    const rows = await this.db.select({ jti: revokedTokens.jti }).from(revokedTokens).where(eq(revokedTokens.jti, jti)).limit(1);
+    return rows.length > 0;
+  }
+
+  async sweepExpired(now: number): Promise<void> {
+    await this.db.delete(revokedTokens).where(lt(revokedTokens.expiresAt, now));
   }
 }

@@ -113,7 +113,7 @@ pnpm build       # builds the web app
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
 | Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
-| Auth | **Not implemented.** Single hard-coded demo seller, no API keys / login. Fine for a demo, not for production. |
+| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; `requireSeller` middleware gates every `/links` and `/webhooks` route (401 unauthenticated, 403 wrong seller), `POST /auth/logout` revokes a token by `jti`. **No web UI exists yet to actually log in** (needs a wallet-connect button — separate issue) — the demo dashboard needs that wired up before it can create/list links post-upgrade. See [`docs/API.md`](docs/API.md#authentication). |
 
 ---
 
@@ -128,7 +128,11 @@ pnpm build       # builds the web app
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Add auth** (API keys per seller + a real login) before anyone but you touches it.
+4. **Build the wallet-connect UI.** SEP-10 login + session enforcement are both
+   real now (`/auth`, `requireSeller` on `/links` and `/webhooks`), but there's
+   no button anywhere to actually sign in — that needs a wallet-connect
+   integration (Stellar Wallets Kit or similar) calling `apps/web/lib/api.ts`'s
+   `getAuthChallenge`/`submitAuthChallenge`. Add API keys for programmatic access.
 5. **Multiple sellers / scale:** the watcher polls per active destination account; for many
    sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
 

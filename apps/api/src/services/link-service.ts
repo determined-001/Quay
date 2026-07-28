@@ -50,8 +50,9 @@ export class LinkService {
     });
   }
 
-  async createLink(body: CreateLinkBody): Promise<LinkWithRequest> {
-    const seller = await this.deps.sellers.getDefault();
+  async createLink(sellerId: string, body: CreateLinkBody): Promise<LinkWithRequest> {
+    const seller = await this.deps.sellers.findById(sellerId);
+    if (!seller) throw new HttpError(404, "seller_not_found");
     const asset = resolveAsset(body.assetCode, this.deps.stellar);
     const expiresAt = body.expiresInMinutes
       ? Date.now() + body.expiresInMinutes * 60_000
@@ -71,9 +72,8 @@ export class LinkService {
     return { link, request: this.buildRequest(link) };
   }
 
-  async listLinks(): Promise<PaymentLink[]> {
-    const seller = await this.deps.sellers.getDefault();
-    return this.deps.links.listBySeller(seller.id);
+  async listLinks(sellerId: string): Promise<PaymentLink[]> {
+    return this.deps.links.listBySeller(sellerId);
   }
 
   async getLink(id: string): Promise<LinkWithRequest | null> {
