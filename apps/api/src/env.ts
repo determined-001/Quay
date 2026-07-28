@@ -49,6 +49,11 @@ if (network !== "testnet" && network !== "public") {
   throw new Error(`STELLAR_NETWORK must be "testnet" or "public", got "${network}"`);
 }
 
+const watchMode = (process.env.WATCH_MODE ?? "poll") as "poll" | "stream";
+if (watchMode !== "poll" && watchMode !== "stream") {
+  throw new Error(`WATCH_MODE must be "poll" or "stream", got "${watchMode}"`);
+}
+
 export const env = {
   network,
   horizonUrl: process.env.HORIZON_URL || undefined,
@@ -61,6 +66,9 @@ export const env = {
   databaseAuthToken: process.env.DATABASE_AUTH_TOKEN || undefined,
   apiPort: Number(process.env.API_PORT ?? "8787"),
   pollMs: Number(process.env.WATCH_POLL_MS ?? "6000"),
+  // "poll" (default, restart-safe MVP behavior) or "stream" (Horizon SSE,
+  // opt-in until proven). See packages/stellar/src/streaming-horizon-watcher.ts.
+  watchMode,
   corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:3000")
     .split(",")
     .map((s) => s.trim())
