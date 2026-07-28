@@ -92,6 +92,17 @@ export const env = {
   // Fixed-window rate limit per client IP. Set RATE_LIMIT_MAX=0 to disable.
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? "60000"),
   rateLimitMax: Number(process.env.RATE_LIMIT_MAX ?? "120"),
+  // Tighter buckets for expensive routes (link creation, cash-out).
+  rateLimitStrictWindowMs: Number(process.env.RATE_LIMIT_STRICT_WINDOW_MS ?? "60000"),
+  rateLimitStrictMax: Number(process.env.RATE_LIMIT_STRICT_MAX ?? "20"),
+  // Number of trusted reverse-proxy hops in front of this instance. Determines
+  // which x-forwarded-for entry (from the right) is treated as the real client IP.
+  // Default 1 in production (Render's own edge proxy), 0 locally where nothing
+  // sits in front of the API and the header (if present at all) is untrusted.
+  trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? (network === "public" ? "1" : "0")),
+  // When set, rate-limit counters are shared across instances via Redis instead
+  // of an in-process Map.
+  redisUrl: process.env.REDIS_URL || undefined,
   // Seller wallet that receives funds. If unset on testnet, the app generates a
   // throwaway keypair on first boot and prints it. Required on public network.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
