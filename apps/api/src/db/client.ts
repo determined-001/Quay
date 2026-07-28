@@ -10,12 +10,16 @@ const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS sellers (
      id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL, created_at INTEGER NOT NULL
    )`,
+  // New columns (offramp_indicative_rate, offramp_rate, offramp_rate_delta) are
+  // included here so fresh databases get the full schema. Existing databases are
+  // handled by the ALTER TABLE statements in MIGRATION_SQL below.
   `CREATE TABLE IF NOT EXISTS links (
      id TEXT PRIMARY KEY, reference TEXT NOT NULL UNIQUE, seller_id TEXT NOT NULL,
      destination TEXT NOT NULL, title TEXT NOT NULL, amount TEXT NOT NULL,
      asset_code TEXT NOT NULL, asset_issuer TEXT, status TEXT NOT NULL,
      tx_hash TEXT, payer TEXT, paid_amount TEXT,
      offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
+     offramp_indicative_rate TEXT, offramp_rate TEXT, offramp_rate_delta TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS webhooks (
@@ -35,6 +39,18 @@ const BOOTSTRAP_SQL = [
    )`,
 ];
 
+/**
+ * Best-effort ALTER TABLE statements for existing databases that were created
+ * before issue 3.5 added the three rate-telemetry columns. SQLite/libSQL throws
+ * "duplicate column name" if the column already exists — we swallow that error
+ * so the server can boot cleanly against both old and new schemas.
+ */
+const MIGRATION_SQL = [
+  `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,
+];
+
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {
   const client = createClient({ url: databaseUrl, authToken });
   const db = drizzle(client, { schema });
@@ -44,6 +60,13 @@ export function createDb(databaseUrl: string, authToken?: string): { db: DB; cli
 export async function bootstrap(client: Client): Promise<void> {
   for (const sql of BOOTSTRAP_SQL) {
     await client.execute(sql);
+  }
+  for (const sql of MIGRATION_SQL) {
+    try {
+      await client.execute(sql);
+    } catch {
+      // "duplicate column name" — column already exists, nothing to do.
+    }
   }
 }
 

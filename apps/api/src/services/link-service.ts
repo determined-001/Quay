@@ -3,6 +3,7 @@ import {
   normalizeAmount,
   type CashOutBody,
   type CreateLinkBody,
+  type IndicativePrice,
   type LinkRepository,
   type MatchOutcome,
   type NormalizedPayment,
@@ -281,6 +282,54 @@ export class LinkService {
   }
 
   /**
+   * Return indicative FX rates for a paid link — SEP-38 GET /prices, no quote
+   * consumed (issue 3.5). The response is clearly labelled indicative so the
+   * dashboard can show it without burning a firm quote on every page visit.
+   *
+   * Side effect: persists the indicative rate for the requested `targetCurrency`
+   * against the link so `triggerCashOut` can later compute the spread delta.
+   *
+   * Returns null when the adapter does not implement `indicativePrices` (e.g.
+   * a future adapter that can only provide firm quotes).
+   */
+  async getOfframpPreview(
+    linkId: string,
+    targetCurrency?: string,
+  ): Promise<{ indicative: true; prices: IndicativePrice[]; sourceAmount: string } | null> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+    if (link.status !== "paid") {
+      throw new HttpError(409, `Link must be paid to preview off-ramp (is "${link.status}")`);
+    }
+    if (!this.deps.offramp.indicativePrices) return null;
+
+    const sourceAmount = link.paidAmount ?? link.amount;
+    let prices: IndicativePrice[];
+    try {
+      prices = await this.deps.offramp.indicativePrices({
+        sourceAsset: link.asset,
+        sourceAmount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp preview error: ${message}`);
+    }
+
+    // Persist the indicative rate for the target currency so triggerCashOut()
+    // can compute the indicative-vs-firm delta (issue 3.5 telemetry).
+    const currency = targetCurrency ?? link.offrampTargetCurrency;
+    if (currency) {
+      const match = prices.find((p) => p.targetCurrency === currency);
+      if (match && link.offrampIndicativeRate !== match.price) {
+        link.offrampIndicativeRate = match.price;
+        await this.deps.links.save(link);
+      }
+    }
+
+    return { indicative: true, prices, sourceAmount };
+  }
+
+  /**
    * Apply a matched payment to its link. Returns whether the link advanced to
    * `paid` (so the worker can decide what to log). Idempotency of the *payment*
    * (processed-tx ledger) is the caller's responsibility; here we additionally
@@ -352,6 +401,20 @@ export class LinkService {
     link.offrampJobId = job.jobId;
     link.offrampTargetCurrency = job.targetCurrency;
     link.offrampStatus = "pending";
+
+    // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
+    // offrampIndicativeRate may already be set if the seller visited the preview
+    // endpoint before committing; if not, we leave it null so the delta is skipped.
+    link.offrampRate = quote.rate;
+    if (link.offrampIndicativeRate !== null) {
+      const indicative = Number(link.offrampIndicativeRate);
+      const firm = Number(quote.rate);
+      if (Number.isFinite(indicative) && Number.isFinite(firm) && indicative !== 0) {
+        // Delta: firm − indicative (positive = anchor moved rate in seller's favour).
+        link.offrampRateDelta = (firm - indicative).toFixed(6);
+      }
+    }
+
     await this.deps.links.save(link);
     return job;
   }

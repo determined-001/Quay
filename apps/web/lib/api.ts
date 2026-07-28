@@ -110,6 +110,20 @@ export interface CreateLinkInput {
   expiresInMinutes?: number;
 }
 
+/** One indicative price entry from GET /links/:id/offramp-preview (issue 3.5). */
+export interface IndicativePrice {
+  targetCurrency: string;
+  price: string;
+  deliveryMethods: string[];
+}
+
+/** Response shape for GET /links/:id/offramp-preview. */
+export interface OfframpPreview {
+  indicative: true;
+  prices: IndicativePrice[];
+  sourceAmount: string | null;
+}
+
 export const api = {
   createLink: (input: CreateLinkInput) =>
     http<LinkWithRequest>("/links", { method: "POST", body: JSON.stringify(input) }),
@@ -117,6 +131,16 @@ export const api = {
   listLinks: () => http<{ links: PaymentLink[] }>("/links"),
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
+
+  /**
+   * Indicative off-ramp prices — SEP-38 GET /prices via the API, no firm quote
+   * consumed (issue 3.5). Safe to call on every dashboard load.
+   * Pass `currency` to persist the indicative rate for spread-delta telemetry.
+   */
+  getOfframpPreview: (id: string, currency?: string) => {
+    const qs = currency ? `?currency=${encodeURIComponent(currency)}` : "";
+    return http<OfframpPreview>(`/links/${id}/offramp-preview${qs}`);
+  },
 
   cashOut: (
     id: string,

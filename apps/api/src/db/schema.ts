@@ -23,6 +23,12 @@ export const links = sqliteTable("links", {
   offrampJobId: text("offramp_job_id"),
   offrampTargetCurrency: text("offramp_target_currency"),
   offrampStatus: text("offramp_status"),
+  /** Indicative rate captured at preview time (issue 3.5 telemetry). */
+  offrampIndicativeRate: text("offramp_indicative_rate"),
+  /** Firm rate from the SEP-38 POST /quote (issue 3.5 telemetry). */
+  offrampRate: text("offramp_rate"),
+  /** Absolute delta: firm − indicative (issue 3.5 telemetry). */
+  offrampRateDelta: text("offramp_rate_delta"),
   expiresAt: integer("expires_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
