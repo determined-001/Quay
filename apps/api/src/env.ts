@@ -55,7 +55,7 @@ export const env = {
   usdcIssuer:
     network === "public"
       ? req("USDC_ISSUER_PUBLIC")
-      : req("USDC_ISSUER_TESTNET"),
+      : req("USDC_ISSUER_TESTNET", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"),
   databaseUrl: process.env.DATABASE_URL || "file:./local.db",
   // Turso auth token. Unused for local file: URLs.
   databaseAuthToken: process.env.DATABASE_AUTH_TOKEN || undefined,
@@ -85,4 +85,5 @@ export const env = {
   watcherCircuitBreakerCooldownMs: Number(process.env.WATCHER_CIRCUIT_BREAKER_COOLDOWN_MS ?? "60000"),
   watcherIdleBackoffTicks: Number(process.env.WATCHER_IDLE_BACKOFF_TICKS ?? "10"),
   watcherAggressivePollTicks: Number(process.env.WATCHER_AGGRESSIVE_POLL_TICKS ?? "5"),
+  shutdownTimeoutMs: Number(process.env.SHUTDOWN_TIMEOUT_MS ?? "5000"),
 } as const;

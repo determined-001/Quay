@@ -46,7 +46,7 @@ describe("WatcherLoop fan-out with fairness", () => {
   const pollMs = 1000;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     loop = new WatcherLoop({
       watcher: mockWatcher,
       links: mockLinks,
@@ -113,41 +113,23 @@ describe("WatcherLoop fan-out with fairness", () => {
     const accounts = ["good_account", "bad_account", "another_good"];
     (mockLinks.activeDestinations as any).mockResolvedValue(accounts);
 
-    // First account succeeds
-    (mockState.getCursor as any)
-      .mockResolvedValueOnce("cursor1")
-      .mockResolvedValueOnce("cursor2")
-      .mockResolvedValueOnce("cursor3");
-    
-    (mockWatcher.fetchSince as any)
-      .mockResolvedValueOnce([])
-      .mockRejectedValueOnce(new Error("Network error"))
-      .mockResolvedValueOnce([]);
-    
+    (mockState.getCursor as any).mockResolvedValue("cursor");
+    (mockWatcher.fetchSince as any).mockImplementation(async (account: string) => {
+      if (account === "bad_account") {
+        throw new Error("Network error");
+      }
+      return [];
+    });
     (mockLinks.openLinksForDestination as any).mockResolvedValue([]);
 
-    // First tick - bad account fails
-    await loop.runOnce();
-
-    // Second tick - bad account should be circuit-breaked after threshold failures
-    for (let i = 0; i < 5; i++) {
-      (mockState.getCursor as any).mockClear();
-      (mockState.getCursor as any)
-        .mockResolvedValueOnce("cursor1")
-        .mockResolvedValueOnce("cursor2")
-        .mockResolvedValueOnce("cursor3");
-      
-      (mockWatcher.fetchSince as any)
-        .mockResolvedValueOnce([])
-        .mockRejectedValueOnce(new Error("Network error"))
-        .mockResolvedValueOnce([]);
-      
+    // Run 6 ticks to trigger circuit breaker threshold and observe open status
+    for (let i = 0; i < 6; i++) {
       await loop.runOnce();
     }
 
     const circuitBreakers = loop.getCircuitBreakerStatus();
-    const badAccountStatus = circuitBreakers.find(cb => cb.account === "bad_…");
-    
+    const badAccountStatus = circuitBreakers.find((cb) => cb.account.startsWith("bad_"));
+
     expect(badAccountStatus).toBeDefined();
     expect(badAccountStatus?.isOpen).toBe(true);
     expect(badAccountStatus?.consecutiveErrors).toBeGreaterThanOrEqual(5);
@@ -175,18 +157,17 @@ describe("WatcherLoop fan-out with fairness", () => {
   });
 
   it("should back off idle accounts", async () => {
+    let fakeTime = 1000;
+    const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => fakeTime);
+
     const accounts = ["idle_account", "active_account"];
     (mockLinks.activeDestinations as any).mockResolvedValue(accounts);
 
-    // Idle account returns no payments
-    (mockState.getCursor as any)
-      .mockResolvedValueOnce("cursor1")
-      .mockResolvedValueOnce("cursor2");
-    
-    (mockWatcher.fetchSince as any)
-      .mockResolvedValueOnce([])  // idle
-      .mockResolvedValueOnce([{ txHash: "tx1", pagingToken: "token1" }]);  // active
-    
+    (mockState.getCursor as any).mockResolvedValue("cursor");
+    (mockWatcher.fetchSince as any).mockImplementation(async (account: string) => {
+      if (account === "idle_account") return [];
+      return [{ txHash: `tx_${fakeTime}`, pagingToken: `token_${fakeTime}` }];
+    });
     (mockLinks.openLinksForDestination as any).mockResolvedValue([]);
     (mockState.isProcessed as any).mockResolvedValue(false);
 
@@ -194,25 +175,18 @@ describe("WatcherLoop fan-out with fairness", () => {
 
     // Run enough ticks to trigger backoff
     for (let i = 0; i < 15; i++) {
-      (mockState.getCursor as any).mockClear();
-      (mockState.getCursor as any)
-        .mockResolvedValueOnce("cursor1")
-        .mockResolvedValueOnce("cursor2");
-      
-      (mockWatcher.fetchSince as any)
-        .mockResolvedValueOnce([])  // idle
-        .mockResolvedValueOnce([{ txHash: `tx${i}`, pagingToken: `token${i}` }]);  // active
-      
+      fakeTime += 100;
       await loop.runOnce();
     }
 
     const metrics = loop.getMetrics();
-    
+
     // Active account should have lower lag than idle account
     const activeLag = metrics.perAccountLag.get("active_account") || 0;
     const idleLag = metrics.perAccountLag.get("idle_account") || 0;
-    
+
     expect(activeLag).toBeLessThan(idleLag);
+    dateSpy.mockRestore();
   });
 
   it("should poll new accounts aggressively", async () => {
@@ -227,7 +201,7 @@ describe("WatcherLoop fan-out with fairness", () => {
 
     // New account should be marked and processed
     const circuitBreakers = loop.getCircuitBreakerStatus();
-    const newAccountStatus = circuitBreakers.find(cb => cb.account === "new_…");
+    const newAccountStatus = circuitBreakers.find(cb => cb.account.startsWith("new_"));
     
     expect(newAccountStatus).toBeDefined();
     expect(newAccountStatus?.consecutiveErrors).toBe(0);

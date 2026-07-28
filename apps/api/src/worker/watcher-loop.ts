@@ -59,6 +59,7 @@ export interface WatcherMetrics {
 export class WatcherLoop {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private currentTick: Promise<void> | null = null;
   private accountStates = new Map<string, AccountState>();
   private roundRobinCursor = 0;
   private metrics: WatcherMetrics = {
@@ -180,7 +181,10 @@ export class WatcherLoop {
     const selected: string[] = [];
     for (let i = 0; i < maxPerTick && i < allAccounts.length; i++) {
       const index = (this.roundRobinCursor + i) % allAccounts.length;
-      selected.push(allAccounts[index]);
+      const account = allAccounts[index];
+      if (account !== undefined) {
+        selected.push(account);
+      }
     }
 
     // Advance cursor for next tick
@@ -214,7 +218,6 @@ export class WatcherLoop {
       
       // Reset error state on success
       state.consecutiveErrors = 0;
-      state.consecutiveIdleTicks = 0;
       state.lastActivityTime = now;
       state.isNewAccount = false;
       state.lastProcessedAt = now;
@@ -309,6 +312,8 @@ export class WatcherLoop {
       state.consecutiveIdleTicks++;
       return;
     }
+
+    state.consecutiveIdleTicks = 0;
 
     const open = await this.deps.links.openLinksForDestination(account);
     const byRef = new Map<string, PaymentLink>(open.map((l) => [l.reference, l]));
