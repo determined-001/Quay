@@ -2,14 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type PaymentLink } from "../../lib/api";
+import CashOutModal from "./CashOutModal";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
 const OFFRAMP_CURRENCY = process.env.NEXT_PUBLIC_OFFRAMP_CURRENCY ?? "NGN";
 const OFFRAMP_IS_MOCK = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "testanchor";
-const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
-  ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
-  : `Cash out to ${OFFRAMP_CURRENCY}`;
 
 function StatusPill({ status }: { status: string }) {
   const label = status.replace("offramp_", "off-ramp ").replace("_", " ");
@@ -28,6 +26,8 @@ export default function Dashboard() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  // Which link id has the cash-out modal open, null = closed.
+  const [cashOutLinkId, setCashOutLinkId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -70,15 +70,12 @@ export default function Dashboard() {
     setTimeout(() => setCopied((c) => (c === id ? null : c)), 1500);
   }
 
-  async function cashOut(id: string) {
-    setError(null);
-    try {
-      await api.cashOut(id, OFFRAMP_CURRENCY);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Cash-out failed");
-    }
+  function handleCashOutSuccess() {
+    setCashOutLinkId(null);
+    void refresh();
   }
+
+  const cashOutLink = cashOutLinkId ? links.find((l) => l.id === cashOutLinkId) ?? null : null;
 
   return (
     <>
@@ -148,8 +145,23 @@ export default function Dashboard() {
                     {link.status === "paid" && (
                       <>
                         {" · "}
-                        <button className="linkbtn" onClick={() => cashOut(link.id)}>
-                          {CASH_OUT_LABEL}
+                        <button
+                          className="linkbtn"
+                          onClick={() => setCashOutLinkId(link.id)}
+                        >
+                          Cash out to {OFFRAMP_CURRENCY}
+                          {OFFRAMP_IS_MOCK && (
+                            <span
+                              style={{
+                                marginLeft: 4,
+                                fontSize: 10,
+                                color: "var(--amber)",
+                                fontFamily: "var(--mono)",
+                              }}
+                            >
+                              (sim)
+                            </span>
+                          )}
                         </button>
                       </>
                     )}
@@ -160,6 +172,19 @@ export default function Dashboard() {
           </table>
         )}
       </section>
+
+      {/* Cash-out modal — rendered when a link's "Cash out" button is clicked */}
+      {cashOutLinkId && cashOutLink && (
+        <CashOutModal
+          linkId={cashOutLinkId}
+          linkAmount={cashOutLink.paidAmount ?? cashOutLink.amount}
+          assetCode={cashOutLink.asset.code}
+          targetCurrency={OFFRAMP_CURRENCY}
+          isMock={OFFRAMP_IS_MOCK}
+          onClose={() => setCashOutLinkId(null)}
+          onSuccess={handleCashOutSuccess}
+        />
+      )}
     </>
   );
 }

@@ -127,6 +127,18 @@ export class DrizzleLinkRepository implements LinkRepository {
   }
 }
 
+function rowToSeller(row: typeof sellers.$inferSelect): Seller {
+  let payoutFields: Record<string, string> | null = null;
+  if (row.payoutFieldsJson) {
+    try {
+      payoutFields = JSON.parse(row.payoutFieldsJson) as Record<string, string>;
+    } catch {
+      payoutFields = null;
+    }
+  }
+  return { id: row.id, name: row.name, wallet: row.wallet, payoutFields, createdAt: row.createdAt };
+}
+
 export class DrizzleSellerRepository implements SellerRepository {
   constructor(private readonly db: DB) {}
 
@@ -138,22 +150,36 @@ export class DrizzleSellerRepository implements SellerRepository {
       if (existing[0].wallet !== wallet) {
         await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
       }
-      return { ...existing[0], wallet };
+      return rowToSeller({ ...existing[0], wallet });
     }
-    const seller: Seller = { id: newId("sel"), name, wallet, createdAt: Date.now() };
+    const now = Date.now();
+    const seller: typeof sellers.$inferSelect = {
+      id: newId("sel"),
+      name,
+      wallet,
+      payoutFieldsJson: null,
+      createdAt: now,
+    };
     await this.db.insert(sellers).values(seller);
-    return seller;
+    return rowToSeller(seller);
   }
 
   async getDefault(): Promise<Seller> {
     const rows = await this.db.select().from(sellers).limit(1);
     if (!rows[0]) throw new Error("No default seller seeded");
-    return rows[0];
+    return rowToSeller(rows[0]);
   }
 
   async findById(id: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
-    return rows[0] ?? null;
+    return rows[0] ? rowToSeller(rows[0]) : null;
+  }
+
+  async savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void> {
+    await this.db
+      .update(sellers)
+      .set({ payoutFieldsJson: JSON.stringify(fields) })
+      .where(eq(sellers.id, sellerId));
   }
 }
 

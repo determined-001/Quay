@@ -26,6 +26,18 @@ export function linkRoutes(c: Container): Hono {
     return ctx.json(result);
   });
 
+  // Return field descriptors + masked saved fields for the cash-out form.
+  // No auth required beyond knowing the link id — descriptors are not sensitive.
+  app.get("/:id/offramp-requirements", async (ctx) => {
+    try {
+      const result = await c.service.getOfframpRequirements(ctx.req.param("id"));
+      return ctx.json(result);
+    } catch (err) {
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      throw err;
+    }
+  });
+
   // Seller-initiated cash-out to local currency.
   app.post("/:id/cash-out", async (ctx) => {
     const parsed = cashOutSchema.safeParse(await safeJson(ctx));

@@ -11,7 +11,9 @@ import {
   type OffRampPort,
   type PaymentLink,
   type PaymentRequest,
+  type PayoutFieldDescriptor,
   type RailPort,
+  type Seller,
   type SellerRepository,
   type WebhookRepository,
 } from "@checkout/core";
@@ -83,6 +85,38 @@ export class LinkService {
   }
 
   /**
+   * Returns the field descriptors for the off-ramp form, plus any payout
+   * fields the seller has already saved (values masked to the last 4 chars
+   * so the form can pre-fill and indicate "already on file" without leaking
+   * the raw account numbers to the browser).
+   */
+  async getOfframpRequirements(linkId: string): Promise<{
+    descriptors: PayoutFieldDescriptor[];
+    savedFields: Record<string, string> | null;
+  }> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+
+    const descriptors = await this.deps.offramp.offrampRequirements(link.asset.code);
+
+    const seller = await this.deps.sellers.getDefault();
+    const saved = seller.payoutFields;
+
+    // Mask every saved value: show only the last 4 chars, rest replaced with *.
+    // This lets the form indicate "already on file" without echoing bank numbers.
+    const savedFields: Record<string, string> | null = saved
+      ? Object.fromEntries(
+          Object.entries(saved).map(([k, v]) => [
+            k,
+            v.length <= 4 ? "****" : `${"*".repeat(v.length - 4)}${v.slice(-4)}`,
+          ]),
+        )
+      : null;
+
+    return { descriptors, savedFields };
+  }
+
+  /**
    * Apply a matched payment to its link. Returns whether the link advanced to
    * `paid` (so the worker can decide what to log). Idempotency of the *payment*
    * (processed-tx ledger) is the caller's responsibility; here we additionally
@@ -124,6 +158,14 @@ export class LinkService {
       throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
     }
 
+    // Merge: previously-saved fields are the base; submitted fields override.
+    // This means the seller only needs to re-enter fields they want to change.
+    const seller: Seller = await this.deps.sellers.getDefault();
+    const mergedFields: Record<string, string> = {
+      ...(seller.payoutFields ?? {}),
+      ...body.payoutFields,
+    };
+
     const sourceAmount = link.paidAmount ?? link.amount;
     let quote: OffRampQuote;
     let job: OffRampJob;
@@ -136,12 +178,17 @@ export class LinkService {
       job = await this.deps.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
-        payout: { currency: body.targetCurrency, fields: body.payoutFields },
+        payout: { currency: body.targetCurrency, fields: mergedFields },
       });
     } catch (err) {
       if (err instanceof HttpError) throw err;
       const message = err instanceof Error ? err.message : String(err);
       throw new HttpError(502, `Off-ramp error: ${message}`);
+    }
+
+    // Persist the (unmasked) merged fields for future reuse — never logged.
+    if (Object.keys(mergedFields).length > 0) {
+      await this.deps.sellers.savePayoutFields(seller.id, mergedFields);
     }
 
     link.status = "offramp_pending";

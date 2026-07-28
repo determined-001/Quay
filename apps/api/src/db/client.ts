@@ -35,6 +35,13 @@ const BOOTSTRAP_SQL = [
    )`,
 ];
 
+// Additive schema migrations — safe to run on an existing DB.
+const MIGRATIONS_SQL = [
+  // #32: store seller's last-used payout destination (encrypted at rest by the
+  //      DB engine; never logged or included in webhook payloads).
+  `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
+];
+
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {
   const client = createClient({ url: databaseUrl, authToken });
   const db = drizzle(client, { schema });
@@ -44,6 +51,18 @@ export function createDb(databaseUrl: string, authToken?: string): { db: DB; cli
 export async function bootstrap(client: Client): Promise<void> {
   for (const sql of BOOTSTRAP_SQL) {
     await client.execute(sql);
+  }
+  // Apply additive migrations. SQLite throws on duplicate column; swallow that
+  // specific error so restarts on an already-migrated DB stay silent.
+  for (const sql of MIGRATIONS_SQL) {
+    try {
+      await client.execute(sql);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes("duplicate column name") && !msg.includes("already exists")) {
+        throw err;
+      }
+    }
   }
 }
 

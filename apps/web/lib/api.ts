@@ -1,10 +1,21 @@
-import type { PaymentLink, PaymentRequest } from "@checkout/core";
+import type { PaymentLink, PaymentRequest, PayoutFieldDescriptor } from "@checkout/core";
 
-export type { PaymentLink, PaymentRequest };
+export type { PaymentLink, PaymentRequest, PayoutFieldDescriptor };
 
 export interface LinkWithRequest {
   link: PaymentLink;
   request: PaymentRequest;
+}
+
+export interface OfframpRequirements {
+  /** Anchor's field descriptors — drives the dynamic form. */
+  descriptors: PayoutFieldDescriptor[];
+  /**
+   * Previously-saved values, masked to last 4 chars. Null on first cash-out.
+   * The form uses these to show "already on file" and skips fields the seller
+   * leaves blank (meaning "reuse saved value").
+   */
+  savedFields: Record<string, string> | null;
 }
 
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
@@ -44,6 +55,9 @@ export const api = {
   listLinks: () => http<{ links: PaymentLink[] }>("/links"),
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
+
+  getOfframpRequirements: (id: string) =>
+    http<OfframpRequirements>(`/links/${id}/offramp-requirements`),
 
   cashOut: (id: string, targetCurrency: string, payoutFields: Record<string, string> = {}) =>
     http<{ job: { jobId: string; status: string; targetAmount: string; targetCurrency: string } }>(

@@ -59,6 +59,20 @@ export interface WatcherPort {
 //   initiate() ~ SEP-24 / SEP-31 (start a withdrawal/payout to local rails)
 //   status()   ~ poll the transfer to settlement
 
+/** Describes a single field the anchor needs before initiating a payout. */
+export interface PayoutFieldDescriptor {
+  /** Machine-readable field name, e.g. "dest", "dest_extra". */
+  name: string;
+  /** Human-readable label from the anchor, e.g. "Bank Account Number". */
+  label: string;
+  /** Optional longer explanation shown beneath the input. */
+  description?: string;
+  /** When true, the field may be omitted. */
+  optional: boolean;
+  /** If present, the field is a select/radio rather than a free-text input. */
+  choices?: string[];
+}
+
 export type OffRampMode = "seller_initiated" | "inline";
 
 export interface OffRampQuote {
@@ -92,6 +106,12 @@ export interface OffRampJob {
 
 export interface OffRampPort {
   readonly mode: OffRampMode;
+  /**
+   * Returns the field descriptors the seller must supply before initiating a
+   * payout. Drives the dynamic form in the dashboard — no hardcoded fields.
+   * `assetCode` is the stablecoin being off-ramped (e.g. "USDC").
+   */
+  offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]>;
   quote(input: { sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string }): Promise<OffRampQuote>;
   initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob>;
   status(jobId: string): Promise<OffRampJob>;
@@ -130,12 +150,20 @@ export interface Seller {
   id: string;
   name: string;
   wallet: string;
+  /**
+   * The seller's last-used payout destination fields (e.g. bank account).
+   * Null until the seller completes their first cash-out. Treated as
+   * sensitive — never logged or included in webhook payloads.
+   */
+  payoutFields: Record<string, string> | null;
   createdAt: number;
 }
 
 export interface SellerRepository {
   getDefault(): Promise<Seller>;
   findById(id: string): Promise<Seller | null>;
+  /** Persist payout fields for the seller. Overwrites any previously stored value. */
+  savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
 }
 
 export interface Webhook {
