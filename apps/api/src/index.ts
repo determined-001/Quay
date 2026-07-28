@@ -29,7 +29,7 @@ async function main(): Promise<void> {
 
   container.start();
 
-  const server = serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
+  let server: ReturnType<typeof serve> | undefined = serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
     console.log(`[api] listening on http://localhost:${info.port}`);
     console.log(`[api] network=${container.config.network}  horizon=${container.config.horizonUrl}`);
     console.log(`[api] seller wallet (receives funds): ${container.config.sellerWallet}`);
