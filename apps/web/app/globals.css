@@ -106,6 +106,74 @@ a { color: inherit; }
 .settled { color: var(--accent); font-weight: 600; font-size: 18px; }
 .settled-check { width: 48px; height: 48px; border-radius: 50%; background: rgba(63, 217, 164, 0.12); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; font-size: 24px; margin-bottom: 12px; }
 
+/* ---------- countdown ---------- */
+.countdown {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 24px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  color: var(--muted);
+}
+.countdown-value {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  letter-spacing: 0.05em;
+}
+.countdown--warning .countdown-value {
+  border-color: var(--red);
+  color: var(--red);
+  animation: pulse-countdown 1.5s ease-in-out infinite;
+}
+.countdown-warning-label {
+  font-family: var(--sans);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--red);
+}
+
+@keyframes pulse-countdown {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ---------- terminal states ---------- */
+.terminal-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  margin-bottom: 12px;
+}
+.terminal-icon--expired {
+  background: rgba(232, 115, 107, 0.12);
+  color: var(--red);
+}
+.terminal-icon--cancelled {
+  background: rgba(232, 115, 107, 0.12);
+  color: var(--red);
+}
+.terminal-icon--underpaid {
+  background: rgba(232, 184, 75, 0.12);
+  color: var(--amber);
+}
+
+.recovery-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 @media (max-width: 560px) {
   .row { grid-template-columns: 1fr; }
   .amount-hero { font-size: 42px; }
@@ -114,4 +182,5 @@ a { color: inherit; }
 
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation: none; }
+  .countdown--warning .countdown-value { animation: none; }
 }
