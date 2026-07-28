@@ -1,6 +1,11 @@
 import type { AssetRef, PaymentLink } from "../domain/payment-link";
 import { assetEquals, isNative } from "../domain/payment-link";
-import { compareAmount, fromStroops, toStroops } from "../domain/money";
+import {
+  compareAmount,
+  fromStroops,
+  normalizeAmount,
+  toStroops,
+} from "../domain/money";
 
 // A Horizon payment, normalized into the shape the matcher needs.
 // (The Stellar adapter is responsible for producing this from a raw Horizon record.)

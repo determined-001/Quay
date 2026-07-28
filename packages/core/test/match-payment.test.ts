@@ -22,6 +22,7 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
@@ -65,10 +66,10 @@ describe("matchPayment", () => {
     if (r.kind === "paid") expect(r.overpaid).toBe(true);
   });
 
-  it("flags underpayment", () => {
+  it("flags partial payment", () => {
     const l = link();
     const r = matchPayment(payment({ amount: "9.5" }), byRef(l));
-    expect(r.kind).toBe("underpaid");
+    expect(r.kind).toBe("partial");
   });
 
   it("rejects wrong asset even if memo matches", () => {
