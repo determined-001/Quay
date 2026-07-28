@@ -19,35 +19,8 @@ export function linkRoutes(c: Container): Hono {
     return ctx.json({ links: await c.service.listLinks() });
   });
 
-  // Fetch one link plus its payment request (for the checkout page).
-  app.get("/:id", async (ctx) => {
-    const result = await c.service.getLink(ctx.req.param("id"));
-    if (!result) return ctx.json({ error: "not_found" }, 404);
-    return ctx.json(result);
-  });
-
-  // Seller-initiated cash-out to local currency.
-  app.post("/:id/cash-out", async (ctx) => {
-    const parsed = cashOutSchema.safeParse(await safeJson(ctx));
-    if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
-    try {
-      const job = await c.service.triggerCashOut(ctx.req.param("id"), parsed.data);
-      return ctx.json({ job });
-    } catch (err) {
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
-      throw err;
-    }
-  });
-
-  // Link detail with webhook deliveries (for the timeline page).
-  app.get("/:id/detail", async (ctx) => {
-    const result = await c.service.getLink(ctx.req.param("id"));
-    if (!result) return ctx.json({ error: "not_found" }, 404);
-    const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
-    return ctx.json({ link: result.link, request: result.request, deliveries });
-  });
-
   // CSV export of links for a date range.
+  // NOTE: must be registered BEFORE /:id to avoid being shadowed by the wildcard.
   app.get("/export/csv", async (ctx) => {
     const from = ctx.req.query("from");
     const to = ctx.req.query("to");
@@ -87,6 +60,34 @@ export function linkRoutes(c: Container): Hono {
       "content-type": "text/csv; charset=utf-8",
       "content-disposition": `attachment; filename="quay-links-export.csv"`,
     });
+  });
+
+  // Fetch one link plus its payment request (for the checkout page).
+  app.get("/:id", async (ctx) => {
+    const result = await c.service.getLink(ctx.req.param("id"));
+    if (!result) return ctx.json({ error: "not_found" }, 404);
+    return ctx.json(result);
+  });
+
+  // Seller-initiated cash-out to local currency.
+  app.post("/:id/cash-out", async (ctx) => {
+    const parsed = cashOutSchema.safeParse(await safeJson(ctx));
+    if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+    try {
+      const job = await c.service.triggerCashOut(ctx.req.param("id"), parsed.data);
+      return ctx.json({ job });
+    } catch (err) {
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      throw err;
+    }
+  });
+
+  // Link detail with webhook deliveries (for the timeline page).
+  app.get("/:id/detail", async (ctx) => {
+    const result = await c.service.getLink(ctx.req.param("id"));
+    if (!result) return ctx.json({ error: "not_found" }, 404);
+    const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
+    return ctx.json({ link: result.link, request: result.request, deliveries });
   });
 
   return app;
