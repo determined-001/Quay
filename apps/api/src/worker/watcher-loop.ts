@@ -82,15 +82,20 @@ export class WatcherLoop {
   start(): void {
     if (this.running) return;
     this.running = true;
-    const tick = async () => {
+    const scheduleNext = () => {
       if (!this.running) return;
-      try {
-        await this.runOnce();
-      } catch (err) {
-        this.deps.log?.(`watcher tick error: ${stringifyErr(err)}`);
-      } finally {
-        if (this.running) this.timer = setTimeout(tick, this.deps.pollMs);
-      }
+      this.timer = setTimeout(tick, this.deps.pollMs);
+    };
+    const tick = () => {
+      if (!this.running) return;
+      this.currentTick = this.runOnce()
+        .catch((err) => {
+          this.deps.log?.(`watcher tick error: ${stringifyErr(err)}`);
+        })
+        .finally(() => {
+          this.currentTick = null;
+          scheduleNext();
+        });
     };
     void tick();
   }

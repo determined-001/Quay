@@ -78,9 +78,12 @@ export async function createContainer(): Promise<Container> {
       loop.start();
       stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
     },
-    stop() {
-      loop.stop();
+    async stop() {
+      await loop.stop();
       stopPoller?.();
+      stopPoller = null;
+      await client.close();
+      console.log("[api] all services stopped");
     },
     getWatcherCircuitBreakerStatus() {
       return loop.getCircuitBreakerStatus();

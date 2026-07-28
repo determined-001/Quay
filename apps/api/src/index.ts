@@ -7,6 +7,8 @@ import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
 import { rateLimit } from "./middleware/rate-limit";
 
+const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
+
 async function main(): Promise<void> {
   const container = await createContainer();
 
@@ -45,7 +47,7 @@ async function main(): Promise<void> {
 
   container.start();
 
-  serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
+  let server: ReturnType<typeof serve> | undefined = serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
     console.log(`[api] listening on http://localhost:${info.port}`);
     console.log(`[api] network=${container.config.network}  horizon=${container.config.horizonUrl}`);
     console.log(`[api] seller wallet (receives funds): ${container.config.sellerWallet}`);
