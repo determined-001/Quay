@@ -1,6 +1,6 @@
 import { Horizon } from "@stellar/stellar-sdk";
 import type { NormalizedPayment, WatcherPort } from "@checkout/core";
-import { normalizePayment } from "./normalize";
+import { normalizePayment, type FetchTransaction, type OperationWithTransaction } from "./normalize";
 
 /**
  * Polling implementation of WatcherPort over Horizon.
@@ -35,9 +35,17 @@ export class HorizonWatcher implements WatcherPort {
 
   /** Value payments on this account after `cursor`, oldest-first.
    *  Includes both directions; the matcher gates correctness on destination,
-   *  and the worker advances the cursor by the last token returned here. */
+   *  and the worker advances the cursor by the last token returned here.
+   *
+   *  `join("transactions")` has Horizon embed each payment's parent
+   *  transaction in the same response, so `normalizePayment`'s memo lookup
+   *  resolves from data already in hand — one Horizon request per page, not
+   *  one plus N. As a second line of defense (in case a given Horizon
+   *  deployment doesn't honor the join), transaction fetches are additionally
+   *  memoized per distinct `transaction_hash` for the duration of this call —
+   *  several payments sharing one transaction only fetch it once. */
   async fetchSince(account: string, cursor: string, limit = 200): Promise<NormalizedPayment[]> {
-    let builder = this.server.payments().forAccount(account).order("asc").limit(limit);
+    let builder = this.server.payments().forAccount(account).order("asc").limit(limit).join("transactions");
     if (cursor) builder = builder.cursor(cursor);
 
     let page;
@@ -48,9 +56,23 @@ export class HorizonWatcher implements WatcherPort {
       throw err;
     }
 
+    const txCache = new Map<string, Promise<Horizon.ServerApi.TransactionRecord>>();
+    const fetchTransaction: FetchTransaction = (record: OperationWithTransaction) => {
+      let pending = txCache.get(record.transaction_hash);
+      if (!pending) {
+        pending = record.transaction();
+        txCache.set(record.transaction_hash, pending);
+      }
+      return pending;
+    };
+
+    // Deliberately not caught here: a transaction-fetch failure must not be
+    // downgraded to a payment with no memo (that would silently park a
+    // matchable payment as unmatched). Throwing lets the whole page fail, so
+    // the caller's cursor doesn't advance and the next tick retries it.
     const out: NormalizedPayment[] = [];
     for (const record of page.records) {
-      const normalized = await normalizePayment(record);
+      const normalized = await normalizePayment(record, fetchTransaction);
       if (normalized) out.push(normalized);
     }
     return out;
