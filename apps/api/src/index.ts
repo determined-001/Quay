@@ -21,8 +21,30 @@ async function main(): Promise<void> {
       ok: true,
       network: container.config.network,
       sellerWallet: container.config.sellerWallet,
+      // Anchor health probe + circuit breaker (issue #19, 3.7) so an operator
+      // can tell "the anchor is down" apart from "the API is down" without
+      // tailing logs.
+      anchor: container.service.healthSnapshot(),
     }),
   );
+
+  app.get("/ready", (ctx) => {
+    const circuitBreakers = container.getWatcherCircuitBreakerStatus();
+    const metrics = container.getWatcherMetrics();
+    
+    const hasOpenCircuitBreakers = circuitBreakers.some((cb) => cb.isOpen);
+    
+    return ctx.json({
+      ok: !hasOpenCircuitBreakers,
+      circuitBreakers,
+      metrics: {
+        accountsWatched: metrics.accountsWatched,
+        tickDurationMs: metrics.tickDurationMs,
+        circuitBreakersOpen: metrics.circuitBreakersOpen,
+        perAccountLag: Object.fromEntries(metrics.perAccountLag),
+      },
+    });
+  });
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
