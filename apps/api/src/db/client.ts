@@ -33,6 +33,12 @@ const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS processed_tx (
      tx_hash TEXT PRIMARY KEY, link_id TEXT, created_at INTEGER NOT NULL
    )`,
+  `CREATE TABLE IF NOT EXISTS idempotency_keys (
+     key TEXT NOT NULL, seller_id TEXT NOT NULL, endpoint TEXT NOT NULL,
+     request_hash TEXT NOT NULL, response_status INTEGER NOT NULL,
+     response_body TEXT NOT NULL, created_at INTEGER NOT NULL,
+     PRIMARY KEY (key, seller_id)
+   )`,
 ];
 
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {

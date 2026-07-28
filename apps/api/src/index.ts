@@ -22,7 +22,7 @@ async function main(): Promise<void> {
     }),
   );
 
-  app.route("/links", linkRoutes(container));
+  app.route("/links", linkRoutes(container, container.defaultSellerId));
   app.route("/webhooks", webhookRoutes(container));
 
   container.start();

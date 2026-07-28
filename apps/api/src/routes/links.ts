@@ -2,12 +2,14 @@ import { Hono } from "hono";
 import { createLinkSchema, cashOutSchema } from "@checkout/core";
 import type { Container } from "../services/container";
 import { HttpError } from "../services/link-service";
+import { idempotency } from "../middleware/idempotency";
 
-export function linkRoutes(c: Container): Hono {
+export function linkRoutes(c: Container, sellerId: string): Hono {
   const app = new Hono();
+  const idempotencyMiddleware = idempotency(c.db, sellerId);
 
   // Create a payment link.
-  app.post("/", async (ctx) => {
+  app.post("/", idempotencyMiddleware, async (ctx) => {
     const parsed = createLinkSchema.safeParse(await safeJson(ctx));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
     const result = await c.service.createLink(parsed.data);
@@ -27,7 +29,7 @@ export function linkRoutes(c: Container): Hono {
   });
 
   // Seller-initiated cash-out to local currency.
-  app.post("/:id/cash-out", async (ctx) => {
+  app.post("/:id/cash-out", idempotencyMiddleware, async (ctx) => {
     const parsed = cashOutSchema.safeParse(await safeJson(ctx));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
     try {

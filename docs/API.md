@@ -16,6 +16,23 @@ CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 - Errors return `{ "error": "<code>", ... }` with an appropriate HTTP status.
   Validation failures return `400` with `{ "error": "invalid_body", "issues": [...] }`.
 
+## Idempotency
+
+`POST /links` and `POST /links/:id/cash-out` support the `Idempotency-Key` header.
+
+```
+Idempotency-Key: <unique-string-per-logical-request>
+```
+
+- **Same key + same body** — the original response is replayed byte-for-byte with an
+  `Idempotent-Replayed: true` header. No second link is created; no second anchor job is started.
+- **Same key + different body** — `409 idempotency_key_reuse`.
+- **Key still in-flight** — `409 request_in_progress`.
+- Keys expire after **24 hours**.
+
+Use a UUID or any sufficiently random string. Retry safely on network timeouts by
+resending the same key and body.
+
 ---
 
 ## `GET /health`

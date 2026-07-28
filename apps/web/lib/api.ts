@@ -17,10 +17,15 @@ export function apiBase(): string {
   return BROWSER_BASE;
 }
 
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
+async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: string }): Promise<T> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    ...(init?.headers as Record<string, string> ?? {}),
+  };
+  if (init?.idempotencyKey) headers["idempotency-key"] = init.idempotencyKey;
   const res = await fetch(`${apiBase()}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers,
     cache: "no-store",
   });
   if (!res.ok) {
@@ -38,16 +43,16 @@ export interface CreateLinkInput {
 }
 
 export const api = {
-  createLink: (input: CreateLinkInput) =>
-    http<LinkWithRequest>("/links", { method: "POST", body: JSON.stringify(input) }),
+  createLink: (input: CreateLinkInput, idempotencyKey?: string) =>
+    http<LinkWithRequest>("/links", { method: "POST", body: JSON.stringify(input), idempotencyKey }),
 
   listLinks: () => http<{ links: PaymentLink[] }>("/links"),
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
 
-  cashOut: (id: string, targetCurrency: string, payoutFields: Record<string, string> = {}) =>
+  cashOut: (id: string, targetCurrency: string, payoutFields: Record<string, string> = {}, idempotencyKey?: string) =>
     http<{ job: { jobId: string; status: string; targetAmount: string; targetCurrency: string } }>(
       `/links/${id}/cash-out`,
-      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }) },
+      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
     ),
 };

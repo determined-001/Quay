@@ -3,7 +3,7 @@ import { resolveStellarConfig, StellarRail, HorizonWatcher } from "@checkout/ste
 import { MockAnchorOffRamp, TestAnchorOffRamp } from "@checkout/offramp";
 import type { OffRampPort } from "@checkout/core";
 import { env } from "../env";
-import { createDb, bootstrap } from "../db/client";
+import { createDb, bootstrap, type DB } from "../db/client";
 import {
   DrizzleLinkRepository,
   DrizzleSellerRepository,
@@ -18,6 +18,8 @@ export interface Container {
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
+  db: DB;
+  defaultSellerId: string;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   start(): void;
   stop(): void;
@@ -71,6 +73,8 @@ export async function createContainer(): Promise<Container> {
     links: linksRepo,
     sellers: sellersRepo,
     webhooks: webhooksRepo,
+    db,
+    defaultSellerId: seller.id,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     start() {
       loop.start();
