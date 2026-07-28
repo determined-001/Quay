@@ -28,6 +28,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Test scripts (db-backup/db-restore)
+        run: pnpm test:scripts
+
       - name: Build
         run: pnpm build
         env:
