@@ -61,6 +61,8 @@ export async function createContainer(): Promise<Container> {
     state: stateRepo,
     service,
     pollMs: env.pollMs,
+    pageLimit: env.watchPageLimit,
+    maxPagesPerTick: env.watchMaxPagesPerTick,
     log: (m) => console.log(`[watcher] ${m}`),
   });
 
