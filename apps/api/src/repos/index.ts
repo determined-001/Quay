@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, lte } from "drizzle-orm";
 import type {
   CreateLinkInput,
   LinkRepository,
@@ -7,12 +7,13 @@ import type {
   SellerRepository,
   Webhook,
   WebhookDelivery,
+  WebhookQueueEntry,
   WebhookRepository,
   WatcherStateRepository,
   AssetRef,
 } from "@checkout/core";
 import type { DB } from "../db/client";
-import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx } from "../db/schema";
+import { links, sellers, webhooks, webhookDeliveries, webhookQueue, watcherCursors, processedTx } from "../db/schema";
 import { newId } from "../services/ids";
 
 type LinkRow = typeof links.$inferSelect;
@@ -176,18 +177,148 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     return this.db.select().from(webhooks).where(eq(webhooks.sellerId, sellerId));
   }
 
+  async findWebhookById(id: string): Promise<Webhook | null> {
+    const rows = await this.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
+    return rows[0] ?? null;
+  }
+
   async recordDelivery(d: WebhookDelivery): Promise<void> {
     await this.db.insert(webhookDeliveries).values({
       id: newId("whd"),
       webhookId: d.webhookId,
       linkId: d.linkId,
       event: d.event,
+      attempt: d.attempt,
+      queueEntryId: d.queueEntryId,
       statusCode: d.statusCode,
       ok: d.ok,
       error: d.error,
       createdAt: Date.now(),
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Queue operations
+  // ---------------------------------------------------------------------------
+
+  async enqueue(
+    entry: Omit<WebhookQueueEntry, "attempts" | "status" | "lastStatusCode" | "lastError" | "updatedAt">,
+  ): Promise<WebhookQueueEntry> {
+    const now = Date.now();
+    const row = {
+      id: entry.id,
+      webhookId: entry.webhookId,
+      linkId: entry.linkId,
+      event: entry.event,
+      payload: entry.payload,
+      attempts: 0,
+      nextAttemptAt: entry.nextAttemptAt,
+      status: "pending" as const,
+      lastStatusCode: null,
+      lastError: null,
+      createdAt: entry.createdAt,
+      updatedAt: now,
+    };
+    await this.db.insert(webhookQueue).values(row);
+    return row;
+  }
+
+  /**
+   * Claim up to `limit` pending rows whose next_attempt_at <= now.
+   *
+   * SQLite is single-writer, so the read-then-update within a single synchronous
+   * call is safe against concurrent processes sharing the same file. For a
+   * multi-process / Turso setup the `status = 'claimed'` write acts as an
+   * optimistic lock: if two workers race, only one's UPDATE will match the row
+   * (the other will find status ≠ 'pending' on the next SELECT and skip it).
+   */
+  async claimDue(now: number, limit: number): Promise<WebhookQueueEntry[]> {
+    // 1. Find candidates.
+    const candidates = await this.db
+      .select()
+      .from(webhookQueue)
+      .where(
+        and(
+          eq(webhookQueue.status, "pending"),
+          lte(webhookQueue.nextAttemptAt, now),
+        ),
+      )
+      .limit(limit);
+
+    if (candidates.length === 0) return [];
+
+    const ids = candidates.map((r) => r.id);
+
+    // 2. Atomically transition pending → claimed.
+    //    Only rows that are still 'pending' will match — concurrent workers get 0 rows.
+    await this.db
+      .update(webhookQueue)
+      .set({ status: "claimed", updatedAt: Date.now() })
+      .where(
+        and(
+          inArray(webhookQueue.id, ids),
+          eq(webhookQueue.status, "pending"),
+        ),
+      );
+
+    // 3. Return only the rows we successfully claimed.
+    const claimed = await this.db
+      .select()
+      .from(webhookQueue)
+      .where(
+        and(
+          inArray(webhookQueue.id, ids),
+          eq(webhookQueue.status, "claimed"),
+        ),
+      );
+
+    return claimed.map(rowToQueueEntry);
+  }
+
+  async updateQueueEntry(
+    id: string,
+    patch: Pick<WebhookQueueEntry, "status" | "attempts" | "nextAttemptAt" | "lastStatusCode" | "lastError">,
+  ): Promise<void> {
+    await this.db
+      .update(webhookQueue)
+      .set({
+        status: patch.status,
+        attempts: patch.attempts,
+        nextAttemptAt: patch.nextAttemptAt,
+        lastStatusCode: patch.lastStatusCode,
+        lastError: patch.lastError,
+        updatedAt: Date.now(),
+      })
+      .where(eq(webhookQueue.id, id));
+  }
+
+  async findQueueEntry(id: string): Promise<WebhookQueueEntry | null> {
+    const rows = await this.db
+      .select()
+      .from(webhookQueue)
+      .where(eq(webhookQueue.id, id))
+      .limit(1);
+    return rows[0] ? rowToQueueEntry(rows[0]) : null;
+  }
+}
+
+type QueueRow = typeof webhookQueue.$inferSelect;
+
+function rowToQueueEntry(row: QueueRow): WebhookQueueEntry {
+  return {
+    id: row.id,
+    webhookId: row.webhookId,
+    linkId: row.linkId,
+    event: row.event,
+    payload: row.payload,
+    attempts: row.attempts,
+    nextAttemptAt: row.nextAttemptAt,
+    status: row.status as WebhookQueueEntry["status"],
+    lastStatusCode: row.lastStatusCode,
+    lastError: row.lastError,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 export class DrizzleWatcherStateRepository implements WatcherStateRepository {

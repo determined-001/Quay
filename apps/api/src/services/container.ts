@@ -12,6 +12,7 @@ import {
 } from "../repos/index";
 import { LinkService } from "./link-service";
 import { WatcherLoop, startCashOutPoller } from "../worker/watcher-loop";
+import { WebhookWorker } from "../worker/webhook-worker";
 
 export interface Container {
   service: LinkService;
@@ -64,6 +65,10 @@ export async function createContainer(): Promise<Container> {
     log: (m) => console.log(`[watcher] ${m}`),
   });
 
+  const webhookWorker = new WebhookWorker(webhooksRepo, {
+    log: (m) => console.log(`[webhook] ${m}`),
+  });
+
   let stopPoller: (() => void) | null = null;
 
   return {
@@ -74,10 +79,12 @@ export async function createContainer(): Promise<Container> {
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     start() {
       loop.start();
+      webhookWorker.start();
       stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
     },
     stop() {
       loop.stop();
+      webhookWorker.stop();
       stopPoller?.();
     },
   };
