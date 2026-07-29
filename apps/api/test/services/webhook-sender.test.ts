@@ -60,7 +60,7 @@ describe("WebhookSender", () => {
       });
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
-      const call = fetchSpy.mock.calls[0];
+      const call = fetchSpy.mock.calls[0]!;
       const headers = call[1]!.headers as Record<string, string>;
       const signatureHeader = headers["x-checkout-signature"] as string;
 
@@ -86,12 +86,12 @@ describe("WebhookSender", () => {
         data: {},
       });
 
-      const call = fetchSpy.mock.calls[0];
+      const call = fetchSpy.mock.calls[0]!;
       const body = JSON.parse(call[1]!.body as string);
       expect(body.sentAt).toBeDefined();
       expect(() => new Date(body.sentAt)).not.toThrow();
 
-      const sigHeader = (call[1]!.headers as Record<string, string>)["x-checkout-signature"];
+      const sigHeader = (call[1]!.headers as Record<string, string>)["x-checkout-signature"]!;
       const tamperedBody = JSON.stringify({ ...body, sentAt: "2020-01-01T00:00:00.000Z" });
       const tamperedSig = createHmac("sha256", hook.secret).update(tamperedBody).digest("hex");
       expect(tamperedSig).not.toBe(sigHeader.replace("sha256=", ""));
@@ -109,7 +109,7 @@ describe("WebhookSender", () => {
         data: { key: "val" },
       });
 
-      const call = fetchSpy.mock.calls[0];
+      const call = fetchSpy.mock.calls[0]!;
       const body = JSON.parse(call[1]!.body as string);
       expect(body.id).toBe("lnk_abc123");
       expect(body.event).toBe("link.paid");
@@ -228,12 +228,12 @@ describe("WebhookSender", () => {
         .where(eq(webhookDeliveries.linkId, "lnk_del_success"));
 
       expect(rows.length).toBe(1);
-      expect(rows[0].webhookId).toBe(hook.id);
-      expect(rows[0].linkId).toBe("lnk_del_success");
-      expect(rows[0].event).toBe("link.paid");
-      expect(rows[0].statusCode).toBe(200);
-      expect(rows[0].ok).toBe(true);
-      expect(rows[0].error).toBeNull();
+      expect(rows[0]!.webhookId).toBe(hook.id);
+      expect(rows[0]!.linkId).toBe("lnk_del_success");
+      expect(rows[0]!.event).toBe("link.paid");
+      expect(rows[0]!.statusCode).toBe(200);
+      expect(rows[0]!.ok).toBe(true);
+      expect(rows[0]!.error).toBeNull();
     });
 
     it("records a delivery row with error info when all attempts fail", async () => {
@@ -250,9 +250,9 @@ describe("WebhookSender", () => {
         .where(eq(webhookDeliveries.linkId, "lnk_del_fail"));
 
       expect(rows.length).toBe(1);
-      expect(rows[0].ok).toBe(false);
-      expect(rows[0].statusCode).toBe(500);
-      expect(rows[0].error).toBe("HTTP 500");
+      expect(rows[0]!.ok).toBe(false);
+      expect(rows[0]!.statusCode).toBe(500);
+      expect(rows[0]!.error).toBe("HTTP 500");
     });
 
     it("records a delivery row for a 400 (non-retried) response", async () => {
@@ -269,8 +269,8 @@ describe("WebhookSender", () => {
         .where(eq(webhookDeliveries.linkId, "lnk_del_400"));
 
       expect(rows.length).toBe(1);
-      expect(rows[0].ok).toBe(false);
-      expect(rows[0].statusCode).toBe(400);
+      expect(rows[0]!.ok).toBe(false);
+      expect(rows[0]!.statusCode).toBe(400);
     });
 
     it("records delivery for retry-then-success scenario", async () => {
@@ -288,8 +288,8 @@ describe("WebhookSender", () => {
 
       // Only the final outcome is recorded
       expect(rows.length).toBe(1);
-      expect(rows[0].ok).toBe(true);
-      expect(rows[0].statusCode).toBe(200);
+      expect(rows[0]!.ok).toBe(true);
+      expect(rows[0]!.statusCode).toBe(200);
     });
   });
 
@@ -401,7 +401,7 @@ describe("WebhookSender with real HTTP server", () => {
     const rows = await db.select().from(webhookDeliveries)
       .where(eq(webhookDeliveries.linkId, "lnk_real_http"));
     expect(rows.length).toBe(1);
-    expect(rows[0].ok).toBe(true);
+    expect(rows[0]!.ok).toBe(true);
   });
 
   it("does not retry when server returns 400", async () => {

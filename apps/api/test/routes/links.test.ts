@@ -133,7 +133,7 @@ describe("GET /links", () => {
     const body = await res.json() as Record<string, unknown>;
     const links = body.links as Array<Record<string, unknown>>;
     if (links.length >= 2) {
-      expect((links[0].createdAt as number)).toBeGreaterThanOrEqual(links[1].createdAt as number);
+      expect((links[0]!.createdAt as number)).toBeGreaterThanOrEqual(links[1]!.createdAt as number);
     }
   });
 });
