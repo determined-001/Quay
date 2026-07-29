@@ -253,6 +253,10 @@ class FakeLinkRepoForAnchor implements LinkRepository {
   async findById(id: string): Promise<PaymentLink | null> {
     return this.byId.get(id) ?? null;
   }
+  async findByIdForSeller(id: string, sellerId: string): Promise<PaymentLink | null> {
+    const link = this.byId.get(id);
+    return link && link.sellerId === sellerId ? link : null;
+  }
   async findByReference(reference: string): Promise<PaymentLink | null> {
     for (const l of this.byId.values()) if (l.reference === reference) return l;
     return null;
@@ -276,9 +280,6 @@ class FakeLinkRepoForAnchor implements LinkRepository {
 
 class FakeSellerRepoForAnchor {
   constructor(private readonly s: Seller) {}
-  async getDefault(): Promise<Seller> {
-    return this.s;
-  }
   async findById(id: string): Promise<Seller | null> {
     return id === this.s.id ? this.s : null;
   }
@@ -377,7 +378,7 @@ function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
   captureRoute.post("/:id/cash-out", async (ctx) => {
     const body = (await ctx.req.json().catch(() => ({}))) as Record<string, unknown>;
     try {
-      const job = await service.triggerCashOut(ctx.req.param("id"), {
+      const job = await service.triggerCashOut(ctx.req.param("id"), "s_1", {
         targetCurrency: typeof body.targetCurrency === "string" ? body.targetCurrency : "NGN",
         payoutFields: (body.payoutFields as Record<string, string> | undefined) ?? {},
       });

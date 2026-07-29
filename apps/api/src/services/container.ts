@@ -5,12 +5,15 @@ import type { OffRampPort } from "@checkout/core";
 import { env } from "../env";
 import { createDb, bootstrap } from "../db/client";
 import {
+  DrizzleApiKeyRepository,
   DrizzleLinkRepository,
   DrizzleSellerRepository,
   DrizzleWebhookRepository,
   DrizzleWatcherStateRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
+import { generateApiKey } from "./api-keys";
+import { makeAuth, makeSingleTenantDevAuth, type Auth } from "../middleware/auth";
 import {
   WatcherLoop,
   startCashOutPoller,
@@ -24,6 +27,7 @@ export interface Container {
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
+  auth: Auth;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   start(): void;
   stop(): void;
@@ -45,10 +49,46 @@ export async function createContainer(): Promise<Container> {
   const sellersRepo = new DrizzleSellerRepository(db);
   const webhooksRepo = new DrizzleWebhookRepository(db);
   const stateRepo = new DrizzleWatcherStateRepository(db);
+  const apiKeysRepo = new DrizzleApiKeyRepository(db);
 
   const seller = resolveSellerKeypairOrWallet();
   const sellerWallet = seller.publicKey;
-  await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
+  const defaultSeller = await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
+
+  // Multi-tenant auth (issue 6.4). SINGLE_TENANT_DEV bypasses the API-key
+  // requirement entirely for local dev - env.ts already refuses to boot with
+  // it set under NODE_ENV=production, so that escape hatch cannot reach a
+  // real deployment.
+  const auth = env.singleTenantDev
+    ? makeSingleTenantDevAuth(() => defaultSeller.id)
+    : makeAuth({ apiKeys: apiKeysRepo });
+
+  // Bootstrap usability: outside single-tenant dev mode, something has to
+  // hand the operator a credential the first time, since there's no
+  // sign-up flow yet (issues 6.1/6.2 own that). Mirrors the existing
+  // "no DEFAULT_SELLER_WALLET -> generate + print" pattern below - mint once,
+  // print once, never again. This is the entire "migration path" issue 6.4
+  // asks for: existing single-tenant rows already carry a real sellerId
+  // (ensureDefault has always assigned one), so the only new requirement is
+  // that seller having a key to authenticate with.
+  if (!env.singleTenantDev) {
+    const existingKeys = await apiKeysRepo.findBySeller(defaultSeller.id);
+    if (existingKeys.length === 0) {
+      const { raw, hash } = generateApiKey();
+      await apiKeysRepo.create({ sellerId: defaultSeller.id, keyHash: hash });
+      console.log(
+        [
+          "",
+          "──────────────────────────────────────────────────────────────────",
+          " No API key existed yet for the seeded seller - minted one.",
+          ` API key (store it now - it is never shown again): ${raw}`,
+          " Use it as: Authorization: Bearer " + raw,
+          "──────────────────────────────────────────────────────────────────",
+          "",
+        ].join("\n"),
+      );
+    }
+  }
 
   const rail = new StellarRail(stellar);
   const watcher =
@@ -89,6 +129,7 @@ export async function createContainer(): Promise<Container> {
     links: linksRepo,
     sellers: sellersRepo,
     webhooks: webhooksRepo,
+    auth,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     start() {
       loop.start();

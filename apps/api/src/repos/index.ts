@@ -1,5 +1,7 @@
 import { eq, and, inArray } from "drizzle-orm";
 import type {
+  ApiKey,
+  ApiKeyRepository,
   CreateLinkInput,
   LinkRepository,
   PaymentLink,
@@ -12,7 +14,7 @@ import type {
   AssetRef,
 } from "@checkout/core";
 import type { DB } from "../db/client";
-import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx } from "../db/schema";
+import { apiKeys, links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx } from "../db/schema";
 import { newId } from "../services/ids";
 
 type LinkRow = typeof links.$inferSelect;
@@ -76,6 +78,15 @@ export class DrizzleLinkRepository implements LinkRepository {
 
   async findById(id: string): Promise<PaymentLink | null> {
     const rows = await this.db.select().from(links).where(eq(links.id, id)).limit(1);
+    return rows[0] ? rowToLink(rows[0]) : null;
+  }
+
+  async findByIdForSeller(id: string, sellerId: string): Promise<PaymentLink | null> {
+    const rows = await this.db
+      .select()
+      .from(links)
+      .where(and(eq(links.id, id), eq(links.sellerId, sellerId)))
+      .limit(1);
     return rows[0] ? rowToLink(rows[0]) : null;
   }
 
@@ -145,15 +156,28 @@ export class DrizzleSellerRepository implements SellerRepository {
     return seller;
   }
 
-  async getDefault(): Promise<Seller> {
-    const rows = await this.db.select().from(sellers).limit(1);
-    if (!rows[0]) throw new Error("No default seller seeded");
-    return rows[0];
-  }
-
   async findById(id: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
     return rows[0] ?? null;
+  }
+}
+
+export class DrizzleApiKeyRepository implements ApiKeyRepository {
+  constructor(private readonly db: DB) {}
+
+  async create(input: { sellerId: string; keyHash: string }): Promise<ApiKey> {
+    const key: ApiKey = { id: newId("key"), sellerId: input.sellerId, keyHash: input.keyHash, createdAt: Date.now() };
+    await this.db.insert(apiKeys).values(key);
+    return key;
+  }
+
+  async findByHash(keyHash: string): Promise<ApiKey | null> {
+    const rows = await this.db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash)).limit(1);
+    return rows[0] ?? null;
+  }
+
+  async findBySeller(sellerId: string): Promise<ApiKey[]> {
+    return this.db.select().from(apiKeys).where(eq(apiKeys.sellerId, sellerId));
   }
 }
 

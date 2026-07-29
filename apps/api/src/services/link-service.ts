@@ -1,6 +1,7 @@
 import {
   canTransition,
   normalizeAmount,
+  toPublicPaymentLink,
   type CashOutBody,
   type CreateLinkBody,
   type LinkRepository,
@@ -11,6 +12,7 @@ import {
   type OffRampPort,
   type PaymentLink,
   type PaymentRequest,
+  type PublicPaymentLink,
   type RailPort,
   type SellerRepository,
   type WebhookRepository,
@@ -21,6 +23,12 @@ import { WebhookSender } from "./webhook-sender";
 
 export interface LinkWithRequest {
   link: PaymentLink;
+  request: PaymentRequest;
+}
+
+/** The public-checkout counterpart to {@link LinkWithRequest} - see `getLink`'s doc comment. */
+export interface PublicLinkWithRequest {
+  link: PublicPaymentLink;
   request: PaymentRequest;
 }
 
@@ -248,8 +256,10 @@ export class LinkService {
     });
   }
 
-  async createLink(body: CreateLinkBody): Promise<LinkWithRequest> {
-    const seller = await this.deps.sellers.getDefault();
+  /** `sellerId` comes from the authenticated request context - never a client-supplied value (issue 6.4). */
+  async createLink(sellerId: string, body: CreateLinkBody): Promise<LinkWithRequest> {
+    const seller = await this.deps.sellers.findById(sellerId);
+    if (!seller) throw new HttpError(401, "unauthorized");
     const asset = resolveAsset(body.assetCode, this.deps.stellar);
     const expiresAt = body.expiresInMinutes
       ? Date.now() + body.expiresInMinutes * 60_000
@@ -259,6 +269,11 @@ export class LinkService {
       id: newId("lnk"),
       reference: newReference(),
       sellerId: seller.id,
+      // Always the seller's own verified wallet on file - never a
+      // client-supplied address (issue 6.4, point 2). A payment link that
+      // could be pointed at an arbitrary destination is exactly the
+      // "create links that pay into the operator's wallet" hole this issue
+      // closes.
       destination: seller.wallet,
       title: body.title,
       amount: normalizeAmount(body.amount),
@@ -269,13 +284,34 @@ export class LinkService {
     return { link, request: this.buildRequest(link) };
   }
 
-  async listLinks(): Promise<PaymentLink[]> {
-    const seller = await this.deps.sellers.getDefault();
-    return this.deps.links.listBySeller(seller.id);
+  async listLinks(sellerId: string): Promise<PaymentLink[]> {
+    return this.deps.links.listBySeller(sellerId);
   }
 
-  async getLink(id: string): Promise<LinkWithRequest | null> {
+  /**
+   * Public checkout read (issue 6.4, point 5) - intentionally unauthenticated
+   * and unscoped by seller, since a buyer paying a link has no seller
+   * credential and shouldn't need one. Returns the minimal
+   * `PublicPaymentLink` projection, never the full internal record - see
+   * `toPublicPaymentLink`'s own doc comment for exactly what's withheld and
+   * why. This is a genuinely different contract from `getLinkForSeller`
+   * below, not a relaxed version of it.
+   */
+  async getLink(id: string): Promise<PublicLinkWithRequest | null> {
     const link = await this.deps.links.findById(id);
+    if (!link) return null;
+    return { link: toPublicPaymentLink(link), request: this.buildRequest(link) };
+  }
+
+  /**
+   * Authenticated, seller-scoped detail read - the full internal record, but
+   * only for the link's own owner. A cross-tenant id (or a genuinely
+   * nonexistent one) both return `null` here, indistinguishably - the caller
+   * must map that to `404`, never `403` (issue 6.4, point 3: do not confirm
+   * existence).
+   */
+  async getLinkForSeller(id: string, sellerId: string): Promise<LinkWithRequest | null> {
+    const link = await this.deps.links.findByIdForSeller(id, sellerId);
     if (!link) return null;
     return { link, request: this.buildRequest(link) };
   }
@@ -314,9 +350,15 @@ export class LinkService {
     return false; // no_memo / unknown_reference / asset_mismatch — nothing to apply
   }
 
-  /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
-  async triggerCashOut(linkId: string, body: CashOutBody): Promise<OffRampJob> {
-    const link = await this.deps.links.findById(linkId);
+  /**
+   * Seller-initiated cash-out: quote -> initiate -> move link to
+   * offramp_pending. `sellerId` scopes the lookup (issue 6.4) - a link
+   * belonging to a different seller is indistinguishable from one that
+   * doesn't exist at all, from this method's own perspective; both produce
+   * the same 404, never a 403 that would confirm the id is real.
+   */
+  async triggerCashOut(linkId: string, sellerId: string, body: CashOutBody): Promise<OffRampJob> {
+    const link = await this.deps.links.findByIdForSeller(linkId, sellerId);
     if (!link) throw new HttpError(404, "Link not found");
     if (link.status !== "paid") {
       throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);

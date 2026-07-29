@@ -114,7 +114,24 @@ export interface CreateLinkInput {
 
 export interface LinkRepository {
   create(input: CreateLinkInput): Promise<PaymentLink>;
+  /**
+   * Unscoped lookup - by design, not an oversight. Two kinds of caller need
+   * this: (1) the public checkout read (`GET /links/:id` with no/invalid
+   * auth), which has no seller to scope by in the first place, and (2)
+   * internal, system-wide code (the payment matcher, the watcher loop) that
+   * operates across every seller's links, not one seller's. Any
+   * *authenticated, acting-as-a-specific-seller* call site (cash-out, an
+   * authenticated detail fetch) must use {@link findByIdForSeller} instead -
+   * never gate access on this method's result.
+   */
   findById(id: string): Promise<PaymentLink | null>;
+  /**
+   * Scoped lookup (issue 6.4) - returns `null` for both "doesn't exist" and
+   * "exists but belongs to a different seller." Callers must map a `null`
+   * here to `404`, never `403` - confirming a cross-tenant id exists at all
+   * is itself a leak.
+   */
+  findByIdForSeller(id: string, sellerId: string): Promise<PaymentLink | null>;
   findByReference(reference: string): Promise<PaymentLink | null>;
   listBySeller(sellerId: string): Promise<PaymentLink[]>;
   /** All links currently in a given status (used by the cash-out poller). */
@@ -133,9 +150,33 @@ export interface Seller {
   createdAt: number;
 }
 
+/**
+ * No `getDefault()` (issue 6.4 removed it, along with every call site) -
+ * there is no such thing as *the* seller anymore. A seller comes from the
+ * authenticated request context (see `apps/api/src/middleware/auth.ts`) or
+ * the request fails.
+ */
 export interface SellerRepository {
-  getDefault(): Promise<Seller>;
   findById(id: string): Promise<Seller | null>;
+}
+
+/**
+ * A seller's API credential (issue 6.4 / roadmap item "6.3 - scoped API
+ * keys"). Only the hash is ever persisted or returned by a repository - the
+ * raw key exists only at mint time, handed to the caller once, exactly like
+ * a webhook secret.
+ */
+export interface ApiKey {
+  id: string;
+  sellerId: string;
+  keyHash: string; // sha256 hex of the raw key
+  createdAt: number;
+}
+
+export interface ApiKeyRepository {
+  create(input: { sellerId: string; keyHash: string }): Promise<ApiKey>;
+  findByHash(keyHash: string): Promise<ApiKey | null>;
+  findBySeller(sellerId: string): Promise<ApiKey[]>;
 }
 
 export interface Webhook {

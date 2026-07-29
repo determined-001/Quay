@@ -3,9 +3,28 @@
 The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by default
 (`API_PORT`). All request and response bodies are JSON.
 
-> **Auth:** there is currently **no authentication**. Every request operates on a
-> single hard-coded demo seller. This is fine for local development and demos, not
-> for production. See the README's "Before you go live" section.
+## Auth
+
+Every route below requires `Authorization: Bearer ak_live_<key>` **except**
+`GET /links/:id`, which is intentionally public (a buyer paying a link has no
+seller credential). An invalid or missing key on a protected route returns
+`401 { "error": "unauthorized" }`.
+
+A key authenticates as exactly one seller - every other route is scoped to
+that seller's own data. A link or webhook belonging to a different seller
+behaves as if it doesn't exist (`404`), never `403` - the API does not
+confirm that a cross-tenant id is real.
+
+There is currently no self-serve way to create a new seller or mint
+additional keys (that's issues 6.1/6.2/6.3's job - wallet-based login and
+session/API-key management). On first boot, if the seeded demo seller has no
+key yet, the API mints one and prints it to the server log once - store it
+then, it is never shown again.
+
+For local development only, set `SINGLE_TENANT_DEV=1` (the default in
+`.env.example`) to skip the credential requirement entirely - every request
+is treated as the seeded seller. This is refused at startup if
+`NODE_ENV=production` is also set.
 
 CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 
@@ -31,7 +50,7 @@ Liveness + basic config echo.
 
 ## `POST /links`
 
-Create a payment link.
+**Requires auth.** Create a payment link.
 
 **Request**
 ```json
@@ -76,7 +95,7 @@ the on-chain payment back to this link.
 
 ## `GET /links`
 
-List the seller's links.
+**Requires auth.** List the authenticated seller's own links - never anyone else's.
 
 **200**
 ```json
@@ -87,16 +106,47 @@ List the seller's links.
 
 ## `GET /links/:id`
 
-Fetch one link plus its payment request (used by the checkout page).
+**Public - no auth required.** Fetch one link's checkout view (used by the
+checkout page). Returns only what a buyer needs to pay and see status -
+`id`, `reference`, `title`, `amount`, `asset`, `status`, `paidAmount`,
+`txHash` - never `sellerId`, `destination`, or any off-ramp bookkeeping.
 
-**200** — same shape as the `POST /links` response.
+If a **valid `Authorization` header for the link's own owner** is included,
+the full authenticated record is returned instead (same shape as `POST
+/links`'s response). Any other credential (missing, invalid, or a different
+seller's) is not an error here - it just falls through to the public view,
+since a payment link is supposed to be viewable by anyone with the id.
+
+**200 (public)**
+```json
+{
+  "link": {
+    "id": "lnk_...",
+    "reference": "...",
+    "title": "T-shirt",
+    "amount": "10.50",
+    "asset": { "code": "USDC", "issuer": "G..." },
+    "status": "paid",
+    "paidAmount": "10.50",
+    "txHash": "..."
+  },
+  "request": {
+    "uri": "web+stellar:pay?destination=...&amount=...&memo=...",
+    "memo": "...",
+    "memoType": "text"
+  }
+}
+```
 **404** — `{ "error": "not_found" }`
 
 ---
 
 ## `POST /links/:id/cash-out`
 
-Seller-initiated off-ramp of a **paid** link to local currency. Runs
+**Requires auth.** Seller-initiated off-ramp of a **paid** link to local
+currency, scoped to the authenticated seller's own links - a link belonging
+to someone else 404s (`Link not found`), the same as one that doesn't exist
+at all. Runs
 `quote → initiate` against the off-ramp adapter and moves the link to
 `offramp_pending`; a background poller advances it to `offramp_settled` /
 `offramp_failed`.
@@ -134,7 +184,8 @@ Seller-initiated off-ramp of a **paid** link to local currency. Runs
 
 ## `POST /webhooks`
 
-Register a webhook endpoint. The signing secret is returned **once** — store it.
+**Requires auth.** Register a webhook endpoint, scoped to the authenticated
+seller. The signing secret is returned **once** — store it.
 
 **Request**
 ```json
@@ -150,7 +201,8 @@ Register a webhook endpoint. The signing secret is returned **once** — store i
 
 ## `GET /webhooks`
 
-List registered webhooks. Secrets are **not** returned.
+**Requires auth.** List the authenticated seller's own registered webhooks.
+Secrets are **not** returned.
 
 **200**
 ```json

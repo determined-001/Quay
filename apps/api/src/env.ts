@@ -54,6 +54,23 @@ if (watchMode !== "poll" && watchMode !== "stream") {
   throw new Error(`WATCH_MODE must be "poll" or "stream", got "${watchMode}"`);
 }
 
+// Multi-tenancy escape hatch for local dev only (issue 6.4). Every request is
+// treated as the one seeded demo seller - no API key needed. Hard-refused in
+// production: this flag existing at all is the difference between "route
+// scoping is enforced" and "route scoping is enforced except when someone
+// sets one env var," which is not actually enforcement. Real production auth
+// is a real API key (see apps/api/src/middleware/auth.ts) - this is not a
+// substitute for that, only a convenience while issues 6.1/6.2's wallet-based
+// login UX hasn't shipped yet.
+const singleTenantDev = process.env.SINGLE_TENANT_DEV === "1";
+if (singleTenantDev && process.env.NODE_ENV === "production") {
+  throw new Error(
+    "SINGLE_TENANT_DEV=1 is refused when NODE_ENV=production - this would disable per-seller " +
+      "route scoping (issue 6.4) in the one environment it exists to protect. Unset " +
+      "SINGLE_TENANT_DEV, or unset NODE_ENV=production if this really is a dev/demo deploy.",
+  );
+}
+
 export const env = {
   network,
   horizonUrl: process.env.HORIZON_URL || undefined,
@@ -69,6 +86,7 @@ export const env = {
   // "poll" (default, restart-safe MVP behavior) or "stream" (Horizon SSE,
   // opt-in until proven). See packages/stellar/src/streaming-horizon-watcher.ts.
   watchMode,
+  singleTenantDev,
   corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:3000")
     .split(",")
     .map((s) => s.trim())

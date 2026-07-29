@@ -38,7 +38,9 @@ graph LR
   SEP-7 URI builder (`sep7/build-uri.ts`), zod request schemas (`schemas.ts`), and —
   critically — the **port interfaces** (`ports/index.ts`): `RailPort`, `WatcherPort`,
   `OffRampPort`, plus the repository ports (`LinkRepository`, `SellerRepository`,
-  `WebhookRepository`, `WatcherStateRepository`).
+  `WebhookRepository`, `WatcherStateRepository`, `ApiKeyRepository`). `SellerRepository`
+  has no `getDefault()` (removed in issue 6.4) — every caller supplies a `sellerId`
+  from the authenticated request context instead.
 - **`packages/stellar`** — implements `RailPort` (`StellarRail`, builds SEP-7 pay URIs)
   and `WatcherPort` (`HorizonWatcher`, polls Horizon for payments and normalizes them).
 - **`packages/offramp`** — implements `OffRampPort` twice: `MockAnchorOffRamp` (offline,
@@ -97,9 +99,10 @@ sequenceDiagram
   participant DB as LinkRepository (Drizzle)
 
   Seller->>Web: fill title + amount + asset
-  Web->>API: POST /links
-  API->>LS: createLink(body)
-  LS->>DB: sellers.getDefault()
+  Web->>API: POST /links (Authorization: Bearer ak_live_...)
+  API->>API: auth.requireAuth - resolve sellerId from the API key
+  API->>LS: createLink(sellerId, body)
+  LS->>DB: sellers.findById(sellerId)
   LS->>LS: resolveAsset(), normalizeAmount()
   LS->>DB: links.create({ id, reference, destination: seller.wallet, ... })
   LS->>Rail: buildRequest({ destination, amount, asset, reference })

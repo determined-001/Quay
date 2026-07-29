@@ -24,6 +24,7 @@ const mockLinks: LinkRepository = {
   openLinksForDestination: vi.fn(),
   create: vi.fn(),
   findById: vi.fn(),
+  findByIdForSeller: vi.fn(),
   findByReference: vi.fn(),
   listBySeller: vi.fn(),
   listByStatus: vi.fn(),

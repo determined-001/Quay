@@ -122,7 +122,7 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
 | Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
-| Auth | **Not implemented.** Single hard-coded demo seller, no API keys / login. Fine for a demo, not for production. |
+| Auth | **Real, minimal.** Every route except the public checkout read (`GET /links/:id`) requires a per-seller API key (`Authorization: Bearer ak_live_...`); routes are scoped so one seller can never see, cancel, or cash out another's data (see `docs/API.md`'s Auth section). There's no self-serve way to create a *new* seller or key yet — that's wallet-based login (issues 6.1/6.2/6.3). `SINGLE_TENANT_DEV=1` (the local `.env.example` default) skips the credential requirement for dev; it's hard-refused if `NODE_ENV=production` is also set. |
 
 ---
 
@@ -137,7 +137,10 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Add auth** (API keys per seller + a real login) before anyone but you touches it.
+4. **Finish auth.** Per-seller API keys and route scoping exist (issue 6.4); a real
+   sign-up/login flow to actually mint a new seller and their first key does not
+   (issues 6.1/6.2/6.3 - wallet-based challenge login). Until then there's exactly
+   one seller anyone can authenticate as, seeded at boot.
 5. **Multiple sellers / scale:** the watcher polls per active destination account; for many
    sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
 

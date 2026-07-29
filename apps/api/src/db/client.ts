@@ -18,6 +18,10 @@ const BOOTSTRAP_SQL = [
      offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
+  `CREATE TABLE IF NOT EXISTS api_keys (
+     id TEXT PRIMARY KEY, seller_id TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+     created_at INTEGER NOT NULL
+   )`,
   `CREATE TABLE IF NOT EXISTS webhooks (
      id TEXT PRIMARY KEY, seller_id TEXT NOT NULL, url TEXT NOT NULL,
      secret TEXT NOT NULL, created_at INTEGER NOT NULL
