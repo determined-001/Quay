@@ -1,5 +1,6 @@
 import type {
   AssetRef,
+  OffRampInitiation,
   OffRampJob,
   OffRampMode,
   OffRampPort,
@@ -87,7 +88,7 @@ export class MockAnchorOffRamp implements OffRampPort {
     linkId: string;
     quoteId: string;
     payout: SellerPayoutRef;
-  }): Promise<OffRampJob> {
+  }): Promise<OffRampInitiation> {
     const q = this.quotes.get(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
     if (Date.now() > q.expiresAt) throw new Error("Quote expired");
@@ -102,7 +103,7 @@ export class MockAnchorOffRamp implements OffRampPort {
       createdAt: Date.now(),
     };
     this.jobs.set(job.jobId, job);
-    return job;
+    return { kind: "fields", job };
   }
 
   async status(jobId: string): Promise<OffRampJob> {

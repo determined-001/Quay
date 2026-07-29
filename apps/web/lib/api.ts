@@ -123,7 +123,7 @@ export const api = {
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
   ) =>
-    http<{ job: { jobId: string; status: string; targetAmount: string; targetCurrency: string } }>(
+    http<{ job: { jobId: string; status: string; targetAmount: string; targetCurrency: string }; interactiveUrl?: string }>(
       `/links/${id}/cash-out`,
       { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }) },
     ),

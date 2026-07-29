@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   type LinkRepository,
   type NormalizedPayment,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampJobStatus,
   type OffRampPort,
@@ -332,8 +333,8 @@ class FlakyOffRamp implements OffRampPort {
       expiresAt: Date.now() + 60_000,
     };
   }
-  async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampJob> {
-    return { jobId: "ofr_1", linkId: "lnk_1", status: "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
+  async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampInitiation> {
+    return { kind: "fields", job: { jobId: "ofr_1", linkId: "lnk_1", status: "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" } };
   }
   async status(jobId: string): Promise<OffRampJob> {
     if (this.opts.statusShouldThrow) {
@@ -377,14 +378,14 @@ function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
   captureRoute.post("/:id/cash-out", async (ctx) => {
     const body = (await ctx.req.json().catch(() => ({}))) as Record<string, unknown>;
     try {
-      const job = await service.triggerCashOut(ctx.req.param("id"), {
+      const result = await service.triggerCashOut(ctx.req.param("id"), {
         targetCurrency: typeof body.targetCurrency === "string" ? body.targetCurrency : "NGN",
         payoutFields: (body.payoutFields as Record<string, string> | undefined) ?? {},
       });
-      return ctx.json({ job }, 200);
+      return ctx.json({ job: result.job }, 200);
     } catch (err) {
       if (err instanceof Error && "status" in err) {
-        return ctx.json({ error: (err as Error).message }, (err as { status: number }).status);
+        return ctx.json({ error: (err as Error).message }, (err as { status: number }).status as any);
       }
       throw err;
     }
@@ -401,7 +402,7 @@ describe("LinkService with AnchorHealth", () => {
         offrampCalls.push("quote");
         throw new Error("should not be called when breaker is open");
       }
-      async initiate(): Promise<OffRampJob> {
+      async initiate(): Promise<OffRampInitiation> {
         offrampCalls.push("initiate");
         throw new Error("should not be called when breaker is open");
       }
@@ -459,6 +460,38 @@ describe("LinkService with AnchorHealth", () => {
     const snap = built.service.healthSnapshot();
     expect(snap.state).toBe("closed");
     expect(snap.url).toBeNull();
+  });
+  it("triggerCashOut handles interactive arm correctly and moves link to offramp_pending", async () => {
+    class InteractiveOffRamp implements OffRampPort {
+      readonly mode = "seller_initiated" as const;
+      async quote(): Promise<OffRampQuote> {
+        return { quoteId: "q1", sourceAsset: { code: "USDC", issuer: null }, sourceAmount: "10", targetCurrency: "NGN", targetAmount: "16500", rate: "1650", expiresAt: Date.now() + 60000 };
+      }
+      async initiate(): Promise<OffRampInitiation> {
+        return {
+          kind: "interactive",
+          job: { jobId: "ofr_interactive", linkId: "lnk_1", status: "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" },
+          url: "https://example.com/interactive"
+        };
+      }
+      async status(): Promise<OffRampJob> {
+        throw new Error("not implemented");
+      }
+    }
+
+    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null });
+    const built = buildSvcWithHealth(health, new InteractiveOffRamp());
+    await built.repo.save(link({ status: "paid" }));
+
+    const initiation = await built.service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(initiation.kind).toBe("interactive");
+    if (initiation.kind === "interactive") {
+      expect(initiation.url).toBe("https://example.com/interactive");
+    }
+
+    const l = await built.repo.findById("lnk_1");
+    expect(l!.status).toBe("offramp_pending");
+    expect(l!.offrampJobId).toBe("ofr_interactive");
   });
 });
 
@@ -579,7 +612,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       async quote(): Promise<OffRampQuote> {
         throw new Error("unused");
       },
-      async initiate(): Promise<OffRampJob> {
+      async initiate(): Promise<OffRampInitiation> {
         throw new Error("unused");
       },
       async status(jobId: string): Promise<OffRampJob> {
@@ -652,7 +685,7 @@ describe("LinkService.pollCashOuts attribution", () => {
     const offramp = {
       mode: "seller_initiated" as const,
       async quote(): Promise<OffRampQuote> { throw new Error("unused"); },
-      async initiate(): Promise<OffRampJob> { throw new Error("unused"); },
+      async initiate(): Promise<OffRampInitiation> { throw new Error("unused"); },
       async status(_jobId: string): Promise<OffRampJob> {
         statusCalls++;
         throw new Error("anchor 502");

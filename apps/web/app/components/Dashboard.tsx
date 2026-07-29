@@ -201,7 +201,10 @@ export default function Dashboard() {
   async function cashOut(id: string) {
     setActionError(null);
     try {
-      await api.cashOut(id, OFFRAMP_CURRENCY);
+      const response = await api.cashOut(id, OFFRAMP_CURRENCY);
+      if (response.interactiveUrl) {
+        window.open(response.interactiveUrl, "_blank", "noopener,noreferrer");
+      }
       await refresh();
     } catch (e) {
       setActionError(
