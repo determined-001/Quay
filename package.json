@@ -13,6 +13,8 @@
     "docs:status-diagram": "node scripts/gen-status-diagram.mjs",
     "docs:check-status-diagram": "node scripts/gen-status-diagram.mjs --check",
     "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
+    "coverage:check-ratchet": "node scripts/check-coverage-ratchet.mjs",
+    "coverage:aggregate": "node scripts/aggregate-coverage.mjs",
     "sweep": "node scripts/uptime-check.mjs"
   },
   "devDependencies": {

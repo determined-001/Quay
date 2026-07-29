@@ -8,8 +8,25 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Needed for the sticky PR comment step below. Only takes effect for
+      # PRs from a branch in THIS repo - GitHub always mints a read-only
+      # GITHUB_TOKEN for `pull_request` events triggered by a fork, and no
+      # `permissions:` block can override that. Since this project's
+      # contributors work from forks (see CLAUDE.md/CONTRIBUTING.md), the PR
+      # comment will silently no-op on most real PRs here - that's a known,
+      # accepted gap, not a bug: the same coverage table is always in the
+      # job's step summary and the uploaded artifact regardless, so nothing
+      # is actually hidden, just not auto-commented for fork PRs.
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so `git show origin/main:coverage-thresholds.json`
+          # (the coverage ratchet check) can actually read the base branch's
+          # copy - a shallow clone wouldn't have that ref's blob available.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -25,8 +42,39 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Test
+      - name: Test (includes coverage - see coverage-thresholds.json)
         run: pnpm test
+
+      - name: Coverage — ratchet check (thresholds may only rise, never fall)
+        if: always() && github.event_name == 'pull_request'
+        run: pnpm coverage:check-ratchet -- "origin/${{ github.event.pull_request.base.ref }}"
+
+      - name: Coverage — aggregate workspace summary
+        if: always()
+        run: pnpm coverage:aggregate >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage — upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            packages/*/coverage/**
+            apps/*/coverage/**
+          retention-days: 30
+
+      - name: Coverage — comment delta on PR
+        # Skipped entirely (not attempted-and-failed) for fork PRs, since the
+        # GITHUB_TOKEN is read-only there regardless of the permissions block
+        # above - see that block's comment. continue-on-error is a second
+        # safety net in case this condition has an edge case, so a comment
+        # failure never fails the whole build over a non-essential step.
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage-report
+          path: coverage/workspace-summary.md
 
       - name: Docs — status diagram hasn't drifted from status.ts
         run: pnpm docs:check-status-diagram

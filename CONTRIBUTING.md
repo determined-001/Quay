@@ -54,7 +54,7 @@ Run the full check suite from the repo root — this is exactly what CI runs:
 
 ```bash
 pnpm typecheck                    # all packages
-pnpm test                         # unit tests
+pnpm test                         # unit tests (with coverage — see below)
 pnpm build                        # builds the web app
 pnpm docs:check-status-diagram    # docs/generated/status-diagram.mmd matches status.ts
 pnpm docs:check-domain-boundary   # packages/core imports no chain SDK
@@ -66,6 +66,35 @@ worker, or adapters should come with tests where practical. If you change
 `LINK_STATUSES`/`TRANSITIONS` in `packages/core/src/domain/status.ts`, run
 `pnpm docs:status-diagram` and update the pasted copy in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) to match.
+
+## Coverage (issue 8.1)
+
+`pnpm test` runs every package's tests with coverage (`@vitest/coverage-v8`)
+and fails if a package drops below its own threshold in
+[`coverage-thresholds.json`](./coverage-thresholds.json):
+`packages/core` ≥90%, `packages/stellar`/`packages/offramp` ≥70%. `apps/api`
+has no enforced threshold yet — gated on issue 4.10 (an integration test
+suite for the API) landing first, though its coverage is still measured and
+reported.
+
+- **Ratchet-only**: thresholds in `coverage-thresholds.json` may only go up,
+  never down — `pnpm coverage:check-ratchet` (run in CI on every PR) diffs
+  the file against the base branch and fails if any number decreased,
+  including a threshold flipping to `null` (enforcement removed). If your
+  change genuinely needs a lower number (rare — usually means new code that
+  isn't tested yet), that's a maintainer call, not something to fix by
+  editing the number back down yourself.
+- **Raising a threshold**: once a package's coverage has genuinely improved
+  and stayed there for a while, bump its number(s) in
+  `coverage-thresholds.json` in the same PR (or a follow-up) that earned it -
+  don't let real coverage silently drift above an outdated floor.
+- CI uploads the full per-package HTML/JSON coverage report as a workflow
+  artifact and posts a workspace-wide summary as a sticky PR comment
+  (`pnpm coverage:aggregate` generates both).
+- Excluded from every package's coverage: test files, config files, and
+  explicitly-listed type-only/generated modules (pure re-export barrels,
+  interface-only files, Drizzle table definitions) - see each package's
+  `vitest.config.ts` for the exact list.
 
 ## Pull request guidelines
 

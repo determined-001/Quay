@@ -1,0 +1,7 @@
+{
+  "_comment": "Coverage floors per package (issue 8.1). Ratchet-only: a number here may only go up, never down - scripts/check-coverage-ratchet.mjs enforces this in CI by diffing this file against the PR's base branch. Raise a threshold only after coverage has genuinely improved and stayed there; lowering one requires a maintainer's explicit sign-off, not just editing this file.",
+  "packages/core": { "lines": 90, "statements": 90, "functions": 90, "branches": 90 },
+  "packages/stellar": { "lines": 70, "statements": 70, "functions": 70, "branches": 70 },
+  "packages/offramp": { "lines": 70, "statements": 70, "functions": 70, "branches": 70 },
+  "apps/api": null
+}
