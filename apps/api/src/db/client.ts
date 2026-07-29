@@ -33,6 +33,22 @@ const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS processed_tx (
      tx_hash TEXT PRIMARY KEY, link_id TEXT, created_at INTEGER NOT NULL
    )`,
+  `CREATE TABLE IF NOT EXISTS offramp_telemetry (
+     id TEXT PRIMARY KEY,
+     anchor_domain TEXT NOT NULL,
+     corridor TEXT NOT NULL,
+     sell_asset TEXT NOT NULL,
+     sell_amount TEXT NOT NULL,
+     indicative_rate TEXT,
+     quoted_rate TEXT NOT NULL,
+     quoted_at INTEGER NOT NULL,
+     initiated_at INTEGER,
+     settled_at INTEGER,
+     effective_rate TEXT,
+     fee_amount TEXT,
+     status TEXT NOT NULL,
+     failure_reason TEXT
+   )`,
 ];
 
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {

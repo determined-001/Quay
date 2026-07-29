@@ -5,6 +5,7 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { telemetryRoutes } from "./routes/telemetry";
 import { rateLimit } from "./middleware/rate-limit";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
@@ -48,6 +49,7 @@ async function main(): Promise<void> {
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
+  app.route("/telemetry", telemetryRoutes(container));
 
   container.start();
 
