@@ -40,3 +40,36 @@ export interface PaymentLink {
   createdAt: number;
   updatedAt: number;
 }
+
+/**
+ * The subset of a `PaymentLink` a buyer is allowed to see (issue 6.4).
+ * `GET /links/:id` is intentionally public - a payment link only works if the
+ * person paying it can view it without a seller credential - but "public"
+ * does not mean "the full internal record." No `sellerId`, `destination`
+ * (the actual pay-to address travels separately, in the `PaymentRequest`
+ * built alongside this), off-ramp bookkeeping, or timestamps a buyer has no
+ * legitimate use for.
+ */
+export interface PublicPaymentLink {
+  id: string;
+  reference: string;
+  title: string;
+  amount: string;
+  asset: AssetRef;
+  status: LinkStatus;
+  paidAmount: string | null;
+  txHash: string | null;
+}
+
+export function toPublicPaymentLink(link: PaymentLink): PublicPaymentLink {
+  return {
+    id: link.id,
+    reference: link.reference,
+    title: link.title,
+    amount: link.amount,
+    asset: link.asset,
+    status: link.status,
+    paidAmount: link.paidAmount,
+    txHash: link.txHash,
+  };
+}

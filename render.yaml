@@ -7,6 +7,16 @@
 #   DATABASE_URL          libsql://<db-name>-<org>.turso.io
 #   DATABASE_AUTH_TOKEN   from `turso db tokens create <db>` or the Turso dashboard
 #   DEFAULT_SELLER_SECRET S... secret for DEFAULT_SELLER_WALLET (SEP-10 signing)
+#
+# Auth (issue 6.4): this image's NODE_ENV=production (baked into the
+# Dockerfile) means SINGLE_TENANT_DEV is hard-refused here - intentionally,
+# per the issue's own requirement. That means create-link/list-links/cash-out
+# on the deployed dashboard (apps/web) will 401 after this ships, since
+# apps/web has no way to send an API key yet (that UI work is issues
+# 6.1/6.2's job, not this one). To get the demo dashboard working again as an
+# interim measure: check this service's boot logs for the one-time "No API
+# key existed yet" line and configure apps/web to send it - there's no
+# built-in mechanism for that today, so this is a stopgap, not a real fix.
 
 services:
   - type: web

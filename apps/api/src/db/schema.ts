@@ -28,6 +28,13 @@ export const links = sqliteTable("links", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+export const apiKeys = sqliteTable("api_keys", {
+  id: text("id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  keyHash: text("key_hash").notNull().unique(),
+  createdAt: integer("created_at").notNull(),
+});
+
 export const webhooks = sqliteTable("webhooks", {
   id: text("id").primaryKey(),
   sellerId: text("seller_id").notNull(),
