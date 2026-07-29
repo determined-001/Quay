@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { Webhook, WebhookRepository } from "@checkout/core";
+import { guardWebhookUrl } from "./ssrf-guard";
 
 export interface WebhookEvent {
   event: string; // e.g. "link.paid"
@@ -13,7 +14,13 @@ export interface WebhookSenderOptions {
   baseDelayMs?: number;
   /** Per-request timeout in ms (default 8000). */
   timeoutMs?: number;
+  /** Cap on response body reads in bytes (default 64 KB). */
+  maxResponseBytes?: number;
 }
+
+const HOST_ALLOWLIST = process.env.WEBHOOK_HOST_ALLOWLIST
+  ? process.env.WEBHOOK_HOST_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean)
+  : undefined;
 
 /**
  * Delivers events to a seller's registered webhooks. The body is signed with
@@ -26,6 +33,15 @@ export interface WebhookSenderOptions {
  * errors and 5xx / 429 responses). 4xx (other than 429) is treated as a
  * permanent failure and not retried. Only the final outcome is recorded.
  *
+ * Security:
+ *   - The URL is re-validated via guardWebhookUrl at delivery time to defeat
+ *     DNS-rebinding attacks (the guard resolves the hostname and checks every
+ *     returned address against private/reserved ranges).
+ *   - redirect: "manual" — 3xx responses are treated as a failed attempt; the
+ *     guard is NOT applied to redirect targets.
+ *   - Response bodies are read up to maxResponseBytes and then discarded to
+ *     prevent memory exhaustion.
+ *
  * NOTE: retries are in-process — a crash mid-backoff loses pending retries.
  * A durable queue is the production answer; this hardens the common transient case.
  */
@@ -33,6 +49,7 @@ export class WebhookSender {
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
   private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(
     private readonly repo: WebhookRepository,
@@ -41,6 +58,7 @@ export class WebhookSender {
     this.maxAttempts = Math.max(1, opts.maxAttempts ?? 4);
     this.baseDelayMs = opts.baseDelayMs ?? 500;
     this.timeoutMs = opts.timeoutMs ?? 8000;
+    this.maxResponseBytes = opts.maxResponseBytes ?? 64 * 1024; // 64 KB
   }
 
   async dispatch(hooks: Webhook[], linkId: string, event: WebhookEvent): Promise<void> {
@@ -55,6 +73,22 @@ export class WebhookSender {
     event: string,
     body: string,
   ): Promise<void> {
+    // Re-check the URL at delivery time to defeat DNS rebinding.
+    // We resolve the hostname here and use the literal IP so the TCP connection
+    // goes to the address we checked — not a freshly-resolved one.
+    const guard = await guardWebhookUrl(hook.url, { allowlist: HOST_ALLOWLIST });
+    if (!guard.ok) {
+      await this.repo.recordDelivery({
+        webhookId: hook.id,
+        linkId,
+        event,
+        statusCode: null,
+        ok: false,
+        error: `SSRF guard rejected URL at delivery: ${guard.reason}`,
+      });
+      return;
+    }
+
     const signature = createHmac("sha256", hook.secret).update(body).digest("hex");
 
     let statusCode: number | null = null;
@@ -70,8 +104,21 @@ export class WebhookSender {
             "x-checkout-event": event,
           },
           body,
+          redirect: "manual",  // 3xx is a failure — never follow redirects
           signal: AbortSignal.timeout(this.timeoutMs),
         });
+
+        // Drain and discard response body to avoid memory leaks / hanging connections.
+        if (res.body) {
+          await drainCapped(res.body, this.maxResponseBytes).catch(() => {});
+        }
+
+        // Treat 3xx as a permanent failure — redirects could escape the guard.
+        if (res.status >= 300 && res.status < 400) {
+          error = `Redirect (${res.status}) is not followed`;
+          statusCode = res.status;
+          break; // do not retry
+        }
 
         if (res.ok) {
           await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
@@ -102,4 +149,20 @@ export class WebhookSender {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Read and discard up to `cap` bytes from a ReadableStream. */
+async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<void> {
+  const reader = stream.getReader();
+  let read = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      read += value?.byteLength ?? 0;
+      if (read >= cap) break;
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }

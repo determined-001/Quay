@@ -2,6 +2,11 @@ import { Hono } from "hono";
 import { randomBytes } from "node:crypto";
 import { registerWebhookSchema } from "@checkout/core";
 import type { Container } from "../services/container";
+import { guardWebhookUrl } from "../services/ssrf-guard";
+
+const HOST_ALLOWLIST = process.env.WEBHOOK_HOST_ALLOWLIST
+  ? process.env.WEBHOOK_HOST_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean)
+  : undefined;
 
 export function webhookRoutes(c: Container): Hono {
   const app = new Hono();
@@ -16,6 +21,12 @@ export function webhookRoutes(c: Container): Hono {
     }
     const parsed = registerWebhookSchema.safeParse(body);
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+
+    // SSRF guard: validate the URL and resolve the hostname before storing.
+    const guard = await guardWebhookUrl(parsed.data.url, { allowlist: HOST_ALLOWLIST });
+    if (!guard.ok) {
+      return ctx.json({ error: "invalid_webhook_url", reason: guard.reason }, 422);
+    }
 
     const seller = await c.sellers.getDefault();
     const secret = randomBytes(24).toString("hex");
