@@ -6,11 +6,12 @@ import type {
   OffRampMode,
   OffRampPort,
   OffRampQuote,
+  PayoutFieldDescriptor,
   SellerPayoutRef,
 } from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { getSep38Quote } from "./sep38";
-import { getSep6Transaction, putSep12Customer, startSep6Withdraw } from "./sep6";
+import { getSep6Transaction, getSep6WithdrawInfo, putSep12Customer, startSep6Withdraw } from "./sep6";
 
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
@@ -69,6 +70,19 @@ export class TestAnchorOffRamp implements OffRampPort {
       baseUrl: this.baseUrl,
       homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
     });
+  }
+
+  async offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]> {
+    // SEP-6 GET /info doesn't always require auth; pass the JWT if we have a
+    // cached one, but don't force a new SEP-10 round-trip just for /info.
+    const jwt = await this.auth.token().catch(() => undefined);
+    const fields = await getSep6WithdrawInfo(this.baseUrl, assetCode, jwt);
+    return fields.map((f) => ({
+      name: f.name,
+      label: f.description, // SEP-6 uses "description" as the human label
+      optional: f.optional ?? false,
+      choices: f.choices,
+    }));
   }
 
   async quote(input: {

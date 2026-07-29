@@ -362,6 +362,13 @@ export class LinkService {
       throw new HttpError(503, "anchor_unavailable");
     }
 
+    const seller = await this.deps.sellers.getDefault();
+    // Merge: request-time fields take precedence over previously saved fields.
+    const mergedFields: Record<string, string> = {
+      ...(seller.payoutFields ?? {}),
+      ...body.payoutFields,
+    };
+
     const sourceAmount = link.paidAmount ?? link.amount;
     let quote: OffRampQuote;
     let job: OffRampJob;

@@ -3,6 +3,60 @@ export interface Sep6WithdrawResult {
   accountId?: string;
 }
 
+/**
+ * A single field descriptor as returned by SEP-6 GET /info for a withdraw type.
+ * See SEP-6 §3.4 — the anchor returns an `fields` map keyed by field name.
+ */
+export interface Sep6FieldInfo {
+  name: string;
+  description: string;
+  optional?: boolean;
+  choices?: string[];
+}
+
+/**
+ * GET /sep6/info — returns the withdraw field requirements for a given asset code.
+ * The anchor may or may not require authentication for /info; we send the JWT if
+ * provided so authenticated anchors can return KYC-aware field sets.
+ */
+export async function getSep6WithdrawInfo(
+  baseUrl: string,
+  assetCode: string,
+  jwt?: string,
+): Promise<Sep6FieldInfo[]> {
+  const url = new URL("/sep6/info", baseUrl);
+  const headers: Record<string, string> = {};
+  if (jwt) headers["authorization"] = `Bearer ${jwt}`;
+
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
+  }
+
+  const body = (await res.json()) as {
+    withdraw?: Record<
+      string,
+      {
+        enabled?: boolean;
+        fields?: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
+      }
+    >;
+  };
+
+  const assetInfo = body.withdraw?.[assetCode];
+  if (!assetInfo?.enabled) {
+    throw new Error(`SEP-6 anchor does not support withdrawing ${assetCode}`);
+  }
+
+  const rawFields = assetInfo.fields ?? {};
+  return Object.entries(rawFields).map(([name, meta]) => ({
+    name,
+    description: meta.description ?? name,
+    optional: meta.optional ?? false,
+    choices: meta.choices,
+  }));
+}
+
 export interface Sep6TransactionResult {
   id: string;
   status: string;

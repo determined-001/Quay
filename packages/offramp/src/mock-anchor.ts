@@ -4,6 +4,7 @@ import type {
   OffRampMode,
   OffRampPort,
   OffRampQuote,
+  PayoutFieldDescriptor,
   SellerPayoutRef,
 } from "@checkout/core";
 
@@ -36,6 +37,33 @@ const MOCK_RATES: Record<string, number> = {
   GHS: 15.5,
 };
 
+/**
+ * Hardcoded field descriptors for the mock anchor. These mirror the fields that
+ * `initiate()` reads from `payout.fields` so the dashboard form is consistent
+ * with what the mock actually uses.
+ */
+const MOCK_PAYOUT_FIELDS: PayoutFieldDescriptor[] = [
+  {
+    name: "type",
+    label: "Payout Method",
+    description: "How you want to receive the funds.",
+    optional: false,
+    choices: ["bank_account", "mobile_money"],
+  },
+  {
+    name: "dest",
+    label: "Bank Account / Mobile Number",
+    description: "Your bank account number or mobile money number.",
+    optional: false,
+  },
+  {
+    name: "dest_extra",
+    label: "Bank Code / Routing Info",
+    description: "Sort code, SWIFT/BIC, or mobile money provider code (if required).",
+    optional: true,
+  },
+];
+
 export interface MockAnchorOptions {
   /** ms before a quote expires (default 5 min). */
   quoteTtlMs?: number;
@@ -58,6 +86,12 @@ export class MockAnchorOffRamp implements OffRampPort {
     this.quoteTtlMs = opts.quoteTtlMs ?? 5 * 60_000;
     this.settleAfterMs = opts.settleAfterMs ?? 8_000;
     this.alwaysFail = opts.alwaysFail ?? false;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async offrampRequirements(_assetCode: string): Promise<PayoutFieldDescriptor[]> {
+    // The mock anchor supports the same fields regardless of asset.
+    return MOCK_PAYOUT_FIELDS;
   }
 
   async quote(input: {

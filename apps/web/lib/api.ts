@@ -129,6 +129,9 @@ export const api = {
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
 
+  getOfframpRequirements: (linkId: string) =>
+    http<OfframpRequirements>(`/links/${linkId}/offramp-requirements`),
+
   cashOut: (
     id: string,
     targetCurrency: string,

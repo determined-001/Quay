@@ -2,11 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, CheckoutError, describeError, type PaymentLink } from "../../lib/api";
+import CashOutModal from "./CashOutModal";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
 const OFFRAMP_CURRENCY = process.env.NEXT_PUBLIC_OFFRAMP_CURRENCY ?? "NGN";
 const OFFRAMP_IS_MOCK = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "testanchor";
+const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
+  ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
+  : `Cash out to ${OFFRAMP_CURRENCY}`;
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
@@ -140,6 +144,9 @@ export default function Dashboard() {
   // Which link id has the cash-out modal open, null = closed.
   const [cashOutLinkId, setCashOutLinkId] = useState<string | null>(null);
 
+  // Derive the full link object for the modal from the id + current links state.
+  const cashOutLink = cashOutLinkId ? (links.find((l) => l.id === cashOutLinkId) ?? null) : null;
+
   const refresh = useCallback(async () => {
     try {
       const { links: fresh } = await api.listLinks();
@@ -156,6 +163,11 @@ export default function Dashboard() {
       setLoading(false);
     }
   }, []);
+
+  const handleCashOutSuccess = useCallback(() => {
+    setCashOutLinkId(null);
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     void refresh();
@@ -195,18 +207,6 @@ export default function Dashboard() {
     await navigator.clipboard.writeText(url);
     setCopied(id);
     setTimeout(() => setCopied((c) => (c === id ? null : c)), 1500);
-  }
-
-  async function cashOut(id: string) {
-    setActionError(null);
-    try {
-      await api.cashOut(id, OFFRAMP_CURRENCY);
-      await refresh();
-    } catch (e) {
-      setActionError(
-        e instanceof CheckoutError ? describeError(e) : "Cash-out failed. Please try again.",
-      );
-    }
   }
 
   // ── Render ──────────────────────────────────────────────────────────────
@@ -267,7 +267,7 @@ export default function Dashboard() {
           <>
             <ErrorBanner message={fetchError} onRetry={refresh} />
             <div style={{ marginTop: 16 }}>
-              <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={cashOut} />
+              <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={setCashOutLinkId} />
             </div>
           </>
         )}
@@ -277,7 +277,7 @@ export default function Dashboard() {
         )}
 
         {!loading && !fetchError && links.length > 0 && (
-          <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={cashOut} />
+          <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={setCashOutLinkId} />
         )}
       </section>
 
