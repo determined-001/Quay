@@ -5,6 +5,7 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { testOnlyRoutes } from "./routes/test-only";
 import { rateLimit } from "./middleware/rate-limit";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
@@ -48,6 +49,13 @@ async function main(): Promise<void> {
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
+
+  // Playwright e2e harness only (issue 5.7) - env.ts already refuses to boot
+  // with this set under NODE_ENV=production.
+  if (env.e2eTestMode) {
+    app.route("/__test__", testOnlyRoutes(container));
+    console.log("[api] E2E_TEST_MODE=1 - /__test__/* routes are mounted. Never set this in production.");
+  }
 
   container.start();
 

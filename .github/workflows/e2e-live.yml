@@ -1,0 +1,104 @@
+name: e2e-live
+
+on:
+  schedule:
+    # Nightly at 04:30 UTC - offset from anchor-probe's 04:00 so they don't
+    # both hit the live demo at once.
+    - cron: "30 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers (Chromium only)
+        run: pnpm --filter @checkout/web exec playwright install --with-deps chromium
+
+      # Against the real deployed URLs (issue 5.7, point 2/4): /ready is
+      # green, link creation from a clean browser context, checkout renders a
+      # QR, and no placeholder strings in the rendered HTML. Same suite
+      # `pnpm sweep` runs locally as the pre-entry ritual.
+      - name: E2E - live stranger flow + placeholder scan
+        id: live
+        continue-on-error: true
+        run: pnpm --filter @checkout/web e2e:live
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-live-report
+          path: apps/web/playwright-report/
+          retention-days: 14
+
+      - name: Open or update failure issue
+        if: steps.live.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = "e2e-live";
+            const issueTitle = "⚠️ Nightly live e2e suite failed";
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+
+            const body = `The nightly [live e2e suite](${runUrl}) against the deployed demo failed.
+
+            ### What broke
+            One of: \`/ready\` isn't green, a stranger can't create a link and see a checkout
+            page with a QR code, or the rendered HTML contains a placeholder string
+            ("Demo Seller", "example.com", "localhost:8787", "TODO", "lorem"). Check the
+            [failed run](${runUrl}) and its Playwright report artifact for which.
+
+            ### Impact
+            This is the exact "stranger path" regression \`MAINTAINER.md\` calls out - a live
+            URL with a broken core flow (or visible placeholder data) is worse than no demo.
+
+            _This issue was auto-filed by the [e2e-live workflow](https://github.com/${process.env.GITHUB_REPOSITORY}/actions/workflows/e2e-live.yml)._`;
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: label,
+              state: "open",
+              per_page: 5,
+            });
+
+            const existing = issues.find((i) => i.title === issueTitle);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Failed again on ${new Date().toISOString()}. [View run](${runUrl}).`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body,
+                labels: [label],
+              });
+            }
+
+      - name: Fail the job if the live suite failed
+        if: steps.live.outcome == 'failure'
+        run: exit 1

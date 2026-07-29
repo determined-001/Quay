@@ -54,6 +54,24 @@ if (watchMode !== "poll" && watchMode !== "stream") {
   throw new Error(`WATCH_MODE must be "poll" or "stream", got "${watchMode}"`);
 }
 
+// Playwright e2e harness only (issue 5.7). Mounts a test-only route
+// (POST /__test__/simulate-payment) that settles a link the same way real
+// on-chain settlement does (LinkService.applyMatch), without needing a live
+// Stellar network - the local e2e suite must run in CI with no network
+// access at all. Also skips starting the real ledger watcher (the one
+// component in this app that makes outbound network calls by default), since
+// the e2e harness settles payments through the test-only route instead of
+// waiting for one to actually land on-chain. Hard-refused at startup under
+// NODE_ENV=production - this must never be reachable in a real deployment.
+const e2eTestMode = process.env.E2E_TEST_MODE === "1";
+if (e2eTestMode && process.env.NODE_ENV === "production") {
+  throw new Error(
+    "E2E_TEST_MODE=1 is refused when NODE_ENV=production - it mounts a route that lets any " +
+      "caller mark an arbitrary link as paid with no on-chain payment. Unset E2E_TEST_MODE, or " +
+      "unset NODE_ENV=production if this really is a test environment.",
+  );
+}
+
 export const env = {
   network,
   horizonUrl: process.env.HORIZON_URL || undefined,
@@ -69,6 +87,7 @@ export const env = {
   // "poll" (default, restart-safe MVP behavior) or "stream" (Horizon SSE,
   // opt-in until proven). See packages/stellar/src/streaming-horizon-watcher.ts.
   watchMode,
+  e2eTestMode,
   corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:3000")
     .split(",")
     .map((s) => s.trim())

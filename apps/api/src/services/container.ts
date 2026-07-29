@@ -91,7 +91,14 @@ export async function createContainer(): Promise<Container> {
     webhooks: webhooksRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     start() {
-      loop.start();
+      // The e2e harness (issue 5.7) settles payments through a test-only
+      // route instead of a real on-chain payment landing, and must run with
+      // no network access - the ledger watcher is the one thing in this
+      // process that makes outbound network calls (to Horizon) on its own,
+      // so it's the one thing skipped here. The cash-out poller stays
+      // running (MockAnchorOffRamp settling is a local in-memory timer, not
+      // network I/O), since the e2e loop's cash-out step needs it.
+      if (!env.e2eTestMode) loop.start();
       stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
       stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
     },
@@ -179,8 +186,15 @@ function resolveSellerKeypairOrWallet(): { keypair: Keypair | null; publicKey: s
 
 function createOffRamp(sellerKeypair: Keypair | null): OffRampPort {
   if (env.offramp === "mock") {
-    // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
-    return new MockAnchorOffRamp({ settleAfterMs: 8000 });
+    // Demo off-ramp: settles 8s after a seller triggers cash-out by default.
+    // NOT a real anchor. Overridable (e.g. OFFRAMP_MOCK_SETTLE_MS=500 for the
+    // e2e suite, issue 5.7, so "cash out -> assert offramp_settled" doesn't
+    // need an 8s wait) - read raw for the same reason ANCHOR_URL etc. are:
+    // keep env.ts's surface to things every deployment cares about.
+    const settleAfterMs = Number(process.env.OFFRAMP_MOCK_SETTLE_MS ?? "8000");
+    return new MockAnchorOffRamp({
+      settleAfterMs: Number.isFinite(settleAfterMs) && settleAfterMs >= 0 ? settleAfterMs : 8000,
+    });
   }
   if (!sellerKeypair) {
     throw new Error(
