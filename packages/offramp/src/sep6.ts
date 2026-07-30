@@ -13,36 +13,6 @@ export interface Sep6TransactionResult {
   message?: string;
 }
 
-/** SEP-12: minimal KYC so the anchor's SEP-6 withdraw will accept the request. */
-export async function putSep12Customer(
-  baseUrl: string,
-  jwt: string,
-  fields: Record<string, string>,
-  logger?: Logger,
-): Promise<void> {
-  const log = (logger ?? NOOP_LOGGER).child({ component: "sep12", baseUrl });
-  const t0 = Date.now();
-  log.info({ event: "anchor.sep12.put.start", fieldCount: Object.keys(fields).length }, "submitting SEP-12 KYC");
-  // Note: `fields` is intentionally NOT passed to the log line — every key
-  // is PII. Both pino's redact list (apps/api) and the no-log policy here
-  // make accidental disclosure a two-failure bug.
-  const res = await fetch(new URL("/sep12/customer", baseUrl), {
-    method: "PUT",
-    headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
-    body: JSON.stringify({
-      first_name: fields.first_name ?? "Demo",
-      last_name: fields.last_name ?? "Seller",
-      email_address: fields.email_address ?? "demo-seller@example.com",
-      ...fields,
-    }),
-  });
-  if (!res.ok) {
-    log.warn({ event: "anchor.sep12.put.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-12 PUT failed");
-    throw new Error(`SEP-12 customer PUT failed: ${res.status} ${await res.text()}`);
-  }
-  log.info({ event: "anchor.sep12.put.ok", durationMs: Date.now() - t0 }, "SEP-12 PUT ok");
-}
-
 /** SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md */
 export async function startSep6Withdraw(
   baseUrl: string,

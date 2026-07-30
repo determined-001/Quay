@@ -325,6 +325,9 @@ export class WatcherLoop {
 
     const open = await this.deps.links.openLinksForDestination(account);
     const byRef = new Map<string, PaymentLink>(open.map((l) => [l.reference, l]));
+    const byMuxedId = new Map<string, PaymentLink>(
+      open.filter((l) => l.muxedId).map((l) => [l.muxedId as string, l]),
+    );
 
     let lastToken = cursor;
     for (const payment of payments) {
@@ -335,7 +338,7 @@ export class WatcherLoop {
         continue;
       }
 
-      const outcome = matchPayment(payment, (ref) => byRef.get(ref));
+      const outcome = matchPayment(payment, (ref) => byRef.get(ref), (id) => byMuxedId.get(id));
       const linkId =
         outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
           ? outcome.link.id

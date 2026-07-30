@@ -60,11 +60,7 @@ export function linkRoutes(c: Container): Hono<AppEnv> {
       log.info({ event: "cashout.request.ok", linkId, jobId: job.jobId, targetCurrency: job.targetCurrency }, "cash-out requested");
       return ctx.json({ job });
     } catch (err) {
-      if (err instanceof HttpError) {
-        log.warn({ event: "cashout.request.rejected", linkId, httpStatus: err.status, error: err.message }, "cash-out rejected");
-        return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
-      }
-      log.error({ event: "cashout.request.error", linkId, error: err instanceof Error ? err.message : String(err) }, "cash-out failed");
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
       throw err;
     }
   });
