@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+﻿import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { matchPayment, type NormalizedPayment } from "../src/matching/match-payment";
+import {
+  matchPayment,
+  type NormalizedPayment,
+} from "../src/matching/match-payment";
+import { toStroops } from "../src/domain/money";
 import type { PaymentLink } from "../src/domain/payment-link";
-
-// ── Shared constants ──────────────────────────────────────────────────────────
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 const ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
@@ -21,6 +23,7 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
@@ -46,9 +49,8 @@ function payment(over: Partial<NormalizedPayment> = {}): NormalizedPayment {
   };
 }
 
-const byRef = (l: PaymentLink) => (ref: string) => (ref === l.reference ? l : undefined);
-
-// ── Example-based tests ───────────────────────────────────────────────────────
+const byRef = (l: PaymentLink) => (ref: string) =>
+  ref === l.reference ? l : undefined;
 
 describe("matchPayment", () => {
   it("marks exact payment as paid", () => {
@@ -65,15 +67,18 @@ describe("matchPayment", () => {
     if (r.kind === "paid") expect(r.overpaid).toBe(true);
   });
 
-  it("flags underpayment", () => {
+  it("flags partial payment", () => {
     const l = link();
     const r = matchPayment(payment({ amount: "9.5" }), byRef(l));
-    expect(r.kind).toBe("underpaid");
+    expect(r.kind).toBe("partial");
   });
 
   it("rejects wrong asset even if memo matches", () => {
     const l = link();
-    const r = matchPayment(payment({ asset: { code: "XLM", issuer: null } }), byRef(l));
+    const r = matchPayment(
+      payment({ asset: { code: "XLM", issuer: null } }),
+      byRef(l),
+    );
     expect(r.kind).toBe("asset_mismatch");
   });
 
@@ -94,16 +99,41 @@ describe("matchPayment", () => {
     const r = matchPayment(payment({ to: "GSOMEONEELSE" }), byRef(l));
     expect(r.kind).toBe("unknown_reference");
   });
-});
 
-// ── Property-based tests ──────────────────────────────────────────────────────
-// Run 1 000 cases per property; fast-check prints the seed on failure.
+  it("marks a second payment as paid when the prior amount covers the remainder", () => {
+    const l = link({ amount: "25" });
+    const first = matchPayment(payment({ amount: "10" }), byRef(l));
+    expect(first.kind).toBe("partial");
+
+    const second = matchPayment(
+      payment({ amount: "15", txHash: "tx2" }),
+      byRef(l),
+      toStroops("10"),
+    );
+    expect(second.kind).toBe("paid");
+    if (second.kind === "paid") {
+      expect(second.overpaid).toBe(false);
+      expect(second.outstanding).toBe("0");
+    }
+  });
+
+  it("records overpayment on the final leg", () => {
+    const l = link({ amount: "25" });
+    const second = matchPayment(
+      payment({ amount: "30", txHash: "tx2" }),
+      byRef(l),
+      toStroops("10"),
+    );
+    expect(second.kind).toBe("paid");
+    if (second.kind === "paid") {
+      expect(second.overpaid).toBe(true);
+      expect(second.outstanding).toBe("0");
+    }
+  });
+});
 
 const RUNS = 1_000;
 
-// Arbitraries ──────────────────────────────────────────────────────────────────
-
-/** A Stellar-like public key: "G" + 55 base32 chars (A-Z, 2-7). */
 const base32Char = fc.constantFrom(
   ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".split(""),
 );
@@ -111,7 +141,6 @@ const stellarAddress = fc
   .array(base32Char, { minLength: 55, maxLength: 55 })
   .map((chars) => "G" + chars.join(""));
 
-/** A short reference string (alphanumeric, hyphen, underscore), ≤28 chars. */
 const refChar = fc.constantFrom(
   ..."abcdefghijklmnopqrstuvwxyz0123456789_-".split(""),
 );
@@ -119,7 +148,6 @@ const referenceArb = fc
   .array(refChar, { minLength: 1, maxLength: 28 })
   .map((chars) => chars.join(""));
 
-/** A valid Stellar amount string (0–7 decimal places, non‑negative). */
 const validAmount = fc
   .record({
     whole: fc.integer({ min: 0, max: 999_999_999_999 }),
@@ -133,7 +161,6 @@ const validAmount = fc
     return `${whole}.${fv.toString().padStart(fracDigits, "0")}`;
   });
 
-/** A payment generated from a link that shares the same destination, amount, asset, and memo. */
 function exactPaymentFor(
   l: PaymentLink,
   pagingToken: string,
@@ -152,8 +179,6 @@ function exactPaymentFor(
     createdAt: "2026-01-01T00:00:00Z",
   };
 }
-
-// ── Properties ────────────────────────────────────────────────────────────────
 
 describe("property: exact payment is always paid", () => {
   it("a payment that exactly matches the link is 'paid' and not overpaid", () => {
@@ -177,6 +202,7 @@ describe("property: exact payment is always paid", () => {
             txHash: null,
             payer: null,
             paidAmount: null,
+            overpaidAmount: null,
             offrampJobId: null,
             offrampTargetCurrency: null,
             offrampStatus: null,
@@ -222,6 +248,7 @@ describe("property: destination mismatch is never paid", () => {
             txHash: null,
             payer: null,
             paidAmount: null,
+            overpaidAmount: null,
             offrampJobId: null,
             offrampTargetCurrency: null,
             offrampStatus: null,
@@ -279,6 +306,7 @@ describe("property: memo whitespace is not trimmed", () => {
             txHash: null,
             payer: null,
             paidAmount: null,
+            overpaidAmount: null,
             offrampJobId: null,
             offrampTargetCurrency: null,
             offrampStatus: null,
@@ -287,7 +315,6 @@ describe("property: memo whitespace is not trimmed", () => {
             updatedAt: 0,
           };
 
-          // Pad the memo with whitespace according to the randomly chosen mode.
           const paddedMemo =
             mode === "leading"
               ? whitespace + ref
@@ -309,9 +336,6 @@ describe("property: memo whitespace is not trimmed", () => {
 
           const lookup = (r: string) => (r === lnk.reference ? lnk : undefined);
 
-          // Assert the chosen behaviour: matchPayment does NOT trim memos,
-          // so a whitespace‑padded memo (leading, trailing, or both) won't
-          // find the link.
           expect(matchPayment(pay, lookup).kind).toBe("unknown_reference");
         },
       ),

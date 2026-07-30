@@ -157,7 +157,7 @@ export class DrizzleLinkRepository implements LinkRepository {
       .where(eq(links.id, link.id));
   }
 
-  async recordLinkPayment(payment: {
+  async recordPayment(payment: {
     linkId: string;
     txHash: string;
     payer: string;

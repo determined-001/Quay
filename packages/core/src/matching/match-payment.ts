@@ -70,18 +70,21 @@ export function matchPayment(
   }
 
   const requested = toStroops(link.amount);
+  const currentPayment = toStroops(payment.amount);
+  const totalReceived = alreadyPaidStroops + currentPayment;
   const outstandingStroops =
-    requested > alreadyPaidStroops ? requested - alreadyPaidStroops : 0n;
+    requested > totalReceived ? requested - totalReceived : 0n;
   const outstanding = fromStroops(outstandingStroops);
-  const receivedTotal = normalizeAmount(payment.amount);
-  const cmp = compareAmount(payment.amount, outstanding);
-  if (cmp === "under") {
+  const receivedTotal = fromStroops(totalReceived);
+
+  if (totalReceived < requested) {
     return { kind: "partial", link, receivedTotal, outstanding };
   }
+
   return {
     kind: "paid",
     link,
-    overpaid: cmp === "over",
+    overpaid: totalReceived > requested,
     receivedTotal,
     outstanding,
   };
