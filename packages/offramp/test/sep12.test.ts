@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSep12Customer, putSep12Customer } from "../src/sep12";
 
-const BASE_URL = "https://testanchor.stellar.org";
+const KYC_SERVER = "https://testanchor.stellar.org/sep12";
 const JWT = "jwt-token";
 const ACCOUNT = "GDEST0000000000000000000000000000000000000000000000000000";
 
@@ -18,7 +18,7 @@ describe("putSep12Customer", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await putSep12Customer(BASE_URL, JWT, {
+    await putSep12Customer(KYC_SERVER, JWT, {
       account: ACCOUNT,
       fields: { first_name: "Ada", email_address: "ada@example.org" },
     });
@@ -38,7 +38,7 @@ describe("putSep12Customer", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {} });
+    await putSep12Customer(KYC_SERVER, JWT, { account: ACCOUNT, fields: {} });
 
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ account: ACCOUNT });
@@ -48,7 +48,7 @@ describe("putSep12Customer", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_1", fields: { first_name: "Ada" } });
+    await putSep12Customer(KYC_SERVER, JWT, { account: ACCOUNT, customerId: "cust_1", fields: { first_name: "Ada" } });
 
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     const body = JSON.parse(init.body as string);
@@ -58,14 +58,14 @@ describe("putSep12Customer", () => {
 
   it("throws with the anchor's response text on a non-OK PUT", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("nope", { status: 400 })));
-    await expect(putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {} })).rejects.toThrow(/400/);
+    await expect(putSep12Customer(KYC_SERVER, JWT, { account: ACCOUNT, fields: {} })).rejects.toThrow(/400/);
   });
 });
 
 describe("getSep12Customer", () => {
   it("reports unsubmitted (no fields known yet) on a 404", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
-    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    const result = await getSep12Customer(KYC_SERVER, JWT, { account: ACCOUNT });
     expect(result).toEqual({ customerId: null, status: "unsubmitted", requiredFields: [], message: null });
   });
 
@@ -85,7 +85,7 @@ describe("getSep12Customer", () => {
       ),
     );
 
-    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    const result = await getSep12Customer(KYC_SERVER, JWT, { account: ACCOUNT });
     expect(result.customerId).toBe("cust_1");
     expect(result.status).toBe("NEEDS_INFO");
     expect(result.message).toBe("please provide your legal name");
@@ -107,12 +107,12 @@ describe("getSep12Customer", () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ status: "ACCEPTED" })));
     vi.stubGlobal("fetch", fetchMock);
 
-    await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_1" });
+    await getSep12Customer(KYC_SERVER, JWT, { account: ACCOUNT, customerId: "cust_1" });
     const [urlWithId] = fetchMock.mock.calls[0] as [URL];
     expect(urlWithId.searchParams.get("id")).toBe("cust_1");
     expect(urlWithId.searchParams.get("account")).toBeNull();
 
-    await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    await getSep12Customer(KYC_SERVER, JWT, { account: ACCOUNT });
     const [urlWithAccount] = fetchMock.mock.calls[1] as [URL];
     expect(urlWithAccount.searchParams.get("account")).toBe(ACCOUNT);
   });

@@ -1,5 +1,6 @@
 import type { Keypair } from "@stellar/stellar-sdk";
 import { KycRequiredError, type KycFieldSpec, type KycPort, type KycRecord, type KycRepository } from "@checkout/core";
+import { resolveAnchor, type Logger, type ResolvedAnchor } from "./anchor";
 import { Sep10Client } from "./sep10";
 import { getSep12Customer, putSep12Customer } from "./sep12";
 
@@ -10,15 +11,19 @@ export function missingRequiredFields(required: KycFieldSpec[], values: Record<s
   return required.filter((f) => !f.optional && !(values[f.name] ?? "").trim()).map((f) => f.name);
 }
 
-const DEFAULT_BASE_URL = "https://testanchor.stellar.org";
 const DEFAULT_HOME_DOMAIN = "testanchor.stellar.org";
 
 export interface TestAnchorKycOptions {
   /** Same seller keypair used for the SEP-10/SEP-6 off-ramp adapter. */
   sellerKeypair: Keypair;
   repo: KycRepository;
-  baseUrl?: string;
+  /** The anchor's home domain — the ONLY endpoint configuration needed. */
   homeDomain?: string;
+  /** Expected NETWORK_PASSPHRASE; a mismatched anchor is rejected at discovery. */
+  networkPassphrase?: string;
+  /** Base URL for last-resort fallback paths; defaults to `https://<homeDomain>`. */
+  baseUrl?: string;
+  logger?: Logger;
 }
 
 /**
@@ -27,24 +32,47 @@ export interface TestAnchorKycOptions {
  * never re-derived from whatever happened to be in a cash-out form.
  */
 export class TestAnchorKyc implements KycPort {
-  private readonly baseUrl: string;
-  private readonly auth: Sep10Client;
   private readonly repo: KycRepository;
+  private readonly opts: TestAnchorKycOptions;
+  private readonly homeDomain: string;
+  private session: Promise<{ anchor: ResolvedAnchor; auth: Sep10Client }> | null = null;
 
   constructor(opts: TestAnchorKycOptions) {
-    this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    this.opts = opts;
     this.repo = opts.repo;
-    this.auth = new Sep10Client(opts.sellerKeypair, {
-      baseUrl: this.baseUrl,
-      homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
+    this.homeDomain = opts.homeDomain ?? DEFAULT_HOME_DOMAIN;
+  }
+
+  /** Memoized SEP-1 discovery; a failure clears the memo so the next call retries. */
+  private connect(): Promise<{ anchor: ResolvedAnchor; auth: Sep10Client }> {
+    if (this.session) return this.session;
+    const pending = (async () => {
+      const anchor = await resolveAnchor(this.homeDomain, {
+        baseUrl: this.opts.baseUrl,
+        expectedNetworkPassphrase: this.opts.networkPassphrase,
+        logger: this.opts.logger,
+      });
+      const auth = new Sep10Client(this.opts.sellerKeypair, {
+        webAuthEndpoint: anchor.webAuthEndpoint,
+        homeDomain: anchor.homeDomain,
+        signingKey: anchor.signingKey ?? "",
+        networkPassphrase: this.opts.networkPassphrase ?? anchor.networkPassphrase ?? undefined,
+      });
+      return { anchor, auth };
+    })();
+    this.session = pending.catch((err: unknown) => {
+      this.session = null;
+      throw err;
     });
+    return this.session;
   }
 
   async status(sellerId: string): Promise<KycRecord> {
     const existing = await this.repo.get(sellerId);
-    const jwt = await this.auth.token();
-    const remote = await getSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
+    const { anchor, auth } = await this.connect();
+    const jwt = await auth.token();
+    const remote = await getSep12Customer(anchor.kycServer, jwt, {
+      account: auth.publicKey,
       customerId: existing?.customerId,
     });
 
@@ -64,9 +92,10 @@ export class TestAnchorKyc implements KycPort {
 
   async submit(sellerId: string, fields: Record<string, string>): Promise<KycRecord> {
     const existing = await this.repo.get(sellerId);
-    const jwt = await this.auth.token();
-    const discovery = await getSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
+    const { anchor, auth } = await this.connect();
+    const jwt = await auth.token();
+    const discovery = await getSep12Customer(anchor.kycServer, jwt, {
+      account: auth.publicKey,
       customerId: existing?.customerId,
     });
 
@@ -79,16 +108,16 @@ export class TestAnchorKyc implements KycPort {
     const missing = missingRequiredFields(discovery.requiredFields, merged);
     if (missing.length > 0) throw new KycRequiredError(missing);
 
-    const put = await putSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
+    const put = await putSep12Customer(anchor.kycServer, jwt, {
+      account: auth.publicKey,
       customerId: discovery.customerId,
       fields: merged,
     });
 
     // The anchor may reveal more required fields only after seeing this
     // submission (SEP-12 is progressive) — re-sync rather than assume ACCEPTED.
-    const after = await getSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
+    const after = await getSep12Customer(anchor.kycServer, jwt, {
+      account: auth.publicKey,
       customerId: put.customerId,
     });
 

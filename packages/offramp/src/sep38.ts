@@ -1,4 +1,5 @@
 import type { AssetRef } from "@checkout/core";
+import { endpoint } from "./endpoint";
 
 export interface Sep38QuoteResult {
   id: string;
@@ -13,13 +14,18 @@ function assetIdentifier(asset: AssetRef): string {
   return asset.issuer === null ? "stellar:native" : `stellar:${asset.code}:${asset.issuer}`;
 }
 
-/** SEP-38: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0038.md */
+/**
+ * SEP-38: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0038.md
+ *
+ * `quoteServer` is the anchor's ANCHOR_QUOTE_SERVER from its SEP-1 stellar.toml,
+ * not a base URL — the `/quote` path is defined by SEP-38 relative to it.
+ */
 export async function getSep38Quote(
-  baseUrl: string,
+  quoteServer: string,
   jwt: string,
   input: { sellAsset: AssetRef; sellAmount: string; buyCurrency: string },
 ): Promise<Sep38QuoteResult> {
-  const res = await fetch(new URL("/sep38/quote", baseUrl), {
+  const res = await fetch(endpoint(quoteServer, "quote"), {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({

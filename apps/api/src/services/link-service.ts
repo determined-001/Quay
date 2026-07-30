@@ -19,6 +19,7 @@ import {
   type WebhookRepository,
 } from "@checkout/core";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
+import { parseToml } from "@checkout/offramp";
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
 
@@ -151,14 +152,19 @@ export class AnchorHealth {
     this.lastCheckedAt = Date.now();
     const probes = { toml: false, sep10: false, info: false };
     try {
-      // 1. TOML reachable.
+      // 1. TOML reachable — and parsed, so the probe can use the endpoints the
+      //    anchor actually advertises (SEP-1) rather than assumed paths.
       const tomlUrl = `https://${this.homeDomain}/.well-known/stellar.toml`;
       const tomlRes = await fetchWithTimeout(tomlUrl, this.requestTimeoutMs);
       probes.toml = tomlRes.ok;
       if (!tomlRes.ok) throw new Error(`TOML probe returned ${tomlRes.status}`);
 
+      // Discovered endpoints when the TOML gives them; `this.url` + the legacy
+      // paths only as a fallback, matching the off-ramp adapter's policy.
+      const discovered = await this.discoverEndpoints(tomlRes);
+
       // 2. SEP-10 challenge obtainable (no signing — this is a liveness check).
-      const sep10Url = new URL("/auth", this.url);
+      const sep10Url = new URL(discovered.webAuth ?? new URL("/auth", this.url as string).toString());
       sep10Url.searchParams.set("account", "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK5KQ");
       sep10Url.searchParams.set("home_domain", this.homeDomain);
       const sep10Res = await fetchWithTimeout(sep10Url.toString(), this.requestTimeoutMs);
@@ -167,8 +173,10 @@ export class AnchorHealth {
       const sep10Body = (await sep10Res.json()) as { transaction?: string };
       if (!sep10Body.transaction) throw new Error("SEP-10 challenge missing transaction");
 
-      // 3. /info 200.
-      const infoUrl = new URL("/info", this.url);
+      // 3. SEP-6 /info 200, at the advertised TRANSFER_SERVER.
+      const infoUrl = discovered.transfer
+        ? new URL(`${discovered.transfer.replace(/\/+$/, "")}/info`)
+        : new URL("/info", this.url as string);
       const infoRes = await fetchWithTimeout(infoUrl.toString(), this.requestTimeoutMs);
       probes.info = infoRes.ok;
       if (!infoRes.ok) throw new Error(`/info returned ${infoRes.status}`);
@@ -180,6 +188,29 @@ export class AnchorHealth {
       this.recordFailure(err);
     }
     return this.snapshot();
+  }
+
+  /**
+   * Pulls WEB_AUTH_ENDPOINT / TRANSFER_SERVER out of an already-fetched TOML
+   * response. Best-effort by design: this is a liveness probe, so a TOML we
+   * can't read falls back to the configured base URL rather than failing the
+   * whole probe — step 1 already proved the document is reachable, which is
+   * what the `toml` probe flag actually asserts.
+   */
+  private async discoverEndpoints(
+    tomlRes: Response,
+  ): Promise<{ webAuth: string | null; transfer: string | null }> {
+    try {
+      const text = await tomlRes.text();
+      const toml = parseToml(text);
+      const pick = (key: string): string | null => {
+        const v = toml[key];
+        return typeof v === "string" && v.length > 0 ? v : null;
+      };
+      return { webAuth: pick("WEB_AUTH_ENDPOINT"), transfer: pick("TRANSFER_SERVER") };
+    } catch {
+      return { webAuth: null, transfer: null };
+    }
   }
 
   private recordSuccess(): void {
