@@ -1,3 +1,5 @@
+import { endpoint } from "./endpoint";
+
 export interface Sep6WithdrawResult {
   id: string;
   accountId?: string;
@@ -10,9 +12,14 @@ export interface Sep6TransactionResult {
   message?: string;
 }
 
-/** SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md */
+/**
+ * SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md
+ *
+ * `transferServer` is the anchor's TRANSFER_SERVER from its SEP-1 stellar.toml;
+ * `/withdraw` and `/transaction` are SEP-6 paths relative to it.
+ */
 export async function startSep6Withdraw(
-  baseUrl: string,
+  transferServer: string,
   jwt: string,
   input: {
     assetCode: string;
@@ -23,13 +30,14 @@ export async function startSep6Withdraw(
     destExtra?: string;
   },
 ): Promise<Sep6WithdrawResult> {
-  const url = new URL("/sep6/withdraw", baseUrl);
-  url.searchParams.set("asset_code", input.assetCode);
-  url.searchParams.set("amount", input.amount);
-  url.searchParams.set("account", input.account);
-  url.searchParams.set("type", input.type);
-  if (input.dest) url.searchParams.set("dest", input.dest);
-  if (input.destExtra) url.searchParams.set("dest_extra", input.destExtra);
+  const url = endpoint(transferServer, "withdraw", {
+    asset_code: input.assetCode,
+    amount: input.amount,
+    account: input.account,
+    type: input.type,
+    dest: input.dest || undefined,
+    dest_extra: input.destExtra || undefined,
+  });
 
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
@@ -40,12 +48,11 @@ export async function startSep6Withdraw(
 }
 
 export async function getSep6Transaction(
-  baseUrl: string,
+  transferServer: string,
   jwt: string,
   id: string,
 ): Promise<Sep6TransactionResult> {
-  const url = new URL("/sep6/transaction", baseUrl);
-  url.searchParams.set("id", id);
+  const url = endpoint(transferServer, "transaction", { id });
 
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {

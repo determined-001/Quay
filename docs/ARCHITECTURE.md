@@ -147,7 +147,12 @@ operations, the **processed-tx ledger** guards the crash window before a cursor 
 and the domain's `canTransition()` guard means a duplicate payment can never double-apply
 even if both of the above somehow let it through.
 
-### 3. Cash-out — SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, today's real adapter)
+### 3. Cash-out — SEP-1 → SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, today's real adapter)
+
+Endpoints are **discovered, not hard-coded**: `ANCHOR_HOME_DOMAIN` is the only
+endpoint configuration, and every URL below comes from the anchor's
+`/.well-known/stellar.toml` (SEP-1). Legacy paths remain only as a last-resort
+fallback for an anchor that omits a service entry, and each use logs a warning.
 
 ```mermaid
 sequenceDiagram
@@ -157,26 +162,31 @@ sequenceDiagram
   participant CB as CircuitBreakerOffRamp
   participant Anchor as TestAnchorOffRamp (OffRampPort)
   participant Sep10 as Sep10Client
-  participant Testanchor as testanchor.stellar.org
+  participant Testanchor as anchor (ANCHOR_HOME_DOMAIN)
 
   Seller->>API: POST /links/:id/cash-out { targetCurrency, payoutFields }
   API->>LS: triggerCashOut(linkId, body)
   LS->>CB: quote({ sourceAsset, sourceAmount, targetCurrency })
   CB->>Anchor: quote(...)
+  Anchor->>Testanchor: GET /.well-known/stellar.toml  (SEP-1, 5-min cache)
+  Testanchor-->>Anchor: SIGNING_KEY, WEB_AUTH_ENDPOINT, TRANSFER_SERVER,<br/>KYC_SERVER, ANCHOR_QUOTE_SERVER, CURRENCIES
+  Anchor->>Anchor: assert NETWORK_PASSPHRASE matches our network
+  Anchor->>Anchor: assert asset is listed in CURRENCIES
   Anchor->>Sep10: token()  // cached JWT, or...
-  Sep10->>Testanchor: GET /auth?account=...  (SEP-10 challenge)
+  Sep10->>Testanchor: GET {WEB_AUTH_ENDPOINT}?account=...  (SEP-10 challenge)
   Testanchor-->>Sep10: challenge transaction (unsigned)
+  Sep10->>Sep10: verify challenge is signed by SIGNING_KEY<br/>(else reject — never sign it)
   Sep10->>Sep10: sign with seller keypair
-  Sep10->>Testanchor: POST /auth { transaction: signed }
+  Sep10->>Testanchor: POST {WEB_AUTH_ENDPOINT} { transaction: signed }
   Testanchor-->>Sep10: { token }  // SEP-10 JWT
-  Anchor->>Testanchor: POST /sep38/quote  (Bearer token)
+  Anchor->>Testanchor: POST {ANCHOR_QUOTE_SERVER}/quote  (Bearer token)
   Testanchor-->>Anchor: { id, price, buy_amount, expires_at }
   Anchor-->>CB: OffRampQuote
   CB-->>LS: OffRampQuote
   LS->>CB: initiate({ linkId, quoteId, payout })
   CB->>Anchor: initiate(...)
-  Anchor->>Testanchor: PUT /sep12/customer  (KYC fields)
-  Anchor->>Testanchor: POST /sep6/withdraw
+  Anchor->>Testanchor: PUT {KYC_SERVER}/customer  (KYC fields)
+  Anchor->>Testanchor: GET {TRANSFER_SERVER}/withdraw
   Testanchor-->>Anchor: { id: jobId }
   Anchor-->>CB: OffRampJob { status: "pending" }
   CB-->>LS: OffRampJob
@@ -186,7 +196,7 @@ sequenceDiagram
   loop cash-out poller (startCashOutPoller)
     LS->>CB: status(jobId)
     CB->>Anchor: status(jobId)
-    Anchor->>Testanchor: GET /sep6/transaction?id=jobId
+    Anchor->>Testanchor: GET {TRANSFER_SERVER}/transaction?id=jobId
     Testanchor-->>Anchor: { status: "completed" | "pending_*" | "error" }
     Anchor-->>CB: OffRampJob
     CB-->>LS: OffRampJob

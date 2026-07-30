@@ -60,8 +60,8 @@ export async function createContainer(): Promise<Container> {
     env.watchMode === "stream"
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : new HorizonWatcher(stellar.horizonUrl);
-  const offramp = createOffRamp(seller.keypair, offrampStateRepo);
-  const kyc = createKyc(seller.keypair, db);
+  const offramp = createOffRamp(seller.keypair, offrampStateRepo, stellar.networkPassphrase);
+  const kyc = createKyc(seller.keypair, db, stellar.networkPassphrase);
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). In mock mode the
   // probe is disabled and short-circuits to "always available" so the dev
@@ -141,8 +141,10 @@ export async function createContainer(): Promise<Container> {
  */
 function buildAnchorHealth(offrampKind: "mock" | "testanchor"): AnchorHealth {
   const enabled = offrampKind === "testanchor";
-  const url = enabled ? process.env.ANCHOR_URL ?? "https://testanchor.stellar.org" : null;
-  const homeDomain = enabled ? process.env.ANCHOR_HOME_DOMAIN ?? "testanchor.stellar.org" : null;
+  const homeDomain = enabled ? env.anchorHomeDomain : null;
+  // ANCHOR_URL is only the fallback base for anchors whose TOML omits an
+  // endpoint; the probe prefers what stellar.toml advertises.
+  const url = enabled ? process.env.ANCHOR_URL ?? `https://${env.anchorHomeDomain}` : null;
   const failureThreshold = Number(process.env.ANCHOR_PROBE_FAILURE_THRESHOLD ?? "3");
   const cooldownMs = Number(process.env.ANCHOR_PROBE_COOLDOWN_MS ?? "30000");
   return new AnchorHealth({
@@ -196,7 +198,11 @@ function resolveSellerKeypairOrWallet(): { keypair: Keypair | null; publicKey: s
   return { keypair: kp, publicKey: pub };
 }
 
-function createOffRamp(sellerKeypair: Keypair | null, state: OffRampStateRepository): OffRampPort {
+function createOffRamp(
+  sellerKeypair: Keypair | null,
+  state: OffRampStateRepository,
+  networkPassphrase: string,
+): OffRampPort {
   if (env.offramp === "mock") {
     // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
     return new MockAnchorOffRamp({ state, settleAfterMs: 8000 });
@@ -208,10 +214,16 @@ function createOffRamp(sellerKeypair: Keypair | null, state: OffRampStateReposit
         "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
     );
   }
-  return new TestAnchorOffRamp({ sellerKeypair, state });
+  // homeDomain is the only endpoint config: every URL comes from SEP-1 discovery.
+  return new TestAnchorOffRamp({
+    sellerKeypair,
+    state,
+    homeDomain: env.anchorHomeDomain,
+    networkPassphrase,
+  });
 }
 
-function createKyc(sellerKeypair: Keypair | null, db: DB): KycPort {
+function createKyc(sellerKeypair: Keypair | null, db: DB, networkPassphrase: string): KycPort {
   if (env.offramp === "mock") {
     // No real anchor, nothing to be compliant with — never gates the simulated cash-out.
     return new NoKycRequired();
@@ -225,5 +237,10 @@ function createKyc(sellerKeypair: Keypair | null, db: DB): KycPort {
   }
   // env.kycEncryptionKey is guaranteed set when OFFRAMP=testanchor (see env.ts).
   const repo = new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey as string));
-  return new TestAnchorKyc({ sellerKeypair, repo });
+  return new TestAnchorKyc({
+    sellerKeypair,
+    repo,
+    homeDomain: env.anchorHomeDomain,
+    networkPassphrase,
+  });
 }

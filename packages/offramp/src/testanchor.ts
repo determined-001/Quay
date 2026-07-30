@@ -10,6 +10,7 @@ import {
   type OffRampStateRepository,
   type SellerPayoutRef,
 } from "@checkout/core";
+import { assertCurrencySupported, resolveAnchor, type Logger, type ResolvedAnchor } from "./anchor";
 import { Sep10Client } from "./sep10";
 import { getSep38Quote } from "./sep38";
 import { getSep6Transaction, startSep6Withdraw } from "./sep6";
@@ -35,17 +36,29 @@ import { getSep6Transaction, startSep6Withdraw } from "./sep6";
 // `initiate()` assumes the caller (LinkService) already confirmed the seller's
 // KYC status is ACCEPTED — this adapter has no business fabricating identity
 // fields from whatever happened to be in a cash-out request.
+//
+// Endpoints are NOT hard-coded: `homeDomain` is the only configuration, and
+// every URL comes from the anchor's SEP-1 stellar.toml (anchor.ts). That is what
+// makes this class swappable to a different anchor by changing one env var
+// instead of forking it.
 
 const ANCHOR_NAME = "testanchor";
-const DEFAULT_BASE_URL = "https://testanchor.stellar.org";
 const DEFAULT_HOME_DOMAIN = "testanchor.stellar.org";
 
 export interface TestAnchorOptions {
   /** Seller's Stellar keypair — SEP-10 needs the secret key to sign the auth challenge. */
   sellerKeypair: Keypair;
   state: OffRampStateRepository;
-  baseUrl?: string;
+  /** The anchor's home domain — the ONLY endpoint configuration needed. */
   homeDomain?: string;
+  /**
+   * Expected NETWORK_PASSPHRASE. When set, an anchor advertising a different
+   * network is rejected at discovery instead of at signing time.
+   */
+  networkPassphrase?: string;
+  /** Base URL for last-resort fallback paths; defaults to `https://<homeDomain>`. */
+  baseUrl?: string;
+  logger?: Logger;
 }
 
 function mapSep6Status(status: string): OffRampJobStatus {
@@ -57,17 +70,51 @@ function mapSep6Status(status: string): OffRampJobStatus {
 export class TestAnchorOffRamp implements OffRampPort {
   readonly mode: OffRampMode = "seller_initiated";
 
-  private readonly baseUrl: string;
-  private readonly auth: Sep10Client;
   private readonly state: OffRampStateRepository;
+  private readonly opts: TestAnchorOptions;
+  private readonly homeDomain: string;
+  /** Memoized SEP-1 discovery + the SEP-10 client it configures. */
+  private session: Promise<{ anchor: ResolvedAnchor; auth: Sep10Client }> | null = null;
 
   constructor(opts: TestAnchorOptions) {
-    this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    this.opts = opts;
     this.state = opts.state;
-    this.auth = new Sep10Client(opts.sellerKeypair, {
-      baseUrl: this.baseUrl,
-      homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
+    this.homeDomain = opts.homeDomain ?? DEFAULT_HOME_DOMAIN;
+  }
+
+  /**
+   * Discovery is async and network-bound, so it can't happen in the constructor.
+   * Memoized on success; a failure clears the memo so the next call retries
+   * rather than caching a transient DNS/network blip for the process lifetime.
+   */
+  private connect(): Promise<{ anchor: ResolvedAnchor; auth: Sep10Client }> {
+    if (this.session) return this.session;
+    const pending = (async () => {
+      const anchor = await resolveAnchor(this.homeDomain, {
+        baseUrl: this.opts.baseUrl,
+        expectedNetworkPassphrase: this.opts.networkPassphrase,
+        logger: this.opts.logger,
+      });
+      const auth = new Sep10Client(this.opts.sellerKeypair, {
+        webAuthEndpoint: anchor.webAuthEndpoint,
+        homeDomain: anchor.homeDomain,
+        // No SIGNING_KEY means no way to verify a challenge; Sep10Client refuses
+        // to sign rather than trusting whatever the server hands it.
+        signingKey: anchor.signingKey ?? "",
+        networkPassphrase: this.opts.networkPassphrase ?? anchor.networkPassphrase ?? undefined,
+      });
+      return { anchor, auth };
+    })();
+    this.session = pending.catch((err: unknown) => {
+      this.session = null;
+      throw err;
     });
+    return this.session;
+  }
+
+  /** The seller's public key — no discovery needed. */
+  get publicKey(): string {
+    return this.opts.sellerKeypair.publicKey();
   }
 
   async quote(input: {
@@ -81,8 +128,14 @@ export class TestAnchorOffRamp implements OffRampPort {
         'The test anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
       );
     }
-    const jwt = await this.auth.token();
-    const q = await getSep38Quote(this.baseUrl, jwt, {
+    const { anchor, auth } = await this.connect();
+
+    // The anchor's own CURRENCIES list is the authority on what it will accept —
+    // check before spending a SEP-10 round trip on an asset it never listed.
+    assertCurrencySupported(anchor, input.sourceAsset, this.opts.logger);
+
+    const jwt = await auth.token();
+    const q = await getSep38Quote(anchor.anchorQuoteServer, jwt, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
@@ -119,12 +172,15 @@ export class TestAnchorOffRamp implements OffRampPort {
     const q = await this.state.getQuote(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
 
-    const jwt = await this.auth.token();
+    const { anchor, auth } = await this.connect();
+    assertCurrencySupported(anchor, q.sellAsset, this.opts.logger);
 
-    const withdraw = await startSep6Withdraw(this.baseUrl, jwt, {
+    const jwt = await auth.token();
+
+    const withdraw = await startSep6Withdraw(anchor.transferServer, jwt, {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,
-      account: this.auth.publicKey,
+      account: auth.publicKey,
       type: input.payout.fields.type ?? "bank_account",
       dest: input.payout.fields.dest,
       destExtra: input.payout.fields.dest_extra,
@@ -159,8 +215,9 @@ export class TestAnchorOffRamp implements OffRampPort {
     const job = await this.state.getJob(jobId);
     if (!job) throw new OffRampJobNotFoundError(jobId);
 
-    const jwt = await this.auth.token();
-    const tx = await getSep6Transaction(this.baseUrl, jwt, jobId);
+    const { anchor, auth } = await this.connect();
+    const jwt = await auth.token();
+    const tx = await getSep6Transaction(anchor.transferServer, jwt, jobId);
     const status = mapSep6Status(tx.status);
     const targetAmount = tx.amountOut ?? job.targetAmount;
     const reason = status === "failed" ? (tx.message ?? "testanchor: withdrawal failed") : null;

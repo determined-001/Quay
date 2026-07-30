@@ -97,6 +97,12 @@ export const env = {
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
   defaultSellerName: process.env.DEFAULT_SELLER_NAME || "Demo Seller",
   offramp,
+  // The anchor's home domain — the ONLY endpoint configuration the off-ramp
+  // needs. Every URL (SEP-10 auth, SEP-6 transfer, SEP-12 KYC, SEP-38 quotes)
+  // and the SEP-10 SIGNING_KEY are discovered from
+  // https://<domain>/.well-known/stellar.toml (SEP-1). Point this at a different
+  // anchor and the adapter follows, with no code change.
+  anchorHomeDomain: process.env.ANCHOR_HOME_DOMAIN || "testanchor.stellar.org",
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,

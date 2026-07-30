@@ -1,8 +1,9 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import { existsSync, writeFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OffRampJobNotFoundError } from "@checkout/core";
 import { TestAnchorOffRamp } from "../src/testanchor";
+import { clearStellarTomlCache } from "../src/sep1";
 import { FakeOffRampStateRepository } from "./fake-state";
 
 // These hit the real https://testanchor.stellar.org sandbox. Off by default —
@@ -20,6 +21,14 @@ function makeKeypair(): Keypair {
   }
   return Keypair.random();
 }
+
+// The SEP-1 cache is process-global; leaking a stubbed TOML between tests would
+// make them order-dependent.
+beforeEach(() => clearStellarTomlCache());
+afterEach(() => {
+  clearStellarTomlCache();
+  vi.unstubAllGlobals();
+});
 
 describe("TestAnchorOffRamp (offline)", () => {
   it("quote() rejects native XLM with a clear error before any network call", async () => {
@@ -43,6 +52,116 @@ describe("TestAnchorOffRamp (offline)", () => {
       state: new FakeOffRampStateRepository(),
     });
     await expect(offramp.status("no-such-job")).rejects.toBeInstanceOf(OffRampJobNotFoundError);
+  });
+
+  it("needs nothing but a homeDomain — every endpoint comes from SEP-1 discovery", async () => {
+    // The adapter is configuration, not a fork: no baseUrl, no per-SEP paths.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        [
+          `SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"`,
+          `WEB_AUTH_ENDPOINT = "https://custom.example/auth-v2"`,
+          `ANCHOR_QUOTE_SERVER = "https://custom.example/quotes"`,
+          `TRANSFER_SERVER = "https://custom.example/rails"`,
+          `KYC_SERVER = "https://custom.example/kyc"`,
+          `[[CURRENCIES]]`,
+          `code = "USDC"`,
+          `issuer = "${USDC_TESTNET_ISSUER}"`,
+        ].join("\n"),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const offramp = new TestAnchorOffRamp({
+      sellerKeypair: Keypair.random(),
+      state: new FakeOffRampStateRepository(),
+      homeDomain: "custom.example",
+      logger: { warn: () => {} },
+    });
+
+    // The SEP-10 GET against the DISCOVERED endpoint is where this stops (the
+    // stub only answers the TOML) — which proves discovery drove the URL.
+    await expect(
+      offramp.quote({
+        linkId: "lnk_1",
+        sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sourceAmount: "10",
+        targetCurrency: "USD",
+      }),
+    ).rejects.toThrow();
+
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls[0]).toBe("https://custom.example/.well-known/stellar.toml");
+    expect(urls.some((u) => u.startsWith("https://custom.example/auth-v2?"))).toBe(true);
+    // Never the hard-coded testanchor layout.
+    expect(urls.some((u) => u.includes("testanchor.stellar.org"))).toBe(false);
+    expect(urls.some((u) => u.includes("/sep38/quote"))).toBe(false);
+  });
+
+  it("refuses an asset the anchor does not list, before any SEP-10 round trip", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        [
+          `SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"`,
+          `WEB_AUTH_ENDPOINT = "https://custom.example/auth"`,
+          `TRANSFER_SERVER = "https://custom.example/sep6"`,
+          `ANCHOR_QUOTE_SERVER = "https://custom.example/sep38"`,
+          `KYC_SERVER = "https://custom.example/sep12"`,
+          `[[CURRENCIES]]`,
+          `code = "SRT"`,
+          `issuer = "GCDNJUBQSX7AJWLJACMJ7I4BC3Z47BQUTMHEICZLE6MU4KQBRYG5JY6B"`,
+        ].join("\n"),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const offramp = new TestAnchorOffRamp({
+      sellerKeypair: Keypair.random(),
+      state: new FakeOffRampStateRepository(),
+      homeDomain: "custom.example",
+      logger: { warn: () => {} },
+    });
+
+    await expect(
+      offramp.quote({
+        linkId: "lnk_1",
+        sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sourceAmount: "10",
+        targetCurrency: "USD",
+      }),
+    ).rejects.toThrow(/does not list USDC/);
+
+    // Only the TOML was fetched — no auth, no quote.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an anchor advertising a different network than we run on", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        `NETWORK_PASSPHRASE = "Public Global Stellar Network ; September 2015"\nWEB_AUTH_ENDPOINT = "https://custom.example/auth"`,
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const offramp = new TestAnchorOffRamp({
+      sellerKeypair: Keypair.random(),
+      state: new FakeOffRampStateRepository(),
+      homeDomain: "custom.example",
+      logger: { warn: () => {} },
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
+
+    await expect(
+      offramp.quote({
+        linkId: "lnk_1",
+        sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sourceAmount: "10",
+        targetCurrency: "USD",
+      }),
+    ).rejects.toThrow(/network mismatch/i);
   });
 });
 
