@@ -4,7 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type PaymentLink } from "../../lib/api";
 import { useCallback, useEffect, useState } from "react";
-import { api, CheckoutError, describeError, type PaymentLink } from "../../lib/api";
+import { api, CheckoutError, describeError, type KycView, type PaymentLink } from "../../lib/api";
+import KycPanel from "./KycPanel";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
@@ -84,9 +85,10 @@ interface TableProps {
   copied: string | null;
   onCopy: (id: string) => void;
   onCashOut: (id: string) => void;
+  cashOutBlocked: boolean;
 }
 
-function LinksTable({ links, copied, onCopy, onCashOut }: TableProps) {
+function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableProps) {
   return (
     <table className="table">
       <thead>
@@ -116,9 +118,15 @@ function LinksTable({ links, copied, onCopy, onCashOut }: TableProps) {
               {link.status === "paid" && (
                 <>
                   {" · "}
-                  <button className="linkbtn" onClick={() => onCashOut(link.id)}>
-                    {CASH_OUT_LABEL}
-                  </button>
+                  {cashOutBlocked ? (
+                    <span className="muted" style={{ fontSize: 12 }} title="Complete identity verification above">
+                      Identity verification required
+                    </span>
+                  ) : (
+                    <button className="linkbtn" onClick={() => onCashOut(link.id)}>
+                      {CASH_OUT_LABEL}
+                    </button>
+                  )}
                 </>
               )}
             </td>
@@ -143,6 +151,7 @@ export default function Dashboard() {
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [kyc, setKyc] = useState<KycView | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -161,11 +170,24 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshKyc = useCallback(async () => {
+    if (OFFRAMP_IS_MOCK) return; // no real anchor, nothing to verify
+    try {
+      setKyc(await api.getKyc());
+    } catch {
+      /* dashboard still works without it; the cash-out button just stays gated */
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
     const t = setInterval(refresh, 5_000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  useEffect(() => {
+    void refreshKyc();
+  }, [refreshKyc]);
 
   async function create() {
     setActionError(null);
@@ -207,6 +229,11 @@ export default function Dashboard() {
       await api.cashOut(id, OFFRAMP_CURRENCY);
       await refresh();
     } catch (e) {
+      if (e instanceof CheckoutError && e.code === "kyc_required") {
+        setActionError(describeError(e));
+        void refreshKyc();
+        return;
+      }
       setActionError(
         e instanceof CheckoutError ? describeError(e) : "Cash-out failed. Please try again.",
       );
@@ -235,6 +262,10 @@ export default function Dashboard() {
       setExporting(false);
     }
   }
+  // Real anchor and not yet verified: never let the seller submit a cash-out
+  // that can only fail (or worse, silently carry placeholder identity data).
+  const cashOutBlocked = !OFFRAMP_IS_MOCK && kyc?.status !== "ACCEPTED";
+
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
@@ -280,6 +311,8 @@ export default function Dashboard() {
         {actionError && <div className="err">{actionError}</div>}
       </section>
 
+      {!OFFRAMP_IS_MOCK && <KycPanel kyc={kyc} onUpdated={setKyc} />}
+
       <section className="panel">
         <h2>Links</h2>
 
@@ -293,7 +326,13 @@ export default function Dashboard() {
           <>
             <ErrorBanner message={fetchError} onRetry={refresh} />
             <div style={{ marginTop: 16 }}>
-              <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={cashOut} />
+              <LinksTable
+                links={links}
+                copied={copied}
+                onCopy={copyCheckout}
+                onCashOut={cashOut}
+                cashOutBlocked={cashOutBlocked}
+              />
             </div>
           </>
         )}
@@ -342,7 +381,13 @@ export default function Dashboard() {
         )}
 
         {!loading && !fetchError && links.length > 0 && (
-          <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={cashOut} />
+          <LinksTable
+            links={links}
+            copied={copied}
+            onCopy={copyCheckout}
+            onCashOut={cashOut}
+            cashOutBlocked={cashOutBlocked}
+          />
         )}
       </section>
 
