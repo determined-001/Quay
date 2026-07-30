@@ -1,5 +1,8 @@
 # Stellar Checkout
 
+[![CI](https://github.com/determined-001/Quay/actions/workflows/ci.yml/badge.svg)](https://github.com/determined-001/Quay/actions/workflows/ci.yml)
+[![Anchor Probe](https://github.com/determined-001/Quay/actions/workflows/anchor-probe.yml/badge.svg)](https://github.com/determined-001/Quay/actions/workflows/anchor-probe.yml)
+
 Stellar Checkout is the open-source, non-custodial merchant checkout for the Stellar anchor network — the inbound counterpart to the Stellar Disbursement Platform.
 
 **Live demo (Stellar testnet):** [dashboard](https://quay-web.vercel.app) ·
@@ -7,6 +10,11 @@ Stellar Checkout is the open-source, non-custodial merchant checkout for the Ste
 testnet wallet with the shown memo, and watch it flip to **paid**. Cash-out runs
 a real SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org` (USD quotes;
 testnet only, no real money moves).
+
+[![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/main/docs/uptime-badge-api.json)](docs/STATUS.md)
+[![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/main/docs/uptime-badge-web.json)](docs/STATUS.md)
+[![Synthetic check](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/main/docs/uptime-badge-synthetic.json)](docs/STATUS.md)
+Checked every 5 minutes — see [`docs/STATUS.md`](docs/STATUS.md) for the last 90 days.
 
 The loop, end to end:
 
@@ -172,6 +180,7 @@ Useful scripts (from the repo root):
 pnpm typecheck   # all packages
 pnpm test        # core unit tests
 pnpm build       # builds the web app
+pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live demo
 ```
 
 ---
@@ -212,12 +221,10 @@ pnpm build       # builds the web app
 
 ## Docs & contributing
 
-- **[Architecture & Topology](ARCHITECTURE.md)** — system boundaries, clean architecture, and ports & adapters.
-- **[Proposal & Vision](PROPOSAL.md)** — market positioning, non-custodial strategy, and SDP alignment.
-- **[Fix Log](FIXLOG.md)** — recent fixes, architectural milestones, and engineering changelog.
-- **[Issues & Backlog](ISSUES.md)** — post-entry roadmap items, SEP-24, auth, and telemetry tasks.
-- **[Triage & Review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h SLAs, and stale issue policy.
+- **[Architecture](docs/ARCHITECTURE.md)** — package graph, the three ports, sequence diagrams for each flow, the status machine, and how to add a new chain/anchor/rail.
+- **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
+- **[SCF Build proposal](docs/PROPOSAL.md)** — the problem, the wedge, milestones, budget, traction, and risk register.
 - **[Contributing](CONTRIBUTING.md)** — setup, the check suite, and PR guidelines.
 - **[Security policy](SECURITY.md)** — how to report a vulnerability privately.
 - **[Code of conduct](CODE_OF_CONDUCT.md)**.

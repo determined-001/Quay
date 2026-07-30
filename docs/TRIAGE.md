@@ -19,14 +19,18 @@ This document defines the issue triage process, labeling rules, response SLAs, a
 
 No issue should remain untriaged or unlabelled. Every open issue must be assigned labels from each of the three core categories:
 
-1. **`area:*`** — Location in the codebase (`area:core`, `area:stellar`, `area:offramp`, `area:api`, `area:web`, `area:docs`, `area:infra`)
-2. **`type:*`** — Intent of the issue (`type:bug`, `type:feature`, `type:enhancement`, `type:docs`, `type:refactor`, `type:security`)
-3. **`complexity:*`** — Estimated effort (`complexity:small`, `complexity:medium`, `complexity:large`)
+1. **`area:*`** — Location in the codebase (`area:core`, `area:stellar`, `area:offramp`, `area:api`, `area:web`, `area:auth`, `area:distribution`, `area:ops`)
+2. **`type:*`** — Intent of the issue (`type:bug`, `type:feature`, `type:docs`, `type:test`, `type:refactor`, `type:perf`, `type:security`, `type:dx`, `type:ops`)
+3. **`complexity:*`** — Estimated effort (`complexity:trivial` = 100 points, `complexity:medium` = 150, `complexity:high` = 200)
+
+The authoritative definitions live in `LABEL_DEFS` in `.github/create-issues.js`
+and are mirrored in [`.github/labels.yml`](../.github/labels.yml). The `area:*`
+major maps one-to-one onto the backlog numbering in `ISSUES.md`.
 
 Optionally add:
 - **`good-first-issue`**: Genuinely self-contained, well-scoped tasks suitable for newcomers.
 - **`help-wanted`**: Issues where community contribution is actively invited.
-- **`Stellar Wave: W7` / `Stellar Wave: W8`**: Roadmap wave milestones.
+- **`Stellar Wave`**: Opts the issue into the Drips Wave Program.
 
 ---
 

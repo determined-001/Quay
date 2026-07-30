@@ -14,7 +14,7 @@ By participating you agree to uphold our [Code of Conduct](./CODE_OF_CONDUCT.md)
 
 Welcome! If you are looking for your first contribution:
 
-1. **Find a Starter Issue**: Look for issues tagged [`good-first-issue`](ISSUES.md#starter-issues-good-first-issue) in [ISSUES.md](ISSUES.md). Examples include [#1.6](.github/issues/01_issue_1.6_request_logging_middleware.md), [#5.5](.github/issues/05_issue_5.5_sep7_uri_builder_tests.md), and [#8.7](.github/issues/10_issue_8.7_payment_qr_copy_toast.md).
+1. **Find a starter issue**: browse the [`good-first-issue`](https://github.com/determined-001/Quay/issues?q=is%3Aissue+is%3Aopen+label%3Agood-first-issue) label. The newcomer-gated set is backlog items 1.6, 5.5, 7.4, 7.6, 8.5 and 8.7 — property-based money tests, SEP-7 builder tests, the FIXLOG regression index, README repositioning, dependency/secret scanning in CI, and uptime monitoring.
 2. **Comment on the Issue**: Express interest so maintainers can assign it to you.
 3. **Fork & Branch**: Fork the repo and create a descriptive branch from `main`:
    ```bash
@@ -29,9 +29,12 @@ Welcome! If you are looking for your first contribution:
 ## Issue Label Taxonomy & Triage SLA
 
 All issues carry labels from three required categories:
-- **`area:*`**: `area:core`, `area:stellar`, `area:offramp`, `area:api`, `area:web`, `area:docs`, `area:infra`
-- **`type:*`**: `type:bug`, `type:feature`, `type:enhancement`, `type:docs`, `type:refactor`, `type:security`
-- **`complexity:*`**: `complexity:small`, `complexity:medium`, `complexity:large`
+- **`area:*`**: `area:core`, `area:stellar`, `area:offramp`, `area:api`, `area:web`, `area:auth`, `area:distribution`, `area:ops`
+- **`type:*`**: `type:bug`, `type:feature`, `type:docs`, `type:test`, `type:refactor`, `type:perf`, `type:security`, `type:dx`, `type:ops`
+- **`complexity:*`**: `complexity:trivial` (100 points), `complexity:medium` (150), `complexity:high` (200)
+
+The full set lives in [`.github/labels.yml`](.github/labels.yml) and is created
+by `.github/create-issues.js` — that script is the authoritative source.
 
 ### SLAs & Codeowners
 - **Triage Cadence**: Every new issue is triaged and labeled within **48 hours** (see [TRIAGE.md](docs/TRIAGE.md)).
@@ -53,9 +56,10 @@ apps/
   web/       Next.js seller dashboard + buyer checkout page + widget.js.
 ```
 
-The domain (`packages/core`) never imports a chain SDK. New chain or anchor behaviour belongs behind a port (`RailPort`, `WatcherPort`, `OffRampPort`), not in the domain. Keep that boundary intact.
-
----
+The domain (`packages/core`) never imports a chain SDK. New chain or anchor
+behaviour belongs behind a port (`RailPort`, `WatcherPort`, `OffRampPort`), not
+in the domain. Keep that boundary intact — CI enforces it (see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)), so a violation fails the build.
 
 ## Prerequisites
 
@@ -90,12 +94,19 @@ pnpm --filter @checkout/web dev
 Run the full check suite from the repo root — this is exactly what CI runs:
 
 ```bash
-pnpm typecheck   # all packages
-pnpm test        # unit tests
-pnpm build       # builds the web app
+pnpm typecheck                    # all packages
+pnpm test                         # unit tests
+pnpm build                        # builds the web app
+pnpm docs:check-status-diagram    # docs/generated/status-diagram.mmd matches status.ts
+pnpm docs:check-domain-boundary   # packages/core imports no chain SDK
 ```
 
-All three must pass. If you change domain logic in `packages/core`, add or update the corresponding unit tests (`packages/core/test/`). New behaviour in the API, worker, or adapters should come with tests where practical.
+All five must pass. If you change domain logic in `packages/core`, add or update
+the corresponding unit tests (`packages/core/test/`). New behaviour in the API,
+worker, or adapters should come with tests where practical. If you change
+`LINK_STATUSES`/`TRANSITIONS` in `packages/core/src/domain/status.ts`, run
+`pnpm docs:status-diagram` and update the pasted copy in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) to match.
 
 ---
 
