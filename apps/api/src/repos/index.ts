@@ -1,10 +1,17 @@
 import { eq, and, inArray } from "drizzle-orm";
 import type {
   CreateLinkInput,
+  KycFieldSpec,
+  KycRecord,
+  KycRepository,
+  KycStatus,
   LinkRepository,
+  OffRampStateRepository,
   PaymentLink,
   Seller,
   SellerRepository,
+  StoredOffRampJob,
+  StoredOffRampQuote,
   Webhook,
   WebhookDelivery,
   WebhookRepository,
@@ -12,8 +19,19 @@ import type {
   AssetRef,
 } from "@checkout/core";
 import type { DB } from "../db/client";
-import { links, sellers, webhooks, webhookDeliveries, watcherCursors, processedTx, offrampTelemetry } from "../db/schema";
+import {
+  links,
+  sellers,
+  webhooks,
+  webhookDeliveries,
+  watcherCursors,
+  processedTx,
+  offrampQuotes,
+  offrampJobs,
+  sellerKyc,
+} from "../db/schema";
 import { newId } from "../services/ids";
+import { decryptPii, encryptPii } from "../crypto/pii";
 
 type LinkRow = typeof links.$inferSelect;
 
@@ -29,6 +47,7 @@ function rowToLink(row: LinkRow): PaymentLink {
     reference: row.reference,
     sellerId: row.sellerId,
     destination: row.destination,
+    muxedId: row.muxedId ?? null,
     title: row.title,
     amount: row.amount,
     asset: assetFromRow(row),
@@ -55,6 +74,7 @@ export class DrizzleLinkRepository implements LinkRepository {
       reference: input.reference,
       sellerId: input.sellerId,
       destination: input.destination,
+      muxedId: input.muxedId,
       title: input.title,
       amount: input.amount,
       assetCode: input.asset.code,
@@ -229,167 +249,138 @@ export class DrizzleWatcherStateRepository implements WatcherStateRepository {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Off-ramp telemetry repository
-// ---------------------------------------------------------------------------
+type OffRampQuoteRow = typeof offrampQuotes.$inferSelect;
+type OffRampJobRow = typeof offrampJobs.$inferSelect;
 
-export interface TelemetryRow {
-  id: string;
-  anchorDomain: string;
-  corridor: string;
-  sellAsset: string;
-  sellAmount: string;
-  indicativeRate: string | null;
-  quotedRate: string;
-  quotedAt: number;
-  initiatedAt: number | null;
-  settledAt: number | null;
-  effectiveRate: string | null;
-  feeAmount: string | null;
-  status: "quoted" | "initiated" | "settled" | "failed";
-  failureReason: string | null;
+function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
+  return {
+    quoteId: row.quoteId,
+    linkId: row.linkId,
+    sellAsset: { code: row.sellAssetCode, issuer: row.sellAssetIssuer ?? null },
+    sellAmount: row.sellAmount,
+    buyCurrency: row.buyCurrency,
+    price: row.price,
+    expiresAt: row.expiresAt,
+    createdAt: row.createdAt,
+  };
 }
 
-export interface TelemetrySummary {
-  anchorDomain: string;
-  corridor: string;
-  count: number;
-  settledCount: number;
-  failedCount: number;
-  /** p50 settlement latency in ms (null when < 1 settled row). */
-  latencyP50Ms: number | null;
-  /** p95 settlement latency in ms (null when < 1 settled row). */
-  latencyP95Ms: number | null;
-  /** mean of (quotedRate - effectiveRate) / quotedRate, as a fraction (null when no data). */
-  meanSpread: number | null;
+function rowToJob(row: OffRampJobRow): StoredOffRampJob {
+  return {
+    jobId: row.jobId,
+    linkId: row.linkId,
+    anchor: row.anchor,
+    targetCurrency: row.targetCurrency,
+    targetAmount: row.targetAmount,
+    rate: row.rate,
+    status: row.status as StoredOffRampJob["status"],
+    externalStatus: row.externalStatus ?? null,
+    lastError: row.lastError ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
-export class DrizzleOfframpTelemetryRepository {
+/** Off-ramp quotes and jobs — money-adjacent state that must survive a restart. */
+export class DrizzleOffRampStateRepository implements OffRampStateRepository {
   constructor(private readonly db: DB) {}
 
-  async upsert(row: TelemetryRow): Promise<void> {
+  async saveQuote(quote: StoredOffRampQuote): Promise<void> {
+    await this.db.insert(offrampQuotes).values({
+      quoteId: quote.quoteId,
+      linkId: quote.linkId,
+      sellAssetCode: quote.sellAsset.code,
+      sellAssetIssuer: quote.sellAsset.issuer,
+      sellAmount: quote.sellAmount,
+      buyCurrency: quote.buyCurrency,
+      price: quote.price,
+      expiresAt: quote.expiresAt,
+      createdAt: quote.createdAt,
+    });
+  }
+
+  async getQuote(quoteId: string): Promise<StoredOffRampQuote | null> {
+    const rows = await this.db.select().from(offrampQuotes).where(eq(offrampQuotes.quoteId, quoteId)).limit(1);
+    return rows[0] ? rowToQuote(rows[0]) : null;
+  }
+
+  async saveJob(job: StoredOffRampJob): Promise<void> {
+    await this.db.insert(offrampJobs).values({
+      jobId: job.jobId,
+      linkId: job.linkId,
+      anchor: job.anchor,
+      targetCurrency: job.targetCurrency,
+      targetAmount: job.targetAmount,
+      rate: job.rate,
+      status: job.status,
+      externalStatus: job.externalStatus,
+      lastError: job.lastError,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+    });
+  }
+
+  async getJob(jobId: string): Promise<StoredOffRampJob | null> {
+    const rows = await this.db.select().from(offrampJobs).where(eq(offrampJobs.jobId, jobId)).limit(1);
+    return rows[0] ? rowToJob(rows[0]) : null;
+  }
+
+  async updateJob(
+    jobId: string,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+  ): Promise<void> {
     await this.db
-      .insert(offrampTelemetry)
-      .values({
-        id: row.id,
-        anchorDomain: row.anchorDomain,
-        corridor: row.corridor,
-        sellAsset: row.sellAsset,
-        sellAmount: row.sellAmount,
-        indicativeRate: row.indicativeRate,
-        quotedRate: row.quotedRate,
-        quotedAt: row.quotedAt,
-        initiatedAt: row.initiatedAt,
-        settledAt: row.settledAt,
-        effectiveRate: row.effectiveRate,
-        feeAmount: row.feeAmount,
-        status: row.status,
-        failureReason: row.failureReason,
-      })
-      .onConflictDoUpdate({
-        target: offrampTelemetry.id,
-        set: {
-          initiatedAt: row.initiatedAt,
-          settledAt: row.settledAt,
-          effectiveRate: row.effectiveRate,
-          feeAmount: row.feeAmount,
-          status: row.status,
-          failureReason: row.failureReason,
-        },
-      });
-  }
-
-  async findById(id: string): Promise<TelemetryRow | null> {
-    const rows = await this.db
-      .select()
-      .from(offrampTelemetry)
-      .where(eq(offrampTelemetry.id, id))
-      .limit(1);
-    return rows[0] ? this.toRow(rows[0]) : null;
-  }
-
-  async findByJobId(jobId: string): Promise<TelemetryRow | null> {
-    // id is the telemetry row id which equals "tel_<jobId>" by convention in LinkService.
-    return this.findById(`tel_${jobId}`);
-  }
-
-  async summary(): Promise<TelemetrySummary[]> {
-    const all = await this.db.select().from(offrampTelemetry);
-    // Group by (anchorDomain, corridor)
-    const groups = new Map<string, (typeof all)[number][]>();
-    for (const r of all) {
-      const key = `${r.anchorDomain}||${r.corridor}`;
-      const g = groups.get(key) ?? [];
-      g.push(r);
-      groups.set(key, g);
-    }
-
-    const result: TelemetrySummary[] = [];
-    for (const rows of groups.values()) {
-      const first = rows[0]!;
-      const settled = rows.filter((r) => r.status === "settled");
-      const failed = rows.filter((r) => r.status === "failed");
-
-      // Settlement latency: initiatedAt -> settledAt
-      const latencies = settled
-        .filter((r) => r.initiatedAt != null && r.settledAt != null)
-        .map((r) => r.settledAt! - r.initiatedAt!)
-        .sort((a, b) => a - b);
-
-      // Spread: (quotedRate - effectiveRate) / quotedRate
-      const spreads = settled
-        .filter((r) => r.effectiveRate != null)
-        .map((r) => {
-          const q = Number(r.quotedRate);
-          const e = Number(r.effectiveRate!);
-          return q === 0 ? 0 : (q - e) / q;
-        });
-
-      result.push({
-        anchorDomain: first.anchorDomain,
-        corridor: first.corridor,
-        count: rows.length,
-        settledCount: settled.length,
-        failedCount: failed.length,
-        latencyP50Ms: percentile(latencies, 50),
-        latencyP95Ms: percentile(latencies, 95),
-        meanSpread: spreads.length > 0 ? spreads.reduce((a, b) => a + b, 0) / spreads.length : null,
-      });
-    }
-    return result;
-  }
-
-  /** All rows ordered by quotedAt ascending — for CSV export. */
-  async all(): Promise<TelemetryRow[]> {
-    const rows = await this.db.select().from(offrampTelemetry);
-    return rows
-      .sort((a, b) => a.quotedAt - b.quotedAt)
-      .map((r) => this.toRow(r));
-  }
-
-  private toRow(r: typeof offrampTelemetry.$inferSelect): TelemetryRow {
-    return {
-      id: r.id,
-      anchorDomain: r.anchorDomain,
-      corridor: r.corridor,
-      sellAsset: r.sellAsset,
-      sellAmount: r.sellAmount,
-      indicativeRate: r.indicativeRate,
-      quotedRate: r.quotedRate,
-      quotedAt: r.quotedAt,
-      initiatedAt: r.initiatedAt,
-      settledAt: r.settledAt,
-      effectiveRate: r.effectiveRate,
-      feeAmount: r.feeAmount,
-      status: r.status as TelemetryRow["status"],
-      failureReason: r.failureReason,
-    };
+      .update(offrampJobs)
+      .set({ ...patch, updatedAt: Date.now() })
+      .where(eq(offrampJobs.jobId, jobId));
   }
 }
 
-/** Nearest-rank percentile. Returns null for empty arrays. */
-function percentile(sorted: number[], p: number): number | null {
-  if (sorted.length === 0) return null;
-  const idx = Math.ceil((p / 100) * sorted.length) - 1;
-  return sorted[Math.max(0, idx)]!;
+type SellerKycRow = typeof sellerKyc.$inferSelect;
+
+/**
+ * Seller-level SEP-12 KYC state. `fieldsEncrypted` is the seller's submitted
+ * PII (name, email, address, ...) — encrypted with `piiKey` before it ever
+ * touches the database, decrypted only in-process when read back.
+ */
+export class DrizzleKycRepository implements KycRepository {
+  constructor(
+    private readonly db: DB,
+    private readonly piiKey: Buffer,
+  ) {}
+
+  private rowToRecord(row: SellerKycRow): KycRecord {
+    return {
+      sellerId: row.sellerId,
+      customerId: row.customerId ?? null,
+      status: row.status as KycStatus,
+      requiredFields: JSON.parse(row.requiredFields) as KycFieldSpec[],
+      providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.piiKey)) as Record<string, string>,
+      message: row.message ?? null,
+      lastSyncedAt: row.lastSyncedAt ?? null,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async get(sellerId: string): Promise<KycRecord | null> {
+    const rows = await this.db.select().from(sellerKyc).where(eq(sellerKyc.sellerId, sellerId)).limit(1);
+    return rows[0] ? this.rowToRecord(rows[0]) : null;
+  }
+
+  async save(record: KycRecord): Promise<void> {
+    const row = {
+      sellerId: record.sellerId,
+      customerId: record.customerId,
+      status: record.status,
+      requiredFields: JSON.stringify(record.requiredFields),
+      fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.piiKey),
+      message: record.message,
+      lastSyncedAt: record.lastSyncedAt,
+      updatedAt: record.updatedAt,
+    };
+    await this.db
+      .insert(sellerKyc)
+      .values(row)
+      .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
+  }
 }
