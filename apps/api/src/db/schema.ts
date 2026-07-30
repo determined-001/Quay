@@ -33,7 +33,12 @@ export const webhooks = sqliteTable("webhooks", {
   id: text("id").primaryKey(),
   sellerId: text("seller_id").notNull(),
   url: text("url").notNull(),
-  secret: text("secret").notNull(),
+  secretEncrypted: text("secret_encrypted").notNull(),
+  secretLast4: text("secret_last4").notNull(),
+  previousSecretEncrypted: text("previous_secret_encrypted"),
+  previousSecretLast4: text("previous_secret_last4"),
+  previousSecretExpiresAt: integer("previous_secret_expires_at"),
+  deletedAt: integer("deleted_at"),
   createdAt: integer("created_at").notNull(),
 });
 

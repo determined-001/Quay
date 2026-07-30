@@ -265,27 +265,64 @@ export interface SellerRepository {
   findById(id: string): Promise<Seller | null>;
 }
 
+/**
+ * A registered webhook endpoint.
+ *
+ * The signing secret is never stored in plaintext — only `secretEncrypted`
+ * (reversible, AES-256-GCM; the platform must be able to decrypt it to sign
+ * outgoing deliveries) plus `secretLast4` for display. API routes must never
+ * serialize `secretEncrypted` / `previousSecretEncrypted` in a response; the
+ * raw secret is only ever returned once, directly from `create`/`rotateSecret`,
+ * before it's encrypted for storage.
+ */
 export interface Webhook {
   id: string;
   sellerId: string;
   url: string;
-  secret: string;
+  secretEncrypted: string;
+  secretLast4: string;
+  /** Set during the 24h post-rotation overlap window; null otherwise. */
+  previousSecretEncrypted: string | null;
+  previousSecretLast4: string | null;
+  previousSecretExpiresAt: number | null;
+  deletedAt: number | null;
   createdAt: number;
 }
 
+/** Fields safe to return from any API route — never includes secret material. */
+export type PublicWebhook = Omit<Webhook, "secretEncrypted" | "previousSecretEncrypted">;
+
 export interface WebhookDelivery {
+  id: string;
   webhookId: string;
   linkId: string;
   event: string;
   statusCode: number | null;
   ok: boolean;
   error: string | null;
+  createdAt: number;
 }
 
 export interface WebhookRepository {
   create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
+  /** Active (non-deleted) webhooks for a seller. Used for both dispatch and listing. */
   listBySeller(sellerId: string): Promise<Webhook[]>;
-  recordDelivery(d: WebhookDelivery): Promise<void>;
+  /** Scoped to the owning seller to prevent cross-tenant access (IDOR). */
+  getById(id: string, sellerId: string, opts?: { includeDeleted?: boolean }): Promise<Webhook | null>;
+  /**
+   * Rotates the signing secret. The previous secret remains valid for
+   * `overlapMs` so in-flight receivers can be redeployed without dropping
+   * events (see WebhookSender, which signs with both during the overlap).
+   */
+  rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null>;
+  /** Soft delete — keeps delivery history browsable after removal. */
+  softDelete(id: string, sellerId: string): Promise<boolean>;
+  recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void>;
+  listDeliveries(
+    webhookId: string,
+    sellerId: string,
+    opts: { limit: number; cursor?: string | null },
+  ): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }>;
 }
 
 /** Watcher bookkeeping: per-account cursor + processed-tx ledger for idempotency. */

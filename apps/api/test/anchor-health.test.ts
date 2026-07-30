@@ -20,6 +20,7 @@ import {
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import { AnchorHealth, LinkService } from "../src/services/link-service";
+import { encryptSecret } from "../src/services/secret-crypto";
 import { Hono } from "hono";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -294,15 +295,42 @@ class FakeSellerRepoForAnchor {
 class FakeWebhookRepoForAnchor implements WebhookRepository {
   stored: Webhook[] = [];
   async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
-    const w: Webhook = { id: "whk_x", sellerId: input.sellerId, url: input.url, secret: input.secret, createdAt: Date.now() };
+    const w: Webhook = {
+      id: "whk_x",
+      sellerId: input.sellerId,
+      url: input.url,
+      secretEncrypted: encryptSecret(input.secret),
+      secretLast4: input.secret.slice(-4),
+      previousSecretEncrypted: null,
+      previousSecretLast4: null,
+      previousSecretExpiresAt: null,
+      deletedAt: null,
+      createdAt: Date.now(),
+    };
     this.stored.push(w);
     return w;
   }
   async listBySeller(sellerId: string): Promise<Webhook[]> {
-    return this.stored.filter((h) => h.sellerId === sellerId);
+    return this.stored.filter((h) => h.sellerId === sellerId && h.deletedAt === null);
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async getById(id: string, sellerId: string): Promise<Webhook | null> {
+    return this.stored.find((h) => h.id === id && h.sellerId === sellerId) ?? null;
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async rotateSecret(): Promise<Webhook | null> {
+    return null;
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async softDelete(): Promise<boolean> {
+    return false;
   }
   async recordDelivery(_d: WebhookDelivery): Promise<void> {
     /* capture elsewhere via fetch interception */
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async listDeliveries(): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }> {
+    return { deliveries: [], nextCursor: null };
   }
 }
 
