@@ -96,6 +96,6 @@ describe("withHorizonRetry", () => {
 
     await withHorizonRetry(fn, { baseDelayMs: 1, maxDelayMs: 1, onRetry });
     expect(onRetry).toHaveBeenCalledTimes(1);
-    expect(onRetry.mock.calls[0][0]).toBe(1); // attempt 1 failed, about to retry
+    expect(onRetry.mock.calls[0]![0]).toBe(1); // attempt 1 failed, about to retry
   });
 });
