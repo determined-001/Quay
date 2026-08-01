@@ -15,6 +15,15 @@ function fakeContainer(): Container {
     metricsToken: "secret-token",
     watcherLagSeconds: () => 1.5,
     circuitBreakerState: () => 0,
+    kyc: {} as Container["kyc"],
+    auth: {} as Container["auth"],
+    getWatcherCircuitBreakerStatus: () => [],
+    getWatcherMetrics: () => ({
+      accountsWatched: 0,
+      tickDurationMs: 0,
+      perAccountLag: new Map(),
+      circuitBreakersOpen: 0,
+    }),
     start() {},
     stop() {},
   };

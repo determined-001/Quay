@@ -141,7 +141,9 @@ export class Histogram {
     // Every bucket >= value gets +1 — that's cumulative-by-construction, so
     // bucketCounts[i] already holds "observations <= buckets[i]" at render time.
     for (let i = 0; i < this.buckets.length; i++) {
-      if (value <= this.buckets[i]) entry.bucketCounts[i] += 1;
+      // `i` is bounded by buckets.length, and bucketCounts is constructed with
+      // exactly that length above — both indices are always populated.
+      if (value <= this.buckets[i]!) entry.bucketCounts[i] = entry.bucketCounts[i]! + 1;
     }
   }
 
@@ -154,7 +156,7 @@ export class Histogram {
     for (const entry of this.data.values()) {
       for (let i = 0; i < this.buckets.length; i++) {
         const leLabels = { ...entry.labels, le: String(this.buckets[i]) };
-        lines.push(`${this.name}_bucket${formatLabels([...this.labelNames, "le"], leLabels)} ${formatValue(entry.bucketCounts[i])}`);
+        lines.push(`${this.name}_bucket${formatLabels([...this.labelNames, "le"], leLabels)} ${formatValue(entry.bucketCounts[i]!)}`);
       }
       const infLabels = { ...entry.labels, le: "+Inf" };
       lines.push(`${this.name}_bucket${formatLabels([...this.labelNames, "le"], infLabels)} ${formatValue(entry.count)}`);

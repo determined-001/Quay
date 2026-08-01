@@ -36,7 +36,7 @@ describe("CircuitBreakerOffRamp", () => {
     const inner = fakePort();
     const breaker = new CircuitBreakerOffRamp(inner);
 
-    await breaker.quote({ sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" });
+    await breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" });
     expect(breaker.getState()).toBe("closed");
     expect(inner.quote).toHaveBeenCalledTimes(1);
   });
@@ -84,7 +84,7 @@ describe("CircuitBreakerOffRamp", () => {
     });
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
     expect(breaker.getStateNumeric()).toBe(0);
-    await expect(breaker.quote({ sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" })).rejects.toThrow();
+    await expect(breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" })).rejects.toThrow();
     expect(breaker.getStateNumeric()).toBe(2);
   });
 });

@@ -51,7 +51,12 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     return STATE_NUMBER[this.state];
   }
 
-  quote(input: { sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string }): Promise<OffRampQuote> {
+  quote(input: {
+    linkId: string;
+    sourceAsset: AssetRef;
+    sourceAmount: string;
+    targetCurrency: string;
+  }): Promise<OffRampQuote> {
     return this.call("quote", () => this.inner.quote(input));
   }
 
