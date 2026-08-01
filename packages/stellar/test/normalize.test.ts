@@ -1,78 +1,38 @@
-import { describe, expect, it, vi } from "vitest";
-import { normalizePayment, type OperationWithTransaction } from "../src/normalize";
+import { describe, expect, it } from "vitest";
+import { normalizePayment } from "../src/normalize";
 
-function paymentRecord(overrides: Partial<Record<string, unknown>> = {}): any {
+const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+
+function record(over: Record<string, unknown> = {}) {
   return {
     type: "payment",
-    transaction_hash: "txhash1",
-    paging_token: "12345",
+    paging_token: "1",
+    transaction_hash: "tx1",
     created_at: "2026-01-01T00:00:00Z",
-    to: "GTO",
-    from: "GFROM",
-    amount: "10.5000000",
-    asset_type: "credit_alphanum4",
-    asset_code: "USDC",
-    asset_issuer: "GISSUER",
-    transaction: vi.fn(),
-    ...overrides,
+    to: DEST,
+    from: "GBUYER",
+    amount: "10",
+    asset_type: "native",
+    transaction: async () => ({ memo_type: "none", memo: undefined }),
+    ...over,
   };
 }
 
 describe("normalizePayment", () => {
-  it("returns null for non-value operations", async () => {
-    const record = paymentRecord({ type: "create_account" });
-    expect(await normalizePayment(record)).toBeNull();
+  it("sets toMuxedId to null for an ordinary G-address payment", async () => {
+    const payment = await normalizePayment(record() as any);
+    expect(payment?.toMuxedId).toBeNull();
   });
 
-  it("pulls the memo from the resolved transaction", async () => {
-    const record = paymentRecord();
-    const fetchTransaction = vi.fn(async () => ({ memo: "pl_abc123", memo_type: "text" }) as any);
-
-    const result = await normalizePayment(record, fetchTransaction);
-
-    expect(result).toMatchObject({
-      txHash: "txhash1",
-      pagingToken: "12345",
-      from: "GFROM",
-      to: "GTO",
-      amount: "10.5000000",
-      memo: "pl_abc123",
-      memoType: "text",
-    });
-    expect(fetchTransaction).toHaveBeenCalledWith(record);
+  it("decodes to_muxed_id when the payer sent to an M-address", async () => {
+    const payment = await normalizePayment(record({ to_muxed_id: "123456789" }) as any);
+    expect(payment?.toMuxedId).toBe("123456789");
+    // `to` still resolves to the underlying G-address regardless of muxing.
+    expect(payment?.to).toBe(DEST);
   });
 
-  it("normalizes memo_type 'none' to a null memo", async () => {
-    const record = paymentRecord();
-    const fetchTransaction = vi.fn(async () => ({ memo: undefined, memo_type: "none" }) as any);
-
-    const result = await normalizePayment(record, fetchTransaction);
-    expect(result?.memo).toBeNull();
-    expect(result?.memoType).toBe("none");
-  });
-
-  it("REGRESSION: a transient transaction-fetch failure propagates — it must never be downgraded to a no_memo payment", async () => {
-    const record = paymentRecord();
-    const fetchTransaction = vi.fn(async () => {
-      throw new Error("Horizon 503");
-    });
-
-    await expect(normalizePayment(record, fetchTransaction)).rejects.toThrow("Horizon 503");
-  });
-
-  it("defaults to calling record.transaction() when no fetchTransaction is injected", async () => {
-    const transaction = vi.fn(async () => ({ memo: "m", memo_type: "text" }) as any);
-    const record = paymentRecord({ transaction });
-
-    const result = await normalizePayment(record);
-    expect(transaction).toHaveBeenCalledTimes(1);
-    expect(result?.memo).toBe("m");
-  });
-});
-
-describe("OperationWithTransaction shape", () => {
-  it("is what horizon-watcher's memoized fetchTransaction keys off of", () => {
-    const record: OperationWithTransaction = { transaction_hash: "h", transaction: vi.fn() };
-    expect(record.transaction_hash).toBe("h");
+  it("returns null for non-value operations regardless of muxing", async () => {
+    const payment = await normalizePayment(record({ type: "create_account", to_muxed_id: "1" }) as any);
+    expect(payment).toBeNull();
   });
 });

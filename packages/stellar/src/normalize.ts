@@ -17,6 +17,9 @@ interface ValueFields {
   asset_type?: string;
   asset_code?: string;
   asset_issuer?: string;
+  // Present when the operation's destination was specified as an SEP-23
+  // M-address; Horizon still normalizes `to` to the underlying G-address.
+  to_muxed_id?: string;
 }
 
 export type OperationWithTransaction = { transaction_hash: string; transaction: () => Promise<Horizon.ServerApi.TransactionRecord> };
@@ -74,6 +77,7 @@ export async function normalizePayment(
     asset: assetOf(r),
     memo,
     memoType,
+    toMuxedId: r.to_muxed_id ?? null,
     createdAt: r.created_at,
   };
 }

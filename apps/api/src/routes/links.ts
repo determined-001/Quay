@@ -10,8 +10,13 @@ export function linkRoutes(c: Container): Hono {
   app.post("/", async (ctx) => {
     const parsed = createLinkSchema.safeParse(await safeJson(ctx));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
-    const result = await c.service.createLink(parsed.data);
-    return ctx.json(result, 201);
+    try {
+      const result = await c.service.createLink(parsed.data);
+      return ctx.json(result, 201);
+    } catch (err) {
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 422);
+      throw err;
+    }
   });
 
   // List the seller's links.
@@ -34,7 +39,7 @@ export function linkRoutes(c: Container): Hono {
       const job = await c.service.triggerCashOut(ctx.req.param("id"), parsed.data);
       return ctx.json({ job });
     } catch (err) {
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
       throw err;
     }
   });
