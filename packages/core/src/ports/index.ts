@@ -97,11 +97,11 @@ export interface OffRampQuote {
   sourceAsset: AssetRef;
   sourceAmount: string;
   targetCurrency: string; // ISO code, e.g. "NGN"
-  targetAmount: string; // what the seller will receive
+  targetAmount: string; // gross amount before fees
   rate: string; // sourceAsset -> targetCurrency
   expiresAt: number; // epoch ms — after this the quote is void
   fee: { amount: string; currency: string; source: "anchor" | "estimated" };
-  netTargetAmount: string;
+  netTargetAmount: string; // what the seller actually receives
 }
 
 /** Where the seller wants their local-currency payout to land. */

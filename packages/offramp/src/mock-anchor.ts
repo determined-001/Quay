@@ -116,7 +116,9 @@ export class MockAnchorOffRamp implements OffRampPort {
     if (!q) throw new Error("Unknown or expired quote");
     if (Date.now() > q.expiresAt) throw new Error("Quote expired");
 
-    const targetAmount = (Number(q.sellAmount) * Number(q.price)).toFixed(2);
+    const grossAmount = (Number(q.sellAmount) * Number(q.price)).toFixed(2);
+    const feeAmount = (Number(grossAmount) * 0.01).toFixed(2);
+    const targetAmount = (Number(grossAmount) - Number(feeAmount)).toFixed(2);
     const jobId = id("ofr");
     const now = Date.now();
 

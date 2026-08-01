@@ -16,6 +16,7 @@ const BOOTSTRAP_SQL = [
      asset_code TEXT NOT NULL, asset_issuer TEXT, status TEXT NOT NULL,
      tx_hash TEXT, payer TEXT, paid_amount TEXT,
      offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
+     offramp_fee_amount TEXT, offramp_fee_currency TEXT, offramp_fee_source TEXT, offramp_net_target_amount TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS webhooks (
@@ -61,7 +62,13 @@ export function createDb(databaseUrl: string, authToken?: string): { db: DB; cli
 // Additive column added after the initial release. `CREATE TABLE IF NOT EXISTS`
 // above won't touch an existing table, so add it out-of-band; ignore the
 // "duplicate column" error on databases that already have it.
-const MIGRATIONS_SQL = [`ALTER TABLE links ADD COLUMN muxed_id TEXT`];
+const MIGRATIONS_SQL = [
+  `ALTER TABLE links ADD COLUMN muxed_id TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_fee_amount TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_fee_currency TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_fee_source TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_net_target_amount TEXT`,
+];
 
 export async function bootstrap(client: Client): Promise<void> {
   for (const sql of BOOTSTRAP_SQL) {

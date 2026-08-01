@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,7 +13,7 @@ function loadEnvFiles(): void {
     resolve(here, "../../../../.env"),
   ];
   for (const path of candidates) {
-    if (!existsSync(path)) continue;
+    if (!existsSync(path) || !statSync(path).isFile()) continue;
     const text = readFileSync(path, "utf8");
     for (const raw of text.split("\n")) {
       const line = raw.trim();

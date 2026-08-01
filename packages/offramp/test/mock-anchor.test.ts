@@ -27,7 +27,7 @@ describe("MockAnchorOffRamp", () => {
 
     const polled = await offramp.status(job.jobId);
     expect(polled.status).toBe("settled");
-    expect(polled.targetAmount).toBe(quote.targetAmount);
+    expect(polled.targetAmount).toBe(quote.netTargetAmount);
   });
 
   it("fails the job when alwaysFail is set, with a reason", async () => {

@@ -6,7 +6,6 @@ export interface Sep38QuoteResult {
   sellAmount: string;
   buyAmount: string;
   expiresAt: string; // ISO 8601
-  totalPrice: string;
 }
 
 function assetIdentifier(asset: AssetRef): string {
@@ -45,7 +44,6 @@ export async function getSep38Quote(
   return {
     id: body.id,
     price: body.price,
-    totalPrice: body.total_price,
     sellAmount: body.sell_amount,
     buyAmount: body.buy_amount,
     expiresAt: body.expires_at,

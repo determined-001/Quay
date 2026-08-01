@@ -58,6 +58,10 @@ function rowToLink(row: LinkRow): PaymentLink {
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
     offrampStatus: row.offrampStatus ?? null,
+    offrampFeeAmount: row.offrampFeeAmount ?? null,
+    offrampFeeCurrency: row.offrampFeeCurrency ?? null,
+    offrampFeeSource: row.offrampFeeSource ?? null,
+    offrampNetTargetAmount: row.offrampNetTargetAmount ?? null,
     expiresAt: row.expiresAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -141,6 +145,10 @@ export class DrizzleLinkRepository implements LinkRepository {
         offrampJobId: link.offrampJobId,
         offrampTargetCurrency: link.offrampTargetCurrency,
         offrampStatus: link.offrampStatus,
+        offrampFeeAmount: link.offrampFeeAmount,
+        offrampFeeCurrency: link.offrampFeeCurrency,
+        offrampFeeSource: link.offrampFeeSource,
+        offrampNetTargetAmount: link.offrampNetTargetAmount,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
