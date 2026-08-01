@@ -30,7 +30,8 @@ describe("buildChangeTrustUri", () => {
     const tx = TransactionBuilder.fromXDR(xdrParam, Networks.TESTNET);
     expect("operations" in tx ? tx.operations.length : 0).toBe(1);
     if ("operations" in tx) {
-      const op = tx.operations[0];
+      // The length assertion above already established there is exactly one.
+      const op = tx.operations[0]!;
       expect(op.type).toBe("changeTrust");
     }
     expect("signatures" in tx ? tx.signatures.length : 0).toBe(0);

@@ -3,9 +3,12 @@
 The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by default
 (`API_PORT`). All request and response bodies are JSON.
 
-> **Auth:** there is currently **no authentication**. Every request operates on a
-> single hard-coded demo seller. This is fine for local development and demos, not
-> for production. See the README's "Before you go live" section.
+> **Auth:** `POST /auth` (below) issues a session JWT after a wallet-signed SEP-10
+> challenge, and a seller row is created for the wallet on first login. `/links`
+> and `/webhooks` do not check this token yet and still operate on the single
+> demo seller — scoping them by authenticated seller is tracked separately. This
+> is fine for local development and demos, not for production. See the README's
+> "Before you go live" section.
 
 CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 
@@ -47,6 +50,99 @@ When the seller's own wallet can't currently receive USDC:
   }
 }
 ```
+
+---
+
+## `GET /auth?account=G...`
+
+Step 1 of [SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md)
+wallet login: builds a challenge transaction for the given account to sign.
+
+**200**
+```json
+{ "transaction": "AAAAAgAAAAA...", "network_passphrase": "Test SDF Network ; September 2015" }
+```
+**400** — `{ "error": "missing_account" }` or `{ "error": "account must be a valid Stellar G-address" }`
+
+---
+
+## `POST /auth`
+
+Step 2: submit the challenge transaction signed by the account's wallet(s).
+Verifies the server's own signature, timebounds, domain fields, and that
+signature weight from the account's actual signers (via Horizon, M-of-N aware)
+meets its medium threshold — the account's master key if it isn't funded yet.
+Each challenge can be redeemed exactly once.
+
+On success, a seller row is created for the wallet if one doesn't exist yet
+(the wallet address **is** the identity).
+
+**Request**
+```json
+{ "transaction": "AAAAAgAAAAA..." }
+```
+
+**200**
+```json
+{ "token": "<session JWT>" }
+```
+**401** — `{ "error": "<reason>" }`, e.g. signature verification failed, challenge
+already used, or the transaction doesn't match what we issued.
+
+---
+
+## `GET /.well-known/stellar.toml`
+
+[SEP-1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)
+descriptor advertising `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`, and `NETWORK_PASSPHRASE`
+so wallets can discover this service's SEP-10 endpoint — the server-side mirror of
+how `packages/offramp/src/sep10.ts` discovers anchors.
+
+---
+
+## `GET /metrics`
+
+Prometheus text-format metrics (`content-type: text/plain; version=0.0.4`).
+Guarded by `METRICS_TOKEN` — pass `Authorization: Bearer <token>` or `?token=`.
+If `METRICS_TOKEN` isn't set, the API generates an ephemeral one at boot and
+prints it once (so the endpoint is never open by default, even locally).
+
+**401** — wrong or missing token: `unauthorized`
+
+**Counters**
+| Metric | Labels |
+| --- | --- |
+| `payments_matched_total` | `outcome` (`paid`, `underpaid`, `asset_mismatch`, `no_memo`, `unknown_reference`) |
+| `link_status_transitions_total` | `to` |
+| `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
+| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
+
+**Histograms**
+| Metric | Labels |
+| --- | --- |
+| `watcher_tick_duration_seconds` | — |
+| `payment_to_paid_latency_seconds` | — |
+| `anchor_call_duration_seconds` | `method` |
+| `quote_to_settlement_duration_seconds` | `outcome` (`settled`, `failed`) |
+
+**Gauges**
+| Metric | Meaning |
+| --- | --- |
+| `accounts_watched` | distinct destinations the watcher is currently polling |
+| `pending_cash_outs` | links in `offramp_pending` |
+| `webhook_deliveries_in_flight` | webhook deliveries currently being attempted, including retries |
+| `offramp_circuit_breaker_state` | `0`=closed, `1`=half_open, `2`=open — see below |
+| `watcher_lag_seconds` | seconds since the watcher's last completed poll tick |
+
+A ready-made dashboard for these is at [`docs/grafana-dashboard.json`](grafana-dashboard.json)
+(import directly into Grafana, point it at your Prometheus data source).
+
+**Off-ramp circuit breaker:** every off-ramp adapter call (mock or
+`testanchor`) is routed through `CircuitBreakerOffRamp`
+(`apps/api/src/services/circuit-breaker.ts`), which opens after 3 consecutive
+failures and stays open for 30s before allowing a half-open trial call — so a
+down anchor can't be hammered by every cash-out poll. This is also the single
+seam `anchor_calls_total` / `anchor_call_duration_seconds` are recorded from.
 
 ---
 
@@ -173,6 +269,54 @@ Seller-initiated off-ramp of a **paid** link to local currency. Runs
 ```
 **409** — link is not in `paid` state: `{ "error": "Link must be paid to cash out (is \"pending\")" }`
 **404** — `{ "error": "Link not found" }`
+**403** — `{ "error": "kyc_required" }`. Only possible with `OFFRAMP=testanchor`: the
+seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
+bank/routing info only — it is never used as a source of identity data.
+
+---
+
+## `GET /seller/kyc`
+
+Current SEP-12 requirements and status for the seller, re-synced from the anchor
+(`OFFRAMP=mock` always reports `ACCEPTED` — there's no real anchor to satisfy).
+
+**200**
+```json
+{
+  "status": "NEEDS_INFO",
+  "requiredFields": [
+    { "name": "first_name", "type": "string", "optional": false },
+    { "name": "email_address", "type": "string", "optional": false }
+  ],
+  "providedFields": { "first_name": "Ada" },
+  "message": null,
+  "lastSyncedAt": 1750000000000
+}
+```
+`status` is one of `unsubmitted | NEEDS_INFO | PROCESSING | ACCEPTED | REJECTED`.
+
+---
+
+## `PUT /seller/kyc`
+
+Submit or update identity fields. Values are sent to the anchor **exactly as
+given** — no field is ever defaulted or fabricated. Call with `{}` to kick off
+discovery before any fields are known.
+
+**Request**
+```json
+{ "first_name": "Ada", "email_address": "ada@example.org" }
+```
+
+**200** — same shape as `GET /seller/kyc`, reflecting the anchor's response
+(which may reveal further required fields — SEP-12 discovery is progressive).
+
+**422**
+```json
+{ "error": "kyc_required", "missingFields": ["email_address"] }
+```
+Returned when a field the anchor is already known to require is missing —
+naming exactly which ones, never silently substituting a placeholder.
 
 ---
 

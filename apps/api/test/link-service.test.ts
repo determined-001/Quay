@@ -1,149 +1,230 @@
-import { describe, expect, it, vi } from "vitest";
-import {
-  CannotReceiveError,
-  type LinkRepository,
-  type OffRampPort,
-  type PaymentLink,
-  type RailPort,
-  type Seller,
-  type SellerRepository,
-  type WebhookRepository,
-} from "@checkout/core";
+import { describe, expect, it } from "vitest";
+import { OffRampJobNotFoundError, type KycPort, type RailPort } from "@checkout/core";
+import { MockAnchorOffRamp } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
-import { HttpError, LinkService } from "../src/services/link-service";
+import { LinkService } from "../src/services/link-service";
+import {
+  AlwaysAcceptedKyc,
+  FakeLinkRepository,
+  FakeOffRampStateRepository,
+  FakeWebhookRepository,
+  ScriptedKyc,
+  ScriptedOffRamp,
+  makeLink,
+} from "./fakes";
 
-const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", createdAt: Date.now() };
-
-const stellar: StellarConfig = {
+const STELLAR: StellarConfig = {
   network: "testnet",
   horizonUrl: "https://horizon-testnet.stellar.org",
   networkPassphrase: "Test SDF Network ; September 2015",
-  usdcIssuer: "GUSDCISSUERADDRESS",
+  usdcIssuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
 };
 
-function fakeLinks(): LinkRepository {
-  return {
-    create: vi.fn(async (input) => ({ ...input, status: "active", txHash: null, payer: null, paidAmount: null, offrampJobId: null, offrampTargetCurrency: null, offrampStatus: null, createdAt: Date.now(), updatedAt: Date.now() }) as PaymentLink),
-    findById: vi.fn(async () => null),
-    findByReference: vi.fn(async () => null),
-    listBySeller: vi.fn(async () => []),
-    listByStatus: vi.fn(async () => []),
-    activeDestinations: vi.fn(async () => []),
-    openLinksForDestination: vi.fn(async () => []),
-    save: vi.fn(async () => {}),
-  };
+const UNUSED_RAIL: RailPort = {
+  async assertCanReceive() {},
+  buildRequest() {
+    throw new Error("not used in these tests");
+  },
+  isValidDestination() {
+    return true;
+  },
+};
+
+function makeService(opts: {
+  links: FakeLinkRepository;
+  offramp: ScriptedOffRamp | MockAnchorOffRamp;
+  offrampState: FakeOffRampStateRepository;
+  webhooks?: FakeWebhookRepository;
+  kyc?: KycPort;
+}): LinkService {
+  return new LinkService({
+    links: opts.links,
+    sellers: {
+      getDefault: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", createdAt: 0 }),
+      findById: async () => null,
+      findByWallet: async () => null,
+      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", createdAt: 0 }),
+    },
+    webhooks: opts.webhooks ?? new FakeWebhookRepository(),
+    rail: UNUSED_RAIL,
+    offramp: opts.offramp,
+    offrampState: opts.offrampState,
+    kyc: opts.kyc ?? new AlwaysAcceptedKyc(),
+    stellar: STELLAR,
+    correlation: "memo",
+  });
 }
 
-function fakeSellers(): SellerRepository {
-  return {
-    getDefault: vi.fn(async () => seller),
-    findById: vi.fn(async () => seller),
-  };
-}
+describe("LinkService.pollCashOuts", () => {
+  it("settles a link when the adapter reports settled", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "settled",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
 
-function fakeWebhooks(): WebhookRepository {
-  return {
-    create: vi.fn(async (input) => ({ id: "whk_1", ...input, createdAt: Date.now() })),
-    listBySeller: vi.fn(async () => []),
-    recordDelivery: vi.fn(async () => {}),
-  };
-}
+    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() }).pollCashOuts();
 
-function fakeRail(assertCanReceive: RailPort["assertCanReceive"]): RailPort {
-  return {
-    buildRequest: vi.fn(() => ({
-      uri: "web+stellar:pay?destination=...",
-      destination: seller.wallet,
-      amount: "10",
-      asset: { code: "USDC", issuer: stellar.usdcIssuer },
-      memo: "ref",
-    })),
-    isValidDestination: vi.fn(() => true),
-    assertCanReceive,
-  };
-}
-
-function fakeOfframp(): OffRampPort {
-  return {
-    mode: "seller_initiated",
-    quote: vi.fn(),
-    initiate: vi.fn(),
-    status: vi.fn(),
-  };
-}
-
-describe("LinkService.createLink — trustline preflight", () => {
-  it("creates the link when the destination can receive the asset", async () => {
-    const links = fakeLinks();
-    const rail = fakeRail(vi.fn(async () => {}));
-    const service = new LinkService({ links, sellers: fakeSellers(), webhooks: fakeWebhooks(), rail, offramp: fakeOfframp(), stellar });
-
-    const { link } = await service.createLink({ title: "T-shirt", amount: "10", assetCode: "USDC" });
-
-    expect(link.title).toBe("T-shirt");
-    expect(links.create).toHaveBeenCalledTimes(1);
+    expect(links.get("lnk_1")?.status).toBe("offramp_settled");
+    expect(links.get("lnk_1")?.offrampStatus).toBe("settled");
   });
 
-  it("rejects with 422 destination_cannot_receive and never creates the link", async () => {
-    const links = fakeLinks();
-    const trustlineUri = "web+stellar:tx?xdr=AAAA...";
-    const rail = fakeRail(
-      vi.fn(async () => {
-        throw new CannotReceiveError("no_trustline", "Account GSELLERWALLETADDRESS has no trustline for USDC.", trustlineUri);
-      }),
-    );
-    const service = new LinkService({ links, sellers: fakeSellers(), webhooks: fakeWebhooks(), rail, offramp: fakeOfframp(), stellar });
+  it("moves the link to offramp_failed when status() throws a typed OffRampJobNotFoundError", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_lost", offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => {
+      throw new OffRampJobNotFoundError(jobId);
+    };
 
-    let caught: unknown;
-    try {
-      await service.createLink({ title: "T-shirt", amount: "10", assetCode: "USDC" });
-    } catch (err) {
-      caught = err;
-    }
+    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() }).pollCashOuts();
 
-    expect(caught).toBeInstanceOf(HttpError);
-    const httpError = caught as HttpError;
-    expect(httpError.status).toBe(422);
-    expect(httpError.message).toBe("destination_cannot_receive");
-    expect(httpError.extra?.reason).toBe("no_trustline");
-    expect(httpError.extra?.trustlineUri).toBe(trustlineUri);
-    expect(links.create).not.toHaveBeenCalled();
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+    expect(links.get("lnk_1")?.offrampStatus).toBe("failed");
   });
 
-  it("lets through non-CannotReceiveError failures unchanged", async () => {
-    const links = fakeLinks();
-    const rail = fakeRail(
-      vi.fn(async () => {
-        throw new Error("horizon is down");
-      }),
-    );
-    const service = new LinkService({ links, sellers: fakeSellers(), webhooks: fakeWebhooks(), rail, offramp: fakeOfframp(), stellar });
+  it("leaves the link pending on a transient (non-typed) error, to retry next tick", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async () => {
+      throw new Error("ECONNRESET");
+    };
 
-    await expect(service.createLink({ title: "T-shirt", amount: "10", assetCode: "USDC" })).rejects.toThrow("horizon is down");
+    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() }).pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("fails a link stuck at offramp_pending with no job id at all (can never resolve)", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: null, offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+
+    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() }).pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
   });
 });
 
-describe("LinkService.checkSellerUsdcTrustline", () => {
-  it("returns ok:true when the seller's wallet can receive USDC", async () => {
-    const rail = fakeRail(vi.fn(async () => {}));
-    const service = new LinkService({ links: fakeLinks(), sellers: fakeSellers(), webhooks: fakeWebhooks(), rail, offramp: fakeOfframp(), stellar });
+describe("LinkService.backfillLostOffRampJobs", () => {
+  it("fails a link whose job id has no row in the off-ramp state store", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_never_persisted", offrampStatus: "pending" }),
+    ]);
+    const offrampState = new FakeOffRampStateRepository();
+    const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState });
 
-    await expect(service.checkSellerUsdcTrustline()).resolves.toEqual({ ok: true });
+    const fixed = await service.backfillLostOffRampJobs();
+
+    expect(fixed).toBe(1);
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+    expect(links.get("lnk_1")?.offrampStatus).toBe("failed");
   });
 
-  it("returns the structured failure when it can't", async () => {
-    const rail = fakeRail(
-      vi.fn(async () => {
-        throw new CannotReceiveError("trustline_not_authorized", "frozen by issuer");
-      }),
-    );
-    const service = new LinkService({ links: fakeLinks(), sellers: fakeSellers(), webhooks: fakeWebhooks(), rail, offramp: fakeOfframp(), stellar });
-
-    await expect(service.checkSellerUsdcTrustline()).resolves.toEqual({
-      ok: false,
-      reason: "trustline_not_authorized",
-      message: "frozen by issuer",
-      trustlineUri: undefined,
+  it("leaves a link alone when its job row is present", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
+    ]);
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_1",
+      linkId: "lnk_1",
+      anchor: "mock",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      status: "pending",
+      externalStatus: null,
+      lastError: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
     });
+    const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState });
+
+    const fixed = await service.backfillLostOffRampJobs();
+
+    expect(fixed).toBe(0);
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("does not touch links that aren't offramp_pending", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState: new FakeOffRampStateRepository() });
+
+    const fixed = await service.backfillLostOffRampJobs();
+
+    expect(fixed).toBe(0);
+    expect(links.get("lnk_1")?.status).toBe("paid");
+  });
+});
+
+describe("LinkService.triggerCashOut — KYC gate", () => {
+  it("rejects with 403 kyc_required when the seller's KYC isn't ACCEPTED", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const kyc = new ScriptedKyc();
+    kyc.statusImpl = async (sellerId) => ({
+      sellerId,
+      customerId: null,
+      status: "NEEDS_INFO",
+      requiredFields: [],
+      providedFields: {},
+      message: null,
+      lastSyncedAt: null,
+      updatedAt: Date.now(),
+    });
+    const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState: new FakeOffRampStateRepository(), kyc });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 403, message: "kyc_required" });
+    // Never reached the off-ramp adapter, and the link stays untouched.
+    expect(links.get("lnk_1")?.status).toBe("paid");
+  });
+
+  it("proceeds to the off-ramp adapter once KYC is ACCEPTED", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 60_000 });
+    const service = makeService({ links, offramp, offrampState, kyc: new AlwaysAcceptedKyc() });
+
+    const job = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+
+    expect(job.status).toBe("pending");
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+});
+
+describe("LinkService + MockAnchorOffRamp — restart survives (integration)", () => {
+  it("a cash-out initiated pre-restart still settles once a fresh service/adapter pair polls it", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+
+    // "Pre-restart" process: trigger the cash-out.
+    const preRestartOfframp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 0 });
+    const preRestartService = makeService({ links, offramp: preRestartOfframp, offrampState });
+    const job = await preRestartService.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    expect(links.get("lnk_1")?.offrampJobId).toBe(job.jobId);
+
+    // "Restart": brand-new adapter and service instances. Only `links` and
+    // `offrampState` — the two persisted stores — carry over.
+    const postRestartOfframp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 0 });
+    const postRestartService = makeService({ links, offramp: postRestartOfframp, offrampState });
+    await postRestartService.pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_settled");
+    expect(links.get("lnk_1")?.offrampStatus).toBe("settled");
   });
 });
