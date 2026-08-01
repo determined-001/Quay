@@ -1,0 +1,73 @@
+{
+  "targets": {
+    "api": {
+      "consecutiveFailures": 0,
+      "lastStatus": "up",
+      "lastCheckedAt": "2026-07-30T00:11:40.936Z",
+      "today": {
+        "date": "2026-07-30",
+        "up": 1,
+        "down": 0
+      },
+      "history": [
+        {
+          "date": "2026-07-28",
+          "up": 0,
+          "down": 3
+        },
+        {
+          "date": "2026-07-29",
+          "up": 0,
+          "down": 13
+        }
+      ],
+      "lastError": null
+    },
+    "web": {
+      "consecutiveFailures": 0,
+      "lastStatus": "up",
+      "lastCheckedAt": "2026-07-30T00:11:41.314Z",
+      "today": {
+        "date": "2026-07-30",
+        "up": 1,
+        "down": 0
+      },
+      "history": [
+        {
+          "date": "2026-07-28",
+          "up": 3,
+          "down": 0
+        },
+        {
+          "date": "2026-07-29",
+          "up": 13,
+          "down": 0
+        }
+      ],
+      "lastError": null
+    },
+    "synthetic": {
+      "consecutiveFailures": 0,
+      "lastStatus": "up",
+      "lastCheckedAt": "2026-07-30T00:11:41.959Z",
+      "today": {
+        "date": "2026-07-30",
+        "up": 1,
+        "down": 0
+      },
+      "history": [
+        {
+          "date": "2026-07-28",
+          "up": 0,
+          "down": 3
+        },
+        {
+          "date": "2026-07-29",
+          "up": 0,
+          "down": 13
+        }
+      ],
+      "lastError": null
+    }
+  }
+}
