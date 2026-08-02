@@ -11,15 +11,15 @@
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
-    "next": "16.2.11",
-    "react": "19.2.7",
-    "react-dom": "19.2.7",
+    "next": "16.2.12",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "qrcode.react": "4.2.0"
   },
   "devDependencies": {
-    "@types/node": "25.9.3",
+    "@types/node": "26.1.2",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
-    "typescript": "6.0.3"
+    "typescript": "7.0.2"
   }
 }

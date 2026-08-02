@@ -10,9 +10,9 @@
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
-    "@stellar/stellar-sdk": "16.0.1"
+    "@stellar/stellar-sdk": "16.2.0"
   },
   "devDependencies": {
-    "vitest": "4.1.9"
+    "vitest": "4.1.10"
   }
 }
