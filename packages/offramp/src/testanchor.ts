@@ -7,11 +7,12 @@ import {
   type OffRampMode,
   type OffRampPort,
   type OffRampQuote,
+  type IndicativePrice,
   type OffRampStateRepository,
   type SellerPayoutRef,
 } from "@checkout/core";
 import { Sep10Client } from "./sep10";
-import { getSep38Quote } from "./sep38";
+import { getSep38Prices, getSep38Quote } from "./sep38";
 import { getSep6Transaction, startSep6Withdraw } from "./sep6";
 
 // ===========================================================================

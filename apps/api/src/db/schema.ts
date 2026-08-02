@@ -105,3 +105,23 @@ export const processedTx = sqliteTable("processed_tx", {
   linkId: text("link_id"),
   createdAt: integer("created_at").notNull(),
 });
+
+export const idempotencyKeys = sqliteTable("idempotency_keys", {
+  key: text("key").notNull(),
+  sellerId: text("seller_id").notNull(),
+  endpoint: text("endpoint").notNull(),
+  requestHash: text("request_hash").notNull(),
+  responseStatus: integer("response_status").notNull(),
+  responseBody: text("response_body").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
+// Logout / compromise revocation for session JWTs, keyed by the token's own
+// `jti`. `expiresAt` mirrors the token's own `exp` — once a token would fail
+// verification on expiry alone, its revocation row is dead weight and gets
+// swept.
+export const revokedTokens = sqliteTable("revoked_tokens", {
+  jti: text("jti").primaryKey(),
+  expiresAt: integer("expires_at").notNull(),
+  revokedAt: integer("revoked_at").notNull(),
+});

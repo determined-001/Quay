@@ -36,6 +36,9 @@ export function makeLink(over: Partial<PaymentLink> = {}): PaymentLink {
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
+    offrampIndicativeRate: null,
+    offrampRate: null,
+    offrampRateDelta: null,
     expiresAt: null,
     createdAt: 0,
     updatedAt: 0,
@@ -54,6 +57,9 @@ export class FakeLinkRepository implements LinkRepository {
   async create(input: CreateLinkInput): Promise<PaymentLink> {
     const link: PaymentLink = {
       ...input,
+      offrampIndicativeRate: null,
+      offrampRate: null,
+      offrampRateDelta: null,
       status: "active",
       txHash: null,
       payer: null,
@@ -111,6 +117,10 @@ export class FakeWebhookRepository implements WebhookRepository {
     const hook: Webhook = { id: `whk_${this.hooks.length}`, ...input, createdAt: Date.now() };
     this.hooks.push(hook);
     return hook;
+  }
+
+  async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
+    return this.deliveries.filter((d) => d.linkId === linkId);
   }
 
   async listBySeller(sellerId: string): Promise<Webhook[]> {

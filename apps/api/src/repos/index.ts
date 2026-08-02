@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, lt } from "drizzle-orm";
 import type {
   CreateLinkInput,
   KycFieldSpec,
@@ -10,6 +10,7 @@ import type {
   PaymentLink,
   Seller,
   SellerRepository,
+  TokenRevocationRepository,
   StoredOffRampJob,
   StoredOffRampQuote,
   Webhook,
@@ -29,6 +30,7 @@ import {
   offrampQuotes,
   offrampJobs,
   sellerKyc,
+  revokedTokens,
 } from "../db/schema";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
@@ -236,6 +238,23 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       createdAt: Date.now(),
     });
   }
+
+  async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
+    const rows = await this.db
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.linkId, linkId))
+      .orderBy(webhookDeliveries.createdAt);
+    return rows.map((r) => ({
+      webhookId: r.webhookId,
+      linkId: r.linkId,
+      event: r.event,
+      statusCode: r.statusCode,
+      ok: r.ok,
+      error: r.error,
+      createdAt: r.createdAt,
+    }));
+  }
 }
 
 export class DrizzleWatcherStateRepository implements WatcherStateRepository {
@@ -274,6 +293,26 @@ export class DrizzleWatcherStateRepository implements WatcherStateRepository {
       .insert(processedTx)
       .values({ txHash, linkId, createdAt: Date.now() })
       .onConflictDoNothing();
+  }
+}
+
+export class DrizzleTokenRevocationRepository implements TokenRevocationRepository {
+  constructor(private readonly db: DB) {}
+
+  async revoke(jti: string, expiresAt: number): Promise<void> {
+    await this.db
+      .insert(revokedTokens)
+      .values({ jti, expiresAt, revokedAt: Date.now() })
+      .onConflictDoNothing();
+  }
+
+  async isRevoked(jti: string): Promise<boolean> {
+    const rows = await this.db.select({ jti: revokedTokens.jti }).from(revokedTokens).where(eq(revokedTokens.jti, jti)).limit(1);
+    return rows.length > 0;
+  }
+
+  async sweepExpired(now: number): Promise<void> {
+    await this.db.delete(revokedTokens).where(lt(revokedTokens.expiresAt, now));
   }
 }
 

@@ -313,6 +313,9 @@ class FakeWebhookRepoForAnchor implements WebhookRepository {
   async listBySeller(sellerId: string): Promise<Webhook[]> {
     return this.stored.filter((h) => h.sellerId === sellerId);
   }
+  async listDeliveriesByLinkId(): Promise<WebhookDelivery[]> {
+    return [];
+  }
   async recordDelivery(_d: WebhookDelivery): Promise<void> {
     /* capture elsewhere via fetch interception */
   }

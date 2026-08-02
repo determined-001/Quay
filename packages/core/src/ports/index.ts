@@ -332,12 +332,14 @@ export interface WebhookDelivery {
   statusCode: number | null;
   ok: boolean;
   error: string | null;
+  createdAt: number;
 }
 
 export interface WebhookRepository {
   create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
   listBySeller(sellerId: string): Promise<Webhook[]>;
   recordDelivery(d: WebhookDelivery): Promise<void>;
+  listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]>;
 }
 
 /** Watcher bookkeeping: per-account cursor + processed-tx ledger for idempotency. */
@@ -346,4 +348,17 @@ export interface WatcherStateRepository {
   setCursor(account: string, cursor: string): Promise<void>;
   isProcessed(txHash: string): Promise<boolean>;
   markProcessed(txHash: string, linkId: string | null): Promise<void>;
+}
+
+/** Session-JWT revocation, keyed by the token's own `jti` — logout and
+ *  compromise both work by revoking a specific token id, not by invalidating
+ *  every session for a seller. */
+export interface TokenRevocationRepository {
+  /** `expiresAt` (epoch seconds) mirrors the token's own `exp`, so expired
+   *  revocation rows can be swept without ever affecting still-valid tokens. */
+  revoke(jti: string, expiresAt: number): Promise<void>;
+  isRevoked(jti: string): Promise<boolean>;
+  /** Deletes revocation rows whose token would already fail verification on
+   *  expiry alone — safe to call opportunistically, no correctness impact. */
+  sweepExpired(now: number): Promise<void>;
 }
