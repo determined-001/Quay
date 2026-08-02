@@ -7,7 +7,6 @@ import {
 } from "@checkout/core";
 import { AnchorHealth, type LinkService } from "../services/link-service";
 import { env } from "../env";
-import { metrics } from "../metrics";
 
 /**
  * Per-account state for adaptive polling and circuit breaking.
@@ -69,7 +68,6 @@ export class WatcherLoop {
     perAccountLag: new Map(),
     circuitBreakersOpen: 0,
   };
-  private lastTickCompletedAt = Date.now();
 
   constructor(
     private readonly deps: {
@@ -109,18 +107,13 @@ export class WatcherLoop {
     this.timer = null;
   }
 
-  /** Seconds since the last fully-completed poll tick, computed at call time. */
-  getLagSeconds(): number {
-    return (Date.now() - this.lastTickCompletedAt) / 1000;
-  }
-
   /**
    * Get current circuit breaker status for all accounts.
    */
   getCircuitBreakerStatus(): AccountCircuitBreakerStatus[] {
     const now = Date.now();
     const statuses: AccountCircuitBreakerStatus[] = [];
-    
+
     for (const [account, state] of this.accountStates.entries()) {
       const isOpen = this.isCircuitBreakerOpen(account, state, now);
       statuses.push({
@@ -128,10 +121,11 @@ export class WatcherLoop {
         isOpen,
         consecutiveErrors: state.consecutiveErrors,
         lastErrorTime: state.lastErrorTime,
-        cooldownUntil: state.lastErrorTime + env.watcherCircuitBreakerCooldownMs,
+        cooldownUntil:
+          state.lastErrorTime + env.watcherCircuitBreakerCooldownMs,
       });
     }
-    
+
     return statuses;
   }
 
@@ -139,25 +133,27 @@ export class WatcherLoop {
    * Get current watcher metrics.
    */
   getMetrics(): WatcherMetrics {
-    return { ...this.metrics, perAccountLag: new Map(this.metrics.perAccountLag) };
+    return {
+      ...this.metrics,
+      perAccountLag: new Map(this.metrics.perAccountLag),
+    };
   }
 
   async runOnce(): Promise<void> {
     const tickStart = Date.now();
     const allAccounts = await this.deps.links.activeDestinations();
     this.metrics.accountsWatched = allAccounts.length;
-    metrics.accountsWatched.set(allAccounts.length);
 
     // Select accounts to process this tick using fair round-robin
     const accountsToProcess = this.selectAccountsForTick(allAccounts);
-    
+
     // Process with bounded concurrency
     const concurrency = env.watcherConcurrency;
     const chunks = this.chunkArray(accountsToProcess, concurrency);
-    
+
     for (const chunk of chunks) {
       await Promise.allSettled(
-        chunk.map((account) => this.processAccountWithCircuitBreaker(account))
+        chunk.map((account) => this.processAccountWithCircuitBreaker(account)),
       );
     }
 
@@ -165,24 +161,12 @@ export class WatcherLoop {
     const tickDuration = Date.now() - tickStart;
     this.metrics.tickDurationMs = tickDuration;
     this.metrics.circuitBreakersOpen = this.countOpenCircuitBreakers();
-    metrics.watcherTickDurationSeconds.observe(tickDuration / 1000);
 
     // Update per-account lag
     const now = Date.now();
     for (const [account, state] of this.accountStates.entries()) {
       const lag = now - state.lastProcessedAt;
       this.metrics.perAccountLag.set(account, lag);
-    }
-    this.lastTickCompletedAt = now;
-
-    // Expiry sweep runs AFTER payment matching, so a buyer who submitted within
-    // TTL but whose on-chain confirmation lands after the deadline still settles
-    // as `paid` rather than being rejected against an already-expired link.
-    try {
-      const moved = await this.deps.service.sweepExpired(Date.now());
-      if (moved > 0) this.deps.log?.(`expiry sweep moved ${moved} link(s) to expired`);
-    } catch (err) {
-      this.deps.log?.(`expiry sweep error: ${stringifyErr(err)}`);
     }
   }
 
@@ -191,7 +175,7 @@ export class WatcherLoop {
    */
   private selectAccountsForTick(allAccounts: string[]): string[] {
     if (allAccounts.length === 0) return [];
-    
+
     const maxPerTick = env.watcherMaxAccountsPerTick;
     if (allAccounts.length <= maxPerTick) {
       return allAccounts;
@@ -208,64 +192,80 @@ export class WatcherLoop {
     }
 
     // Advance cursor for next tick
-    this.roundRobinCursor = (this.roundRobinCursor + maxPerTick) % allAccounts.length;
-    
+    this.roundRobinCursor =
+      (this.roundRobinCursor + maxPerTick) % allAccounts.length;
+
     return selected;
   }
 
   /**
    * Process account with circuit breaker protection.
    */
-  private async processAccountWithCircuitBreaker(account: string): Promise<void> {
+  private async processAccountWithCircuitBreaker(
+    account: string,
+  ): Promise<void> {
     const state = this.getOrCreateAccountState(account);
     const now = Date.now();
 
     // Check circuit breaker
     if (this.isCircuitBreakerOpen(account, state, now)) {
-      this.deps.log?.(`watcher account ${short(account)} circuit breaker open, skipping`);
+      this.deps.log?.(
+        `watcher account ${short(account)} circuit breaker open, skipping`,
+      );
       return;
     }
 
     // Check adaptive interval - skip if idle for too long
-    if (state.consecutiveIdleTicks >= env.watcherIdleBackoffTicks && !state.isNewAccount) {
-      this.deps.log?.(`watcher account ${short(account)} idle for ${state.consecutiveIdleTicks} ticks, backing off`);
+    if (
+      state.consecutiveIdleTicks >= env.watcherIdleBackoffTicks &&
+      !state.isNewAccount
+    ) {
+      this.deps.log?.(
+        `watcher account ${short(account)} idle for ${state.consecutiveIdleTicks} ticks, backing off`,
+      );
       state.consecutiveIdleTicks++;
       return;
     }
 
     try {
       await this.processAccount(account);
-      
+
       // Reset error state on success
       state.consecutiveErrors = 0;
       state.lastActivityTime = now;
       state.isNewAccount = false;
       state.lastProcessedAt = now;
-      
     } catch (err) {
       state.consecutiveErrors++;
       state.lastErrorTime = now;
-      
+
       // Check if we should open circuit breaker
       if (state.consecutiveErrors >= env.watcherCircuitBreakerThreshold) {
         this.deps.log?.(
-          `watcher account ${short(account)} circuit breaker opened after ${state.consecutiveErrors} errors`
+          `watcher account ${short(account)} circuit breaker opened after ${state.consecutiveErrors} errors`,
         );
       }
-      
-      this.deps.log?.(`watcher account ${short(account)} error: ${stringifyErr(err)}`);
+
+      this.deps.log?.(
+        `watcher account ${short(account)} error: ${stringifyErr(err)}`,
+      );
     }
   }
 
   /**
    * Check if circuit breaker is open for an account.
    */
-  private isCircuitBreakerOpen(account: string, state: AccountState, now: number): boolean {
+  private isCircuitBreakerOpen(
+    account: string,
+    state: AccountState,
+    now: number,
+  ): boolean {
     if (state.consecutiveErrors < env.watcherCircuitBreakerThreshold) {
       return false;
     }
-    
-    const cooldownEnd = state.lastErrorTime + env.watcherCircuitBreakerCooldownMs;
+
+    const cooldownEnd =
+      state.lastErrorTime + env.watcherCircuitBreakerCooldownMs;
     return now < cooldownEnd;
   }
 
@@ -275,13 +275,13 @@ export class WatcherLoop {
   private countOpenCircuitBreakers(): number {
     const now = Date.now();
     let count = 0;
-    
+
     for (const [account, state] of this.accountStates.entries()) {
       if (this.isCircuitBreakerOpen(account, state, now)) {
         count++;
       }
     }
-    
+
     return count;
   }
 
@@ -326,7 +326,7 @@ export class WatcherLoop {
     }
 
     const payments = await this.deps.watcher.fetchSince(account, cursor);
-    
+
     // Track idle ticks for adaptive polling
     if (payments.length === 0) {
       state.consecutiveIdleTicks++;
@@ -336,9 +336,8 @@ export class WatcherLoop {
     state.consecutiveIdleTicks = 0;
 
     const open = await this.deps.links.openLinksForDestination(account);
-    const byRef = new Map<string, PaymentLink>(open.map((l) => [l.reference, l]));
-    const byMuxedId = new Map<string, PaymentLink>(
-      open.filter((l) => l.muxedId).map((l) => [l.muxedId as string, l]),
+    const byRef = new Map<string, PaymentLink>(
+      open.map((l) => [l.reference, l]),
     );
 
     let lastToken = cursor;
@@ -346,41 +345,20 @@ export class WatcherLoop {
       lastToken = payment.pagingToken;
       if (await this.deps.state.isProcessed(payment.txHash)) continue;
 
-      const outcome = matchPayment(payment, (ref) => byRef.get(ref), (id) => byMuxedId.get(id));
-      metrics.paymentsMatchedTotal.inc({ outcome: outcome.kind });
+      const outcome = matchPayment(payment, (ref) => byRef.get(ref));
       const linkId =
-        outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
+        outcome.kind === "paid" ||
+        outcome.kind === "partial" ||
+        outcome.kind === "asset_mismatch"
           ? outcome.link.id
           : null;
 
-      if (outcome.kind === "paid" || outcome.kind === "underpaid") {
+      if (outcome.kind === "paid" || outcome.kind === "partial") {
         const becamePaid = await this.deps.service.applyMatch(payment, outcome);
         this.deps.log?.(
           `payment ${short(payment.txHash)} -> ${outcome.kind}` +
             (becamePaid ? ` (link ${linkId} PAID)` : ""),
         );
-      } else if (
-        outcome.kind === "unknown_reference" &&
-        payment.memo &&
-        payment.memoType !== "none"
-      ) {
-        // Memo matched nothing in the OPEN set. Before we give up, check
-        // whether the memo belongs to a link that *used to* be open but has
-        // since been expired or cancelled by the seller. If so, the buyer
-        // paid a dead link: do NOT resurrect it, fire payment.unmatched so
-        // the seller can refund the buyer out-of-band.
-        const terminal = await this.deps.links.findByReference(payment.memo);
-        if (
-          terminal &&
-          terminal.destination === account &&
-          (terminal.status === "expired" || terminal.status === "cancelled")
-        ) {
-          await this.deps.service.recordUnmatchedPayment(payment, terminal);
-          this.deps.log?.(
-            `payment ${short(payment.txHash)} -> unmatched against ` +
-              `${terminal.status} link ${terminal.id}`,
-          );
-        }
       }
 
       await this.deps.state.markProcessed(payment.txHash, linkId);
@@ -391,7 +369,10 @@ export class WatcherLoop {
 }
 
 /** Periodically advance any pending seller cash-outs. */
-export function startCashOutPoller(service: LinkService, intervalMs: number): () => void {
+export function startCashOutPoller(
+  service: LinkService,
+  intervalMs: number,
+): () => void {
   const timer = setInterval(() => {
     void service.pollCashOuts().catch(() => {});
   }, intervalMs);
@@ -403,7 +384,10 @@ export function startCashOutPoller(service: LinkService, intervalMs: number): ()
  * the breaker state is correct on first request rather than after one interval
  * has elapsed. Probe failures never throw; AnchorHealth records every outcome.
  */
-export function startAnchorProbeTimer(health: AnchorHealth, intervalMs: number): () => void {
+export function startAnchorProbeTimer(
+  health: AnchorHealth,
+  intervalMs: number,
+): () => void {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   const tick = async () => {
