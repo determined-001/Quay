@@ -25,4 +25,10 @@ paths = [
   # fixture directories keeps false positives from ever becoming a reason to
   # skip reviewing a real finding elsewhere.
   '''.*/test/fixtures/.*''',
+  # apps/api/test/webhook-repository.test.ts asserts on secretLast4 and
+  # round-trips decryptSecret, so it needs literal fixture secrets with known
+  # values. generic-api-key matches them. Scoped to this one file rather than
+  # all *.test.ts: a blanket test exclusion would let a real key committed in a
+  # test slip past the scanner, which is the failure issue 8.5 exists to stop.
+  '''apps/api/test/webhook-repository\.test\.ts''',
 ]
