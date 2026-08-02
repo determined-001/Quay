@@ -249,9 +249,15 @@ export class DrizzleWebhookRepository implements WebhookRepository {
 
     const ids = candidates.map((r) => r.id);
 
-    // 2. Atomically transition pending → claimed.
-    //    Only rows that are still 'pending' will match — concurrent workers get 0 rows.
-    await this.db
+    // 2. Atomically transition pending → claimed and take the affected rows
+    //    straight off the UPDATE via RETURNING.
+    //
+    //    RETURNING is what makes this safe across instances: it yields exactly
+    //    the rows *this* statement transitioned. Re-SELECTing status='claimed'
+    //    afterwards would also match rows a concurrent worker had just claimed
+    //    between our UPDATE and our SELECT, and both workers would deliver the
+    //    same webhook.
+    const claimed = await this.db
       .update(webhookQueue)
       .set({ status: "claimed", updatedAt: Date.now() })
       .where(
@@ -259,18 +265,8 @@ export class DrizzleWebhookRepository implements WebhookRepository {
           inArray(webhookQueue.id, ids),
           eq(webhookQueue.status, "pending"),
         ),
-      );
-
-    // 3. Return only the rows we successfully claimed.
-    const claimed = await this.db
-      .select()
-      .from(webhookQueue)
-      .where(
-        and(
-          inArray(webhookQueue.id, ids),
-          eq(webhookQueue.status, "claimed"),
-        ),
-      );
+      )
+      .returning();
 
     return claimed.map(rowToQueueEntry);
   }
