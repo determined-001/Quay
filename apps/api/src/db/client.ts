@@ -8,7 +8,7 @@ export type DB = LibSQLDatabase<typeof schema>;
 // (drizzle-kit push can manage this instead; see drizzle.config.ts.)
 const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS sellers (
-     id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL, created_at INTEGER NOT NULL
+     id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS links (
      id TEXT PRIMARY KEY, reference TEXT NOT NULL UNIQUE, seller_id TEXT NOT NULL,
