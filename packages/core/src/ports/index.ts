@@ -329,16 +329,63 @@ export interface WebhookDelivery {
   webhookId: string;
   linkId: string;
   event: string;
+  /** Which attempt number (1-based). */
+  attempt: number;
+  /** ID of the queue entry this delivery belongs to. Null for rows written
+   *  before the durable queue existed. */
+  queueEntryId: string | null;
   statusCode: number | null;
   ok: boolean;
   error: string | null;
   createdAt: number;
 }
 
+/** Lifecycle status of a queue entry. */
+export type WebhookQueueStatus = "pending" | "claimed" | "delivered" | "dead";
+
+/**
+ * One row in webhook_queue — the durable representation of a pending delivery.
+ * Immutable fields are set at enqueue time; mutable fields are updated by the
+ * worker after each attempt.
+ */
+export interface WebhookQueueEntry {
+  id: string;
+  webhookId: string;
+  linkId: string;
+  event: string;
+  /** The signed JSON body, serialised once at enqueue time. */
+  payload: string;
+  attempts: number;
+  nextAttemptAt: number; // epoch ms
+  status: WebhookQueueStatus;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface WebhookRepository {
   create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
   listBySeller(sellerId: string): Promise<Webhook[]>;
+  findWebhookById(id: string): Promise<Webhook | null>;
   recordDelivery(d: WebhookDelivery): Promise<void>;
+
+  // --- Queue operations ---
+  /** Insert a new pending queue entry. */
+  enqueue(entry: Omit<WebhookQueueEntry, "attempts" | "status" | "lastStatusCode" | "lastError" | "updatedAt">): Promise<WebhookQueueEntry>;
+  /**
+   * Atomically claim up to `limit` rows that are due for delivery.
+   * "Due" means status = 'pending' AND next_attempt_at <= now.
+   * Returns only the rows successfully claimed by this process (status → 'claimed').
+   */
+  claimDue(now: number, limit: number): Promise<WebhookQueueEntry[]>;
+  /** Persist the result of one delivery attempt onto the queue entry. */
+  updateQueueEntry(
+    id: string,
+    patch: Pick<WebhookQueueEntry, "status" | "attempts" | "nextAttemptAt" | "lastStatusCode" | "lastError">,
+  ): Promise<void>;
+  /** Look up a single queue entry by id (for replay). */
+  findQueueEntry(id: string): Promise<WebhookQueueEntry | null>;
   listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]>;
 }
 

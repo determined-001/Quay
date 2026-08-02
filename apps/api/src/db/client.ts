@@ -28,9 +28,28 @@ const BOOTSTRAP_SQL = [
    )`,
   `CREATE TABLE IF NOT EXISTS webhook_deliveries (
      id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT NOT NULL,
-     event TEXT NOT NULL, status_code INTEGER, ok INTEGER NOT NULL,
+     event TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+     queue_entry_id TEXT,
+     status_code INTEGER, ok INTEGER NOT NULL,
      error TEXT, created_at INTEGER NOT NULL
    )`,
+  `CREATE TABLE IF NOT EXISTS webhook_queue (
+     id TEXT PRIMARY KEY,
+     webhook_id TEXT NOT NULL,
+     link_id TEXT NOT NULL,
+     event TEXT NOT NULL,
+     payload TEXT NOT NULL,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     next_attempt_at INTEGER NOT NULL,
+     status TEXT NOT NULL DEFAULT 'pending',
+     last_status_code INTEGER,
+     last_error TEXT,
+     created_at INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL
+   )`,
+  // Index to make the worker's "claim due rows" query fast.
+  `CREATE INDEX IF NOT EXISTS idx_webhook_queue_due
+     ON webhook_queue (status, next_attempt_at)`,
   `CREATE TABLE IF NOT EXISTS offramp_quotes (
      quote_id TEXT PRIMARY KEY, link_id TEXT NOT NULL,
      sell_asset_code TEXT NOT NULL, sell_asset_issuer TEXT, sell_amount TEXT NOT NULL,

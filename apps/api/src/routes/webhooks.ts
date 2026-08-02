@@ -34,5 +34,55 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }
     });
   });
 
+  /**
+   * POST /webhooks/deliveries/:id/replay
+   *
+   * Re-enqueues a dead-lettered (or any) queue entry for immediate redelivery.
+   * Returns 202 Accepted with the updated entry summary. The actual delivery
+   * happens on the next WebhookWorker tick (within seconds).
+   *
+   * Idempotent if called on an entry that is already pending or delivered:
+   *   - pending   → next_attempt_at reset to now (no-op on next tick if already 0)
+   *   - delivered → re-queued as pending (manual replay of a successful delivery)
+   *   - dead      → re-queued as pending (the primary use-case)
+   *   - claimed   → 409 (delivery is in-flight; wait for it to settle first)
+   */
+  app.post("/deliveries/:id/replay", async (ctx) => {
+    const id = ctx.req.param("id");
+    const entry = await c.webhooks.findQueueEntry(id);
+
+    if (!entry) {
+      return ctx.json({ error: "not_found", message: `No delivery queue entry with id "${id}"` }, 404);
+    }
+
+    if (entry.status === "claimed") {
+      return ctx.json(
+        { error: "in_flight", message: "Delivery is currently in-flight; wait for it to settle before replaying." },
+        409,
+      );
+    }
+
+    await c.webhooks.updateQueueEntry(id, {
+      status: "pending",
+      attempts: entry.attempts, // preserve history count; worker increments on next attempt
+      nextAttemptAt: Date.now(),
+      lastStatusCode: entry.lastStatusCode,
+      lastError: entry.lastError,
+    });
+
+    return ctx.json(
+      {
+        id: entry.id,
+        webhookId: entry.webhookId,
+        linkId: entry.linkId,
+        event: entry.event,
+        previousAttempts: entry.attempts,
+        status: "pending",
+        message: "Queued for immediate redelivery.",
+      },
+      202,
+    );
+  });
+
   return app;
 }

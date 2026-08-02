@@ -34,6 +34,7 @@ import { horizonSignerFetcher } from "./horizon-signers";
 import { SessionIssuer } from "./session";
 import type { StellarTomlConfig } from "../routes/well-known";
 import { CircuitBreakerOffRamp } from "./circuit-breaker";
+import { WebhookWorker } from "../worker/webhook-worker";
 
 export interface Container {
   service: LinkService;
@@ -135,6 +136,9 @@ export async function createContainer(): Promise<Container> {
     log: (m) => console.log(`[watcher] ${m}`),
   });
 
+  const webhookWorker = new WebhookWorker(webhooksRepo, {
+    log: (m) => console.log(`[webhook] ${m}`),
+  });
   const metricsToken = resolveMetricsToken();
   const serverKeypair = resolveServerSigningKeypair();
   const challenge = new ChallengeService({
@@ -171,6 +175,7 @@ export async function createContainer(): Promise<Container> {
     auth: { challenge, session, stellarToml, revocations: revocationsRepo, secureCookie: env.cookieSecure },
     start() {
       loop.start();
+      webhookWorker.start();
       stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
       stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
       const sweepTimer = setInterval(
@@ -181,6 +186,7 @@ export async function createContainer(): Promise<Container> {
     },
     async stop() {
       await loop.stop();
+      webhookWorker.stop();
       stopPoller?.();
       stopRevocationSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();

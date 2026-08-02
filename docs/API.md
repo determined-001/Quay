@@ -472,9 +472,49 @@ Secrets are **not** returned.
 
 ---
 
+## `POST /webhooks/deliveries/:id/replay`
+
+Manually re-queue a webhook delivery for immediate redelivery. Useful for
+recovering dead-lettered entries or forcing a retry without waiting for the
+next backoff window.
+
+`:id` is the queue entry id returned in delivery metadata, or visible in
+`webhook_queue.id`.
+
+**Behaviour by current status**
+
+| Entry status | Effect                                          |
+| ------------ | ----------------------------------------------- |
+| `dead`       | Re-queued as `pending`, `nextAttemptAt = now`.  |
+| `pending`    | `nextAttemptAt` reset to now (accelerates next attempt). |
+| `delivered`  | Re-queued as `pending` (re-sends an already-delivered event). |
+| `claimed`    | **409** — delivery is in-flight; wait for it to settle. |
+
+**202**
+```json
+{
+  "id": "wqe_...",
+  "webhookId": "whk_...",
+  "linkId": "lnk_...",
+  "event": "link.paid",
+  "previousAttempts": 5,
+  "status": "pending",
+  "message": "Queued for immediate redelivery."
+}
+```
+**404** — queue entry not found.
+**409** — delivery is currently in-flight.
+
+---
+
 ## Webhook delivery
 
-When a link changes state, the API POSTs a JSON event to each registered URL:
+When a link changes state, the API writes a delivery row to the durable queue
+and returns immediately — event emission never blocks a state transition. A
+background `WebhookWorker` claims due rows and POSTs the event to each
+registered URL.
+
+### Events
 
 | Event             | Fired when                                  |
 | ----------------- | ------------------------------------------- |
@@ -483,7 +523,7 @@ When a link changes state, the API POSTs a JSON event to each registered URL:
 | `offramp.settled` | a cash-out job settled                       |
 | `offramp.failed`  | a cash-out job failed                        |
 
-**Body**
+### Body
 ```json
 {
   "event": "link.paid",
@@ -502,20 +542,35 @@ When a link changes state, the API POSTs a JSON event to each registered URL:
 }
 ```
 
-**Headers**
+### Headers
 - `x-checkout-event` — the event name.
 - `x-checkout-signature` — `sha256=<hex>`, an HMAC-SHA256 of the **exact raw body**
   using your webhook secret.
 
-Delivery is retried with exponential backoff (default 4 attempts) on transient
-failures — network errors and `5xx`/`429` responses. A `4xx` (other than `429`) is
-treated as permanent and not retried. Return `2xx` quickly to acknowledge receipt.
+### Delivery guarantees
+
+- **Durable**: the event body is serialised and signed once at write time and
+  persisted in `webhook_queue`. A process crash during backoff does not lose the
+  event — it will be delivered after restart.
+- **At-least-once**: retried up to 5 attempts with exponential backoff + full
+  jitter (base 5 s → max ceiling doubles per attempt). Make receivers idempotent.
+- **Per-attempt history**: every attempt is written to `webhook_deliveries`
+  (`attempt` column + `queue_entry_id`), so you can inspect exactly which
+  attempts failed and why.
+- **Transient failures** (network errors, `5xx`, `429`) are retried.
+- **Permanent failures** (`4xx` except `429`) are dead-lettered immediately.
+- **Dead letters** are replayable via `POST /webhooks/deliveries/:id/replay`.
+
+Return `2xx` quickly to acknowledge receipt. Long-running processing should be
+done asynchronously.
 
 For **replay protection**, reject events whose in-body `sentAt` is older than a
-small window (e.g. 5 minutes). `sentAt` is part of the signed body, so it cannot be
+small window (e.g. 5 minutes). `sentAt` is inside the signed body and cannot be
 forged without the secret.
 
-**Verifying** (recompute over the raw body and compare in constant time):
+### Verifying signatures
+
+Recompute over the raw body and compare in constant time:
 
 ```js
 import { createHmac, timingSafeEqual } from "node:crypto";

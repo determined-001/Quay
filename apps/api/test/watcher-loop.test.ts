@@ -115,6 +115,19 @@ function makeNoopWebhookRepo(): WebhookRepository {
     async listBySeller() {
       return [];
     },
+    async findWebhookById(): Promise<null> {
+      return null;
+    },
+    enqueue: async (e: { id: string; webhookId: string; linkId: string; event: string; payload: string; nextAttemptAt: number; createdAt: number }) => ({
+      ...e, attempts: 0, status: "pending" as const, lastStatusCode: null, lastError: null, updatedAt: e.createdAt,
+    }),
+    async claimDue(): Promise<never[]> {
+      return [];
+    },
+    async updateQueueEntry(): Promise<void> {},
+    async findQueueEntry(): Promise<null> {
+      return null;
+    },
     async listDeliveriesByLinkId(): Promise<never[]> {
     return [];
   },
