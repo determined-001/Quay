@@ -8,14 +8,18 @@ export type DB = LibSQLDatabase<typeof schema>;
 // (drizzle-kit push can manage this instead; see drizzle.config.ts.)
 const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS sellers (
-     id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL, created_at INTEGER NOT NULL
+     id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
    )`,
+  // New columns (offramp_indicative_rate, offramp_rate, offramp_rate_delta) are
+  // included here so fresh databases get the full schema. Existing databases are
+  // handled by the ALTER TABLE statements in MIGRATION_SQL below.
   `CREATE TABLE IF NOT EXISTS links (
      id TEXT PRIMARY KEY, reference TEXT NOT NULL UNIQUE, seller_id TEXT NOT NULL,
-     destination TEXT NOT NULL, title TEXT NOT NULL, amount TEXT NOT NULL,
+     destination TEXT NOT NULL, muxed_id TEXT, title TEXT NOT NULL, amount TEXT NOT NULL,
      asset_code TEXT NOT NULL, asset_issuer TEXT, status TEXT NOT NULL,
      tx_hash TEXT, payer TEXT, paid_amount TEXT,
      offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
+     offramp_indicative_rate TEXT, offramp_rate TEXT, offramp_rate_delta TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS webhooks (
@@ -46,12 +50,50 @@ const BOOTSTRAP_SQL = [
   // Index to make the worker's "claim due rows" query fast.
   `CREATE INDEX IF NOT EXISTS idx_webhook_queue_due
      ON webhook_queue (status, next_attempt_at)`,
+  `CREATE TABLE IF NOT EXISTS offramp_quotes (
+     quote_id TEXT PRIMARY KEY, link_id TEXT NOT NULL,
+     sell_asset_code TEXT NOT NULL, sell_asset_issuer TEXT, sell_amount TEXT NOT NULL,
+     buy_currency TEXT NOT NULL, price TEXT NOT NULL,
+     expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS offramp_jobs (
+     job_id TEXT PRIMARY KEY, link_id TEXT NOT NULL, anchor TEXT NOT NULL,
+     target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
+     status TEXT NOT NULL, external_status TEXT, last_error TEXT,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS seller_kyc (
+     seller_id TEXT PRIMARY KEY, customer_id TEXT, status TEXT NOT NULL,
+     required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
+     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL
+   )`,
   `CREATE TABLE IF NOT EXISTS watcher_cursors (
      account TEXT PRIMARY KEY, cursor TEXT NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS processed_tx (
      tx_hash TEXT PRIMARY KEY, link_id TEXT, created_at INTEGER NOT NULL
    )`,
+  `CREATE TABLE IF NOT EXISTS idempotency_keys (
+     key TEXT NOT NULL, seller_id TEXT NOT NULL, endpoint TEXT NOT NULL,
+     request_hash TEXT NOT NULL, response_status INTEGER NOT NULL,
+     response_body TEXT NOT NULL, created_at INTEGER NOT NULL,
+     PRIMARY KEY (key, seller_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS revoked_tokens (
+     jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, revoked_at INTEGER NOT NULL
+   )`,
+];
+
+/**
+ * Best-effort ALTER TABLE statements for existing databases that were created
+ * before issue 3.5 added the three rate-telemetry columns. SQLite/libSQL throws
+ * "duplicate column name" if the column already exists — we swallow that error
+ * so the server can boot cleanly against both old and new schemas.
+ */
+const MIGRATION_SQL = [
+  `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
+  `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,
 ];
 
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {
@@ -60,9 +102,22 @@ export function createDb(databaseUrl: string, authToken?: string): { db: DB; cli
   return { db, client };
 }
 
+// Additive column added after the initial release. `CREATE TABLE IF NOT EXISTS`
+// above won't touch an existing table, so add it out-of-band; ignore the
+// "duplicate column" error on databases that already have it.
+const MIGRATIONS_SQL = [`ALTER TABLE links ADD COLUMN muxed_id TEXT`];
+
 export async function bootstrap(client: Client): Promise<void> {
   for (const sql of BOOTSTRAP_SQL) {
     await client.execute(sql);
+  }
+  for (const sql of MIGRATIONS_SQL) {
+    try {
+      await client.execute(sql);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!message.toLowerCase().includes("duplicate column")) throw err;
+    }
   }
 }
 

@@ -21,7 +21,17 @@ export interface WebhookEvent {
  * scheme from the previous in-process sender are preserved.
  */
 export class WebhookSender {
+  /** Rows enqueued but not yet confirmed delivered by the worker. Feeds the
+   *  `webhook_deliveries_in_flight` gauge; approximate by design — it is a
+   *  per-process counter, not a query, so it stays free to read on every
+   *  /metrics scrape. */
+  private pending = 0;
+
   constructor(private readonly repo: WebhookRepository) {}
+
+  get pendingDepth(): number {
+    return this.pending;
+  }
 
   /**
    * Enqueue a delivery for every registered hook.  Returns as soon as all rows
@@ -59,6 +69,7 @@ export class WebhookSender {
     // comment; the actual header is built in WebhookWorker.
     void signature; // deliberate no-op: worker re-signs using repo secret
 
+    this.pending += 1;
     await this.repo.enqueue({
       id: newId("wqe"),
       webhookId: hook.id,

@@ -217,6 +217,7 @@ export class WebhookWorker {
       statusCode,
       ok,
       error,
+      createdAt: Date.now(),
     });
   }
 
