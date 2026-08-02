@@ -72,6 +72,12 @@ if (offramp !== "mock" && offramp !== "testanchor") {
 export const env = {
   network,
   horizonUrl: process.env.HORIZON_URL || undefined,
+  // Optional standby Horizon endpoint. The watcher switches to it after
+  // several consecutive failures on the primary, and back on recovery.
+  horizonUrlFallback: process.env.HORIZON_URL_FALLBACK || undefined,
+  // Consecutive Horizon failures (after retries) before /health reports
+  // degraded and (if HORIZON_URL_FALLBACK is set) the watcher switches to it.
+  horizonDegradedThreshold: Number(process.env.HORIZON_DEGRADED_THRESHOLD ?? "3"),
   usdcIssuer:
     network === "public"
       ? req("USDC_ISSUER_PUBLIC")
@@ -100,6 +106,21 @@ export const env = {
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Bearer token required to read GET /metrics. Auto-generates an ephemeral one
+  // (printed once at boot) if unset — the endpoint is always gated.
+  metricsToken: process.env.METRICS_TOKEN || undefined,
+  // Domain we identify as in SEP-10 challenges + stellar.toml. Should match where
+  // this API is actually reachable in production.
+  homeDomain: process.env.HOME_DOMAIN || `localhost:${Number(process.env.API_PORT ?? "8787")}`,
+  webAuthDomain: process.env.WEB_AUTH_DOMAIN || process.env.HOME_DOMAIN || `localhost:${Number(process.env.API_PORT ?? "8787")}`,
+  // Secret key for the identity that SIGNS SEP-10 challenges (our server, not any
+  // seller). Auto-generates a throwaway testnet keypair if unset. Required on
+  // public network — a login server's signing key must be stable across restarts.
+  serverSigningSecret: process.env.SERVER_SIGNING_SECRET || undefined,
+  // Symmetric secret for session JWTs minted after a SEP-10 login. Auto-generates
+  // an ephemeral one on testnet if unset (sessions won't survive a restart);
+  // required on public network.
+  jwtSecret: process.env.JWT_SECRET || undefined,
   // Watcher concurrency and fairness settings
   watcherConcurrency: Number(process.env.WATCHER_CONCURRENCY ?? "10"),
   watcherMaxAccountsPerTick: Number(process.env.WATCHER_MAX_ACCOUNTS_PER_TICK ?? "50"),

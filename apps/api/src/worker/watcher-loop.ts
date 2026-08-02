@@ -7,6 +7,7 @@ import {
 } from "@checkout/core";
 import { AnchorHealth, type LinkService } from "../services/link-service";
 import { env } from "../env";
+import { metrics } from "../metrics";
 
 /**
  * Per-account state for adaptive polling and circuit breaking.
@@ -68,6 +69,7 @@ export class WatcherLoop {
     perAccountLag: new Map(),
     circuitBreakersOpen: 0,
   };
+  private lastTickCompletedAt = Date.now();
 
   constructor(
     private readonly deps: {
@@ -107,6 +109,11 @@ export class WatcherLoop {
     this.timer = null;
   }
 
+  /** Seconds since the last fully-completed poll tick, computed at call time. */
+  getLagSeconds(): number {
+    return (Date.now() - this.lastTickCompletedAt) / 1000;
+  }
+
   /**
    * Get current circuit breaker status for all accounts.
    */
@@ -139,6 +146,7 @@ export class WatcherLoop {
     const tickStart = Date.now();
     const allAccounts = await this.deps.links.activeDestinations();
     this.metrics.accountsWatched = allAccounts.length;
+    metrics.accountsWatched.set(allAccounts.length);
 
     // Select accounts to process this tick using fair round-robin
     const accountsToProcess = this.selectAccountsForTick(allAccounts);
@@ -157,13 +165,15 @@ export class WatcherLoop {
     const tickDuration = Date.now() - tickStart;
     this.metrics.tickDurationMs = tickDuration;
     this.metrics.circuitBreakersOpen = this.countOpenCircuitBreakers();
-    
+    metrics.watcherTickDurationSeconds.observe(tickDuration / 1000);
+
     // Update per-account lag
     const now = Date.now();
     for (const [account, state] of this.accountStates.entries()) {
       const lag = now - state.lastProcessedAt;
       this.metrics.perAccountLag.set(account, lag);
     }
+    this.lastTickCompletedAt = now;
   }
 
   /**
@@ -327,6 +337,7 @@ export class WatcherLoop {
       if (await this.deps.state.isProcessed(payment.txHash)) continue;
 
       const outcome = matchPayment(payment, (ref) => byRef.get(ref), (id) => byMuxedId.get(id));
+      metrics.paymentsMatchedTotal.inc({ outcome: outcome.kind });
       const linkId =
         outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
           ? outcome.link.id

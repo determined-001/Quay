@@ -1,4 +1,5 @@
 import {
+  CannotReceiveError,
   canTransition,
   normalizeAmount,
   OffRampJobNotFoundError,
@@ -22,6 +23,7 @@ import {
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
+import { metrics } from "../metrics";
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -207,6 +209,10 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
 
 export class LinkService {
   private readonly sender: WebhookSender;
+  // Ephemeral: cash-out start time for the quote-to-settlement histogram. A
+  // process restart mid-cash-out just loses that one latency sample — the
+  // link's own status/offrampStatus fields remain the durable source of truth.
+  private readonly cashOutStartedAt = new Map<string, number>();
   private readonly health: AnchorHealth;
   /** Per-link last poll error (in-memory; survives only until restart). */
   private readonly lastPollErrorByLinkId = new Map<string, string>();
@@ -246,6 +252,11 @@ export class LinkService {
       deps.health ?? new AnchorHealth({ enabled: false, url: null, homeDomain: null });
   }
 
+  /** Webhook deliveries currently in flight (including in-process retries). */
+  webhookQueueDepth(): number {
+    return this.sender.inFlightCount;
+  }
+
   private buildRequest(link: PaymentLink): PaymentRequest {
     return this.deps.rail.buildRequest({
       destination: link.destination,
@@ -264,12 +275,25 @@ export class LinkService {
       ? Date.now() + body.expiresInMinutes * 60_000
       : null;
 
+    // Universal receive-preflight (issue #9): every link, not just muxed ones.
+    // Subsumes the muxed-only `canReceiveAsset` check that used to live in the
+    // branch below — this runs first and carries the richer 422 payload.
+    try {
+      await this.deps.rail.assertCanReceive(seller.wallet, asset);
+    } catch (err) {
+      if (err instanceof CannotReceiveError) {
+        throw new HttpError(422, "destination_cannot_receive", {
+          message: err.message,
+          reason: err.reason,
+          asset,
+          ...(err.trustlineUri ? { trustlineUri: err.trustlineUri } : {}),
+        });
+      }
+      throw err;
+    }
+
     let muxedId: string | null = null;
     if (this.deps.correlation === "muxed") {
-      const preflight = await canReceiveAsset(this.deps.stellar.horizonUrl, seller.wallet, asset);
-      if (!preflight.ok) {
-        throw new HttpError(422, `Cannot create a muxed payment link: ${preflight.reason}`);
-      }
       muxedId = newMuxedId();
     }
 
@@ -284,8 +308,27 @@ export class LinkService {
       asset,
       expiresAt,
     });
+    metrics.linkStatusTransitionsTotal.inc({ to: link.status });
 
     return { link, request: this.buildRequest(link) };
+  }
+
+  /** Re-checks the seller's own USDC trustline (bypassing the preflight cache is
+   *  unnecessary — a 60s-stale "ok" or "revoked" is fine for a health check). */
+  async checkSellerUsdcTrustline(): Promise<
+    { ok: true } | { ok: false; reason: string; message: string; trustlineUri?: string }
+  > {
+    const seller = await this.deps.sellers.getDefault();
+    const asset = resolveAsset("USDC", this.deps.stellar);
+    try {
+      await this.deps.rail.assertCanReceive(seller.wallet, asset);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof CannotReceiveError) {
+        return { ok: false, reason: err.reason, message: err.message, trustlineUri: err.trustlineUri };
+      }
+      throw err;
+    }
   }
 
   async listLinks(): Promise<PaymentLink[]> {
@@ -314,6 +357,9 @@ export class LinkService {
       link.payer = payment.from;
       link.paidAmount = normalizeAmount(payment.amount);
       await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "paid" });
+      const paidAt = Date.parse(payment.createdAt);
+      if (!Number.isNaN(paidAt)) metrics.paymentToPaidLatencySeconds.observe((Date.now() - paidAt) / 1000);
       await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid });
       return true;
     }
@@ -326,6 +372,7 @@ export class LinkService {
       link.payer = payment.from;
       link.paidAmount = normalizeAmount(payment.amount);
       await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "underpaid" });
       await this.fireWebhook(link, "link.underpaid", {});
       return false;
     }
@@ -383,17 +430,9 @@ export class LinkService {
     link.offrampTargetCurrency = quote.targetCurrency;
     link.offrampStatus = "pending";
     await this.deps.links.save(link);
-
-    const job: OffRampJob = {
-      jobId,
-      linkId: link.id,
-      status: "pending",
-      targetCurrency: quote.targetCurrency,
-      targetAmount: quote.targetAmount,
-      rate: quote.rate,
-    };
-
-    return { job, initiation };
+    metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
+    this.cashOutStartedAt.set(link.id, Date.now());
+    return job;
   }
 
   /** Advance any pending cash-outs by polling the off-ramp adapter. */
@@ -448,6 +487,8 @@ export class LinkService {
         link.status = "offramp_settled";
         link.offrampStatus = "settled";
         await this.deps.links.save(link);
+        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_settled" });
+        this.observeSettlementDuration(link.id, "settled");
         await this.fireWebhook(link, "offramp.settled", {
           targetCurrency: job.targetCurrency,
           targetAmount: job.targetAmount,
@@ -456,9 +497,18 @@ export class LinkService {
         link.status = "offramp_failed";
         link.offrampStatus = "failed";
         await this.deps.links.save(link);
+        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
+        this.observeSettlementDuration(link.id, "failed");
         await this.fireWebhook(link, "offramp.failed", { reason: job.reason });
       }
     }
+  }
+
+  private observeSettlementDuration(linkId: string, outcome: "settled" | "failed"): void {
+    const startedAt = this.cashOutStartedAt.get(linkId);
+    if (startedAt === undefined) return; // process restarted mid-cash-out — no sample
+    this.cashOutStartedAt.delete(linkId);
+    metrics.quoteToSettlementDurationSeconds.observe({ outcome }, (Date.now() - startedAt) / 1000);
   }
 
   /**
@@ -532,6 +582,7 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly extra?: Record<string, unknown>,
   ) {
     super(message);
   }
