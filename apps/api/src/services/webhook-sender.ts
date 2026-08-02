@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { Webhook, WebhookRepository } from "@checkout/core";
+import { decryptSecret } from "./secret-crypto";
 import { metrics } from "../metrics";
 
 export interface WebhookEvent {
@@ -23,6 +24,10 @@ export interface WebhookSenderOptions {
  * reject events whose in-body `sentAt` is too old (replay protection — `sentAt`
  * is inside the signed body, so it cannot be tampered with).
  *
+ * If a secret was rotated less than 24h ago, the previous secret is also
+ * accepted as a valid signer and both signatures are sent (see `deliver`) —
+ * this is what makes rotation zero-downtime for the receiver.
+ *
  * Delivery is retried with exponential backoff on transient failures (network
  * errors and 5xx / 429 responses). 4xx (other than 429) is treated as a
  * permanent failure and not retried. Only the final outcome is recorded.
@@ -30,6 +35,10 @@ export interface WebhookSenderOptions {
  * NOTE: retries are in-process — a crash mid-backoff loses pending retries.
  * A durable queue is the production answer; this hardens the common transient case.
  */
+function sign(secret: string, body: string): string {
+  return createHmac("sha256", secret).update(body).digest("hex");
+}
+
 export class WebhookSender {
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
@@ -62,7 +71,20 @@ export class WebhookSender {
     event: string,
     body: string,
   ): Promise<void> {
-    const signature = createHmac("sha256", hook.secret).update(body).digest("hex");
+    const signature = sign(decryptSecret(hook.secretEncrypted), body);
+
+    // During the post-rotation overlap window, also sign with the previous
+    // secret and send both — so a receiver that hasn't redeployed with the
+    // new secret yet still verifies successfully, and drops no events.
+    // Signatures are comma-separated in one header (`sha256=<new>,sha256=<old>`);
+    // a receiver should accept the delivery if *any* listed signature matches.
+    const stillInOverlap =
+      hook.previousSecretEncrypted !== null &&
+      hook.previousSecretExpiresAt !== null &&
+      hook.previousSecretExpiresAt > Date.now();
+    const signatureHeader = stillInOverlap
+      ? `sha256=${signature},sha256=${sign(decryptSecret(hook.previousSecretEncrypted!), body)}`
+      : `sha256=${signature}`;
 
     let statusCode: number | null = null;
     let error: string | null = null;
@@ -75,7 +97,7 @@ export class WebhookSender {
             method: "POST",
             headers: {
               "content-type": "application/json",
-              "x-checkout-signature": `sha256=${signature}`,
+              "x-checkout-signature": signatureHeader,
               "x-checkout-event": event,
             },
             body,
