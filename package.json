@@ -16,7 +16,8 @@
     "docs:status-diagram": "node scripts/gen-status-diagram.mjs",
     "docs:check-status-diagram": "node scripts/gen-status-diagram.mjs --check",
     "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
-    "sweep": "node scripts/uptime-check.mjs"
+    "e2e": "pnpm --filter @checkout/web e2e",
+    "sweep": "node scripts/uptime-check.mjs && pnpm --filter @checkout/web e2e:live"
   },
   "dependencies": {
     "@libsql/client": "0.17.4"

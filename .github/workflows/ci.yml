@@ -43,6 +43,23 @@ jobs:
           API_URL: http://localhost:8787
           NEXT_TELEMETRY_DISABLED: "1"
 
+      - name: Install Playwright browsers (Chromium only)
+        run: pnpm --filter @checkout/web exec playwright install --with-deps chromium
+
+      # Locally-composed stack (fake off-ramp timing, real ledger watcher
+      # disabled via E2E_TEST_MODE - see playwright.config.ts) - runs with no
+      # network access to Stellar/anchor infra, only this job's own
+      # localhost traffic (issue 5.7).
+      - name: E2E - local payment loop
+        run: pnpm e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 14
       - name: Dependency audit (fails on unallowlisted HIGH/CRITICAL)
         run: |
           set +e

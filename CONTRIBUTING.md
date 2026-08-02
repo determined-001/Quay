@@ -105,17 +105,36 @@ Run the full check suite from the repo root — this is exactly what CI runs:
 pnpm typecheck                    # all packages
 pnpm test                         # unit tests
 pnpm build                        # builds the web app
+pnpm e2e                          # Playwright: full payment loop against a local stack, no network access
 pnpm docs:check-status-diagram    # docs/generated/status-diagram.mmd matches status.ts
 pnpm docs:check-domain-boundary   # packages/core imports no chain SDK
 ```
 
-All five must pass. If you change domain logic in `packages/core`, add or update
+All six must pass. If you change domain logic in `packages/core`, add or update
 the corresponding unit tests (`packages/core/test/`). New behaviour in the API,
 worker, or adapters should come with tests where practical. If you change
 `LINK_STATUSES`/`TRANSITIONS` in `packages/core/src/domain/status.ts`, run
 `pnpm docs:status-diagram` and update the pasted copy in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) to match.
 
+## End-to-end tests (issue 5.7)
+
+`pnpm e2e` (`apps/web/e2e/local/`) runs a Playwright suite against a
+locally-composed stack (API + web + a throwaway local DB) that CI also runs
+on every PR with no network access to Stellar/anchor infra - it settles
+payments through a test-only API route
+(`apps/api/src/routes/test-only.ts`, only mounted under `E2E_TEST_MODE=1`,
+refused under `NODE_ENV=production`) instead of a real on-chain payment.
+
+`pnpm sweep` additionally runs `apps/web/e2e/live/` against the real deployed
+demo (`pnpm --filter @checkout/web e2e:live`) - the pre-entry ritual from
+`MAINTAINER.md`'s standing rule, as one command. This mutates the live
+deployment (creates a small throwaway link, same trade-off as
+`scripts/uptime-check.mjs`'s synthetic check) and is not part of the PR
+checklist above - it also runs nightly and on demand
+(`.github/workflows/e2e-live.yml`).
+
+## Pull request guidelines
 ---
 
 ## Pull Request Guidelines

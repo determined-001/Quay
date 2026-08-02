@@ -180,7 +180,8 @@ Useful scripts (from the repo root):
 pnpm typecheck   # all packages
 pnpm test        # core unit tests
 pnpm build       # builds the web app
-pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live demo
+pnpm e2e         # Playwright: full payment loop against a local stack, no network access
+pnpm sweep       # pre-entry ritual: uptime/synthetic checks + a live Playwright suite against the live demo
 ```
 
 ---

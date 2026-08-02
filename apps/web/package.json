@@ -7,7 +7,10 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "e2e:dev": "next dev -p 3100",
+    "e2e": "playwright test --project=local",
+    "e2e:live": "E2E_LIVE=1 playwright test --project=live"
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
@@ -17,6 +20,7 @@
     "qrcode.react": "4.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.49.1",
     "@types/node": "25.9.3",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
