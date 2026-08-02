@@ -1,7 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { api, CheckoutError, describeError, type KycView, type PaymentLink } from "../../lib/api";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  api,
+  CheckoutError,
+  describeError,
+  type KycView,
+  type PaymentLink,
+  type UsdcTrustlineStatus,
+} from "../../lib/api";
 import KycPanel from "./KycPanel";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
@@ -100,7 +108,11 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableP
       <tbody>
         {links.map((link) => (
           <tr key={link.id}>
-            <td>{link.title}</td>
+            <td>
+              <Link href={`/links/${link.id}`} className="dash-link-title">
+                {link.title}
+              </Link>
+            </td>
             <td className="amt">{amountLabel(link)}</td>
             <td>
               <StatusPill status={link.status} />
@@ -148,6 +160,7 @@ export default function Dashboard() {
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
   const [kyc, setKyc] = useState<KycView | null>(null);
 
   const refresh = useCallback(async () => {
@@ -176,11 +189,27 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshTrustline = useCallback(async () => {
+    try {
+      const health = await api.health();
+      setTrustline(health.usdcTrustline);
+    } catch {
+      // Health check itself failing is surfaced by the rest of the dashboard
+      // (links won't load either) — don't also blank out a banner that was
+      // showing real, still-relevant information.
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
+    void refreshTrustline();
     const t = setInterval(refresh, 5_000);
-    return () => clearInterval(t);
-  }, [refresh]);
+    const th = setInterval(refreshTrustline, 15_000);
+    return () => {
+      clearInterval(t);
+      clearInterval(th);
+    };
+  }, [refresh, refreshTrustline]);
 
   useEffect(() => {
     void refreshKyc();
@@ -208,6 +237,9 @@ export default function Dashboard() {
           ? describeError(e)
           : "Failed to create the payment link. Please try again.",
       );
+      if (e instanceof CheckoutError && e.code === "destination_cannot_receive") {
+        void refreshTrustline(); // don't wait up to 15s for the banner to catch up
+      }
     } finally {
       setCreating(false);
     }
@@ -237,6 +269,28 @@ export default function Dashboard() {
     }
   }
 
+  const [csvFrom, setCsvFrom] = useState("");
+  const [csvTo, setCsvTo] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  async function handleCsvExport() {
+    setExporting(true);
+    try {
+      const blob = await api.exportCsv(csvFrom || undefined, csvTo || undefined);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `quay-links-export-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
   // Real anchor and not yet verified: never let the seller submit a cash-out
   // that can only fail (or worse, silently carry placeholder identity data).
   const cashOutBlocked = !OFFRAMP_IS_MOCK && kyc?.status !== "ACCEPTED";
@@ -245,6 +299,21 @@ export default function Dashboard() {
 
   return (
     <>
+      {trustline && !trustline.ok && (
+        <div className="banner banner--warn">
+          <strong>Your wallet can&apos;t receive USDC right now.</strong>{" "}
+          {trustline.message}
+          {trustline.trustlineUri && (
+            <>
+              {" "}
+              <a className="linkbtn" href={trustline.trustlineUri}>
+                Add USDC trustline
+              </a>
+            </>
+          )}
+        </div>
+      )}
+
       <section className="panel">
         <h2>New payment link</h2>
         <div className="field">
@@ -325,6 +394,36 @@ export default function Dashboard() {
             cashOutBlocked={cashOutBlocked}
           />
         )}
+      </section>
+
+      <section className="panel">
+        <h2>Export</h2>
+        <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          Download all links as CSV for your accounting. Optionally filter by date range.
+        </p>
+        <div className="csv-export-row">
+          <div className="field csv-field">
+            <label htmlFor="csv-from">From</label>
+            <input
+              id="csv-from"
+              type="date"
+              value={csvFrom}
+              onChange={(e) => setCsvFrom(e.target.value)}
+            />
+          </div>
+          <div className="field csv-field">
+            <label htmlFor="csv-to">To</label>
+            <input
+              id="csv-to"
+              type="date"
+              value={csvTo}
+              onChange={(e) => setCsvTo(e.target.value)}
+            />
+          </div>
+          <button className="btn" onClick={handleCsvExport} disabled={exporting}>
+            {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+        </div>
       </section>
     </>
   );
