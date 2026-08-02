@@ -35,11 +35,26 @@ def load_allowlist(path: str) -> set[str]:
     return ids
 
 
+# `pnpm audit --audit-level=high` gates its own EXIT CODE on severity, but the
+# JSON report it writes still contains every advisory including low/moderate.
+# Filtering here is what makes this gate actually mean "HIGH/CRITICAL", rather
+# than failing on any advisory at all.
+BLOCKING_SEVERITIES = {"high", "critical"}
+
+
+def _blocking(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("severity", "")).lower() in BLOCKING_SEVERITIES
+
+
 def extract_advisory_ids(data: dict) -> set[str]:
     ids: set[str] = set()
 
     # Older shape: {"advisories": {"<numeric-id>": {"url": "...", "github_advisory_id": "GHSA-..."}}}
     for advisory_id, advisory in (data.get("advisories") or {}).items():
+        if not _blocking(advisory):
+            continue
         ids.add(str(advisory_id))
         if isinstance(advisory, dict):
             ghsa = advisory.get("github_advisory_id") or advisory.get("url")
@@ -51,6 +66,8 @@ def extract_advisory_ids(data: dict) -> set[str]:
     # Newer shape: {"vulnerabilities": {"<package>": {"via": [ ... ]}}}
     for _pkg, vuln in (data.get("vulnerabilities") or {}).items():
         if not isinstance(vuln, dict):
+            continue
+        if not _blocking(vuln):
             continue
         for via in vuln.get("via", []):
             if isinstance(via, str):
