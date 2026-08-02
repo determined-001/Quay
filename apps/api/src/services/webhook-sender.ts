@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import type { Webhook, WebhookRepository } from "@checkout/core";
+import { metrics } from "../metrics";
 
 export interface WebhookEvent {
   event: string; // e.g. "link.paid"
@@ -38,6 +39,7 @@ export class WebhookSender {
   private readonly baseDelayMs: number;
   private readonly timeoutMs: number;
   private readonly logger: Logger;
+  private inFlight = 0;
 
   constructor(
     private readonly repo: WebhookRepository,
@@ -49,13 +51,12 @@ export class WebhookSender {
     this.logger = opts.logger ?? NOOP_LOGGER;
   }
 
-  async dispatch(
-    hooks: Webhook[],
-    linkId: string,
-    event: WebhookEvent,
-    opts?: { logger?: Logger },
-  ): Promise<void> {
-    const baseLog = (opts?.logger ?? this.logger);
+  /** Deliveries currently in progress, including in-process retry backoff. */
+  get inFlightCount(): number {
+    return this.inFlight;
+  }
+
+  async dispatch(hooks: Webhook[], linkId: string, event: WebhookEvent): Promise<void> {
     const body = JSON.stringify({ ...event, id: linkId, sentAt: new Date().toISOString() });
 
     await Promise.all(hooks.map((hook) => this.deliver(baseLog, hook, linkId, event.event, body)));
@@ -81,53 +82,45 @@ export class WebhookSender {
     let statusCode: number | null = null;
     let error: string | null = null;
 
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
-      try {
-        const res = await fetch(hook.url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-checkout-signature": `sha256=${signature}`,
-            "x-checkout-event": event,
-          },
-          body,
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
+    this.inFlight += 1;
+    try {
+      for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+        try {
+          const res = await fetch(hook.url, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-checkout-signature": `sha256=${signature}`,
+              "x-checkout-event": event,
+            },
+            body,
+            signal: AbortSignal.timeout(this.timeoutMs),
+          });
 
-        if (res.ok) {
-          await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
-          child.info(
-            { event: "webhook.attempt", attempt, statusCode: res.status, delivered: true },
-            "webhook delivered",
-          );
-          return;
+          if (res.ok) {
+            metrics.webhookAttemptsTotal.inc({ result: "ok" });
+            await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
+            return;
+          }
+
+          metrics.webhookAttemptsTotal.inc({ result: "error" });
+          statusCode = res.status;
+          error = `HTTP ${res.status}`;
+          // 4xx (except 429) is a client error the receiver won't fix on retry.
+          if (res.status < 500 && res.status !== 429) break;
+        } catch (err) {
+          metrics.webhookAttemptsTotal.inc({ result: "error" });
+          statusCode = null;
+          error = err instanceof Error ? err.message : String(err);
         }
 
-        statusCode = res.status;
-        error = `HTTP ${res.status}`;
-        child.info(
-          { event: "webhook.attempt", attempt, statusCode: res.status, delivered: false, willRetry: attempt < this.maxAttempts && (res.status >= 500 || res.status === 429) },
-          "webhook attempt failed",
-        );
-        // 4xx (except 429) is a client error the receiver won't fix on retry.
-        if (res.status < 500 && res.status !== 429) break;
-      } catch (err) {
-        statusCode = null;
-        error = err instanceof Error ? err.message : String(err);
-        child.info(
-          { event: "webhook.attempt", attempt, statusCode: null, delivered: false, willRetry: attempt < this.maxAttempts, error },
-          "webhook attempt errored",
-        );
+        if (attempt < this.maxAttempts) await sleep(this.backoff(attempt));
       }
 
-      if (attempt < this.maxAttempts) await sleep(this.backoff(attempt));
+      await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error });
+    } finally {
+      this.inFlight -= 1;
     }
-
-    child.error(
-      { event: "webhook.failed", attempts: this.maxAttempts, statusCode, error },
-      "webhook delivery failed",
-    );
-    await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error });
   }
 
   /** Exponential backoff with full jitter. */

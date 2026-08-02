@@ -11,17 +11,12 @@ export function linkRoutes(c: Container): Hono<AppEnv> {
   app.post("/", async (ctx) => {
     const log = getLogger(ctx);
     const parsed = createLinkSchema.safeParse(await safeJson(ctx));
-    if (!parsed.success) {
-      log.warn({ event: "link.create.invalid", issues: parsed.error.issues }, "create link invalid body");
-      return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
-    }
-    const t0 = Date.now();
+    if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
     try {
-      const result = await c.service.createLink(parsed.data, { logger: log });
-      log.info({ event: "link.create.ok", linkId: result.link.id, durationMs: Date.now() - t0 }, "create link ok");
+      const result = await c.service.createLink(parsed.data);
       return ctx.json(result, 201);
     } catch (err) {
-      log.error({ event: "link.create.error", error: err instanceof Error ? err.message : String(err) }, "create link failed");
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 422);
       throw err;
     }
   });
