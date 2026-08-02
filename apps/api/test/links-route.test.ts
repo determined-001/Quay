@@ -12,6 +12,7 @@ const ownedLink: PaymentLink = {
   reference: "ref_1",
   sellerId: owner.id,
   destination: owner.wallet,
+  muxedId: null,
   title: "T-shirt",
   amount: "10",
   asset: { code: "USDC", issuer: "GISSUER" },
@@ -53,6 +54,18 @@ function fakeContainer(): Container {
     webhooks: {} as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: owner.wallet },
     auth: { session, sellers, revocations } as unknown as Container["auth"],
+    kyc: {} as Container["kyc"],
+    horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
+    metricsToken: "test-metrics-token",
+    watcherLagSeconds: () => 0,
+    circuitBreakerState: () => 0,
+    getWatcherCircuitBreakerStatus: () => [],
+    getWatcherMetrics: () => ({
+      accountsWatched: 0,
+      tickDurationMs: 0,
+      perAccountLag: new Map(),
+      circuitBreakersOpen: 0,
+    }),
     start() {},
     stop() {},
   };
@@ -63,12 +76,15 @@ async function tokenFor(session: SessionIssuer, sellerId: string): Promise<strin
   return token;
 }
 
-describe("GET /links/:id — auth semantics", () => {
-  it("rejects with 401 when no token is provided", async () => {
+describe("GET /links/:id — public checkout read", () => {
+  // Deliberately NOT gated: the buyer paying an invoice holds no seller session,
+  // and the checkout page is server-rendered with no cookie at all. The link id
+  // is the bearer capability here.
+  it("returns the link (200) to an unauthenticated buyer", async () => {
     const container = fakeContainer();
     const app = linkRoutes(container);
     const res = await app.request(`/${ownedLink.id}`);
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
   });
 
   it("returns the link (200) when the owning seller is authenticated", async () => {
@@ -80,22 +96,19 @@ describe("GET /links/:id — auth semantics", () => {
     expect(res.status).toBe(200);
   });
 
-  it("rejects with 403 when a different authenticated seller requests someone else's link", async () => {
+  it("still serves a link to a different authenticated seller — reads are public", async () => {
     const container = fakeContainer();
     const app = linkRoutes(container);
     const token = await tokenFor(container.auth.session, other.id);
 
     const res = await app.request(`/${ownedLink.id}`, { headers: { authorization: `Bearer ${token}` } });
-    expect(res.status).toBe(403);
-    expect((await res.json()).error).toBe("forbidden");
+    expect(res.status).toBe(200);
   });
 
-  it("returns 404 for a nonexistent link even when authenticated", async () => {
+  it("returns 404 for a nonexistent link", async () => {
     const container = fakeContainer();
     const app = linkRoutes(container);
-    const token = await tokenFor(container.auth.session, owner.id);
-
-    const res = await app.request(`/lnk_does_not_exist`, { headers: { authorization: `Bearer ${token}` } });
+    const res = await app.request(`/lnk_does_not_exist`);
     expect(res.status).toBe(404);
   });
 });

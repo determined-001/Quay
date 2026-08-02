@@ -5,9 +5,13 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { metricsRoutes } from "./routes/metrics";
 import { authRoutes } from "./routes/auth";
 import { wellKnownRoutes } from "./routes/well-known";
+import { kycRoutes } from "./routes/kyc";
 import { rateLimit } from "./middleware/rate-limit";
+
+const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
 
 async function main(): Promise<void> {
   const container = await createContainer();
@@ -17,7 +21,7 @@ async function main(): Promise<void> {
     "*",
     cors({
       origin: env.corsOrigins,
-      allowMethods: ["GET", "POST", "OPTIONS"],
+      allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
       // The session cookie is sent cross-origin (API and web app are separate
       // hosts) — credentials: true plus an explicit (non-"*") origin list is
       // required for the browser to actually attach/accept it.
@@ -26,16 +30,44 @@ async function main(): Promise<void> {
   );
   app.use("*", rateLimit({ windowMs: env.rateLimitWindowMs, max: env.rateLimitMax }));
 
-  app.get("/health", (ctx) =>
-    ctx.json({
+  app.get("/health", async (ctx) => {
+    const usdcTrustline = await container.service
+      .checkSellerUsdcTrustline()
+      .catch(() => ({ ok: false as const, reason: "check_failed", message: "trustline preflight check failed" }));
+    return ctx.json({
       ok: true,
       network: container.config.network,
       sellerWallet: container.config.sellerWallet,
-    }),
-  );
+      usdcTrustline,
+      horizon: container.horizonStatus(),
+      // Anchor health probe + circuit breaker (issue #19, 3.7) so an operator
+      // can tell "the anchor is down" apart from "the API is down" without
+      // tailing logs.
+      anchor: container.service.healthSnapshot(),
+    });
+  });
+
+  app.get("/ready", (ctx) => {
+    const circuitBreakers = container.getWatcherCircuitBreakerStatus();
+    const metrics = container.getWatcherMetrics();
+    
+    const hasOpenCircuitBreakers = circuitBreakers.some((cb) => cb.isOpen);
+    
+    return ctx.json({
+      ok: !hasOpenCircuitBreakers,
+      circuitBreakers,
+      metrics: {
+        accountsWatched: metrics.accountsWatched,
+        tickDurationMs: metrics.tickDurationMs,
+        circuitBreakersOpen: metrics.circuitBreakersOpen,
+        perAccountLag: Object.fromEntries(metrics.perAccountLag),
+      },
+    });
+  });
 
   app.route("/links", linkRoutes(container));
   app.route("/webhooks", webhookRoutes(container));
+  app.route("/metrics", metricsRoutes(container));
   app.route(
     "/auth",
     authRoutes({
@@ -47,10 +79,11 @@ async function main(): Promise<void> {
     }),
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
+  app.route("/seller/kyc", kycRoutes(container));
 
   container.start();
 
-  serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
+  let server: ReturnType<typeof serve> | undefined = serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
     console.log(`[api] listening on http://localhost:${info.port}`);
     console.log(`[api] network=${container.config.network}  horizon=${container.config.horizonUrl}`);
     console.log(`[api] seller wallet (receives funds): ${container.config.sellerWallet}`);

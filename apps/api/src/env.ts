@@ -49,18 +49,48 @@ if (network !== "testnet" && network !== "public") {
   throw new Error(`STELLAR_NETWORK must be "testnet" or "public", got "${network}"`);
 }
 
+const watchMode = (process.env.WATCH_MODE ?? "poll") as "poll" | "stream";
+if (watchMode !== "poll" && watchMode !== "stream") {
+  throw new Error(`WATCH_MODE must be "poll" or "stream", got "${watchMode}"`);
+}
+
+// "memo" (default): correlation via MEMO_TEXT. "muxed": SEP-23 M-address, no
+// memo needed — survives wallets that drop/mangle memos. Some older wallets
+// refuse M... destinations, so this stays opt-in until measured in practice.
+const correlation = (process.env.CORRELATION ?? "memo") as "memo" | "muxed";
+if (correlation !== "memo" && correlation !== "muxed") {
+  throw new Error(`CORRELATION must be "memo" or "muxed", got "${correlation}"`);
+}
+
+// "mock" (default, offline-safe) or "testanchor" (real SEP-10/12/38/6 flow
+// against https://testanchor.stellar.org). See packages/offramp/src/testanchor.ts.
+const offramp = (process.env.OFFRAMP ?? "mock") as "mock" | "testanchor";
+if (offramp !== "mock" && offramp !== "testanchor") {
+  throw new Error(`OFFRAMP must be "mock" or "testanchor", got "${offramp}"`);
+}
+
 export const env = {
   network,
   horizonUrl: process.env.HORIZON_URL || undefined,
+  // Optional standby Horizon endpoint. The watcher switches to it after
+  // several consecutive failures on the primary, and back on recovery.
+  horizonUrlFallback: process.env.HORIZON_URL_FALLBACK || undefined,
+  // Consecutive Horizon failures (after retries) before /health reports
+  // degraded and (if HORIZON_URL_FALLBACK is set) the watcher switches to it.
+  horizonDegradedThreshold: Number(process.env.HORIZON_DEGRADED_THRESHOLD ?? "3"),
   usdcIssuer:
     network === "public"
       ? req("USDC_ISSUER_PUBLIC")
-      : req("USDC_ISSUER_TESTNET"),
+      : req("USDC_ISSUER_TESTNET", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"),
   databaseUrl: process.env.DATABASE_URL || "file:./local.db",
   // Turso auth token. Unused for local file: URLs.
   databaseAuthToken: process.env.DATABASE_AUTH_TOKEN || undefined,
   apiPort: Number(process.env.API_PORT ?? "8787"),
   pollMs: Number(process.env.WATCH_POLL_MS ?? "6000"),
+  // "poll" (default, restart-safe MVP behavior) or "stream" (Horizon SSE,
+  // opt-in until proven). See packages/stellar/src/streaming-horizon-watcher.ts.
+  watchMode,
+  correlation,
   corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:3000")
     .split(",")
     .map((s) => s.trim())
@@ -72,12 +102,13 @@ export const env = {
   // throwaway keypair on first boot and prints it. Required on public network.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
   defaultSellerName: process.env.DEFAULT_SELLER_NAME || "Demo Seller",
-  // "mock" (default, offline-safe) or "testanchor" (real SEP-10/38/6 flow against
-  // https://testanchor.stellar.org). See packages/offramp/src/testanchor.ts.
-  offramp: (process.env.OFFRAMP ?? "mock") as "mock" | "testanchor",
+  offramp,
   // Required only when OFFRAMP=testanchor and DEFAULT_SELLER_WALLET is set (SEP-10
   // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
+  // Bearer token required to read GET /metrics. Auto-generates an ephemeral one
+  // (printed once at boot) if unset — the endpoint is always gated.
+  metricsToken: process.env.METRICS_TOKEN || undefined,
   // Domain we identify as in SEP-10 challenges + stellar.toml. Should match where
   // this API is actually reachable in production.
   homeDomain: process.env.HOME_DOMAIN || `localhost:${Number(process.env.API_PORT ?? "8787")}`,
@@ -94,4 +125,16 @@ export const env = {
   // HTTPS). Defaults on; set COOKIE_SECURE=false for plain-http local dev,
   // where a Secure cookie would otherwise silently never be sent at all.
   cookieSecure: (process.env.COOKIE_SECURE ?? "true") !== "false",
+  // Watcher concurrency and fairness settings
+  watcherConcurrency: Number(process.env.WATCHER_CONCURRENCY ?? "10"),
+  watcherMaxAccountsPerTick: Number(process.env.WATCHER_MAX_ACCOUNTS_PER_TICK ?? "50"),
+  watcherCircuitBreakerThreshold: Number(process.env.WATCHER_CIRCUIT_BREAKER_THRESHOLD ?? "5"),
+  watcherCircuitBreakerCooldownMs: Number(process.env.WATCHER_CIRCUIT_BREAKER_COOLDOWN_MS ?? "60000"),
+  watcherIdleBackoffTicks: Number(process.env.WATCHER_IDLE_BACKOFF_TICKS ?? "10"),
+  watcherAggressivePollTicks: Number(process.env.WATCHER_AGGRESSIVE_POLL_TICKS ?? "5"),
+  shutdownTimeoutMs: Number(process.env.SHUTDOWN_TIMEOUT_MS ?? "5000"),
+  // AES-256-GCM key (32 bytes, hex) for seller KYC field values at rest.
+  // Required only when OFFRAMP=testanchor — mock mode never stores real PII.
+  // Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  kycEncryptionKey: offramp === "testanchor" ? req("KYC_ENCRYPTION_KEY") : undefined,
 } as const;

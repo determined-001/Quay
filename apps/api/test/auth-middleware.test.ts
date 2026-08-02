@@ -37,7 +37,7 @@ describe("requireSeller", () => {
     const app = buildApp({ session: new SessionIssuer("s"), sellers: fakeSellers(), revocations: fakeRevocations() });
     const res = await app.request("/protected");
     expect(res.status).toBe(401);
-    expect((await res.json()).error).toBe("unauthorized");
+    expect(((await res.json()) as Record<string, unknown>).error).toBe("unauthorized");
   });
 
   it("rejects a tampered token — 401", async () => {
@@ -67,7 +67,7 @@ describe("requireSeller", () => {
     const app = buildApp({ session, sellers: fakeSellers(), revocations });
     const res = await app.request("/protected", { headers: { authorization: `Bearer ${issued.token}` } });
     expect(res.status).toBe(401);
-    expect((await res.json()).message).toMatch(/revoked/);
+    expect(((await res.json()) as Record<string, unknown>).message).toMatch(/revoked/);
   });
 
   it("rejects a token for a seller that no longer exists — 401", async () => {
@@ -86,7 +86,7 @@ describe("requireSeller", () => {
     const app = buildApp({ session, sellers: fakeSellers(), revocations: fakeRevocations() });
     const res = await app.request("/protected", { headers: { authorization: `Bearer ${issued.token}` } });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ sellerId: "sel_1", jti: issued.jti });
+    expect((await res.json()) as Record<string, unknown>).toEqual({ sellerId: "sel_1", jti: issued.jti });
   });
 
   it("also accepts the token via the session cookie (SSR path)", async () => {

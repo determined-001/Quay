@@ -1,4 +1,4 @@
-import { Keypair, StrKey, Utils } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, WebAuth } from "@stellar/stellar-sdk";
 
 export class AuthError extends Error {}
 
@@ -24,7 +24,7 @@ export interface ChallengeOptions {
  * verifies signed ones back. https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md
  *
  * Signature + timebounds + domain checks are delegated to @stellar/stellar-sdk's
- * `Utils` (the same primitives the JS SDK uses client-side in
+ * `WebAuth` (the same primitives the JS SDK uses client-side in
  * packages/offramp/src/sep10.ts); this class adds the single-use nonce store and
  * the M-of-N threshold lookup via Horizon.
  */
@@ -38,7 +38,7 @@ export class ChallengeService {
     if (!StrKey.isValidEd25519PublicKey(account)) {
       throw new AuthError("account must be a valid Stellar G-address");
     }
-    const transaction = Utils.buildChallengeTx(
+    const transaction = WebAuth.buildChallengeTx(
       this.opts.serverKeypair,
       account,
       this.opts.homeDomain,
@@ -56,7 +56,7 @@ export class ChallengeService {
     let clientAccountID: string;
     let hash: string;
     try {
-      const read = Utils.readChallengeTx(
+      const read = WebAuth.readChallengeTx(
         transactionXdr,
         this.opts.serverKeypair.publicKey(),
         this.opts.networkPassphrase,
@@ -76,18 +76,23 @@ export class ChallengeService {
     const account = await this.opts.fetchAccountSigners(clientAccountID);
     try {
       if (account) {
-        Utils.verifyChallengeTxThreshold(
+        WebAuth.verifyChallengeTxThreshold(
           transactionXdr,
           this.opts.serverKeypair.publicKey(),
           this.opts.networkPassphrase,
           account.medThreshold,
-          Object.entries(account.signers).map(([key, weight]) => ({ key, weight })),
+          // `horizonSignerFetcher` only collects ed25519 signers, so the type is known.
+          Object.entries(account.signers).map(([key, weight]) => ({
+            key,
+            weight,
+            type: "ed25519_public_key",
+          })),
           [this.opts.homeDomain],
           this.opts.webAuthDomain,
         );
       } else {
         // Unfunded account: SEP-10 falls back to the account id as its own sole signer.
-        Utils.verifyChallengeTxSigners(
+        WebAuth.verifyChallengeTxSigners(
           transactionXdr,
           this.opts.serverKeypair.publicKey(),
           this.opts.networkPassphrase,
