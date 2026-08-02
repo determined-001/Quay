@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { registerWebhookSchema, listWebhookDeliveriesQuerySchema } from "@checkout/core";
 import type { PublicWebhook, Webhook } from "@checkout/core";
 import type { Container } from "../services/container";
+import { requireSeller, type AuthedVariables } from "../middleware/auth";
 
 /** How long the previous secret keeps signing deliveries after a rotation. */
 export const SECRET_ROTATION_OVERLAP_MS = 24 * 60 * 60 * 1000;
@@ -17,8 +18,9 @@ function toPublic(h: Webhook): PublicWebhook {
   return safe;
 }
 
-export function webhookRoutes(c: Container): Hono {
-  const app = new Hono();
+export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }> {
+  const app = new Hono<{ Variables: AuthedVariables }>();
+  app.use("*", requireSeller({ session: c.auth.session, sellers: c.sellers, revocations: c.auth.revocations }));
 
   // Register a webhook. The secret is returned ONCE — store it to verify signatures.
   app.post("/", async (ctx) => {
@@ -31,7 +33,7 @@ export function webhookRoutes(c: Container): Hono {
     const parsed = registerWebhookSchema.safeParse(body);
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
 
-    const seller = await c.sellers.getDefault();
+    const seller = ctx.get("seller");
     const secret = generateSecret();
     const hook = await c.webhooks.create({ sellerId: seller.id, url: parsed.data.url, secret });
     return ctx.json({ ...toPublic(hook), secret }, 201);
@@ -39,7 +41,7 @@ export function webhookRoutes(c: Container): Hono {
 
   // List registered webhooks (secrets are not returned; deleted ones are excluded).
   app.get("/", async (ctx) => {
-    const seller = await c.sellers.getDefault();
+    const seller = ctx.get("seller");
     const hooks = await c.webhooks.listBySeller(seller.id);
     return ctx.json({ webhooks: hooks.map(toPublic) });
   });

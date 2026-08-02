@@ -1,4 +1,4 @@
-import { eq, and, inArray, isNull, desc, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt } from "drizzle-orm";
 import type {
   CreateLinkInput,
   KycFieldSpec,
@@ -10,6 +10,7 @@ import type {
   PaymentLink,
   Seller,
   SellerRepository,
+  TokenRevocationRepository,
   StoredOffRampJob,
   StoredOffRampQuote,
   Webhook,
@@ -29,6 +30,7 @@ import {
   offrampQuotes,
   offrampJobs,
   sellerKyc,
+  revokedTokens,
 } from "../db/schema";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
@@ -59,6 +61,9 @@ function rowToLink(row: LinkRow): PaymentLink {
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
     offrampStatus: row.offrampStatus ?? null,
+    offrampIndicativeRate: row.offrampIndicativeRate ?? null,
+    offrampRate: row.offrampRate ?? null,
+    offrampRateDelta: row.offrampRateDelta ?? null,
     expiresAt: row.expiresAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -87,6 +92,9 @@ export class DrizzleLinkRepository implements LinkRepository {
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
+      offrampIndicativeRate: null,
+      offrampRate: null,
+      offrampRateDelta: null,
       expiresAt: input.expiresAt,
       createdAt: now,
       updatedAt: now,
@@ -142,6 +150,9 @@ export class DrizzleLinkRepository implements LinkRepository {
         offrampJobId: link.offrampJobId,
         offrampTargetCurrency: link.offrampTargetCurrency,
         offrampStatus: link.offrampStatus,
+        offrampIndicativeRate: link.offrampIndicativeRate,
+        offrampRate: link.offrampRate,
+        offrampRateDelta: link.offrampRateDelta,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
@@ -176,6 +187,25 @@ export class DrizzleSellerRepository implements SellerRepository {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
     return rows[0] ?? null;
   }
+
+  async findByWallet(wallet: string): Promise<Seller | null> {
+    const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
+    return rows[0] ?? null;
+  }
+
+  async createIfAbsent(wallet: string): Promise<Seller> {
+    await this.db
+      .insert(sellers)
+      .values({ id: newId("sel"), name: shortWallet(wallet), wallet, createdAt: Date.now() })
+      .onConflictDoNothing({ target: sellers.wallet });
+    const seller = await this.findByWallet(wallet);
+    if (!seller) throw new Error(`failed to create or find seller for wallet ${wallet}`);
+    return seller;
+  }
+}
+
+function shortWallet(wallet: string): string {
+  return `${wallet.slice(0, 4)}…${wallet.slice(-4)}`;
 }
 
 function rowToWebhook(row: typeof webhooks.$inferSelect): Webhook {
@@ -301,6 +331,24 @@ export class DrizzleWebhookRepository implements WebhookRepository {
 
     return { deliveries: page, nextCursor };
   }
+
+  async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
+    const rows = await this.db
+      .select()
+      .from(webhookDeliveries)
+      .where(eq(webhookDeliveries.linkId, linkId))
+      .orderBy(webhookDeliveries.createdAt);
+    return rows.map((r) => ({
+      id: r.id,
+      webhookId: r.webhookId,
+      linkId: r.linkId,
+      event: r.event,
+      statusCode: r.statusCode,
+      ok: r.ok,
+      error: r.error,
+      createdAt: r.createdAt,
+    }));
+  }
 }
 
 function encodeDeliveryCursor(createdAt: number): string {
@@ -349,6 +397,26 @@ export class DrizzleWatcherStateRepository implements WatcherStateRepository {
       .insert(processedTx)
       .values({ txHash, linkId, createdAt: Date.now() })
       .onConflictDoNothing();
+  }
+}
+
+export class DrizzleTokenRevocationRepository implements TokenRevocationRepository {
+  constructor(private readonly db: DB) {}
+
+  async revoke(jti: string, expiresAt: number): Promise<void> {
+    await this.db
+      .insert(revokedTokens)
+      .values({ jti, expiresAt, revokedAt: Date.now() })
+      .onConflictDoNothing();
+  }
+
+  async isRevoked(jti: string): Promise<boolean> {
+    const rows = await this.db.select({ jti: revokedTokens.jti }).from(revokedTokens).where(eq(revokedTokens.jti, jti)).limit(1);
+    return rows.length > 0;
+  }
+
+  async sweepExpired(now: number): Promise<void> {
+    await this.db.delete(revokedTokens).where(lt(revokedTokens.expiresAt, now));
   }
 }
 

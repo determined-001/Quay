@@ -43,6 +43,9 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
+    offrampIndicativeRate: null,
+    offrampRate: null,
+    offrampRateDelta: null,
     expiresAt: null,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
@@ -251,6 +254,9 @@ class FakeLinkRepoForAnchor implements LinkRepository {
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
+      offrampIndicativeRate: null,
+      offrampRate: null,
+      offrampRateDelta: null,
       expiresAt: input.expiresAt,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -290,6 +296,12 @@ class FakeSellerRepoForAnchor {
   async findById(id: string): Promise<Seller | null> {
     return id === this.s.id ? this.s : null;
   }
+  async findByWallet(wallet: string): Promise<Seller | null> {
+    return wallet === this.s.wallet ? this.s : null;
+  }
+  async createIfAbsent(_wallet: string): Promise<Seller> {
+    return this.s;
+  }
 }
 
 class FakeWebhookRepoForAnchor implements WebhookRepository {
@@ -325,6 +337,9 @@ class FakeWebhookRepoForAnchor implements WebhookRepository {
   async softDelete(): Promise<boolean> {
     return false;
   }
+  async listDeliveriesByLinkId(): Promise<WebhookDelivery[]> {
+    return [];
+  }
   async recordDelivery(_d: WebhookDelivery): Promise<void> {
     /* capture elsewhere via fetch interception */
   }
@@ -335,6 +350,7 @@ class FakeWebhookRepoForAnchor implements WebhookRepository {
 }
 
 class FakeRailForAnchor implements RailPort {
+  assertCanReceive = async (): Promise<void> => {};
   buildRequest = (input: Parameters<RailPort["buildRequest"]>[0]) => ({
     uri: `web+stellar:pay?destination=${input.destination}&memo=${input.reference}`,
     destination: input.destination,
