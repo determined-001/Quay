@@ -12,6 +12,12 @@ const LOCAL_API_PORT = 8887;
 const LOCAL_WEB_URL = `http://localhost:${LOCAL_WEB_PORT}`;
 const LOCAL_API_URL = `http://localhost:${LOCAL_API_PORT}`;
 
+// Playwright takes `webServer` and `globalSetup` at the top level only — they
+// are not per-project options. The live suite must NOT boot local servers, so
+// both are switched off when running it. `pnpm e2e:live` / `pnpm sweep` set
+// E2E_LIVE=1; the local suite leaves it unset.
+const IS_LIVE = process.env.E2E_LIVE === "1";
+
 export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 10_000 },
@@ -22,6 +28,46 @@ export default defineConfig({
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
+  webServer: IS_LIVE ? undefined : [
+    {
+      command: "pnpm --filter @checkout/api start",
+      cwd: repoRoot,
+      url: `${LOCAL_API_URL}/health`,
+      reuseExistingServer: false,
+      // The API starts through tsx with no build step, so a cold start is
+      // ~20s on a warm machine and slower on a loaded CI runner. 30s was
+      // marginal enough to fail intermittently.
+      timeout: 90_000,
+      env: {
+        API_PORT: String(LOCAL_API_PORT),
+        // A file DB, not :memory: - unverified whether @libsql/client's
+        // in-memory mode behaves identically to a file for this repo's
+        // exact usage, and a throwaway file is just as fast for this
+        // suite's scale. Gitignored (**/*.db); deleted before each run
+        // by ./e2e/global-setup.ts so every run starts from empty.
+        DATABASE_URL: "file:./e2e-test.db",
+        STELLAR_NETWORK: "testnet",
+        OFFRAMP: "mock",
+        OFFRAMP_MOCK_SETTLE_MS: "500",
+        E2E_TEST_MODE: "1",
+        CORS_ORIGINS: LOCAL_WEB_URL,
+        RATE_LIMIT_MAX: "0",
+      },
+    },
+    {
+      command: "pnpm --filter @checkout/web e2e:dev",
+      cwd: repoRoot,
+      url: LOCAL_WEB_URL,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      env: {
+        NEXT_PUBLIC_API_URL: LOCAL_API_URL,
+        API_URL: LOCAL_API_URL,
+        NEXT_TELEMETRY_DISABLED: "1",
+      },
+    },
+  ],
+  globalSetup: IS_LIVE ? undefined : "./e2e/global-setup.ts",
   projects: [
     {
       // The full payment loop against a locally-composed stack (issue 5.7,
@@ -34,43 +80,6 @@ export default defineConfig({
       name: "local",
       testDir: "./e2e/local",
       use: { baseURL: LOCAL_WEB_URL, ...devices["Desktop Chrome"] },
-      webServer: [
-        {
-          command: "pnpm --filter @checkout/api start",
-          cwd: repoRoot,
-          url: `${LOCAL_API_URL}/health`,
-          reuseExistingServer: false,
-          timeout: 30_000,
-          env: {
-            API_PORT: String(LOCAL_API_PORT),
-            // A file DB, not :memory: - unverified whether @libsql/client's
-            // in-memory mode behaves identically to a file for this repo's
-            // exact usage, and a throwaway file is just as fast for this
-            // suite's scale. Gitignored (**/*.db); deleted before each run
-            // by ./e2e/global-setup.ts so every run starts from empty.
-            DATABASE_URL: "file:./e2e-test.db",
-            STELLAR_NETWORK: "testnet",
-            OFFRAMP: "mock",
-            OFFRAMP_MOCK_SETTLE_MS: "500",
-            E2E_TEST_MODE: "1",
-            CORS_ORIGINS: LOCAL_WEB_URL,
-            RATE_LIMIT_MAX: "0",
-          },
-        },
-        {
-          command: "pnpm --filter @checkout/web e2e:dev",
-          cwd: repoRoot,
-          url: LOCAL_WEB_URL,
-          reuseExistingServer: false,
-          timeout: 60_000,
-          env: {
-            NEXT_PUBLIC_API_URL: LOCAL_API_URL,
-            API_URL: LOCAL_API_URL,
-            NEXT_TELEMETRY_DISABLED: "1",
-          },
-        },
-      ],
-      globalSetup: "./e2e/global-setup.ts",
     },
     {
       // Against the real deployed URLs (issue 5.7, point 2) - genuinely

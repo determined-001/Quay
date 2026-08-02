@@ -1,23 +1,29 @@
 import {
+  CannotReceiveError,
   canTransition,
   normalizeAmount,
+  OffRampJobNotFoundError,
   type CashOutBody,
   type CreateLinkBody,
+  type KycPort,
   type LinkRepository,
   type MatchOutcome,
   type NormalizedPayment,
   type OffRampJob,
   type OffRampQuote,
   type OffRampPort,
+  type OffRampStateRepository,
   type PaymentLink,
   type PaymentRequest,
   type RailPort,
   type SellerRepository,
   type WebhookRepository,
+  type IndicativePrice,
 } from "@checkout/core";
-import { resolveAsset, type StellarConfig } from "@checkout/stellar";
-import { newId, newReference } from "./ids";
+import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
+import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
+import { metrics } from "../metrics";
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -203,6 +209,10 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
 
 export class LinkService {
   private readonly sender: WebhookSender;
+  // Ephemeral: cash-out start time for the quote-to-settlement histogram. A
+  // process restart mid-cash-out just loses that one latency sample — the
+  // link's own status/offrampStatus fields remain the durable source of truth.
+  private readonly cashOutStartedAt = new Map<string, number>();
   private readonly health: AnchorHealth;
   /** Per-link last poll error (in-memory; survives only until restart). */
   private readonly lastPollErrorByLinkId = new Map<string, string>();
@@ -225,17 +235,29 @@ export class LinkService {
       webhooks: WebhookRepository;
       rail: RailPort;
       offramp: OffRampPort;
+      offrampState: OffRampStateRepository;
+      kyc: KycPort;
       stellar: StellarConfig;
       /**
        * Optional anchor health probe. When omitted we default to a no-op
        * "always available" probe so existing test fixtures stay lightweight.
        */
       health?: AnchorHealth;
+      // "memo" (default) or "muxed" — see packages/stellar/src/stellar-rail.ts.
+      correlation: "memo" | "muxed";
+      /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
+       *  a permissive one so they do not depend on live DNS resolution. */
+      webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
     },
   ) {
-    this.sender = new WebhookSender(deps.webhooks);
+    this.sender = new WebhookSender(deps.webhooks, { guard: deps.webhookGuard });
     this.health =
       deps.health ?? new AnchorHealth({ enabled: false, url: null, homeDomain: null });
+  }
+
+  /** Webhook deliveries currently in flight (including in-process retries). */
+  webhookQueueDepth(): number {
+    return this.sender.inFlightCount;
   }
 
   private buildRequest(link: PaymentLink): PaymentRequest {
@@ -244,40 +266,131 @@ export class LinkService {
       amount: link.amount,
       asset: link.asset,
       reference: link.reference,
+      muxedId: link.muxedId,
       message: link.title,
     });
   }
 
-  async createLink(body: CreateLinkBody): Promise<LinkWithRequest> {
-    const seller = await this.deps.sellers.getDefault();
+  async createLink(sellerId: string, body: CreateLinkBody): Promise<LinkWithRequest> {
+    const seller = await this.deps.sellers.findById(sellerId);
+    if (!seller) throw new HttpError(404, "seller_not_found");
     const asset = resolveAsset(body.assetCode, this.deps.stellar);
     const expiresAt = body.expiresInMinutes
       ? Date.now() + body.expiresInMinutes * 60_000
       : null;
+
+    // Universal receive-preflight (issue #9): every link, not just muxed ones.
+    // Subsumes the muxed-only `canReceiveAsset` check that used to live in the
+    // branch below — this runs first and carries the richer 422 payload.
+    try {
+      await this.deps.rail.assertCanReceive(seller.wallet, asset);
+    } catch (err) {
+      if (err instanceof CannotReceiveError) {
+        throw new HttpError(422, "destination_cannot_receive", {
+          message: err.message,
+          reason: err.reason,
+          asset,
+          ...(err.trustlineUri ? { trustlineUri: err.trustlineUri } : {}),
+        });
+      }
+      throw err;
+    }
+
+    let muxedId: string | null = null;
+    if (this.deps.correlation === "muxed") {
+      muxedId = newMuxedId();
+    }
 
     const link = await this.deps.links.create({
       id: newId("lnk"),
       reference: newReference(),
       sellerId: seller.id,
       destination: seller.wallet,
+      muxedId,
       title: body.title,
       amount: normalizeAmount(body.amount),
       asset,
       expiresAt,
     });
+    metrics.linkStatusTransitionsTotal.inc({ to: link.status });
 
     return { link, request: this.buildRequest(link) };
   }
 
-  async listLinks(): Promise<PaymentLink[]> {
+  /** Re-checks the seller's own USDC trustline (bypassing the preflight cache is
+   *  unnecessary — a 60s-stale "ok" or "revoked" is fine for a health check). */
+  async checkSellerUsdcTrustline(): Promise<
+    { ok: true } | { ok: false; reason: string; message: string; trustlineUri?: string }
+  > {
     const seller = await this.deps.sellers.getDefault();
-    return this.deps.links.listBySeller(seller.id);
+    const asset = resolveAsset("USDC", this.deps.stellar);
+    try {
+      await this.deps.rail.assertCanReceive(seller.wallet, asset);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof CannotReceiveError) {
+        return { ok: false, reason: err.reason, message: err.message, trustlineUri: err.trustlineUri };
+      }
+      throw err;
+    }
+  }
+
+  async listLinks(sellerId: string): Promise<PaymentLink[]> {
+    return this.deps.links.listBySeller(sellerId);
   }
 
   async getLink(id: string): Promise<LinkWithRequest | null> {
     const link = await this.deps.links.findById(id);
     if (!link) return null;
     return { link, request: this.buildRequest(link) };
+  }
+
+  /**
+   * Return indicative FX rates for a paid link — SEP-38 GET /prices, no quote
+   * consumed (issue 3.5). The response is clearly labelled indicative so the
+   * dashboard can show it without burning a firm quote on every page visit.
+   *
+   * Side effect: persists the indicative rate for the requested `targetCurrency`
+   * against the link so `triggerCashOut` can later compute the spread delta.
+   *
+   * Returns null when the adapter does not implement `indicativePrices` (e.g.
+   * a future adapter that can only provide firm quotes).
+   */
+  async getOfframpPreview(
+    linkId: string,
+    targetCurrency?: string,
+  ): Promise<{ indicative: true; prices: IndicativePrice[]; sourceAmount: string } | null> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+    if (link.status !== "paid") {
+      throw new HttpError(409, `Link must be paid to preview off-ramp (is "${link.status}")`);
+    }
+    if (!this.deps.offramp.indicativePrices) return null;
+
+    const sourceAmount = link.paidAmount ?? link.amount;
+    let prices: IndicativePrice[];
+    try {
+      prices = await this.deps.offramp.indicativePrices({
+        sourceAsset: link.asset,
+        sourceAmount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp preview error: ${message}`);
+    }
+
+    // Persist the indicative rate for the target currency so triggerCashOut()
+    // can compute the indicative-vs-firm delta (issue 3.5 telemetry).
+    const currency = targetCurrency ?? link.offrampTargetCurrency;
+    if (currency) {
+      const match = prices.find((p) => p.targetCurrency === currency);
+      if (match && link.offrampIndicativeRate !== match.price) {
+        link.offrampIndicativeRate = match.price;
+        await this.deps.links.save(link);
+      }
+    }
+
+    return { indicative: true, prices, sourceAmount };
   }
 
   /**
@@ -295,6 +408,9 @@ export class LinkService {
       link.payer = payment.from;
       link.paidAmount = normalizeAmount(payment.amount);
       await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "paid" });
+      const paidAt = Date.parse(payment.createdAt);
+      if (!Number.isNaN(paidAt)) metrics.paymentToPaidLatencySeconds.observe((Date.now() - paidAt) / 1000);
       await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid });
       return true;
     }
@@ -307,11 +423,81 @@ export class LinkService {
       link.payer = payment.from;
       link.paidAmount = normalizeAmount(payment.amount);
       await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "underpaid" });
       await this.fireWebhook(link, "link.underpaid", {});
       return false;
     }
 
     return false; // no_memo / unknown_reference / asset_mismatch — nothing to apply
+  }
+
+  /**
+   * Seller voids a link they created by mistake.
+   *
+   * Idempotent: cancelling an already-`cancelled` link returns the link unchanged
+   * (no double-fire of the webhook). Any state from which `cancelled` is not
+   * reachable (paid, off-ramp in flight, off-ramp settled, off-ramp failed,
+   * already expired) is rejected with 409. 404 if the id is unknown.
+   */
+  async cancelLink(id: string): Promise<PaymentLink> {
+    const link = await this.deps.links.findById(id);
+    if (!link) throw new HttpError(404, "Link not found");
+
+    // Idempotent: already cancelled -> no-op success, no second webhook.
+    if (link.status === "cancelled") return link;
+
+    if (!canTransition(link.status, "cancelled")) {
+      throw new HttpError(409, `Link cannot be cancelled (is "${link.status}")`);
+    }
+
+    link.status = "cancelled";
+    await this.deps.links.save(link);
+    await this.fireWebhook(link, "link.cancelled", {});
+    return link;
+  }
+
+  /**
+   * Move any TTL'd link whose `expiresAt` is in the past to `expired`.
+   *
+   * Respects `canTransition`: only `active` and `underpaid` can become `expired`
+   * (the transition table forbids everything else — paid and the off-ramp
+   * states stay as-is). Idempotent across runs: a link already `expired` has
+   * `status === "expired"` which fails the OPEN filter and is skipped.
+   *
+   * Returns the number of links flipped this sweep, so the caller can decide
+   * whether to log. `now` is injected so tests can drive the clock.
+   */
+  async sweepExpired(now: number): Promise<number> {
+    const seller = await this.deps.sellers.getDefault();
+    const all = await this.deps.links.listBySeller(seller.id);
+    let moved = 0;
+    for (const link of all) {
+      if (link.status !== "active" && link.status !== "underpaid") continue;
+      if (link.expiresAt === null || link.expiresAt >= now) continue;
+      if (!canTransition(link.status, "expired")) continue; // defense in depth
+      link.status = "expired";
+      await this.deps.links.save(link);
+      await this.fireWebhook(link, "link.expired", { expiresAt: link.expiresAt });
+      moved++;
+    }
+    return moved;
+  }
+
+  /**
+   * A payment matched the memo of a link that is no longer open (expired or
+   * cancelled). The link must not be resurrected — record the payment as
+   * unmatched so the seller can refund the buyer out-of-band.
+   *
+   * The receiving link is included so the webhook payload carries the link
+   * context the seller needs to identify the buyer and refund.
+   */
+  async recordUnmatchedPayment(payment: NormalizedPayment, link: PaymentLink): Promise<void> {
+    await this.fireWebhook(link, "payment.unmatched", {
+      payer: payment.from,
+      paymentAmount: payment.amount,
+      paymentAsset: payment.asset,
+      paymentTxHash: payment.txHash,
+    });
   }
 
   /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
@@ -328,11 +514,21 @@ export class LinkService {
       throw new HttpError(503, "anchor_unavailable");
     }
 
+    // KYC is keyed by seller, never by link — a live cash-out is impossible
+    // until the anchor has actually accepted this seller's identity. `status()`
+    // re-syncs rather than trusting a cached value, since paying out against
+    // stale/rejected KYC is exactly the failure this gate exists to prevent.
+    const kyc = await this.deps.kyc.status(link.sellerId);
+    if (kyc.status !== "ACCEPTED") {
+      throw new HttpError(403, "kyc_required");
+    }
+
     const sourceAmount = link.paidAmount ?? link.amount;
     let quote: OffRampQuote;
     let job: OffRampJob;
     try {
       quote = await this.deps.offramp.quote({
+        linkId: link.id,
         sourceAsset: link.asset,
         sourceAmount,
         targetCurrency: body.targetCurrency,
@@ -352,7 +548,23 @@ export class LinkService {
     link.offrampJobId = job.jobId;
     link.offrampTargetCurrency = job.targetCurrency;
     link.offrampStatus = "pending";
+
+    // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
+    // offrampIndicativeRate may already be set if the seller visited the preview
+    // endpoint before committing; if not, we leave it null so the delta is skipped.
+    link.offrampRate = quote.rate;
+    if (link.offrampIndicativeRate !== null) {
+      const indicative = Number(link.offrampIndicativeRate);
+      const firm = Number(quote.rate);
+      if (Number.isFinite(indicative) && Number.isFinite(firm) && indicative !== 0) {
+        // Delta: firm − indicative (positive = anchor moved rate in seller's favour).
+        link.offrampRateDelta = (firm - indicative).toFixed(6);
+      }
+    }
+
     await this.deps.links.save(link);
+    metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
+    this.cashOutStartedAt.set(link.id, Date.now());
     return job;
   }
 
@@ -361,7 +573,12 @@ export class LinkService {
     const pending = await this.deps.links.listByStatus("offramp_pending");
     const now = Date.now();
     for (const link of pending) {
-      if (!link.offrampJobId) continue;
+      if (!link.offrampJobId) {
+        // Should never happen going forward (triggerCashOut always sets it),
+        // but a link like this can't ever resolve — same fate as a lost job.
+        await this.markOffRampFailed(link, "job_state_lost");
+        continue;
+      }
       // Per-job backoff: while the anchor is sick we don't re-ping it on every
       // tick. Skip links whose `next_try_at` is still in the future.
       const next = this.nextPollAtByLinkId.get(link.id);
@@ -375,6 +592,16 @@ export class LinkService {
         this.consecutivePollErrorsByLinkId.delete(link.id);
         this.nextPollAtByLinkId.delete(link.id);
       } catch (err) {
+        if (err instanceof OffRampJobNotFoundError) {
+          // The adapter has no state for this job id at all — not a transient
+          // hiccup, it will never resolve on its own. Fail it out so the
+          // seller has a path forward instead of silent purgatory forever.
+          await this.markOffRampFailed(link, "job_state_lost");
+          this.lastPollErrorByLinkId.delete(link.id);
+          this.consecutivePollErrorsByLinkId.delete(link.id);
+          this.nextPollAtByLinkId.delete(link.id);
+          continue;
+        }
         // ATTRIBUTABLE: record the error against the link id so it can be
         // exposed in a follow-up PR (and is logged now). Without this catch
         // the swallowed error meant a downed anchor's failures evaporated.
@@ -393,6 +620,8 @@ export class LinkService {
         link.status = "offramp_settled";
         link.offrampStatus = "settled";
         await this.deps.links.save(link);
+        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_settled" });
+        this.observeSettlementDuration(link.id, "settled");
         await this.fireWebhook(link, "offramp.settled", {
           targetCurrency: job.targetCurrency,
           targetAmount: job.targetAmount,
@@ -401,9 +630,18 @@ export class LinkService {
         link.status = "offramp_failed";
         link.offrampStatus = "failed";
         await this.deps.links.save(link);
+        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
+        this.observeSettlementDuration(link.id, "failed");
         await this.fireWebhook(link, "offramp.failed", { reason: job.reason });
       }
     }
+  }
+
+  private observeSettlementDuration(linkId: string, outcome: "settled" | "failed"): void {
+    const startedAt = this.cashOutStartedAt.get(linkId);
+    if (startedAt === undefined) return; // process restarted mid-cash-out — no sample
+    this.cashOutStartedAt.delete(linkId);
+    metrics.quoteToSettlementDurationSeconds.observe({ outcome }, (Date.now() - startedAt) / 1000);
   }
 
   /**
@@ -421,6 +659,33 @@ export class LinkService {
    */
   healthSnapshot(): AnchorHealthSnapshot {
     return this.health.snapshot();
+  }
+
+  /**
+   * Boot-time repair: a link can be stuck in `offramp_pending` with a job id
+   * that has no corresponding row in the off-ramp state store — the fallout
+   * of the pre-fix in-memory Maps not surviving a restart. Nothing can recover
+   * that lost job state, so move the link to `offramp_failed` (a domain-level
+   * retryable state) instead of leaving it in permanent limbo.
+   */
+  async backfillLostOffRampJobs(): Promise<number> {
+    const pending = await this.deps.links.listByStatus("offramp_pending");
+    let fixed = 0;
+    for (const link of pending) {
+      const job = link.offrampJobId ? await this.deps.offrampState.getJob(link.offrampJobId) : null;
+      if (job) continue;
+      await this.markOffRampFailed(link, "job_state_lost");
+      fixed++;
+    }
+    return fixed;
+  }
+
+  private async markOffRampFailed(link: PaymentLink, reason: string): Promise<void> {
+    if (!canTransition(link.status, "offramp_failed")) return;
+    link.status = "offramp_failed";
+    link.offrampStatus = "failed";
+    await this.deps.links.save(link);
+    await this.fireWebhook(link, "offramp.failed", { reason });
   }
 
   private async fireWebhook(
@@ -450,6 +715,7 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly extra?: Record<string, unknown>,
   ) {
     super(message);
   }

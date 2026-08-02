@@ -40,6 +40,7 @@ export function testOnlyRoutes(c: Container): Hono {
       asset: link.asset,
       memo: link.reference,
       memoType: "text",
+      toMuxedId: null,
       createdAt: new Date().toISOString(),
     };
     const outcome: MatchOutcome = { kind: "paid", link, overpaid: false };

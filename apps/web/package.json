@@ -10,11 +10,11 @@
     "typecheck": "tsc -p tsconfig.json",
     "e2e:dev": "next dev -p 3100",
     "e2e": "playwright test --project=local",
-    "e2e:live": "playwright test --project=live"
+    "e2e:live": "E2E_LIVE=1 playwright test --project=live"
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
-    "next": "16.2.9",
+    "next": "16.2.11",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "qrcode.react": "4.2.0"
