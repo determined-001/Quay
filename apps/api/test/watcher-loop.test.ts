@@ -12,6 +12,7 @@ import type {
 import { XLM } from "@checkout/core";
 import { WatcherLoop } from "../src/worker/watcher-loop";
 import { LinkService } from "../src/services/link-service";
+import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
 
 const DESTINATION = "GDEST000000000000000000000000000000000000000000000000000";
 
@@ -30,6 +31,7 @@ function makePayment(n: number, overrides: Partial<NormalizedPayment> = {}): Nor
     asset: XLM,
     memo: null,
     memoType: "none",
+    toMuxedId: null,
     createdAt: new Date(0).toISOString(),
     ...overrides,
   };
@@ -113,7 +115,10 @@ function makeNoopWebhookRepo(): WebhookRepository {
     async listBySeller() {
       return [];
     },
-    async recordDelivery(): Promise<void> {},
+    async listDeliveriesByLinkId(): Promise<never[]> {
+    return [];
+  },
+  async recordDelivery(): Promise<void> {},
   };
 }
 
@@ -122,7 +127,13 @@ function makeUnusedSellerRepo(): SellerRepository {
     async getDefault(): Promise<never> {
       throw new Error("not used in this test");
     },
-    async findById(): Promise<null> {
+    async findByWallet(): Promise<null> {
+    return null;
+  },
+  async createIfAbsent(): Promise<never> {
+    throw new Error("not used");
+  },
+  async findById(): Promise<null> {
       return null;
     },
   };
@@ -130,7 +141,11 @@ function makeUnusedSellerRepo(): SellerRepository {
 
 function makeUnusedRailPort(): RailPort {
   return {
-    buildRequest(): never {
+    isValidDestination(): boolean {
+    return true;
+  },
+  async assertCanReceive(): Promise<void> {},
+  buildRequest(): never {
       throw new Error("not used in this test");
     },
   };
@@ -157,6 +172,7 @@ function makeTestLink(overrides: Partial<PaymentLink> = {}): PaymentLink {
     reference: "ref-001",
     sellerId: "seller_1",
     destination: DESTINATION,
+    muxedId: null,
     title: "Test invoice",
     amount: "10",
     asset: XLM,
@@ -179,7 +195,9 @@ describe("WatcherLoop - backlog drain (issue 2.2)", () => {
     const payments = Array.from({ length: 500 }, (_, i) => makePayment(i + 1));
     const watcher = makeFakeWatcher(payments);
     const stateRepo = makeFakeStateRepo();
-    const linkRepo = makeFakeLinkRepo([]);
+    // Needs at least one open link on DESTINATION, otherwise activeDestinations()
+    // is empty and runOnce() processes no accounts at all.
+    const linkRepo = makeFakeLinkRepo([makeTestLink()]);
     stateRepo.cursors.set(DESTINATION, ""); // already-watched account, not first-seen
 
     const loop = new WatcherLoop({
@@ -207,7 +225,9 @@ describe("WatcherLoop - backlog drain (issue 2.2)", () => {
     const payments = Array.from({ length: 450 }, (_, i) => makePayment(i + 1));
     const watcher = makeFakeWatcher(payments);
     const stateRepo = makeFakeStateRepo();
-    const linkRepo = makeFakeLinkRepo([]);
+    // Needs at least one open link on DESTINATION, otherwise activeDestinations()
+    // is empty and runOnce() processes no accounts at all.
+    const linkRepo = makeFakeLinkRepo([makeTestLink()]);
     stateRepo.cursors.set(DESTINATION, "");
 
     const loop = new WatcherLoop({
@@ -230,7 +250,9 @@ describe("WatcherLoop - backlog drain (issue 2.2)", () => {
     const payments = Array.from({ length: 2500 }, (_, i) => makePayment(i + 1));
     const watcher = makeFakeWatcher(payments);
     const stateRepo = makeFakeStateRepo();
-    const linkRepo = makeFakeLinkRepo([]);
+    // Needs at least one open link on DESTINATION, otherwise activeDestinations()
+    // is empty and runOnce() processes no accounts at all.
+    const linkRepo = makeFakeLinkRepo([makeTestLink()]);
     stateRepo.cursors.set(DESTINATION, "");
 
     const logs: string[] = [];
@@ -262,7 +284,9 @@ describe("WatcherLoop - backlog drain (issue 2.2)", () => {
     const payments = Array.from({ length: 450 }, (_, i) => makePayment(i + 1));
     const watcher = makeFakeWatcher(payments);
     const stateRepo = makeFakeStateRepo();
-    const linkRepo = makeFakeLinkRepo([]);
+    // Needs at least one open link on DESTINATION, otherwise activeDestinations()
+    // is empty and runOnce() processes no accounts at all.
+    const linkRepo = makeFakeLinkRepo([makeTestLink()]);
     stateRepo.cursors.set(DESTINATION, "");
 
     const realSetCursor = stateRepo.setCursor.bind(stateRepo);
@@ -336,6 +360,9 @@ describe("WatcherLoop - matching integration", () => {
       webhooks: makeNoopWebhookRepo(),
       rail: makeUnusedRailPort(),
       offramp: makeUnusedOffRampPort(),
+      offrampState: new FakeOffRampStateRepository(),
+      kyc: new AlwaysAcceptedKyc(),
+      correlation: "memo" as const,
       stellar: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", usdcIssuer: "GISSUER" } as never,
     });
 
