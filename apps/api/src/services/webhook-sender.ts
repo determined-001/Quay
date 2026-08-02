@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { Webhook, WebhookRepository } from "@checkout/core";
-import { guardWebhookUrl } from "./ssrf-guard";
+import { metrics } from "../metrics";
 
 export interface WebhookEvent {
   event: string; // e.g. "link.paid"
@@ -49,7 +49,7 @@ export class WebhookSender {
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
   private readonly timeoutMs: number;
-  private readonly maxResponseBytes: number;
+  private inFlight = 0;
 
   constructor(
     private readonly repo: WebhookRepository,
@@ -59,6 +59,11 @@ export class WebhookSender {
     this.baseDelayMs = opts.baseDelayMs ?? 500;
     this.timeoutMs = opts.timeoutMs ?? 8000;
     this.maxResponseBytes = opts.maxResponseBytes ?? 64 * 1024; // 64 KB
+  }
+
+  /** Deliveries currently in progress, including in-process retry backoff. */
+  get inFlightCount(): number {
+    return this.inFlight;
   }
 
   async dispatch(hooks: Webhook[], linkId: string, event: WebhookEvent): Promise<void> {
@@ -94,50 +99,45 @@ export class WebhookSender {
     let statusCode: number | null = null;
     let error: string | null = null;
 
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
-      try {
-        const res = await fetch(hook.url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-checkout-signature": `sha256=${signature}`,
-            "x-checkout-event": event,
-          },
-          body,
-          redirect: "manual",  // 3xx is a failure — never follow redirects
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
+    this.inFlight += 1;
+    try {
+      for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+        try {
+          const res = await fetch(hook.url, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-checkout-signature": `sha256=${signature}`,
+              "x-checkout-event": event,
+            },
+            body,
+            signal: AbortSignal.timeout(this.timeoutMs),
+          });
 
-        // Drain and discard response body to avoid memory leaks / hanging connections.
-        if (res.body) {
-          await drainCapped(res.body, this.maxResponseBytes).catch(() => {});
-        }
+          if (res.ok) {
+            metrics.webhookAttemptsTotal.inc({ result: "ok" });
+            await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
+            return;
+          }
 
-        // Treat 3xx as a permanent failure — redirects could escape the guard.
-        if (res.status >= 300 && res.status < 400) {
-          error = `Redirect (${res.status}) is not followed`;
+          metrics.webhookAttemptsTotal.inc({ result: "error" });
           statusCode = res.status;
-          break; // do not retry
+          error = `HTTP ${res.status}`;
+          // 4xx (except 429) is a client error the receiver won't fix on retry.
+          if (res.status < 500 && res.status !== 429) break;
+        } catch (err) {
+          metrics.webhookAttemptsTotal.inc({ result: "error" });
+          statusCode = null;
+          error = err instanceof Error ? err.message : String(err);
         }
 
-        if (res.ok) {
-          await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
-          return;
-        }
-
-        statusCode = res.status;
-        error = `HTTP ${res.status}`;
-        // 4xx (except 429) is a client error the receiver won't fix on retry.
-        if (res.status < 500 && res.status !== 429) break;
-      } catch (err) {
-        statusCode = null;
-        error = err instanceof Error ? err.message : String(err);
+        if (attempt < this.maxAttempts) await sleep(this.backoff(attempt));
       }
 
-      if (attempt < this.maxAttempts) await sleep(this.backoff(attempt));
+      await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error });
+    } finally {
+      this.inFlight -= 1;
     }
-
-    await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error });
   }
 
   /** Exponential backoff with full jitter. */

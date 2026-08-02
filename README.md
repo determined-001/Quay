@@ -190,12 +190,14 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
 | Piece | Status |
 | --- | --- |
 | SEP-7 payment-request URIs | **Real**, spec-correct (native vs issued asset, memo ≤28 bytes, %20 encoding, network passphrase). |
-| Horizon payment watching + memo matching | **Real** logic against the Stellar SDK v16 API. Polling (restart-safe), idempotent via persisted cursor + processed-tx ledger. |
+| Horizon payment watching + memo matching | **Real** logic against the Stellar SDK v16 API. Polling (restart-safe), idempotent via persisted cursor + processed-tx ledger. One Horizon request per page (`join=transactions` for the memo lookup, not one-plus-N), and a transaction-fetch failure retries the tick rather than silently parking a matchable payment as `no_memo`. Every Horizon call retries transient failures (3 attempts, exponential backoff + full jitter, honors `Retry-After` on 429) and can fail over to `HORIZON_URL_FALLBACK`; sustained failure shows up in `GET /health` instead of silently going idle. |
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
+| Account/trustline preflight | **Real.** `POST /links` checks the seller's wallet actually exists and (for USDC) has an authorized, under-limit trustline before the link goes live — `422 destination_cannot_receive` otherwise, with a SEP-7 deep link to add the trustline. Re-checked in `GET /health` so a revoked trustline shows up in ops, not as a dead checkout page. |
 | Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
+| Metrics | **Real.** `GET /metrics` (Prometheus text format, `METRICS_TOKEN`-gated) — payment/webhook/anchor counters, watcher-lag and latency histograms, a circuit breaker around the off-ramp adapter. See [`docs/API.md`](docs/API.md#get-metrics) and [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json). |
 | Embeddable widget (`/widget.js`) | **Real**, lightweight embeddable script rendering modal checkout. |
-| Auth | **Not implemented.** Single hard-coded demo seller, no API keys / login. Fine for a demo, not for production. |
+| Auth | **Partial.** Wallet-native login is real: `GET/POST /auth` implements the server side of SEP-10 (challenge, signature + M-of-N threshold verification via Horizon, single-use, session JWT), and `/.well-known/stellar.toml` makes it discoverable. A seller row is created for a wallet on first login, but `/links` and `/webhooks` don't check the session yet — every request still operates on the single demo seller. See [`docs/API.md`](docs/API.md#get-authaccountg). |
 
 ---
 
@@ -210,7 +212,10 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Add auth** (API keys per seller + a real login) before anyone but you touches it.
+4. **Wire the login through.** SEP-10 wallet login (`/auth`) works, but scope
+   `/links` and `/webhooks` to the authenticated seller (from the session JWT)
+   before anyone but you touches it — right now they still hit the single demo
+   seller regardless of who's logged in. Add API keys for programmatic access.
 5. **Multiple sellers / scale:** the watcher polls per active destination account; for many
    sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
 

@@ -3,9 +3,12 @@
 The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by default
 (`API_PORT`). All request and response bodies are JSON.
 
-> **Auth:** there is currently **no authentication**. Every request operates on a
-> single hard-coded demo seller. This is fine for local development and demos, not
-> for production. See the README's "Before you go live" section.
+> **Auth:** `POST /auth` (below) issues a session JWT after a wallet-signed SEP-10
+> challenge, and a seller row is created for the wallet on first login. `/links`
+> and `/webhooks` do not check this token yet and still operate on the single
+> demo seller — scoping them by authenticated seller is tracked separately. This
+> is fine for local development and demos, not for production. See the README's
+> "Before you go live" section.
 
 CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 
@@ -20,12 +23,141 @@ CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
 
 ## `GET /health`
 
-Liveness + basic config echo.
+Liveness + basic config echo, plus the watcher's Horizon health and a re-check of
+the seller's own USDC trustline (cached up to 60s — see the account/trustline
+preflight note below) so a revoked trustline shows up in ops without anyone
+touching logs.
 
 **200**
 ```json
-{ "ok": true, "network": "testnet", "sellerWallet": "G..." }
+{
+  "ok": true,
+  "network": "testnet",
+  "sellerWallet": "G...",
+  "usdcTrustline": { "ok": true },
+  "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 }
+}
 ```
+`ok` is pure liveness (the process is up) — check `horizon.degraded` for whether
+the ledger watcher is actually keeping up. Every Horizon call (`packages/stellar`)
+goes through a retry policy first — 3 attempts, exponential backoff with full
+jitter, honoring `Retry-After` on `429` — so a single blip never surfaces here at
+all. `horizon.degraded` only flips to `true` once retries have been exhausted
+`HORIZON_DEGRADED_THRESHOLD` times in a row (default 3): a transient 429 that
+recovers on retry #2 never trips this, but a sustained outage does, instead of
+silently degrading to "nothing is ever marked paid." `usingFallback` is `true`
+once it has switched to `HORIZON_URL_FALLBACK` (if configured); it switches back
+to the primary automatically on the next successful call. `400`/`404` responses
+(e.g. an account that doesn't exist yet) are treated as a normal, prompt answer —
+never retried, never counted against `consecutiveFailures`.
+
+When the seller's own wallet can't currently receive USDC:
+```json
+{
+  "ok": true,
+  "network": "testnet",
+  "sellerWallet": "G...",
+  "usdcTrustline": {
+    "ok": false,
+    "reason": "no_trustline",
+    "message": "Account G... has no trustline for USDC (issuer G...) — add one before this link can be paid.",
+    "trustlineUri": "web+stellar:tx?xdr=...&network_passphrase=..."
+  }
+}
+```
+
+---
+
+## `GET /auth?account=G...`
+
+Step 1 of [SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md)
+wallet login: builds a challenge transaction for the given account to sign.
+
+**200**
+```json
+{ "transaction": "AAAAAgAAAAA...", "network_passphrase": "Test SDF Network ; September 2015" }
+```
+**400** — `{ "error": "missing_account" }` or `{ "error": "account must be a valid Stellar G-address" }`
+
+---
+
+## `POST /auth`
+
+Step 2: submit the challenge transaction signed by the account's wallet(s).
+Verifies the server's own signature, timebounds, domain fields, and that
+signature weight from the account's actual signers (via Horizon, M-of-N aware)
+meets its medium threshold — the account's master key if it isn't funded yet.
+Each challenge can be redeemed exactly once.
+
+On success, a seller row is created for the wallet if one doesn't exist yet
+(the wallet address **is** the identity).
+
+**Request**
+```json
+{ "transaction": "AAAAAgAAAAA..." }
+```
+
+**200**
+```json
+{ "token": "<session JWT>" }
+```
+**401** — `{ "error": "<reason>" }`, e.g. signature verification failed, challenge
+already used, or the transaction doesn't match what we issued.
+
+---
+
+## `GET /.well-known/stellar.toml`
+
+[SEP-1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)
+descriptor advertising `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`, and `NETWORK_PASSPHRASE`
+so wallets can discover this service's SEP-10 endpoint — the server-side mirror of
+how `packages/offramp/src/sep10.ts` discovers anchors.
+
+---
+
+## `GET /metrics`
+
+Prometheus text-format metrics (`content-type: text/plain; version=0.0.4`).
+Guarded by `METRICS_TOKEN` — pass `Authorization: Bearer <token>` or `?token=`.
+If `METRICS_TOKEN` isn't set, the API generates an ephemeral one at boot and
+prints it once (so the endpoint is never open by default, even locally).
+
+**401** — wrong or missing token: `unauthorized`
+
+**Counters**
+| Metric | Labels |
+| --- | --- |
+| `payments_matched_total` | `outcome` (`paid`, `underpaid`, `asset_mismatch`, `no_memo`, `unknown_reference`) |
+| `link_status_transitions_total` | `to` |
+| `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
+| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
+
+**Histograms**
+| Metric | Labels |
+| --- | --- |
+| `watcher_tick_duration_seconds` | — |
+| `payment_to_paid_latency_seconds` | — |
+| `anchor_call_duration_seconds` | `method` |
+| `quote_to_settlement_duration_seconds` | `outcome` (`settled`, `failed`) |
+
+**Gauges**
+| Metric | Meaning |
+| --- | --- |
+| `accounts_watched` | distinct destinations the watcher is currently polling |
+| `pending_cash_outs` | links in `offramp_pending` |
+| `webhook_deliveries_in_flight` | webhook deliveries currently being attempted, including retries |
+| `offramp_circuit_breaker_state` | `0`=closed, `1`=half_open, `2`=open — see below |
+| `watcher_lag_seconds` | seconds since the watcher's last completed poll tick |
+
+A ready-made dashboard for these is at [`docs/grafana-dashboard.json`](grafana-dashboard.json)
+(import directly into Grafana, point it at your Prometheus data source).
+
+**Off-ramp circuit breaker:** every off-ramp adapter call (mock or
+`testanchor`) is routed through `CircuitBreakerOffRamp`
+(`apps/api/src/services/circuit-breaker.ts`), which opens after 3 consecutive
+failures and stays open for 30s before allowing a half-open trial call — so a
+down anchor can't be hammered by every cash-out poll. This is also the single
+seam `anchor_calls_total` / `anchor_call_duration_seconds` are recorded from.
 
 ---
 
@@ -71,6 +203,29 @@ Create a payment link.
 The `request.uri` is a spec-correct SEP-7 payment URI for the buyer's wallet/QR.
 The buyer **must** pay with the given `memo` — that is how the watcher correlates
 the on-chain payment back to this link.
+
+**422** — the destination (the seller's wallet) can't currently receive this
+asset: not yet created/funded on-chain, no trustline for an issued asset, the
+trustline is unauthorized (frozen by the issuer), or it's already at its limit.
+Checked on every `POST /links` (an unfunded/trustline-less seller wallet used to
+mean a checkout page that could never actually be paid — see
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for why this matters). Cached 60s per
+(account, asset) so this stays cheap.
+```json
+{
+  "error": "destination_cannot_receive",
+  "message": "Account G... has no trustline for USDC (issuer G...) — add one before this link can be paid.",
+  "reason": "no_trustline",
+  "asset": { "code": "USDC", "issuer": "G..." },
+  "trustlineUri": "web+stellar:tx?xdr=...&network_passphrase=..."
+}
+```
+- `reason` — `account_not_found` | `no_trustline` | `trustline_not_authorized` | `trustline_limit_exceeded`.
+- `trustlineUri` — present for `no_trustline` (and any reason where a trustline
+  exists to sign for): a SEP-7 `tx` deep link wrapping an unsigned `changeTrust`
+  operation. The seller's wallet can sign it directly — nothing server-side ever
+  touches their key. Absent for `account_not_found` (no account yet, so no
+  sequence number to build a transaction from).
 
 ---
 
