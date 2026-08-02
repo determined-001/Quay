@@ -19,7 +19,7 @@ describe("DrizzleWebhookRepository", () => {
   describe("create / listBySeller", () => {
     it("creates a webhook and never persists the plaintext secret", async () => {
       const repo = await freshRepo();
-      const hook = await repo.create({ sellerId: SELLER, url: "https://example.com/hook", secret: "topsecret123456" });
+      const hook = await repo.create({ sellerId: SELLER, url: "https://example.com/hook", secret: "topsecret123456" }); // gitleaks:allow — fixture, not a real credential
 
       expect(hook.secretEncrypted).not.toContain("topsecret");
       expect(hook.secretLast4).toBe("3456");
