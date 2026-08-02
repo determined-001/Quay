@@ -11,11 +11,24 @@ import { createTestContainer, type TestContainer } from "../setup";
 let container: TestContainer;
 let app: Hono;
 
+/** Every /links and /webhooks route is seller-gated since #79, so route tests
+ *  authenticate as the default seller. `GET /links/:id` is public but sending
+ *  the header there is harmless. */
+let authToken = "";
+async function req(path: string, init: RequestInit = {}): Promise<Response> {
+  return app.request(path, {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${authToken}` },
+  });
+}
+
 beforeAll(async () => {
   container = await createTestContainer();
   app = new Hono();
   app.use("*", rateLimit({ windowMs: 60_000, max: 0 }));
   app.route("/webhooks", webhookRoutes(container));
+  const seller = await container.sellers.getDefault();
+  authToken = await container.tokenFor(seller.id, seller.wallet);
 });
 
 afterAll(() => {
@@ -24,7 +37,7 @@ afterAll(() => {
 
 describe("POST /webhooks", () => {
   it("registers a webhook and returns id, url, and secret", async () => {
-    const res = await app.request("/webhooks", {
+    const res = await req("/webhooks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url: "https://example.com/hooks/checkout" }),
@@ -41,7 +54,7 @@ describe("POST /webhooks", () => {
   });
 
   it("returns 400 for missing url", async () => {
-    const res = await app.request("/webhooks", {
+    const res = await req("/webhooks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({}),
@@ -52,7 +65,7 @@ describe("POST /webhooks", () => {
   });
 
   it("returns 400 for invalid url", async () => {
-    const res = await app.request("/webhooks", {
+    const res = await req("/webhooks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url: "not-a-url" }),
@@ -61,7 +74,7 @@ describe("POST /webhooks", () => {
   });
 
   it("returns 400 for invalid JSON body", async () => {
-    const res = await app.request("/webhooks", {
+    const res = await req("/webhooks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "not json",
@@ -78,7 +91,12 @@ describe("GET /webhooks", () => {
     freshApp.use("*", rateLimit({ windowMs: 60_000, max: 0 }));
     freshApp.route("/webhooks", webhookRoutes(fresh));
 
-    const res = await freshApp.request("/webhooks");
+    // `fresh` has its own in-memory DB, so the outer token's sellerId doesn't
+    // resolve against it — mint one from this container's own seller.
+    const freshSeller = await fresh.sellers.getDefault();
+    const freshToken = await fresh.tokenFor(freshSeller.id, freshSeller.wallet);
+
+    const res = await freshApp.request("/webhooks", { headers: { authorization: `Bearer ${freshToken}` } });
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
     expect(body.webhooks).toEqual([]);
@@ -88,13 +106,13 @@ describe("GET /webhooks", () => {
 
   it("lists registered webhooks without secrets", async () => {
     // Register one webhook
-    await app.request("/webhooks", {
+    await req("/webhooks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url: "https://example.com/hook1" }),
     });
 
-    const res = await app.request("/webhooks");
+    const res = await req("/webhooks");
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
     const hooks = body.webhooks as Array<Record<string, unknown>>;

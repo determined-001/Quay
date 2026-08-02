@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, CheckoutError, describeError, type PaymentLink } from "../../lib/api";
+import {
+  api,
+  CheckoutError,
+  describeError,
+  type KycView,
+  type PaymentLink,
+  type UsdcTrustlineStatus,
+} from "../../lib/api";
+import KycPanel from "./KycPanel";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
@@ -81,9 +89,10 @@ interface TableProps {
   copied: string | null;
   onCopy: (id: string) => void;
   onCashOut: (id: string) => void;
+  cashOutBlocked: boolean;
 }
 
-function LinksTable({ links, copied, onCopy, onCashOut }: TableProps) {
+function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableProps) {
   return (
     <table className="table">
       <thead>
@@ -113,9 +122,15 @@ function LinksTable({ links, copied, onCopy, onCashOut }: TableProps) {
               {link.status === "paid" && (
                 <>
                   {" · "}
-                  <button className="linkbtn" onClick={() => onCashOut(link.id)}>
-                    {CASH_OUT_LABEL}
-                  </button>
+                  {cashOutBlocked ? (
+                    <span className="muted" style={{ fontSize: 12 }} title="Complete identity verification above">
+                      Identity verification required
+                    </span>
+                  ) : (
+                    <button className="linkbtn" onClick={() => onCashOut(link.id)}>
+                      {CASH_OUT_LABEL}
+                    </button>
+                  )}
                 </>
               )}
             </td>
@@ -140,6 +155,8 @@ export default function Dashboard() {
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
+  const [kyc, setKyc] = useState<KycView | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -158,11 +175,40 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshKyc = useCallback(async () => {
+    if (OFFRAMP_IS_MOCK) return; // no real anchor, nothing to verify
+    try {
+      setKyc(await api.getKyc());
+    } catch {
+      /* dashboard still works without it; the cash-out button just stays gated */
+    }
+  }, []);
+
+  const refreshTrustline = useCallback(async () => {
+    try {
+      const health = await api.health();
+      setTrustline(health.usdcTrustline);
+    } catch {
+      // Health check itself failing is surfaced by the rest of the dashboard
+      // (links won't load either) — don't also blank out a banner that was
+      // showing real, still-relevant information.
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
+    void refreshTrustline();
     const t = setInterval(refresh, 5_000);
-    return () => clearInterval(t);
-  }, [refresh]);
+    const th = setInterval(refreshTrustline, 15_000);
+    return () => {
+      clearInterval(t);
+      clearInterval(th);
+    };
+  }, [refresh, refreshTrustline]);
+
+  useEffect(() => {
+    void refreshKyc();
+  }, [refreshKyc]);
 
   async function create() {
     setActionError(null);
@@ -186,6 +232,9 @@ export default function Dashboard() {
           ? describeError(e)
           : "Failed to create the payment link. Please try again.",
       );
+      if (e instanceof CheckoutError && e.code === "destination_cannot_receive") {
+        void refreshTrustline(); // don't wait up to 15s for the banner to catch up
+      }
     } finally {
       setCreating(false);
     }
@@ -204,16 +253,40 @@ export default function Dashboard() {
       await api.cashOut(id, OFFRAMP_CURRENCY);
       await refresh();
     } catch (e) {
+      if (e instanceof CheckoutError && e.code === "kyc_required") {
+        setActionError(describeError(e));
+        void refreshKyc();
+        return;
+      }
       setActionError(
         e instanceof CheckoutError ? describeError(e) : "Cash-out failed. Please try again.",
       );
     }
   }
 
+  // Real anchor and not yet verified: never let the seller submit a cash-out
+  // that can only fail (or worse, silently carry placeholder identity data).
+  const cashOutBlocked = !OFFRAMP_IS_MOCK && kyc?.status !== "ACCEPTED";
+
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
     <>
+      {trustline && !trustline.ok && (
+        <div className="banner banner--warn">
+          <strong>Your wallet can&apos;t receive USDC right now.</strong>{" "}
+          {trustline.message}
+          {trustline.trustlineUri && (
+            <>
+              {" "}
+              <a className="linkbtn" href={trustline.trustlineUri}>
+                Add USDC trustline
+              </a>
+            </>
+          )}
+        </div>
+      )}
+
       <section className="panel">
         <h2>New payment link</h2>
         <div className="field">
@@ -255,6 +328,8 @@ export default function Dashboard() {
         {actionError && <div className="err">{actionError}</div>}
       </section>
 
+      {!OFFRAMP_IS_MOCK && <KycPanel kyc={kyc} onUpdated={setKyc} />}
+
       <section className="panel">
         <h2>Links</h2>
 
@@ -268,7 +343,13 @@ export default function Dashboard() {
           <>
             <ErrorBanner message={fetchError} onRetry={refresh} />
             <div style={{ marginTop: 16 }}>
-              <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={cashOut} />
+              <LinksTable
+                links={links}
+                copied={copied}
+                onCopy={copyCheckout}
+                onCashOut={cashOut}
+                cashOutBlocked={cashOutBlocked}
+              />
             </div>
           </>
         )}
@@ -278,7 +359,13 @@ export default function Dashboard() {
         )}
 
         {!loading && !fetchError && links.length > 0 && (
-          <LinksTable links={links} copied={copied} onCopy={copyCheckout} onCashOut={cashOut} />
+          <LinksTable
+            links={links}
+            copied={copied}
+            onCopy={copyCheckout}
+            onCashOut={cashOut}
+            cashOutBlocked={cashOutBlocked}
+          />
         )}
       </section>
     </>

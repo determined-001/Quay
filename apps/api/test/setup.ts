@@ -7,7 +7,12 @@ import {
   DrizzleSellerRepository,
   DrizzleWebhookRepository,
   DrizzleWatcherStateRepository,
+  DrizzleOffRampStateRepository,
+  DrizzleTokenRevocationRepository,
 } from "../src/repos/index";
+import { SessionIssuer } from "../src/services/session";
+import type { Container } from "../src/services/container";
+import { NoKycRequired } from "@checkout/offramp";
 import { LinkService } from "../src/services/link-service";
 import type {
   AssetRef,
@@ -59,6 +64,9 @@ export class FakeRailPort implements RailPort {
   isValidDestination(_address: string): boolean {
     return true;
   }
+
+  /** Preflight always passes in tests; the trustline path has its own suite. */
+  async assertCanReceive(): Promise<void> {}
 
   buildRequest(input: {
     destination: string;
@@ -116,6 +124,7 @@ export class FakeWatcherPort implements WatcherPort {
       asset: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
       memo: "ref_test",
       memoType: "text",
+      toMuxedId: null,
       createdAt: new Date().toISOString(),
       ...over,
     };
@@ -193,7 +202,7 @@ export const testStellarConfig: StellarConfig = {
 //  Test Container
 // ---------------------------------------------------------------------------
 
-export interface TestContainer {
+export interface TestContainer extends Container {
   service: LinkService;
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
@@ -205,6 +214,8 @@ export interface TestContainer {
   db: DB;
   client: Client;
   config: { network: string; horizonUrl: string; sellerWallet: string };
+  /** Mints a bearer token for a seller, so route tests can authenticate. */
+  tokenFor(sellerId: string, wallet: string): Promise<string>;
   start(): void;
   stop(): void;
 }
@@ -216,14 +227,22 @@ export async function createTestContainer(): Promise<TestContainer> {
   const watcher = new FakeWatcherPort();
   const offramp = new FakeOffRampPort();
 
+  const offrampState = new DrizzleOffRampStateRepository(repos.db);
+
   const service = new LinkService({
     links: repos.links,
     sellers: repos.sellers,
     webhooks: repos.webhooks,
     rail,
     offramp,
+    offrampState,
+    kyc: new NoKycRequired(),
     stellar: testStellarConfig,
+    correlation: "memo",
   });
+
+  const session = new SessionIssuer("test-session-secret");
+  const revocations = new DrizzleTokenRevocationRepository(repos.db);
 
   return {
     service,
@@ -236,6 +255,23 @@ export async function createTestContainer(): Promise<TestContainer> {
     offramp,
     db: repos.db,
     client: repos.client,
+    kyc: new NoKycRequired() as unknown as Container["kyc"],
+    auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
+    horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
+    metricsToken: "test-metrics-token",
+    watcherLagSeconds: () => 0,
+    circuitBreakerState: () => 0,
+    getWatcherCircuitBreakerStatus: () => [],
+    getWatcherMetrics: () => ({
+      accountsWatched: 0,
+      tickDurationMs: 0,
+      perAccountLag: new Map(),
+      circuitBreakersOpen: 0,
+    }),
+    async tokenFor(sellerId: string, wallet: string) {
+      const issued = await session.issue({ sub: wallet, sellerId });
+      return issued.token;
+    },
     config: {
       network: "testnet",
       horizonUrl: "https://horizon-testnet.stellar.org",

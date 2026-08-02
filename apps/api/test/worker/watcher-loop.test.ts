@@ -3,6 +3,8 @@ import { WatcherLoop } from "../../src/worker/watcher-loop";
 import { LinkService } from "../../src/services/link-service";
 import { FakeRailPort, FakeWatcherPort, FakeOffRampPort, testStellarConfig, withTestDb } from "../setup";
 import type { DrizzleLinkRepository, DrizzleSellerRepository, DrizzleWebhookRepository, DrizzleWatcherStateRepository } from "../../src/repos/index";
+import { DrizzleOffRampStateRepository } from "../../src/repos/index";
+import { NoKycRequired } from "@checkout/offramp";
 
 // ---------------------------------------------------------------------------
 //  WatcherLoop tests
@@ -47,7 +49,10 @@ describe("WatcherLoop", () => {
       webhooks: webhooksRepo,
       rail,
       offramp,
+      offrampState: new DrizzleOffRampStateRepository(repos.db),
+      kyc: new NoKycRequired(),
       stellar: testStellarConfig,
+      correlation: "memo",
     });
 
     logs = [];
@@ -73,6 +78,7 @@ describe("WatcherLoop", () => {
       reference: ref,
       sellerId: seller.id,
       destination: DEST,
+      muxedId: null,
       title: "Test item",
       amount,
       asset: { code: "USDC", issuer: ISSUER },
@@ -377,7 +383,10 @@ describe("WatcherLoop — crash between markProcessed and setCursor", () => {
       webhooks: repos.webhooks,
       rail,
       offramp,
+      offrampState: new DrizzleOffRampStateRepository(repos.db),
+      kyc: new NoKycRequired(),
       stellar: testStellarConfig,
+      correlation: "memo",
     });
 
     const ref = "crash_safe_1";
@@ -387,6 +396,7 @@ describe("WatcherLoop — crash between markProcessed and setCursor", () => {
       reference: ref,
       sellerId: seller.id,
       destination: DEST,
+      muxedId: null,
       title: "Crash safe",
       amount: "10",
       asset: { code: "USDC", issuer: ISSUER },

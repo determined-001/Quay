@@ -11,11 +11,24 @@ import { createTestContainer, type TestContainer } from "../setup";
 let container: TestContainer;
 let app: Hono;
 
+/** Every /links and /webhooks route is seller-gated since #79, so route tests
+ *  authenticate as the default seller. `GET /links/:id` is public but sending
+ *  the header there is harmless. */
+let authToken = "";
+async function req(path: string, init: RequestInit = {}): Promise<Response> {
+  return app.request(path, {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${authToken}` },
+  });
+}
+
 beforeAll(async () => {
   container = await createTestContainer();
   app = new Hono();
   app.use("*", rateLimit({ windowMs: 60_000, max: 0 }));
   app.route("/links", linkRoutes(container));
+  const seller = await container.sellers.getDefault();
+  authToken = await container.tokenFor(seller.id, seller.wallet);
 });
 
 afterAll(() => {
@@ -28,7 +41,7 @@ afterAll(() => {
 
 describe("POST /links", () => {
   it("creates a link with valid body and returns 201", async () => {
-    const res = await app.request("/links", {
+    const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Test item", amount: "25.50", assetCode: "USDC" }),
@@ -44,7 +57,7 @@ describe("POST /links", () => {
   });
 
   it("creates a link with XLM asset", async () => {
-    const res = await app.request("/links", {
+    const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "XLM item", amount: "100", assetCode: "XLM" }),
@@ -57,7 +70,7 @@ describe("POST /links", () => {
   });
 
   it("returns 400 for missing title", async () => {
-    const res = await app.request("/links", {
+    const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ amount: "10" }),
@@ -68,7 +81,7 @@ describe("POST /links", () => {
   });
 
   it("returns 400 for invalid amount", async () => {
-    const res = await app.request("/links", {
+    const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Bad", amount: "-5" }),
@@ -77,7 +90,7 @@ describe("POST /links", () => {
   });
 
   it("returns 400 for empty title", async () => {
-    const res = await app.request("/links", {
+    const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "", amount: "10" }),
@@ -86,7 +99,7 @@ describe("POST /links", () => {
   });
 
   it("returns 400 for invalid JSON body", async () => {
-    const res = await app.request("/links", {
+    const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "not json",
@@ -95,7 +108,7 @@ describe("POST /links", () => {
   });
 
   it("creates a link with expiresInMinutes", async () => {
-    const res = await app.request("/links", {
+    const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Timed", amount: "10", expiresInMinutes: 60 }),
@@ -114,13 +127,13 @@ describe("POST /links", () => {
 
 describe("GET /links", () => {
   it("returns an array of links", async () => {
-    await app.request("/links", {
+    await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "List test", amount: "50" }),
     });
 
-    const res = await app.request("/links");
+    const res = await req("/links");
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
     expect(Array.isArray(body.links)).toBe(true);
@@ -128,7 +141,7 @@ describe("GET /links", () => {
   });
 
   it("returns links sorted newest-first", async () => {
-    const res = await app.request("/links");
+    const res = await req("/links");
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
     const links = body.links as Array<Record<string, unknown>>;
@@ -144,7 +157,7 @@ describe("GET /links", () => {
 
 describe("GET /links/:id", () => {
   it("returns a link by id", async () => {
-    const createRes = await app.request("/links", {
+    const createRes = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Get me", amount: "30" }),
@@ -152,7 +165,7 @@ describe("GET /links/:id", () => {
     const created = await createRes.json() as Record<string, unknown>;
     const linkId = (created.link as Record<string, unknown>).id as string;
 
-    const res = await app.request(`/links/${linkId}`);
+    const res = await req(`/links/${linkId}`);
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
     expect((body.link as Record<string, unknown>).id).toBe(linkId);
@@ -160,7 +173,7 @@ describe("GET /links/:id", () => {
   });
 
   it("returns 404 for unknown id", async () => {
-    const res = await app.request("/links/lnk_nonexistent");
+    const res = await req("/links/lnk_nonexistent");
     expect(res.status).toBe(404);
     const body = await res.json() as Record<string, unknown>;
     expect(body.error).toBe("not_found");
@@ -173,7 +186,7 @@ describe("GET /links/:id", () => {
 
 describe("POST /links/:id/cash-out", () => {
   async function createAndPayLink(): Promise<string> {
-    const createRes = await app.request("/links", {
+    const createRes = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Cash-out test", amount: "10" }),
@@ -193,7 +206,7 @@ describe("POST /links/:id/cash-out", () => {
   }
 
   it("returns 409 when link is not paid", async () => {
-    const createRes = await app.request("/links", {
+    const createRes = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Cash-out test", amount: "10" }),
@@ -201,7 +214,7 @@ describe("POST /links/:id/cash-out", () => {
     const created = await createRes.json() as Record<string, unknown>;
     const linkId = (created.link as Record<string, unknown>).id as string;
 
-    const res = await app.request(`/links/${linkId}/cash-out`, {
+    const res = await req(`/links/${linkId}/cash-out`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ targetCurrency: "NGN" }),
@@ -212,7 +225,7 @@ describe("POST /links/:id/cash-out", () => {
   });
 
   it("returns 404 when link does not exist", async () => {
-    const res = await app.request("/links/lnk_nonexistent/cash-out", {
+    const res = await req("/links/lnk_nonexistent/cash-out", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ targetCurrency: "NGN" }),
@@ -225,7 +238,7 @@ describe("POST /links/:id/cash-out", () => {
   it("returns 400 when body field has wrong type", async () => {
     const linkId = await createAndPayLink();
 
-    const res = await app.request(`/links/${linkId}/cash-out`, {
+    const res = await req(`/links/${linkId}/cash-out`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ targetCurrency: 123 }),
@@ -238,7 +251,7 @@ describe("POST /links/:id/cash-out", () => {
   it("triggers cash-out successfully for a paid link", async () => {
     const linkId = await createAndPayLink();
 
-    const res = await app.request(`/links/${linkId}/cash-out`, {
+    const res = await req(`/links/${linkId}/cash-out`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -267,7 +280,7 @@ describe("rate-limit headers", () => {
     limitedApp.use("*", rateLimit({ windowMs: 60_000, max: 5 }));
     limitedApp.route("/links", linkRoutes(container));
 
-    const res = await limitedApp.request("/links");
+    const res = await limitedApp.request("/links", { headers: { authorization: `Bearer ${authToken}` } });
     expect(res.status).toBe(200);
     expect(res.headers.get("x-ratelimit-limit")).toBe("5");
     expect(res.headers.get("x-ratelimit-remaining")).toBe("4");
@@ -279,11 +292,11 @@ describe("rate-limit headers", () => {
     limitedApp.use("*", rateLimit({ windowMs: 60_000, max: 1 }));
     limitedApp.route("/links", linkRoutes(container));
 
-    const res1 = await limitedApp.request("/links");
+    const res1 = await limitedApp.request("/links", { headers: { authorization: `Bearer ${authToken}` } });
     expect(res1.status).toBe(200);
     expect(res1.headers.get("x-ratelimit-remaining")).toBe("0");
 
-    const res2 = await limitedApp.request("/links");
+    const res2 = await limitedApp.request("/links", { headers: { authorization: `Bearer ${authToken}` } });
     expect(res2.status).toBe(429);
     const body = await res2.json() as Record<string, unknown>;
     expect(body.error).toBe("rate_limited");
@@ -297,7 +310,7 @@ describe("rate-limit headers", () => {
 
 describe("404 handling", () => {
   it("returns 404 for unknown routes", async () => {
-    const res = await app.request("/nonexistent");
+    const res = await req("/nonexistent");
     expect(res.status).toBe(404);
   });
 });
