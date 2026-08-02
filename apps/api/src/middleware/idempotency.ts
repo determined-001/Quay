@@ -13,10 +13,19 @@ function hashBody(body: unknown): string {
   return createHash("sha256").update(JSON.stringify(body)).digest("hex");
 }
 
-export function idempotency(db: DB, sellerId: string) {
+/**
+ * Scopes stored responses to the *authenticated* seller, so this must be
+ * mounted AFTER `requireSeller` — it reads the seller off the context rather
+ * than taking a fixed id, which is what it did before routes were auth-gated.
+ */
+export function idempotency(db: DB) {
   return async (ctx: Context, next: Next) => {
     const key = ctx.req.header("idempotency-key");
     if (!key) return next();
+
+    const seller = ctx.get("seller") as { id: string } | undefined;
+    if (!seller) return next(); // unauthenticated route — nothing to scope to
+    const sellerId = seller.id;
 
     const endpoint = `${ctx.req.method} ${ctx.req.path}`;
     const rawBody = await ctx.req.text();
@@ -56,11 +65,14 @@ export function idempotency(db: DB, sellerId: string) {
     let capturedBody: string | null = null;
     let capturedStatus = 200;
     const origJson = ctx.json.bind(ctx);
-    ctx.json = (data: unknown, status?: number) => {
+    // Wraps ctx.json so the handler's response can be persisted for replay.
+    // Cast because Hono's JSONRespond is a heavily-overloaded signature that a
+    // plain (data, status) function can't structurally satisfy.
+    ctx.json = ((data: unknown, status?: number) => {
       capturedBody = JSON.stringify(data);
       capturedStatus = status ?? 200;
       return origJson(data, status as never);
-    };
+    }) as typeof ctx.json;
 
     try {
       await next();
