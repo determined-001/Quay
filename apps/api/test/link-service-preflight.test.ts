@@ -91,6 +91,7 @@ function makeService(links: LinkRepository, rail: RailPort): LinkService {
     kyc: new AlwaysAcceptedKyc(),
     stellar,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 }
 

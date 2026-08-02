@@ -77,7 +77,7 @@ export class WebhookSender {
     this.baseDelayMs = opts.baseDelayMs ?? 500;
     this.timeoutMs = opts.timeoutMs ?? 8000;
     this.maxResponseBytes = opts.maxResponseBytes ?? 64 * 1024;
-    this.guard = opts.guard ?? ((url) => guardWebhookUrl(url, { allowlist: HOST_ALLOWLIST }));
+    this.guard = opts.guard ?? ((url: string) => guardWebhookUrl(url, { allowlist: HOST_ALLOWLIST }));
     this.maxResponseBytes = opts.maxResponseBytes ?? 64 * 1024; // 64 KB
   }
 

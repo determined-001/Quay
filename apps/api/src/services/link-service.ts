@@ -245,9 +245,12 @@ export class LinkService {
       health?: AnchorHealth;
       // "memo" (default) or "muxed" — see packages/stellar/src/stellar-rail.ts.
       correlation: "memo" | "muxed";
+      /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
+       *  a permissive one so they do not depend on live DNS resolution. */
+      webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
     },
   ) {
-    this.sender = new WebhookSender(deps.webhooks);
+    this.sender = new WebhookSender(deps.webhooks, { guard: deps.webhookGuard });
     this.health =
       deps.health ?? new AnchorHealth({ enabled: false, url: null, homeDomain: null });
   }

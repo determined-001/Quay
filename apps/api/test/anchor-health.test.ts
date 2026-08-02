@@ -473,6 +473,7 @@ function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
     stellar: STELLAR,
     health,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
   const captureRoute = new Hono();
   // Mirror the production cash-out route shape for HTTP-level assertions.
@@ -658,6 +659,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
 
     await repo.save(
@@ -706,6 +708,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
       link({
@@ -751,6 +754,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
       link({ id: "lnk_3", status: "offramp_pending", offrampJobId: "ofr_x", offrampTargetCurrency: "NGN" }),
@@ -788,6 +792,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
       link({ id: "lnk_bo", status: "offramp_pending", offrampJobId: "ofr_bo", offrampTargetCurrency: "NGN" }),

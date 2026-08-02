@@ -271,6 +271,8 @@ async function makeFixture(): Promise<Fixture> {
     kyc: new AlwaysAcceptedKyc(),
     stellar: STELLAR,
     correlation: "memo",
+    // Avoid live DNS in unit tests; ssrf-guard.test.ts covers the guard.
+    webhookGuard: async () => ({ ok: true }) as const,
   });
   // Build a Hono sub-app that mirrors what `routes/links.ts` would mount but
   // depends only on `service`. The full Container has fields the route doesn't

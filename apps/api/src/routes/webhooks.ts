@@ -39,7 +39,9 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
 
     // SSRF guard: validate the URL and resolve the hostname before storing.
-    const guard = await guardWebhookUrl(parsed.data.url, { allowlist: HOST_ALLOWLIST });
+    const guard = await (c.webhookGuard ?? ((u: string) => guardWebhookUrl(u, { allowlist: HOST_ALLOWLIST })))(
+      parsed.data.url,
+    );
     if (!guard.ok) {
       return ctx.json({ error: "invalid_webhook_url", reason: guard.reason }, 422);
     }
