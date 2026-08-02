@@ -295,6 +295,12 @@ class FakeSellerRepoForAnchor {
   async findById(id: string): Promise<Seller | null> {
     return id === this.s.id ? this.s : null;
   }
+  async findByWallet(wallet: string): Promise<Seller | null> {
+    return wallet === this.s.wallet ? this.s : null;
+  }
+  async createIfAbsent(_wallet: string): Promise<Seller> {
+    return this.s;
+  }
 }
 
 class FakeWebhookRepoForAnchor implements WebhookRepository {
@@ -313,6 +319,7 @@ class FakeWebhookRepoForAnchor implements WebhookRepository {
 }
 
 class FakeRailForAnchor implements RailPort {
+  assertCanReceive = async (): Promise<void> => {};
   buildRequest = (input: Parameters<RailPort["buildRequest"]>[0]) => ({
     uri: `web+stellar:pay?destination=${input.destination}&memo=${input.reference}`,
     destination: input.destination,

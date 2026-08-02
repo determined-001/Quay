@@ -33,6 +33,7 @@ export type ApiErrorCode =
   | "invalid_body"
   | "conflict"
   | "kyc_required" // seller's SEP-12 KYC isn't ACCEPTED yet — see `missingFields`
+  | "destination_cannot_receive" // seller wallet can't receive the asset — see `details.trustlineUri`
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
   | "server_error"; // 5xx or unexpected non-JSON response
 
@@ -44,6 +45,8 @@ export class CheckoutError extends Error {
     detail: string,
     /** Set when `code === "kyc_required"` and the API named specific missing fields. */
     readonly missingFields?: string[],
+    /** Everything else in the error body — e.g. `reason`, `trustlineUri`. */
+    readonly details: Record<string, unknown> = {},
   ) {
     super(`${code} (${status}): ${detail}`);
     this.name = "CheckoutError";
@@ -61,6 +64,8 @@ export function describeError(err: CheckoutError): string {
       return "This action cannot be completed right now. The link may be in an unexpected state. Try refreshing.";
     case "kyc_required":
       return "Identity verification is required before you can cash out. See the panel above.";
+    case "destination_cannot_receive":
+      return "Your wallet can't receive this asset yet. Add the trustline and try again.";
     case "unreachable":
       return "We can't reach the payment service right now. Check your connection and try again.";
     case "server_error":
@@ -92,15 +97,11 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
-    let apiCode: string | undefined;
-    let missingFields: string[] | undefined;
-    try {
-      const body = (await res.json()) as { error?: string; missingFields?: string[] };
-      apiCode = body.error;
-      missingFields = body.missingFields;
-    } catch {
-      // response wasn't JSON
-    }
+    const raw = await res.text().catch(() => "");
+    const body = parseJsonObject(raw) ?? {};
+    const { error, missingFields: rawMissing, message, ...details } = body;
+    const apiCode = typeof error === "string" ? error : undefined;
+    const missingFields = Array.isArray(rawMissing) ? (rawMissing as string[]) : undefined;
     const code: ApiErrorCode =
       res.status >= 500
         ? "server_error"
@@ -112,12 +113,24 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
               ? "invalid_body"
               : apiCode === "kyc_required"
                 ? "kyc_required"
-                : "server_error";
-    const detail = apiCode ?? res.statusText;
-    throw new CheckoutError(code, res.status, detail, missingFields);
+                : apiCode === "destination_cannot_receive"
+                  ? "destination_cannot_receive"
+                  : "server_error";
+    const detail = typeof message === "string" ? message : (apiCode ?? res.statusText);
+    throw new CheckoutError(code, res.status, detail, missingFields, details);
   }
 
   return res.json() as Promise<T>;
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface CreateLinkInput {
@@ -127,18 +140,15 @@ export interface CreateLinkInput {
   expiresInMinutes?: number;
 }
 
-/** One indicative price entry from GET /links/:id/offramp-preview (issue 3.5). */
-export interface IndicativePrice {
-  targetCurrency: string;
-  price: string;
-  deliveryMethods: string[];
-}
+export type UsdcTrustlineStatus =
+  | { ok: true }
+  | { ok: false; reason: string; message: string; trustlineUri?: string };
 
-/** Response shape for GET /links/:id/offramp-preview. */
-export interface OfframpPreview {
-  indicative: true;
-  prices: IndicativePrice[];
-  sourceAmount: string | null;
+export interface HealthResponse {
+  ok: boolean;
+  network: string;
+  sellerWallet: string;
+  usdcTrustline: UsdcTrustlineStatus;
 }
 
 export const api = {
@@ -149,15 +159,7 @@ export const api = {
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
 
-  /**
-   * Indicative off-ramp prices — SEP-38 GET /prices via the API, no firm quote
-   * consumed (issue 3.5). Safe to call on every dashboard load.
-   * Pass `currency` to persist the indicative rate for spread-delta telemetry.
-   */
-  getOfframpPreview: (id: string, currency?: string) => {
-    const qs = currency ? `?currency=${encodeURIComponent(currency)}` : "";
-    return http<OfframpPreview>(`/links/${id}/offramp-preview${qs}`);
-  },
+  health: () => http<HealthResponse>("/health"),
 
   cashOut: (
     id: string,

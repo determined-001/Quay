@@ -184,6 +184,25 @@ export class DrizzleSellerRepository implements SellerRepository {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
     return rows[0] ?? null;
   }
+
+  async findByWallet(wallet: string): Promise<Seller | null> {
+    const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
+    return rows[0] ?? null;
+  }
+
+  async createIfAbsent(wallet: string): Promise<Seller> {
+    await this.db
+      .insert(sellers)
+      .values({ id: newId("sel"), name: shortWallet(wallet), wallet, createdAt: Date.now() })
+      .onConflictDoNothing({ target: sellers.wallet });
+    const seller = await this.findByWallet(wallet);
+    if (!seller) throw new Error(`failed to create or find seller for wallet ${wallet}`);
+    return seller;
+  }
+}
+
+function shortWallet(wallet: string): string {
+  return `${wallet.slice(0, 4)}…${wallet.slice(-4)}`;
 }
 
 export class DrizzleWebhookRepository implements WebhookRepository {
