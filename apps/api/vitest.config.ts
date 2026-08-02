@@ -32,5 +32,10 @@ export default defineConfig({
       ],
       thresholds: thresholds["apps/api"] ?? undefined,
     },
+    include: ["src/**/*.test.ts", "test/**/*.test.ts"],
+    // The off-ramp poll-backoff tests wait on a real 2s backoff; 5s is too
+    // tight under parallel load.
+    testTimeout: 10_000,
+    hookTimeout: 10_000,
   },
 });

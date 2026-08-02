@@ -24,6 +24,10 @@ export interface PaymentLink {
   reference: string; // short, <=28 bytes — embedded as the Stellar MEMO_TEXT
   sellerId: string;
   destination: string; // seller's G-address (payments land here, non-custodial)
+  // SEP-23 muxed id embedded in the M-address handed to the payer when
+  // CORRELATION=muxed. Null in memo mode (the default) — the two correlation
+  // paths are independent, and a link only ever uses one.
+  muxedId: string | null;
   title: string;
   amount: string; // requested amount, canonical decimal string
   asset: AssetRef;
@@ -36,6 +40,23 @@ export interface PaymentLink {
   offrampJobId: string | null;
   offrampTargetCurrency: string | null;
   offrampStatus: string | null;
+  /**
+   * Indicative rate shown to the seller before they committed (issue 3.5).
+   * Stored at the moment the seller opens the cash-out form (GET offramp-preview).
+   * The delta with `offrampRate` is the anchor's real spread.
+   */
+  offrampIndicativeRate: string | null;
+  /**
+   * The firm rate from the SEP-38 POST /quote used to initiate this cash-out.
+   * Stored by triggerCashOut() (issue 3.5).
+   */
+  offrampRate: string | null;
+  /**
+   * Absolute difference between the indicative and firm rates (firm − indicative),
+   * as a decimal string. Persisted so the spread is queryable without recomputing
+   * (issue 3.5 / 3.8 telemetry).
+   */
+  offrampRateDelta: string | null;
   expiresAt: number | null; // epoch ms
   createdAt: number;
   updatedAt: number;
