@@ -12,7 +12,11 @@
     "typecheck": "turbo run typecheck",
     "db:push": "pnpm --filter @checkout/api db:push",
     "db:backup": "tsx scripts/db-backup.ts",
-    "db:restore": "tsx scripts/db-restore.ts"
+    "db:restore": "tsx scripts/db-restore.ts",
+    "docs:status-diagram": "node scripts/gen-status-diagram.mjs",
+    "docs:check-status-diagram": "node scripts/gen-status-diagram.mjs --check",
+    "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
+    "sweep": "node scripts/uptime-check.mjs"
   },
   "dependencies": {
     "@libsql/client": "0.17.4"

@@ -61,7 +61,9 @@ describe("dumpDatabase / restoreDatabase (lib/dump.ts)", () => {
     const check = createClient({ url: targetUrl });
     const result = await check.execute("SELECT reference, amount, status FROM links WHERE id = 'link_1'");
     check.close();
-    expect(result.rows[0]).toEqual(["ref-001", "25.00", "paid"]);
+    // libSQL returns array-like row objects (numeric AND named keys), not real
+    // Arrays, so assert on the named columns — clearer and version-stable.
+    expect(result.rows[0]).toMatchObject({ reference: "ref-001", amount: "25.00", status: "paid" });
   });
 
   it("skips (with a warning, not an error) a table present in the dump but absent from the target", async () => {
