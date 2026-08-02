@@ -197,7 +197,7 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
 | Metrics | **Real.** `GET /metrics` (Prometheus text format, `METRICS_TOKEN`-gated) — payment/webhook/anchor counters, watcher-lag and latency histograms, a circuit breaker around the off-ramp adapter. See [`docs/API.md`](docs/API.md#get-metrics) and [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json). |
 | Embeddable widget (`/widget.js`) | **Real**, lightweight embeddable script rendering modal checkout. |
-| Auth | **Partial.** Wallet-native login is real: `GET/POST /auth` implements the server side of SEP-10 (challenge, signature + M-of-N threshold verification via Horizon, single-use, session JWT), and `/.well-known/stellar.toml` makes it discoverable. A seller row is created for a wallet on first login, but `/links` and `/webhooks` don't check the session yet — every request still operates on the single demo seller. See [`docs/API.md`](docs/API.md#get-authaccountg). |
+| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; `requireSeller` middleware gates every `/links` and `/webhooks` route (401 unauthenticated, 403 wrong seller), `POST /auth/logout` revokes a token by `jti`. **No web UI exists yet to actually log in** (needs a wallet-connect button — separate issue) — the demo dashboard needs that wired up before it can create/list links post-upgrade. See [`docs/API.md`](docs/API.md#authentication). |
 
 ---
 
@@ -212,10 +212,11 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Wire the login through.** SEP-10 wallet login (`/auth`) works, but scope
-   `/links` and `/webhooks` to the authenticated seller (from the session JWT)
-   before anyone but you touches it — right now they still hit the single demo
-   seller regardless of who's logged in. Add API keys for programmatic access.
+4. **Build the wallet-connect UI.** SEP-10 login + session enforcement are both
+   real now (`/auth`, `requireSeller` on `/links` and `/webhooks`), but there's
+   no button anywhere to actually sign in — that needs a wallet-connect
+   integration (Stellar Wallets Kit or similar) calling `apps/web/lib/api.ts`'s
+   `getAuthChallenge`/`submitAuthChallenge`. Add API keys for programmatic access.
 5. **Multiple sellers / scale:** the watcher polls per active destination account; for many
    sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
 

@@ -99,7 +99,7 @@ export class WebhookSender {
 
           if (res.ok) {
             metrics.webhookAttemptsTotal.inc({ result: "ok" });
-            await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
+            await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null, createdAt: Date.now() });
             return;
           }
 
@@ -117,7 +117,7 @@ export class WebhookSender {
         if (attempt < this.maxAttempts) await sleep(this.backoff(attempt));
       }
 
-      await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error });
+      await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error, createdAt: Date.now() });
     } finally {
       this.inFlight -= 1;
     }

@@ -98,6 +98,17 @@ export const env = {
   // Fixed-window rate limit per client IP. Set RATE_LIMIT_MAX=0 to disable.
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? "60000"),
   rateLimitMax: Number(process.env.RATE_LIMIT_MAX ?? "120"),
+  // Tighter buckets for expensive routes (link creation, cash-out).
+  rateLimitStrictWindowMs: Number(process.env.RATE_LIMIT_STRICT_WINDOW_MS ?? "60000"),
+  rateLimitStrictMax: Number(process.env.RATE_LIMIT_STRICT_MAX ?? "20"),
+  // Number of trusted reverse-proxy hops in front of this instance. Determines
+  // which x-forwarded-for entry (from the right) is treated as the real client IP.
+  // Default 1 in production (Render's own edge proxy), 0 locally where nothing
+  // sits in front of the API and the header (if present at all) is untrusted.
+  trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? (network === "public" ? "1" : "0")),
+  // When set, rate-limit counters are shared across instances via Redis instead
+  // of an in-process Map.
+  redisUrl: process.env.REDIS_URL || undefined,
   // Seller wallet that receives funds. If unset on testnet, the app generates a
   // throwaway keypair on first boot and prints it. Required on public network.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
@@ -121,6 +132,10 @@ export const env = {
   // an ephemeral one on testnet if unset (sessions won't survive a restart);
   // required on public network.
   jwtSecret: process.env.JWT_SECRET || undefined,
+  // Whether the session cookie gets the `Secure` attribute (only sent over
+  // HTTPS). Defaults on; set COOKIE_SECURE=false for plain-http local dev,
+  // where a Secure cookie would otherwise silently never be sent at all.
+  cookieSecure: (process.env.COOKIE_SECURE ?? "true") !== "false",
   // Watcher concurrency and fairness settings
   watcherConcurrency: Number(process.env.WATCHER_CONCURRENCY ?? "10"),
   watcherMaxAccountsPerTick: Number(process.env.WATCHER_MAX_ACCOUNTS_PER_TICK ?? "50"),

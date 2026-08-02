@@ -3,14 +3,34 @@
 The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by default
 (`API_PORT`). All request and response bodies are JSON.
 
-> **Auth:** `POST /auth` (below) issues a session JWT after a wallet-signed SEP-10
-> challenge, and a seller row is created for the wallet on first login. `/links`
-> and `/webhooks` do not check this token yet and still operate on the single
-> demo seller — scoping them by authenticated seller is tracked separately. This
-> is fine for local development and demos, not for production. See the README's
-> "Before you go live" section.
+> **Auth:** `POST /auth` issues a session JWT after a wallet-signed SEP-10
+> challenge; a seller row is created for the wallet on first login. **`/links`
+> and `/webhooks` now require it** — every route under those two prefixes needs
+> `Authorization: Bearer <token>` (or the httpOnly `session` cookie set by
+> `POST /auth`) and returns `401` without one. There is currently no web UI to
+> obtain a token (that needs a wallet-connect button — tracked separately), so
+> the demo dashboard will need one wired up before it can create/list links
+> again post-upgrade. See `apps/web/lib/api.ts`'s `getAuthChallenge` /
+> `submitAuthChallenge` for the client-side pieces already in place.
 
-CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
+CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated), with
+`credentials: true` (required for the browser to send/receive the session cookie
+cross-origin — so `CORS_ORIGINS` can't be `*` while auth is in use).
+
+## Authentication
+
+Every route marked **Requires auth** below needs `Authorization: Bearer <token>`
+(from `POST /auth`) or the httpOnly `session` cookie it also sets.
+
+- **401 `unauthorized`** — you're not authenticated at all: no token, or one
+  that's missing, malformed, tampered, expired, or revoked (`POST /auth/logout`
+  put its `jti` on the revocation list). The response body always has this
+  shape: `{ "error": "unauthorized", "message": "<why>" }`.
+- **403 `forbidden`** — you *are* authenticated, just not as the seller who
+  owns the resource (e.g. someone else's link). `{ "error": "forbidden", "message": "<why>" }`.
+
+These are deliberately different failure modes: 401 means "prove who you are
+again"; 403 means "you did, and the answer is still no."
 
 ## Conventions
 
@@ -18,6 +38,23 @@ CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated).
   decimals. Internally compared in integer stroops, never floats.
 - Errors return `{ "error": "<code>", ... }` with an appropriate HTTP status.
   Validation failures return `400` with `{ "error": "invalid_body", "issues": [...] }`.
+
+## Idempotency
+
+`POST /links` and `POST /links/:id/cash-out` support the `Idempotency-Key` header.
+
+```
+Idempotency-Key: <unique-string-per-logical-request>
+```
+
+- **Same key + same body** — the original response is replayed byte-for-byte with an
+  `Idempotent-Replayed: true` header. No second link is created; no second anchor job is started.
+- **Same key + different body** — `409 idempotency_key_reuse`.
+- **Key still in-flight** — `409 request_in_progress`.
+- Keys expire after **24 hours**.
+
+Use a UUID or any sufficiently random string. Retry safely on network timeouts by
+resending the same key and body.
 
 ---
 
@@ -161,9 +198,77 @@ seam `anchor_calls_total` / `anchor_call_duration_seconds` are recorded from.
 
 ---
 
+## `GET /auth?account=G...`
+
+Step 1 of [SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md)
+wallet login: builds a challenge transaction for the given account to sign.
+
+**200**
+```json
+{ "transaction": "AAAAAgAAAAA...", "network_passphrase": "Test SDF Network ; September 2015" }
+```
+**400** — `{ "error": "missing_account" }` or `{ "error": "account must be a valid Stellar G-address" }`
+
+---
+
+## `POST /auth`
+
+Step 2: submit the challenge transaction signed by the account's wallet(s).
+Verifies the server's own signature, timebounds, domain fields, and that
+signature weight from the account's actual signers (via Horizon, M-of-N aware)
+meets its medium threshold — the account's master key if it isn't funded yet.
+Each challenge can be redeemed exactly once.
+
+On success, a seller row is created for the wallet if one doesn't exist yet
+(the wallet address **is** the identity).
+
+**Request**
+```json
+{ "transaction": "AAAAAgAAAAA..." }
+```
+
+**200** — also sets an httpOnly `session` cookie (`Secure` unless `COOKIE_SECURE=false`,
+`SameSite=Lax`), for server-side/SSR requests that can't hold the token in JS memory.
+```json
+{ "token": "<session JWT>", "expiresAt": 1750003600 }
+```
+- `token` — an HS256 JWT (`sub`=wallet G-address, `sellerId`, `jti`, `exp` ≤ 24h from
+  now). Keep it **in memory only** on the client — never `localStorage`/`sessionStorage`.
+- There is no refresh token by design: renew by re-signing a fresh challenge
+  (`GET /auth` → `POST /auth` again) before `expiresAt`.
+
+**401** — `{ "error": "<reason>" }`, e.g. signature verification failed, challenge
+already used, or the transaction doesn't match what we issued.
+
+---
+
+## `POST /auth/logout`
+
+**Requires auth.** Revokes the current token's `jti` (rejected by every
+protected route from then on, even though it hasn't expired yet) and clears
+the `session` cookie.
+
+**200**
+```json
+{ "ok": true }
+```
+**401** — same as any protected route: missing/invalid/expired/already-revoked token.
+
+---
+
+## `GET /.well-known/stellar.toml`
+
+[SEP-1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)
+descriptor advertising `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`, and `NETWORK_PASSPHRASE`
+so wallets can discover this service's SEP-10 endpoint — the server-side mirror of
+how `packages/offramp/src/sep10.ts` discovers anchors.
+
+---
+
 ## `POST /links`
 
-Create a payment link.
+**Requires auth.** Creates the link under the authenticated seller (the
+one the token's `sellerId` resolves to).
 
 **Request**
 ```json
@@ -231,7 +336,7 @@ mean a checkout page that could never actually be paid — see
 
 ## `GET /links`
 
-List the seller's links.
+**Requires auth.** Lists the authenticated seller's own links only.
 
 **200**
 ```json
@@ -242,16 +347,19 @@ List the seller's links.
 
 ## `GET /links/:id`
 
-Fetch one link plus its payment request (used by the checkout page).
+**Requires auth.** Fetch one link plus its payment request (used by the
+checkout page).
 
 **200** — same shape as the `POST /links` response.
+**403** — `{ "error": "forbidden", "message": "..." }`: the link exists but
+belongs to a different seller.
 **404** — `{ "error": "not_found" }`
 
 ---
 
 ## `POST /links/:id/cash-out`
 
-Seller-initiated off-ramp of a **paid** link to local currency. Runs
+**Requires auth** (403 if the link belongs to a different seller). Seller-initiated off-ramp of a **paid** link to local currency. Runs
 `quote → initiate` against the off-ramp adapter and moves the link to
 `offramp_pending`; a background poller advances it to `offramp_settled` /
 `offramp_failed`.
@@ -337,7 +445,8 @@ naming exactly which ones, never silently substituting a placeholder.
 
 ## `POST /webhooks`
 
-Register a webhook endpoint. The signing secret is returned **once** — store it.
+**Requires auth.** Register a webhook endpoint for the authenticated seller.
+The signing secret is returned **once** — store it.
 
 **Request**
 ```json
@@ -353,7 +462,8 @@ Register a webhook endpoint. The signing secret is returned **once** — store i
 
 ## `GET /webhooks`
 
-List registered webhooks. Secrets are **not** returned.
+**Requires auth.** Lists the authenticated seller's registered webhooks.
+Secrets are **not** returned.
 
 **200**
 ```json

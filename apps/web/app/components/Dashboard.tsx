@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   CheckoutError,
@@ -107,7 +108,11 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableP
       <tbody>
         {links.map((link) => (
           <tr key={link.id}>
-            <td>{link.title}</td>
+            <td>
+              <Link href={`/links/${link.id}`} className="dash-link-title">
+                {link.title}
+              </Link>
+            </td>
             <td className="amt">{amountLabel(link)}</td>
             <td>
               <StatusPill status={link.status} />
@@ -264,6 +269,28 @@ export default function Dashboard() {
     }
   }
 
+  const [csvFrom, setCsvFrom] = useState("");
+  const [csvTo, setCsvTo] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  async function handleCsvExport() {
+    setExporting(true);
+    try {
+      const blob = await api.exportCsv(csvFrom || undefined, csvTo || undefined);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `quay-links-export-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
   // Real anchor and not yet verified: never let the seller submit a cash-out
   // that can only fail (or worse, silently carry placeholder identity data).
   const cashOutBlocked = !OFFRAMP_IS_MOCK && kyc?.status !== "ACCEPTED";
@@ -367,6 +394,36 @@ export default function Dashboard() {
             cashOutBlocked={cashOutBlocked}
           />
         )}
+      </section>
+
+      <section className="panel">
+        <h2>Export</h2>
+        <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          Download all links as CSV for your accounting. Optionally filter by date range.
+        </p>
+        <div className="csv-export-row">
+          <div className="field csv-field">
+            <label htmlFor="csv-from">From</label>
+            <input
+              id="csv-from"
+              type="date"
+              value={csvFrom}
+              onChange={(e) => setCsvFrom(e.target.value)}
+            />
+          </div>
+          <div className="field csv-field">
+            <label htmlFor="csv-to">To</label>
+            <input
+              id="csv-to"
+              type="date"
+              value={csvTo}
+              onChange={(e) => setCsvTo(e.target.value)}
+            />
+          </div>
+          <button className="btn" onClick={handleCsvExport} disabled={exporting}>
+            {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+        </div>
       </section>
     </>
   );

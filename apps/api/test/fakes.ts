@@ -113,6 +113,10 @@ export class FakeWebhookRepository implements WebhookRepository {
     return hook;
   }
 
+  async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
+    return this.deliveries.filter((d) => d.linkId === linkId);
+  }
+
   async listBySeller(sellerId: string): Promise<Webhook[]> {
     return this.hooks.filter((h) => h.sellerId === sellerId);
   }
