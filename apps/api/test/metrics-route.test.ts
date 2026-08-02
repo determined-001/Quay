@@ -17,6 +17,7 @@ function fakeContainer(): Container {
     circuitBreakerState: () => 0,
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     kyc: {} as Container["kyc"],
+    db: {} as Container["db"],
     auth: {} as Container["auth"],
     getWatcherCircuitBreakerStatus: () => [],
     getWatcherMetrics: () => ({
