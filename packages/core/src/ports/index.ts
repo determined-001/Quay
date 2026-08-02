@@ -31,6 +31,34 @@ export interface RailPort {
 
   /** Validate that a string is a usable destination address for this rail. */
   isValidDestination(address: string): boolean;
+
+  /**
+   * Throws `CannotReceiveError` if `account` cannot currently receive `asset` —
+   * the account doesn't exist yet, or (for issued assets) has no trustline, an
+   * unauthorized one, or one already at its limit. Resolves silently if it can.
+   * Implementations should cache a short TTL per (account, asset) so calling
+   * this on every link creation stays cheap.
+   */
+  assertCanReceive(account: string, asset: AssetRef): Promise<void>;
+}
+
+export type CannotReceiveReason =
+  | "account_not_found" // not yet created/funded on-chain
+  | "no_trustline" // issued asset, no trustline established
+  | "trustline_not_authorized" // trustline exists but the issuer froze/deauthorized it
+  | "trustline_limit_exceeded"; // trustline exists but is already full
+
+/** Raised by `RailPort.assertCanReceive`. `trustlineUri` (when present) is a
+ *  rail-specific "fix it" deep link — e.g. a SEP-7 `tx` URI wrapping an unsigned
+ *  changeTrust operation the seller's wallet can sign directly. */
+export class CannotReceiveError extends Error {
+  constructor(
+    readonly reason: CannotReceiveReason,
+    message: string,
+    readonly trustlineUri?: string,
+  ) {
+    super(message);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +291,10 @@ export interface Seller {
 export interface SellerRepository {
   getDefault(): Promise<Seller>;
   findById(id: string): Promise<Seller | null>;
+  findByWallet(wallet: string): Promise<Seller | null>;
+  /** Wallet-native signup: SEP-10 proved control of `wallet`, so it IS the identity.
+   *  Idempotent — returns the existing seller if one is already registered for it. */
+  createIfAbsent(wallet: string): Promise<Seller>;
 }
 
 export interface Webhook {
@@ -296,4 +328,17 @@ export interface WatcherStateRepository {
   setCursor(account: string, cursor: string): Promise<void>;
   isProcessed(txHash: string): Promise<boolean>;
   markProcessed(txHash: string, linkId: string | null): Promise<void>;
+}
+
+/** Session-JWT revocation, keyed by the token's own `jti` — logout and
+ *  compromise both work by revoking a specific token id, not by invalidating
+ *  every session for a seller. */
+export interface TokenRevocationRepository {
+  /** `expiresAt` (epoch seconds) mirrors the token's own `exp`, so expired
+   *  revocation rows can be swept without ever affecting still-valid tokens. */
+  revoke(jti: string, expiresAt: number): Promise<void>;
+  isRevoked(jti: string): Promise<boolean>;
+  /** Deletes revocation rows whose token would already fail verification on
+   *  expiry alone — safe to call opportunistically, no correctness impact. */
+  sweepExpired(now: number): Promise<void>;
 }

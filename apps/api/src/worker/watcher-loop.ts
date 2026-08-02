@@ -7,6 +7,7 @@ import {
 } from "@checkout/core";
 import { AnchorHealth, type LinkService } from "../services/link-service";
 import { env } from "../env";
+import { metrics } from "../metrics";
 
 /**
  * Per-account state for adaptive polling and circuit breaking.
@@ -68,6 +69,7 @@ export class WatcherLoop {
     perAccountLag: new Map(),
     circuitBreakersOpen: 0,
   };
+  private lastTickCompletedAt = Date.now();
 
   constructor(
     private readonly deps: {
@@ -107,6 +109,11 @@ export class WatcherLoop {
     this.timer = null;
   }
 
+  /** Seconds since the last fully-completed poll tick, computed at call time. */
+  getLagSeconds(): number {
+    return (Date.now() - this.lastTickCompletedAt) / 1000;
+  }
+
   /**
    * Get current circuit breaker status for all accounts.
    */
@@ -139,6 +146,7 @@ export class WatcherLoop {
     const tickStart = Date.now();
     const allAccounts = await this.deps.links.activeDestinations();
     this.metrics.accountsWatched = allAccounts.length;
+    metrics.accountsWatched.set(allAccounts.length);
 
     // Select accounts to process this tick using fair round-robin
     const accountsToProcess = this.selectAccountsForTick(allAccounts);
@@ -157,12 +165,24 @@ export class WatcherLoop {
     const tickDuration = Date.now() - tickStart;
     this.metrics.tickDurationMs = tickDuration;
     this.metrics.circuitBreakersOpen = this.countOpenCircuitBreakers();
-    
+    metrics.watcherTickDurationSeconds.observe(tickDuration / 1000);
+
     // Update per-account lag
     const now = Date.now();
     for (const [account, state] of this.accountStates.entries()) {
       const lag = now - state.lastProcessedAt;
       this.metrics.perAccountLag.set(account, lag);
+    }
+    this.lastTickCompletedAt = now;
+
+    // Expiry sweep runs AFTER payment matching, so a buyer who submitted within
+    // TTL but whose on-chain confirmation lands after the deadline still settles
+    // as `paid` rather than being rejected against an already-expired link.
+    try {
+      const moved = await this.deps.service.sweepExpired(Date.now());
+      if (moved > 0) this.deps.log?.(`expiry sweep moved ${moved} link(s) to expired`);
+    } catch (err) {
+      this.deps.log?.(`expiry sweep error: ${stringifyErr(err)}`);
     }
   }
 
@@ -327,6 +347,7 @@ export class WatcherLoop {
       if (await this.deps.state.isProcessed(payment.txHash)) continue;
 
       const outcome = matchPayment(payment, (ref) => byRef.get(ref), (id) => byMuxedId.get(id));
+      metrics.paymentsMatchedTotal.inc({ outcome: outcome.kind });
       const linkId =
         outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
           ? outcome.link.id
@@ -338,6 +359,28 @@ export class WatcherLoop {
           `payment ${short(payment.txHash)} -> ${outcome.kind}` +
             (becamePaid ? ` (link ${linkId} PAID)` : ""),
         );
+      } else if (
+        outcome.kind === "unknown_reference" &&
+        payment.memo &&
+        payment.memoType !== "none"
+      ) {
+        // Memo matched nothing in the OPEN set. Before we give up, check
+        // whether the memo belongs to a link that *used to* be open but has
+        // since been expired or cancelled by the seller. If so, the buyer
+        // paid a dead link: do NOT resurrect it, fire payment.unmatched so
+        // the seller can refund the buyer out-of-band.
+        const terminal = await this.deps.links.findByReference(payment.memo);
+        if (
+          terminal &&
+          terminal.destination === account &&
+          (terminal.status === "expired" || terminal.status === "cancelled")
+        ) {
+          await this.deps.service.recordUnmatchedPayment(payment, terminal);
+          this.deps.log?.(
+            `payment ${short(payment.txHash)} -> unmatched against ` +
+              `${terminal.status} link ${terminal.id}`,
+          );
+        }
       }
 
       await this.deps.state.markProcessed(payment.txHash, linkId);
