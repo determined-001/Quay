@@ -1,6 +1,8 @@
 import {
   CannotReceiveError,
   canTransition,
+  isQuoteExpired,
+  QuoteExpiredError,
   normalizeAmount,
   OffRampJobNotFoundError,
   type CashOutBody,
@@ -18,6 +20,7 @@ import {
   type RailPort,
   type SellerRepository,
   type WebhookRepository,
+  type IndicativePrice,
 } from "@checkout/core";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -244,9 +247,12 @@ export class LinkService {
       health?: AnchorHealth;
       // "memo" (default) or "muxed" — see packages/stellar/src/stellar-rail.ts.
       correlation: "memo" | "muxed";
+      /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
+       *  a permissive one so they do not depend on live DNS resolution. */
+      webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
     },
   ) {
-    this.sender = new WebhookSender(deps.webhooks);
+    this.sender = new WebhookSender(deps.webhooks, { guard: deps.webhookGuard });
     this.health =
       deps.health ?? new AnchorHealth({ enabled: false, url: null, homeDomain: null });
   }
@@ -339,6 +345,54 @@ export class LinkService {
     const link = await this.deps.links.findById(id);
     if (!link) return null;
     return { link, request: this.buildRequest(link) };
+  }
+
+  /**
+   * Return indicative FX rates for a paid link — SEP-38 GET /prices, no quote
+   * consumed (issue 3.5). The response is clearly labelled indicative so the
+   * dashboard can show it without burning a firm quote on every page visit.
+   *
+   * Side effect: persists the indicative rate for the requested `targetCurrency`
+   * against the link so `triggerCashOut` can later compute the spread delta.
+   *
+   * Returns null when the adapter does not implement `indicativePrices` (e.g.
+   * a future adapter that can only provide firm quotes).
+   */
+  async getOfframpPreview(
+    linkId: string,
+    targetCurrency?: string,
+  ): Promise<{ indicative: true; prices: IndicativePrice[]; sourceAmount: string } | null> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+    if (link.status !== "paid") {
+      throw new HttpError(409, `Link must be paid to preview off-ramp (is "${link.status}")`);
+    }
+    if (!this.deps.offramp.indicativePrices) return null;
+
+    const sourceAmount = link.paidAmount ?? link.amount;
+    let prices: IndicativePrice[];
+    try {
+      prices = await this.deps.offramp.indicativePrices({
+        sourceAsset: link.asset,
+        sourceAmount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp preview error: ${message}`);
+    }
+
+    // Persist the indicative rate for the target currency so triggerCashOut()
+    // can compute the indicative-vs-firm delta (issue 3.5 telemetry).
+    const currency = targetCurrency ?? link.offrampTargetCurrency;
+    if (currency) {
+      const match = prices.find((p) => p.targetCurrency === currency);
+      if (match && link.offrampIndicativeRate !== match.price) {
+        link.offrampIndicativeRate = match.price;
+        await this.deps.links.save(link);
+      }
+    }
+
+    return { indicative: true, prices, sourceAmount };
   }
 
   /**
@@ -449,7 +503,10 @@ export class LinkService {
   }
 
   /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
-  async triggerCashOut(linkId: string, body: CashOutBody): Promise<OffRampJob> {
+  async triggerCashOut(
+    linkId: string,
+    body: CashOutBody,
+  ): Promise<OffRampJob & { quoteExpiresAt: number; quoteExpiresInSeconds: number }> {
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
     if (link.status !== "paid") {
@@ -472,15 +529,31 @@ export class LinkService {
     }
 
     const sourceAmount = link.paidAmount ?? link.amount;
-    let quote: OffRampQuote;
-    let job: OffRampJob;
-    try {
-      quote = await this.deps.offramp.quote({
+
+    // Extracted so the expiry guard below can ask for a second, fresh quote
+    // without duplicating the request shape.
+    const fetchFreshQuote = () =>
+      this.deps.offramp.quote({
         linkId: link.id,
         sourceAsset: link.asset,
         sourceAmount,
         targetCurrency: body.targetCurrency,
       });
+
+    let quote: OffRampQuote;
+    let job: OffRampJob;
+    try {
+      quote = await fetchFreshQuote();
+
+      // Guard: reject quotes with unparsable or already-expired expiresAt.
+      if (isQuoteExpired(quote)) {
+        // One automatic re-quote in case of clock skew or a very short TTL.
+        quote = await fetchFreshQuote();
+        if (isQuoteExpired(quote)) {
+          throw new QuoteExpiredError(quote.quoteId);
+        }
+      }
+
       job = await this.deps.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
@@ -488,6 +561,9 @@ export class LinkService {
       });
     } catch (err) {
       if (err instanceof HttpError) throw err;
+      if (err instanceof QuoteExpiredError) {
+        throw new HttpError(409, `quote_expired: ${err.message}`);
+      }
       const message = err instanceof Error ? err.message : String(err);
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
@@ -496,10 +572,28 @@ export class LinkService {
     link.offrampJobId = job.jobId;
     link.offrampTargetCurrency = job.targetCurrency;
     link.offrampStatus = "pending";
+
+    // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
+    // offrampIndicativeRate may already be set if the seller visited the preview
+    // endpoint before committing; if not, we leave it null so the delta is skipped.
+    link.offrampRate = quote.rate;
+    if (link.offrampIndicativeRate !== null) {
+      const indicative = Number(link.offrampIndicativeRate);
+      const firm = Number(quote.rate);
+      if (Number.isFinite(indicative) && Number.isFinite(firm) && indicative !== 0) {
+        // Delta: firm − indicative (positive = anchor moved rate in seller's favour).
+        link.offrampRateDelta = (firm - indicative).toFixed(6);
+      }
+    }
+
     await this.deps.links.save(link);
     metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
     this.cashOutStartedAt.set(link.id, Date.now());
-    return job;
+
+    const now = Date.now();
+    const quoteExpiresInSeconds = Math.max(0, Math.floor((quote.expiresAt - now) / 1000));
+
+    return { ...job, quoteExpiresAt: quote.expiresAt, quoteExpiresInSeconds };
   }
 
   /** Advance any pending cash-outs by polling the off-ramp adapter. */

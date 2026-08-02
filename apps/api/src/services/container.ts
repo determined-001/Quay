@@ -44,6 +44,9 @@ export interface Container {
   kyc: KycPort;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   horizonStatus(): HorizonStatus;
+  /** Optional SSRF guard override for webhook URLs. Tests inject a permissive
+   *  one so route tests do not depend on live DNS. */
+  webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
   metricsToken: string;
   watcherLagSeconds(): number;
   circuitBreakerState(): number;
@@ -130,6 +133,8 @@ export async function createContainer(): Promise<Container> {
     state: stateRepo,
     service,
     pollMs: env.pollMs,
+    pageLimit: env.watchPageLimit,
+    maxPagesPerTick: env.watchMaxPagesPerTick,
     log: (m) => console.log(`[watcher] ${m}`),
   });
 

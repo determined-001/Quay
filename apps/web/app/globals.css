@@ -83,6 +83,9 @@ a { color: inherit; }
 .pill--underpaid, .pill--offramp_pending { color: var(--amber); }
 .pill--offramp_settled { color: var(--accent); }
 .pill--offramp_failed, .pill--expired, .pill--cancelled { color: var(--red); }
+.pill--ok { color: var(--accent); }
+.pill--fail { color: var(--red); }
+.pill--none { color: var(--muted); }
 
 .muted { color: var(--muted); }
 .linkbtn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0; font-family: var(--sans); }

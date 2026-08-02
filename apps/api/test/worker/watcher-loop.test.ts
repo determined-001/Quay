@@ -53,6 +53,7 @@ describe("WatcherLoop", () => {
       kyc: new NoKycRequired(),
       stellar: testStellarConfig,
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
 
     logs = [];
@@ -387,6 +388,7 @@ describe("WatcherLoop — crash between markProcessed and setCursor", () => {
       kyc: new NoKycRequired(),
       stellar: testStellarConfig,
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
 
     const ref = "crash_safe_1";

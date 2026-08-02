@@ -239,6 +239,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     kyc: new NoKycRequired(),
     stellar: testStellarConfig,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 
   const session = new SessionIssuer("test-session-secret");
@@ -258,6 +259,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     kyc: new NoKycRequired() as unknown as Container["kyc"],
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
+    webhookGuard: async () => ({ ok: true }) as const,
     metricsToken: "test-metrics-token",
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,

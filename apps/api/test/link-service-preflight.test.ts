@@ -48,6 +48,10 @@ function fakeWebhooks(): WebhookRepository {
   return {
     create: vi.fn(async (input) => ({ id: "whk_1", ...input, createdAt: Date.now() })),
     listBySeller: vi.fn(async () => []),
+    getById: vi.fn(async () => null),
+    rotateSecret: vi.fn(async () => null),
+    softDelete: vi.fn(async () => false),
+    listDeliveries: vi.fn(async () => ({ deliveries: [], nextCursor: null })),
     listDeliveriesByLinkId: vi.fn(async () => []),
     recordDelivery: vi.fn(async () => {}),
   };
@@ -87,6 +91,7 @@ function makeService(links: LinkRepository, rail: RailPort): LinkService {
     kyc: new AlwaysAcceptedKyc(),
     stellar,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 }
 

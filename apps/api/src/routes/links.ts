@@ -90,6 +90,34 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     return ctx.json(result);
   });
 
+  // Indicative off-ramp prices — SEP-38 GET /prices, no firm quote consumed.
+  // Safe to call on every dashboard load (issue 3.5).
+  // Optional query param: ?currency=NGN — when provided, the indicative rate for
+  // that currency is persisted against the link for spread-delta telemetry.
+  // Seller-only: this reads the seller's off-ramp corridor AND persists the
+  // indicative rate against the link, so it must not be reachable with just a
+  // link id.
+  app.get("/:id/offramp-preview", auth, async (ctx) => {
+    const currency = ctx.req.query("currency") ?? undefined;
+    try {
+      const owned = await c.service.getLink(ctx.req.param("id"));
+      if (!owned) return ctx.json({ error: "not_found" }, 404);
+      if (owned.link.sellerId !== ctx.get("seller").id) {
+        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+      }
+      const result = await c.service.getOfframpPreview(ctx.req.param("id"), currency);
+      if (result === null) {
+        // Adapter doesn't support indicative prices — return empty prices list
+        // so the dashboard degrades gracefully.
+        return ctx.json({ indicative: true, prices: [], sourceAmount: null });
+      }
+      return ctx.json(result);
+    } catch (err) {
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      throw err;
+    }
+  });
+
   // Seller-initiated cash-out to local currency.
   app.post("/:id/cash-out", strictRateLimit, auth, idempotent, async (ctx) => {
     const parsed = cashOutSchema.safeParse(await safeJson(ctx));

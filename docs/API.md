@@ -445,6 +445,9 @@ naming exactly which ones, never silently substituting a placeholder.
 
 ## `POST /webhooks`
 
+Register a webhook endpoint. The signing secret is returned **once** — store it.
+It's encrypted at rest (not stored in plaintext); the API can never show it to you
+again after this response, only a display-only `secretLast4`.
 **Requires auth.** Register a webhook endpoint for the authenticated seller.
 The signing secret is returned **once** — store it.
 
@@ -455,20 +458,91 @@ The signing secret is returned **once** — store it.
 
 **201**
 ```json
-{ "id": "...", "url": "https://example.com/hooks/checkout", "secret": "<hex>" }
+{ "id": "...", "url": "https://example.com/hooks/checkout", "secretLast4": "a1b2", "secret": "<hex>" }
 ```
 
 ---
 
 ## `GET /webhooks`
 
+List registered webhooks. Secrets are **not** returned — only `secretLast4` for
+display. Deleted webhooks are excluded.
 **Requires auth.** Lists the authenticated seller's registered webhooks.
 Secrets are **not** returned.
 
 **200**
 ```json
-{ "webhooks": [ { "id": "...", "url": "...", "createdAt": 1750000000000 } ] }
+{
+  "webhooks": [
+    {
+      "id": "...",
+      "url": "...",
+      "secretLast4": "a1b2",
+      "previousSecretLast4": null,
+      "previousSecretExpiresAt": null,
+      "deletedAt": null,
+      "createdAt": 1750000000000
+    }
+  ]
+}
 ```
+
+---
+
+## `DELETE /webhooks/:id`
+
+Removes a webhook (soft delete — it stops receiving events immediately, but its
+delivery history remains readable via `GET /webhooks/:id/deliveries`).
+
+**204** — no body.
+**404** — `{ "error": "not_found" }` if the id doesn't exist or isn't yours.
+
+---
+
+## `POST /webhooks/:id/rotate-secret`
+
+Issues a new signing secret, returned **once** just like at creation. The
+previous secret keeps signing deliveries for **24 hours** after rotation (see
+"Webhook delivery" below), so you can redeploy your receiver with the new
+secret without dropping any events in between.
+
+**200**
+```json
+{ "id": "...", "url": "...", "secretLast4": "c3d4", "secret": "<hex>" }
+```
+
+**404** — `{ "error": "not_found" }`
+
+---
+
+## `GET /webhooks/:id/deliveries?limit=&cursor=`
+
+Paginated delivery history for one webhook, newest first. Works even after the
+webhook has been deleted. `limit` defaults to 20, max 100.
+
+**200**
+```json
+{
+  "deliveries": [
+    {
+      "id": "whd_...",
+      "webhookId": "whk_...",
+      "linkId": "lnk_...",
+      "event": "link.paid",
+      "statusCode": 200,
+      "ok": true,
+      "error": null,
+      "createdAt": 1750000000000
+    }
+  ],
+  "nextCursor": "b3RoZXI"
+}
+```
+
+Pass `nextCursor` back as `?cursor=` to fetch the next page; `null` means there
+are no more results.
+
+**404** — `{ "error": "not_found" }` if the id doesn't exist or isn't yours.
 
 ---
 
@@ -504,8 +578,11 @@ When a link changes state, the API POSTs a JSON event to each registered URL:
 
 **Headers**
 - `x-checkout-event` — the event name.
-- `x-checkout-signature` — `sha256=<hex>`, an HMAC-SHA256 of the **exact raw body**
-  using your webhook secret.
+- `x-checkout-signature` — one or more `sha256=<hex>` HMAC-SHA256 signatures of
+  the **exact raw body**, comma-separated. Normally just one, signed with your
+  current secret. For 24h after a secret rotation, **two** are sent (current +
+  previous secret) — accept the delivery if *any* listed signature matches, so
+  you can redeploy without dropping events.
 
 Delivery is retried with exponential backoff (default 4 attempts) on transient
 failures — network errors and `5xx`/`429` responses. A `4xx` (other than `429`) is
@@ -515,15 +592,17 @@ For **replay protection**, reject events whose in-body `sentAt` is older than a
 small window (e.g. 5 minutes). `sentAt` is part of the signed body, so it cannot be
 forged without the secret.
 
-**Verifying** (recompute over the raw body and compare in constant time):
+**Verifying** (recompute over the raw body, accept if any signature matches):
 
 ```js
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 function verify(rawBody, header, secret) {
-  const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
-  const a = Buffer.from(header);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  return header.split(",").some((part) => {
+    const a = Buffer.from(part.trim());
+    const b = Buffer.from(`sha256=${expected}`);
+    return a.length === b.length && timingSafeEqual(a, b);
+  });
 }
 ```
