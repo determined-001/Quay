@@ -37,14 +37,21 @@ export class MemoryStore implements RateLimitStore {
 export function rateLimit(opts: {
   windowMs: number;
   max: number;
-  store: RateLimitStore;
-  trustProxyHops: number;
+  /** Defaults to a per-process MemoryStore. Pass a RedisStore to share a budget
+   *  across instances. */
+  store?: RateLimitStore;
+  /** Defaults to 0 — `x-forwarded-for` is ignored entirely, which is the safe
+   *  choice when no trusted proxy is guaranteed to overwrite it. */
+  trustProxyHops?: number;
 }) {
+  const store = opts.store ?? new MemoryStore();
+  const trustProxyHops = opts.trustProxyHops ?? 0;
+
   return async (ctx: Context, next: Next) => {
     if (opts.max <= 0) return next(); // disabled
 
-    const key = clientIp(ctx, opts.trustProxyHops);
-    const entry = await opts.store.increment(key, opts.windowMs);
+    const key = clientIp(ctx, trustProxyHops);
+    const entry = await store.increment(key, opts.windowMs);
     const now = Date.now();
 
     const remaining = Math.max(0, opts.max - entry.count);

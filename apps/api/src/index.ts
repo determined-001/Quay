@@ -5,6 +5,9 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { metricsRoutes } from "./routes/metrics";
+import { authRoutes } from "./routes/auth";
+import { wellKnownRoutes } from "./routes/well-known";
 import { kycRoutes } from "./routes/kyc";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
@@ -16,7 +19,17 @@ async function main(): Promise<void> {
 
   const app = new Hono();
   const rateLimitStore = env.redisUrl ? new RedisStore(env.redisUrl) : new MemoryStore();
-  app.use("*", cors({ origin: env.corsOrigins, allowMethods: ["GET", "POST", "PUT", "OPTIONS"] }));
+  app.use(
+    "*",
+    cors({
+      origin: env.corsOrigins,
+      allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
+      // The session cookie is sent cross-origin (API and web app are separate
+      // hosts) — credentials: true plus an explicit (non-"*") origin list is
+      // required for the browser to actually attach/accept it.
+      credentials: true,
+    }),
+  );
   app.use(
     "*",
     rateLimit({
@@ -33,17 +46,22 @@ async function main(): Promise<void> {
     trustProxyHops: env.trustProxyHops,
   });
 
-  app.get("/health", (ctx) =>
-    ctx.json({
+  app.get("/health", async (ctx) => {
+    const usdcTrustline = await container.service
+      .checkSellerUsdcTrustline()
+      .catch(() => ({ ok: false as const, reason: "check_failed", message: "trustline preflight check failed" }));
+    return ctx.json({
       ok: true,
       network: container.config.network,
       sellerWallet: container.config.sellerWallet,
+      usdcTrustline,
+      horizon: container.horizonStatus(),
       // Anchor health probe + circuit breaker (issue #19, 3.7) so an operator
       // can tell "the anchor is down" apart from "the API is down" without
       // tailing logs.
       anchor: container.service.healthSnapshot(),
-    }),
-  );
+    });
+  });
 
   app.get("/ready", (ctx) => {
     const circuitBreakers = container.getWatcherCircuitBreakerStatus();
@@ -65,6 +83,18 @@ async function main(): Promise<void> {
 
   app.route("/links", linkRoutes(container, strictRateLimit));
   app.route("/webhooks", webhookRoutes(container));
+  app.route("/metrics", metricsRoutes(container));
+  app.route(
+    "/auth",
+    authRoutes({
+      challenge: container.auth.challenge,
+      session: container.auth.session,
+      sellers: container.sellers,
+      revocations: container.auth.revocations,
+      secureCookie: container.auth.secureCookie,
+    }),
+  );
+  app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
   app.route("/seller/kyc", kycRoutes(container));
 
   container.start();
