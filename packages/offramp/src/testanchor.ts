@@ -7,11 +7,12 @@ import {
   type OffRampMode,
   type OffRampPort,
   type OffRampQuote,
+  type IndicativePrice,
   type OffRampStateRepository,
   type SellerPayoutRef,
 } from "@checkout/core";
 import { Sep10Client } from "./sep10";
-import { getSep38Quote } from "./sep38";
+import { getSep38Prices, getSep38Quote } from "./sep38";
 import { getSep6Transaction, startSep6Withdraw } from "./sep6";
 
 // ===========================================================================
@@ -46,13 +47,6 @@ export interface TestAnchorOptions {
   state: OffRampStateRepository;
   baseUrl?: string;
   homeDomain?: string;
-  /**
-   * Preferred SEP-6 withdrawal type (e.g. "bank_account").
-   * If omitted the adapter reads /sep6/info and uses the single enabled type,
-   * or fails with the list when the anchor offers more than one.
-   * Maps to the OFFRAMP_TYPE env var.
-   */
-  preferredWithdrawType?: string;
 }
 
 function mapSep6Status(status: string): OffRampJobStatus {
@@ -77,6 +71,25 @@ export class TestAnchorOffRamp implements OffRampPort {
     });
   }
 
+  /**
+   * Indicative prices via SEP-38 GET /prices — unauthenticated, no quote consumed.
+   * Safe to call on every dashboard load without burning a firm quote (issue 3.5).
+   */
+  async indicativePrices(input: {
+    sourceAsset: AssetRef;
+    sourceAmount: string;
+  }): Promise<IndicativePrice[]> {
+    const entries = await getSep38Prices(this.baseUrl, {
+      sellAsset: input.sourceAsset,
+      sellAmount: input.sourceAmount,
+    });
+    return entries.map((e) => ({
+      targetCurrency: e.buyCurrency,
+      price: e.price,
+      deliveryMethods: e.deliveryMethods,
+    }));
+  }
+
   async quote(input: {
     linkId: string;
     sourceAsset: AssetRef;
@@ -88,24 +101,11 @@ export class TestAnchorOffRamp implements OffRampPort {
         'The test anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
       );
     }
-
-    // Validate amount against /sep6/info and discover the withdrawal type.
-    // Sep6ValidationError propagates as-is so callers can surface anchor limits.
-    const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
-      this.baseUrl,
-      input.sourceAsset.code,
-      input.sourceAmount,
-      this.preferredWithdrawType,
-    );
-
     const jwt = await this.auth.token();
     const q = await getSep38Quote(this.baseUrl, jwt, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
-      // Use the delivery method matching the resolved withdraw type when the
-      // anchor publishes one; fall back to omitting it so the anchor chooses.
-      buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
     });
 
     const expiresAt = Date.parse(q.expiresAt);
@@ -145,8 +145,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,
       account: this.auth.publicKey,
-      // Use the type discovered from /sep6/info — never assume "bank_account".
-      type: q.withdrawType,
+      type: input.payout.fields.type ?? "bank_account",
       dest: input.payout.fields.dest,
       destExtra: input.payout.fields.dest_extra,
     });
