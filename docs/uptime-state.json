@@ -1,13 +1,13 @@
 {
   "targets": {
     "api": {
-      "consecutiveFailures": 28,
+      "consecutiveFailures": 50,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-08-01T23:05:05.137Z",
+      "lastCheckedAt": "2026-08-03T14:06:29.375Z",
       "today": {
-        "date": "2026-08-01",
+        "date": "2026-08-03",
         "up": 0,
-        "down": 16
+        "down": 5
       },
       "history": [
         {
@@ -29,6 +29,16 @@
           "date": "2026-07-31",
           "up": 0,
           "down": 12
+        },
+        {
+          "date": "2026-08-01",
+          "up": 0,
+          "down": 16
+        },
+        {
+          "date": "2026-08-02",
+          "up": 0,
+          "down": 17
         }
       ],
       "lastError": "This operation was aborted"
@@ -36,10 +46,10 @@
     "web": {
       "consecutiveFailures": 0,
       "lastStatus": "up",
-      "lastCheckedAt": "2026-08-01T23:05:05.453Z",
+      "lastCheckedAt": "2026-08-03T14:06:29.756Z",
       "today": {
-        "date": "2026-08-01",
-        "up": 16,
+        "date": "2026-08-03",
+        "up": 5,
         "down": 0
       },
       "history": [
@@ -62,18 +72,28 @@
           "date": "2026-07-31",
           "up": 12,
           "down": 0
+        },
+        {
+          "date": "2026-08-01",
+          "up": 16,
+          "down": 0
+        },
+        {
+          "date": "2026-08-02",
+          "up": 17,
+          "down": 0
         }
       ],
       "lastError": null
     },
     "synthetic": {
-      "consecutiveFailures": 28,
+      "consecutiveFailures": 50,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-08-01T23:05:20.454Z",
+      "lastCheckedAt": "2026-08-03T14:06:44.758Z",
       "today": {
-        "date": "2026-08-01",
+        "date": "2026-08-03",
         "up": 0,
-        "down": 16
+        "down": 5
       },
       "history": [
         {
@@ -95,6 +115,16 @@
           "date": "2026-07-31",
           "up": 0,
           "down": 12
+        },
+        {
+          "date": "2026-08-01",
+          "up": 0,
+          "down": 16
+        },
+        {
+          "date": "2026-08-02",
+          "up": 0,
+          "down": 17
         }
       ],
       "lastError": "This operation was aborted"

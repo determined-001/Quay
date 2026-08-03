@@ -24,10 +24,12 @@ export const links = sqliteTable("links", {
   offrampJobId: text("offramp_job_id"),
   offrampTargetCurrency: text("offramp_target_currency"),
   offrampStatus: text("offramp_status"),
-  offrampFeeAmount: text("offramp_fee_amount"),
-  offrampFeeCurrency: text("offramp_fee_currency"),
-  offrampFeeSource: text("offramp_fee_source"),
-  offrampNetTargetAmount: text("offramp_net_target_amount"),
+  /** Indicative rate captured at preview time (issue 3.5 telemetry). */
+  offrampIndicativeRate: text("offramp_indicative_rate"),
+  /** Firm rate from the SEP-38 POST /quote (issue 3.5 telemetry). */
+  offrampRate: text("offramp_rate"),
+  /** Absolute delta: firm − indicative (issue 3.5 telemetry). */
+  offrampRateDelta: text("offramp_rate_delta"),
   expiresAt: integer("expires_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
@@ -37,7 +39,12 @@ export const webhooks = sqliteTable("webhooks", {
   id: text("id").primaryKey(),
   sellerId: text("seller_id").notNull(),
   url: text("url").notNull(),
-  secret: text("secret").notNull(),
+  secretEncrypted: text("secret_encrypted").notNull(),
+  secretLast4: text("secret_last4").notNull(),
+  previousSecretEncrypted: text("previous_secret_encrypted"),
+  previousSecretLast4: text("previous_secret_last4"),
+  previousSecretExpiresAt: integer("previous_secret_expires_at"),
+  deletedAt: integer("deleted_at"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -102,4 +109,24 @@ export const processedTx = sqliteTable("processed_tx", {
   txHash: text("tx_hash").primaryKey(),
   linkId: text("link_id"),
   createdAt: integer("created_at").notNull(),
+});
+
+export const idempotencyKeys = sqliteTable("idempotency_keys", {
+  key: text("key").notNull(),
+  sellerId: text("seller_id").notNull(),
+  endpoint: text("endpoint").notNull(),
+  requestHash: text("request_hash").notNull(),
+  responseStatus: integer("response_status").notNull(),
+  responseBody: text("response_body").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
+// Logout / compromise revocation for session JWTs, keyed by the token's own
+// `jti`. `expiresAt` mirrors the token's own `exp` — once a token would fail
+// verification on expiry alone, its revocation row is dead weight and gets
+// swept.
+export const revokedTokens = sqliteTable("revoked_tokens", {
+  jti: text("jti").primaryKey(),
+  expiresAt: integer("expires_at").notNull(),
+  revokedAt: integer("revoked_at").notNull(),
 });
