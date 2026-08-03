@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createHmac } from "node:crypto";
 
+// These tests point at loopback stubs, which the real SSRF guard correctly
+// rejects. ssrf-guard.test.ts covers the guard itself.
+const PERMISSIVE_GUARD = async () => ({ ok: true }) as const;
+
 process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = "2".repeat(64);
 
 const { WebhookSender } = await import("../src/services/webhook-sender");
@@ -40,7 +44,7 @@ describe("WebhookSender", () => {
 
   it("signs with only the current secret when there is no active rotation", async () => {
     const repo = fakeRepo();
-    const sender = new WebhookSender(repo);
+    const sender = new WebhookSender(repo, { guard: PERMISSIVE_GUARD });
     const hook = baseHook();
 
     await sender.dispatch([hook], "lnk_1", { event: "link.paid", data: { foo: "bar" } });
@@ -56,7 +60,7 @@ describe("WebhookSender", () => {
 
   it("signs with both secrets while a rotation is within its overlap window", async () => {
     const repo = fakeRepo();
-    const sender = new WebhookSender(repo);
+    const sender = new WebhookSender(repo, { guard: PERMISSIVE_GUARD });
     const hook = baseHook({
       previousSecretEncrypted: encryptSecret("old-secret-value"),
       previousSecretLast4: "alue",
@@ -76,7 +80,7 @@ describe("WebhookSender", () => {
 
   it("stops sending the previous secret once its overlap window has expired", async () => {
     const repo = fakeRepo();
-    const sender = new WebhookSender(repo);
+    const sender = new WebhookSender(repo, { guard: PERMISSIVE_GUARD });
     const hook = baseHook({
       previousSecretEncrypted: encryptSecret("old-secret-value"),
       previousSecretLast4: "alue",
@@ -92,7 +96,7 @@ describe("WebhookSender", () => {
 
   it("records a successful delivery outcome", async () => {
     const repo = fakeRepo();
-    const sender = new WebhookSender(repo);
+    const sender = new WebhookSender(repo, { guard: PERMISSIVE_GUARD });
     await sender.dispatch([baseHook()], "lnk_1", { event: "link.paid", data: {} });
 
     expect(repo.recordDelivery).toHaveBeenCalledWith(
@@ -103,7 +107,7 @@ describe("WebhookSender", () => {
   it("retries transient failures and eventually records failure after exhausting attempts", async () => {
     fetchMock.mockImplementation(async () => new Response(null, { status: 500 }));
     const repo = fakeRepo();
-    const sender = new WebhookSender(repo, { maxAttempts: 2, baseDelayMs: 1 });
+    const sender = new WebhookSender(repo, { maxAttempts: 2, baseDelayMs: 1, guard: PERMISSIVE_GUARD });
 
     await sender.dispatch([baseHook()], "lnk_1", { event: "link.paid", data: {} });
 

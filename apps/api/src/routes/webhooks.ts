@@ -4,6 +4,11 @@ import { registerWebhookSchema, listWebhookDeliveriesQuerySchema } from "@checko
 import type { PublicWebhook, Webhook } from "@checkout/core";
 import type { Container } from "../services/container";
 import { requireSeller, type AuthedVariables } from "../middleware/auth";
+import { guardWebhookUrl } from "../services/ssrf-guard";
+
+const HOST_ALLOWLIST = process.env.WEBHOOK_HOST_ALLOWLIST
+  ? process.env.WEBHOOK_HOST_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean)
+  : undefined;
 
 /** How long the previous secret keeps signing deliveries after a rotation. */
 export const SECRET_ROTATION_OVERLAP_MS = 24 * 60 * 60 * 1000;
@@ -32,6 +37,14 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }
     }
     const parsed = registerWebhookSchema.safeParse(body);
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+
+    // SSRF guard: validate the URL and resolve the hostname before storing.
+    const guard = await (c.webhookGuard ?? ((u: string) => guardWebhookUrl(u, { allowlist: HOST_ALLOWLIST })))(
+      parsed.data.url,
+    );
+    if (!guard.ok) {
+      return ctx.json({ error: "invalid_webhook_url", reason: guard.reason }, 422);
+    }
 
     const seller = ctx.get("seller");
     const secret = generateSecret();

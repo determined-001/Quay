@@ -102,6 +102,23 @@ export interface OffRampQuote {
   expiresAt: number; // epoch ms — after this the quote is void
 }
 
+/** Thrown when a quote's expiresAt has passed or is unparsable (NaN). */
+export class QuoteExpiredError extends Error {
+  constructor(readonly quoteId: string) {
+    super(`Quote ${quoteId} has expired`);
+    this.name = "QuoteExpiredError";
+  }
+}
+
+/**
+ * Returns true when a quote is expired or has an unparsable expiresAt (NaN).
+ * NaN comparisons always return false in JS, so we must guard explicitly.
+ */
+export function isQuoteExpired(quote: OffRampQuote, now: number = Date.now()): boolean {
+  if (Number.isNaN(quote.expiresAt)) return true;
+  return now >= quote.expiresAt;
+}
+
 /** Where the seller wants their local-currency payout to land. */
 export interface SellerPayoutRef {
   currency: string; // "NGN"

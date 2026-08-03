@@ -36,6 +36,10 @@ describe("WebhookSender", () => {
 
   beforeEach(async () => {
     sender = new WebhookSender(repo, {
+      // These tests point at a loopback stub, which the real SSRF guard
+      // correctly rejects. Inject a permissive guard so they exercise the
+      // delivery path; ssrf-guard.test.ts covers the guard itself.
+      guard: async () => ({ ok: true }) as const,
       maxAttempts: 2,
       baseDelayMs: 10,
       timeoutMs: 2000,
@@ -352,7 +356,7 @@ describe("WebhookSender with real HTTP server", () => {
   });
 
   it("delivers to a real HTTP server and verifies signature", async () => {
-    sender = new WebhookSender(repo, { maxAttempts: 1, timeoutMs: 8000 });
+    sender = new WebhookSender(repo, { maxAttempts: 1, timeoutMs: 8000, guard: async () => ({ ok: true }) as const });
     const secret = randomBytes(24).toString("hex");
     const hook = await repo.create({
       sellerId: "sel_test",
@@ -410,7 +414,7 @@ describe("WebhookSender with real HTTP server", () => {
   });
 
   it("does not retry when server returns 400", async () => {
-    sender = new WebhookSender(repo, { maxAttempts: 2, timeoutMs: 8000 });
+    sender = new WebhookSender(repo, { maxAttempts: 2, timeoutMs: 8000, guard: async () => ({ ok: true }) as const });
     const hook = await repo.create({
       sellerId: "sel_test",
       url: "",
