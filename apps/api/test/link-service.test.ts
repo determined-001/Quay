@@ -52,6 +52,7 @@ function makeService(opts: {
     kyc: opts.kyc ?? new AlwaysAcceptedKyc(),
     stellar: STELLAR,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 }
 
