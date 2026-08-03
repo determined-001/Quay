@@ -13,7 +13,7 @@ import type { StellarConfig } from "@checkout/stellar";
 import { HttpError, LinkService } from "../src/services/link-service";
 import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
 
-const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", createdAt: Date.now() };
+const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", payoutFields: null, createdAt: Date.now() };
 
 const stellar: StellarConfig = {
   network: "testnet",
@@ -41,6 +41,7 @@ function fakeSellers(): SellerRepository {
     findById: vi.fn(async () => seller),
     findByWallet: vi.fn(async () => seller),
     createIfAbsent: vi.fn(async () => seller),
+    savePayoutFields: vi.fn(async () => {}),
   };
 }
 
@@ -77,6 +78,7 @@ function fakeOfframp(): OffRampPort {
     quote: vi.fn(),
     initiate: vi.fn(),
     status: vi.fn(),
+    offrampRequirements: vi.fn(async () => []),
   };
 }
 

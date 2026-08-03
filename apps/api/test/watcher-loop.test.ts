@@ -3,6 +3,7 @@ import type {
   LinkRepository,
   NormalizedPayment,
   PaymentLink,
+  PayoutFieldDescriptor,
   SellerRepository,
   WatcherPort,
   WebhookRepository,
@@ -148,6 +149,7 @@ function makeUnusedSellerRepo(): SellerRepository {
   async findById(): Promise<null> {
       return null;
     },
+    async savePayoutFields(): Promise<void> {},
   };
 }
 
@@ -174,6 +176,9 @@ function makeUnusedOffRampPort(): OffRampPort {
     },
     async status(): Promise<never> {
       throw new Error("not used in this test");
+    },
+    async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+      return [];
     },
   };
 }

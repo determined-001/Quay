@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OffRampJob, OffRampPort, OffRampQuote } from "@checkout/core";
+import type { OffRampJob, OffRampPort, OffRampQuote, PayoutFieldDescriptor } from "@checkout/core";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 
 const fakeQuote: OffRampQuote = {
@@ -27,6 +27,7 @@ function fakePort(overrides: Partial<OffRampPort> = {}): OffRampPort {
     quote: vi.fn(async () => fakeQuote),
     initiate: vi.fn(async () => fakeJob),
     status: vi.fn(async () => fakeJob),
+    offrampRequirements: vi.fn(async (): Promise<PayoutFieldDescriptor[]> => []),
     ...overrides,
   };
 }

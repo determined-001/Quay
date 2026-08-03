@@ -7,6 +7,7 @@ import {
   type OffRampQuote,
   type IndicativePrice,
   type OffRampStateRepository,
+  type PayoutFieldDescriptor,
   type SellerPayoutRef,
 } from "@checkout/core";
 
@@ -110,6 +111,14 @@ export class MockAnchorOffRamp implements OffRampPort {
       price: String(rate),
       deliveryMethods: ["BANK_TRANSFER"],
     }));
+  }
+
+  /**
+   * Field descriptors for the mock anchor's cash-out form. Fixed set
+   * mirroring what `initiate()` reads from `payout.fields` (issue #32).
+   */
+  async offrampRequirements(_assetCode: string): Promise<PayoutFieldDescriptor[]> {
+    return MOCK_PAYOUT_FIELDS;
   }
 
   async quote(input: {

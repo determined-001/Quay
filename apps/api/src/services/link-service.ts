@@ -398,6 +398,42 @@ export class LinkService {
   }
 
   /**
+   * Returns the field descriptors for the off-ramp form, plus any payout
+   * fields the seller has already saved. Saved values are masked to the last 4
+   * chars server-side so the form can pre-fill / indicate "already on file"
+   * without ever leaking the raw bank account number to the browser (issue #32).
+   */
+  async getOfframpRequirements(linkId: string): Promise<{
+    descriptors: PayoutFieldDescriptor[];
+    savedFields: Record<string, string> | null;
+  }> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+
+    const seller = await this.deps.sellers.findById(link.sellerId);
+    if (!seller) throw new HttpError(404, "seller_not_found");
+
+    let descriptors: PayoutFieldDescriptor[];
+    try {
+      descriptors = await this.deps.offramp.offrampRequirements(link.asset.code);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp requirements error: ${message}`);
+    }
+
+    const savedFields: Record<string, string> | null = seller.payoutFields
+      ? Object.fromEntries(
+          Object.entries(seller.payoutFields).map(([k, v]) => [
+            k,
+            v.length <= 4 ? "****" : `${"*".repeat(v.length - 4)}${v.slice(-4)}`,
+          ]),
+        )
+      : null;
+
+    return { descriptors, savedFields };
+  }
+
+  /**
    * Apply a matched payment to its link. Returns whether the link advanced to
    * `paid` (so the worker can decide what to log). Idempotency of the *payment*
    * (processed-tx ledger) is the caller's responsibility; here we additionally
@@ -514,6 +550,16 @@ export class LinkService {
     if (link.status !== "paid") {
       throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
     }
+
+    // Merge: previously-saved fields are the base; submitted fields override.
+    // This means the seller only needs to re-enter fields they want to change
+    // (issue #32). The seller is keyed by the link's owner, not a global default.
+    const seller = await this.deps.sellers.findById(link.sellerId);
+    if (!seller) throw new HttpError(404, "seller_not_found");
+    const mergedFields: Record<string, string> = {
+      ...(seller.payoutFields ?? {}),
+      ...body.payoutFields,
+    };
 
     // Fail fast when the breaker is open: never attempt to call a known-dead
     // anchor. The HTTP layer maps this to 503 anchor_unavailable.

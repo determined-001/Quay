@@ -11,6 +11,7 @@ import {
   type UsdcTrustlineStatus,
 } from "../../lib/api";
 import KycPanel from "./KycPanel";
+import CashOutModal from "./CashOutModal";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
@@ -214,6 +215,8 @@ export default function Dashboard() {
   const [copied, setCopied] = useState<string | null>(null);
   const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
   const [kyc, setKyc] = useState<KycView | null>(null);
+  // Which link has the cash-out modal open; null = closed (issue #32).
+  const [cashOutLinkId, setCashOutLinkId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -305,26 +308,18 @@ export default function Dashboard() {
   }
 
   /**
-   * Cash-out: this is the only place a firm SEP-38 quote is consumed.
-   * The indicative rate shown inline in the table is from GET /prices
-   * and does not commit to anything (issue 3.5).
+   * Cash-out flow (issue #32): the button opens CashOutModal, which fetches the
+   * anchor's field descriptors + the seller's masked saved payout fields, then
+   * submits through `api.cashOut`. On success the modal closes and we refresh
+   * so the link's status flips to off-ramp pending.
    */
-  async function cashOut(id: string) {
-    setActionError(null);
-    try {
-      await api.cashOut(id, OFFRAMP_CURRENCY);
-      await refresh();
-    } catch (e) {
-      if (e instanceof CheckoutError && e.code === "kyc_required") {
-        setActionError(describeError(e));
-        void refreshKyc();
-        return;
-      }
-      setActionError(
-        e instanceof CheckoutError ? describeError(e) : "Cash-out failed. Please try again.",
-      );
-    }
+  function handleCashOutSuccess() {
+    setCashOutLinkId(null);
+    void refresh();
   }
+
+  // The link the modal is operating on; null when closed.
+  const cashOutLink = cashOutLinkId ? (links.find((l) => l.id === cashOutLinkId) ?? null) : null;
 
   const [csvFrom, setCsvFrom] = useState("");
   const [csvTo, setCsvTo] = useState("");
@@ -431,7 +426,7 @@ export default function Dashboard() {
                 links={links}
                 copied={copied}
                 onCopy={copyCheckout}
-                onCashOut={cashOut}
+                onCashOut={(id) => setCashOutLinkId(id)}
                 cashOutBlocked={cashOutBlocked}
               />
             </div>
@@ -447,7 +442,7 @@ export default function Dashboard() {
             links={links}
             copied={copied}
             onCopy={copyCheckout}
-            onCashOut={cashOut}
+            onCashOut={(id) => setCashOutLinkId(id)}
             cashOutBlocked={cashOutBlocked}
           />
         )}
@@ -482,6 +477,19 @@ export default function Dashboard() {
           </button>
         </div>
       </section>
+
+      {/* Cash-out modal — rendered when a link's "Cash out" button is clicked */}
+      {cashOutLinkId && cashOutLink && (
+        <CashOutModal
+          linkId={cashOutLinkId}
+          linkAmount={cashOutLink.paidAmount ?? cashOutLink.amount}
+          assetCode={cashOutLink.asset.code}
+          targetCurrency={OFFRAMP_CURRENCY}
+          isMock={OFFRAMP_IS_MOCK}
+          onClose={() => setCashOutLinkId(null)}
+          onSuccess={handleCashOutSuccess}
+        />
+      )}
     </>
   );
 }

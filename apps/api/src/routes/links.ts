@@ -118,6 +118,25 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     }
   });
 
+  // Field descriptors + masked saved fields for the cash-out form (issue #32).
+  // Seller-only: it returns the seller's own saved payout destination, so it is
+  // gated and ownership-checked like the other seller routes — never reachable
+  // with just a link id.
+  app.get("/:id/offramp-requirements", auth, async (ctx) => {
+    try {
+      const owned = await c.service.getLink(ctx.req.param("id"));
+      if (!owned) return ctx.json({ error: "not_found" }, 404);
+      if (owned.link.sellerId !== ctx.get("seller").id) {
+        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+      }
+      const result = await c.service.getOfframpRequirements(ctx.req.param("id"));
+      return ctx.json(result);
+    } catch (err) {
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 403 | 502);
+      throw err;
+    }
+  });
+
   // Seller-initiated cash-out to local currency.
   app.post("/:id/cash-out", strictRateLimit, auth, idempotent, async (ctx) => {
     const parsed = cashOutSchema.safeParse(await safeJson(ctx));

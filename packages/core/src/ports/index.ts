@@ -176,6 +176,13 @@ export interface OffRampPort {
     sourceAsset: AssetRef;
     sourceAmount: string;
   }): Promise<IndicativePrice[]>;
+  /**
+   * Field descriptors the anchor requires before it will initiate a payout —
+   * SEP-6 GET /info for a real anchor, a fixed set for the mock. Drives the
+   * dynamic cash-out form (issue #32) so the dashboard never hardcodes bank
+   * fields.
+   */
+  offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]>;
 }
 
 /** One indicative price entry from SEP-38 GET /prices (issue 3.5). */
@@ -352,6 +359,9 @@ export interface SellerRepository {
   /** Wallet-native signup: SEP-10 proved control of `wallet`, so it IS the identity.
    *  Idempotent — returns the existing seller if one is already registered for it. */
   createIfAbsent(wallet: string): Promise<Seller>;
+  /** Persist the seller's last-used payout destination fields for reuse on the
+   *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
+  savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
 }
 
 /**

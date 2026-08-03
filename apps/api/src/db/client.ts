@@ -85,8 +85,12 @@ const MIGRATION_SQL = [
 
 // Additive schema migrations — safe to run on an existing DB.
 const MIGRATIONS_SQL = [
-  // #32: store seller's last-used payout destination (encrypted at rest by the
-  //      DB engine; never logged or included in webhook payloads).
+  // SEP-23 muxed correlation id (issue #69).
+  `ALTER TABLE links ADD COLUMN muxed_id TEXT`,
+  // #32: store the seller's last-used payout destination (e.g. bank account).
+  //      Stored as plaintext JSON — NOT encrypted at rest by libSQL/Turso by
+  //      default — so this is treated as sensitive end-to-end: masked to the
+  //      last 4 chars in every API response and never logged or webhook'd.
   `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
 ];
 
@@ -95,11 +99,6 @@ export function createDb(databaseUrl: string, authToken?: string): { db: DB; cli
   const db = drizzle(client, { schema });
   return { db, client };
 }
-
-// Additive column added after the initial release. `CREATE TABLE IF NOT EXISTS`
-// above won't touch an existing table, so add it out-of-band; ignore the
-// "duplicate column" error on databases that already have it.
-const MIGRATIONS_SQL = [`ALTER TABLE links ADD COLUMN muxed_id TEXT`];
 
 /**
  * Upgrades a `webhooks` table created before the secret-rotation feature

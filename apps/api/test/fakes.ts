@@ -9,6 +9,7 @@ import type {
   OffRampQuote,
   OffRampStateRepository,
   PaymentLink,
+  PayoutFieldDescriptor,
   StoredOffRampJob,
   StoredOffRampQuote,
   Webhook,
@@ -228,6 +229,9 @@ export class ScriptedOffRamp implements OffRampPort {
   }
   async status(jobId: string): Promise<OffRampJob> {
     return this.statusImpl(jobId);
+  }
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 }
 

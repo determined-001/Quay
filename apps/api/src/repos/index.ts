@@ -216,7 +216,11 @@ export class DrizzleSellerRepository implements SellerRepository {
 
   async findByWallet(wallet: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
-    return rows[0] ?? null;
+    // Must go through rowToSeller — the raw row carries payoutFieldsJson but
+    // not the parsed payoutFields; every other read path already does this,
+    // and this is the SEP-10 login path, so skipping it would make the payout
+    // reuse feature silently do nothing for wallet-logged-in sellers.
+    return rows[0] ? rowToSeller(rows[0]) : null;
   }
 
   async createIfAbsent(wallet: string): Promise<Seller> {

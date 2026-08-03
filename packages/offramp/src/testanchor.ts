@@ -9,11 +9,12 @@ import {
   type OffRampQuote,
   type IndicativePrice,
   type OffRampStateRepository,
+  type PayoutFieldDescriptor,
   type SellerPayoutRef,
 } from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { getSep38Prices, getSep38Quote } from "./sep38";
-import { getSep6Transaction, startSep6Withdraw } from "./sep6";
+import { getSep6Transaction, getSep6WithdrawInfo, startSep6Withdraw } from "./sep6";
 
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
@@ -87,6 +88,23 @@ export class TestAnchorOffRamp implements OffRampPort {
       targetCurrency: e.buyCurrency,
       price: e.price,
       deliveryMethods: e.deliveryMethods,
+    }));
+  }
+
+  /**
+   * Field descriptors from the anchor's SEP-6 GET /info for this asset.
+   * /info is sent with the JWT when one is cached so authenticated anchors can
+   * return KYC-aware field sets, but a SEP-10 round-trip is not forced just to
+   * render the form (issue #32).
+   */
+  async offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]> {
+    const jwt = await this.auth.token().catch(() => undefined);
+    const fields = await getSep6WithdrawInfo(this.baseUrl, assetCode, jwt);
+    return fields.map((f) => ({
+      name: f.name,
+      label: f.description, // SEP-6 uses "description" as the human label
+      optional: f.optional ?? false,
+      choices: f.choices,
     }));
   }
 

@@ -4,6 +4,13 @@ export const sellers = sqliteTable("sellers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   wallet: text("wallet").notNull().unique(),
+  /**
+   * JSON-serialised Record<string,string> of the seller's last-used payout
+   * fields (e.g. bank account number). Never emitted in logs or webhooks;
+   * exposed to the dashboard only in masked form. Null until the seller
+   * completes their first cash-out.
+   */
+  payoutFieldsJson: text("payout_fields_json"),
   createdAt: integer("created_at").notNull(),
 });
 
