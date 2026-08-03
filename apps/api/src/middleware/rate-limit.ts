@@ -43,14 +43,18 @@ export function rateLimit(opts: {
   /** Defaults to 0 — `x-forwarded-for` is ignored entirely, which is the safe
    *  choice when no trusted proxy is guaranteed to overwrite it. */
   trustProxyHops?: number;
+  /** Override how the limiter key is derived. Defaults to the client IP; API
+   *  keys pass `apiKeyRateLimitKey` so each key gets its own bucket (#40 item 4). */
+  keyFor?: (ctx: Context, trustProxyHops: number) => Promise<string> | string;
 }) {
   const store = opts.store ?? new MemoryStore();
   const trustProxyHops = opts.trustProxyHops ?? 0;
+  const keyFor = opts.keyFor ?? clientIp;
 
   return async (ctx: Context, next: Next) => {
     if (opts.max <= 0) return next(); // disabled
 
-    const key = clientIp(ctx, trustProxyHops);
+    const key = await keyFor(ctx, trustProxyHops);
     const entry = await store.increment(key, opts.windowMs);
     const now = Date.now();
 

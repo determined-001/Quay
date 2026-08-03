@@ -10,6 +10,7 @@ import {
   type PaymentLink,
   type UsdcTrustlineStatus,
 } from "../../lib/api";
+import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
@@ -215,6 +216,8 @@ export default function Dashboard() {
   const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
   const [kyc, setKyc] = useState<KycView | null>(null);
 
+  const [tab, setTab] = useState<"links" | "api-keys">("links");
+
   const refresh = useCallback(async () => {
     try {
       const { links: fresh } = await api.listLinks();
@@ -356,6 +359,41 @@ export default function Dashboard() {
 
   return (
     <>
+      <nav
+        aria-label="Dashboard sections"
+        style={{
+          display: "flex",
+          gap: 4,
+          marginBottom: 20,
+          borderBottom: "1px solid var(--clr-border, #2a3448)",
+        }}
+      >
+        {(["links", "api-keys"] as const).map((t) => (
+          <button
+            key={t}
+            role="tab"
+            aria-selected={tab === t}
+            onClick={() => setTab(t)}
+            style={{
+              background: "none",
+              border: "none",
+              borderBottom: tab === t ? "2px solid var(--clr-accent, #6c8ebf)" : "2px solid transparent",
+              color: tab === t ? "var(--clr-text, #e0e6f0)" : "var(--clr-muted, #7a8aaa)",
+              cursor: "pointer",
+              fontSize: "0.9em",
+              fontWeight: tab === t ? 600 : 400,
+              padding: "8px 14px",
+              marginBottom: -1,
+              transition: "color 0.15s",
+            }}
+          >
+            {t === "links" ? "Payment links" : "API keys"}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "links" && (
+        <>
       {trustline && !trustline.ok && (
         <div className="banner banner--warn">
           <strong>Your wallet can&apos;t receive USDC right now.</strong>{" "}
@@ -482,6 +520,10 @@ export default function Dashboard() {
           </button>
         </div>
       </section>
+        </>
+      )}
+
+      {tab === "api-keys" && <ApiKeys />}
     </>
   );
 }

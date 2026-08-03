@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { registerWebhookSchema, listWebhookDeliveriesQuerySchema } from "@checkout/core";
 import type { PublicWebhook, Webhook } from "@checkout/core";
 import type { Container } from "../services/container";
-import { requireSeller, type AuthedVariables } from "../middleware/auth";
+import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 import { guardWebhookUrl } from "../services/ssrf-guard";
 
 const HOST_ALLOWLIST = process.env.WEBHOOK_HOST_ALLOWLIST
@@ -23,9 +23,20 @@ function toPublic(h: Webhook): PublicWebhook {
   return safe;
 }
 
-export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }> {
-  const app = new Hono<{ Variables: AuthedVariables }>();
-  app.use("*", requireSeller({ session: c.auth.session, sellers: c.sellers, revocations: c.auth.revocations }));
+export function webhookRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
+  const app = new Hono<{ Variables: AuthVariables }>();
+  // Composed auth: session (requireSeller, ALL_SCOPES) or a scoped API key
+  // (issue #40). Every route additionally requires webhooks:manage.
+  app.use(
+    "*",
+    buildAuthMiddleware({
+      session: c.auth.session,
+      sellers: c.sellers,
+      revocations: c.auth.revocations,
+      apiKeyRepo: c.apiKeys,
+    }),
+    requireScope("webhooks:manage"),
+  );
 
   // Register a webhook. The secret is returned ONCE — store it to verify signatures.
   app.post("/", async (ctx) => {
@@ -61,7 +72,7 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }
 
   // Remove a webhook. Soft delete — delivery history stays visible afterward.
   app.delete("/:id", async (ctx) => {
-    const seller = await c.sellers.getDefault();
+    const seller = ctx.get("seller");
     const deleted = await c.webhooks.softDelete(ctx.req.param("id"), seller.id);
     if (!deleted) return ctx.json({ error: "not_found" }, 404);
     return ctx.body(null, 204);
@@ -71,7 +82,7 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }
   // like at creation. The old secret keeps signing deliveries for 24h (see
   // WebhookSender) so an in-flight deploy of the new secret doesn't drop events.
   app.post("/:id/rotate-secret", async (ctx) => {
-    const seller = await c.sellers.getDefault();
+    const seller = ctx.get("seller");
     const secret = generateSecret();
     const hook = await c.webhooks.rotateSecret(ctx.req.param("id"), seller.id, secret, SECRET_ROTATION_OVERLAP_MS);
     if (!hook) return ctx.json({ error: "not_found" }, 404);
@@ -80,7 +91,7 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthedVariables }
 
   // Paginated delivery history for one webhook (visible even after it's deleted).
   app.get("/:id/deliveries", async (ctx) => {
-    const seller = await c.sellers.getDefault();
+    const seller = ctx.get("seller");
     const parsed = listWebhookDeliveriesQuerySchema.safeParse({
       limit: ctx.req.query("limit"),
       cursor: ctx.req.query("cursor"),

@@ -130,3 +130,30 @@ export const revokedTokens = sqliteTable("revoked_tokens", {
   expiresAt: integer("expires_at").notNull(),
   revokedAt: integer("revoked_at").notNull(),
 });
+
+/**
+ * Scoped API keys for programmatic access (issue #40, 6.3).
+ *
+ * Security invariants:
+ *   - `hash` is an scrypt digest of the full key — the plaintext is NEVER stored.
+ *   - `prefix` is the first 8 chars of the key (safe to index and display).
+ *   - `scopes` is a comma-separated list drawn from ApiKeyScope.
+ *   - `revokedAt` non-null means the key is invalid regardless of hash match.
+ *   - `lastUsedAt` is updated asynchronously (fire-and-forget) to avoid adding
+ *     latency to the hot path.
+ */
+export const apiKeys = sqliteTable("api_keys", {
+  id: text("id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  name: text("name").notNull(),
+  /** First 8 chars of the plaintext key — used for display / lookup. */
+  prefix: text("prefix").notNull(),
+  /** scrypt hash of the full plaintext key (hex-encoded). */
+  hash: text("hash").notNull(),
+  /** Comma-separated scope list, e.g. "links:read,links:write". */
+  scopes: text("scopes").notNull(),
+  lastUsedAt: integer("last_used_at"),
+  createdAt: integer("created_at").notNull(),
+  /** Non-null when the key has been revoked. */
+  revokedAt: integer("revoked_at"),
+});

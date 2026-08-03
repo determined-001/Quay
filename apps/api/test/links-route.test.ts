@@ -58,6 +58,7 @@ function fakeContainer(): Container {
     webhooks: {} as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: owner.wallet },
     auth: { session, sellers, revocations } as unknown as Container["auth"],
+    apiKeys: {} as Container["apiKeys"],
     kyc: {} as Container["kyc"],
     db: {} as Container["db"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),

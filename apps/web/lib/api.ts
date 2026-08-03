@@ -237,6 +237,24 @@ export interface AuthChallenge {
   network_passphrase: string;
 }
 
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  lastUsedAt: number | null;
+  createdAt: number;
+  revokedAt: number | null;
+}
+
+export interface ApiKeyCreated {
+  id: string;
+  name: string;
+  key: string;
+  scopes: string[];
+  env: "live" | "test";
+}
+
 export type UsdcTrustlineStatus =
   | { ok: true }
   | { ok: false; reason: string; message: string; trustlineUri?: string };
@@ -323,4 +341,19 @@ export const api = {
       `/webhooks/${id}/deliveries${qs ? `?${qs}` : ""}`,
     );
   },
+
+  // ── API Keys (issue #40) ───────────────────────────────────────────────
+
+  listApiKeys: () =>
+    http<{
+      keys: ApiKeyInfo[];
+      availableScopes: string[];
+      defaultScopes: string[];
+    }>("/api-keys"),
+
+  createApiKey: (input: { name: string; env?: "live" | "test"; scopes?: string }) =>
+    http<ApiKeyCreated>("/api-keys", { method: "POST", body: JSON.stringify(input) }),
+
+  revokeApiKey: (id: string) =>
+    http<{ id: string; revokedAt: number }>(`/api-keys/${id}`, { method: "DELETE" }),
 };

@@ -20,6 +20,7 @@ import {
   DrizzleTokenRevocationRepository,
   DrizzleOffRampStateRepository,
   DrizzleKycRepository,
+  DrizzleApiKeyRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -40,6 +41,7 @@ export interface Container {
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
+  apiKeys: DrizzleApiKeyRepository;
   db: DB;
   kyc: KycPort;
   config: { network: string; horizonUrl: string; sellerWallet: string };
@@ -79,6 +81,7 @@ export async function createContainer(): Promise<Container> {
   const stateRepo = new DrizzleWatcherStateRepository(db);
   const revocationsRepo = new DrizzleTokenRevocationRepository(db);
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
+  const apiKeysRepo = new DrizzleApiKeyRepository(db);
 
   const seller = resolveSellerKeypairOrWallet();
   const sellerWallet = seller.publicKey;
@@ -164,6 +167,7 @@ export async function createContainer(): Promise<Container> {
     links: linksRepo,
     sellers: sellersRepo,
     webhooks: webhooksRepo,
+    apiKeys: apiKeysRepo,
     db,
     kyc,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
