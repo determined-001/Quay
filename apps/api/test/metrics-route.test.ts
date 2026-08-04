@@ -18,6 +18,7 @@ function fakeContainer(): Container {
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     kyc: {} as Container["kyc"],
     db: {} as Container["db"],
+    telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
     auth: {} as Container["auth"],
     getWatcherCircuitBreakerStatus: () => [],
     getWatcherMetrics: () => ({

@@ -15,7 +15,7 @@ import {
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
 import { encryptSecret } from "../src/services/secret-crypto";
-import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
+import { AlwaysAcceptedKyc, FakeOffRampStateRepository, FakeTelemetryRepository } from "./fakes";
 import { Hono } from "hono";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -270,6 +270,7 @@ async function makeFixture(): Promise<Fixture> {
     offrampState: new FakeOffRampStateRepository(),
     kyc: new AlwaysAcceptedKyc(),
     stellar: STELLAR,
+    telemetry: new FakeTelemetryRepository(),
     correlation: "memo",
     // Avoid live DNS in unit tests; ssrf-guard.test.ts covers the guard.
     webhookGuard: async () => ({ ok: true }) as const,

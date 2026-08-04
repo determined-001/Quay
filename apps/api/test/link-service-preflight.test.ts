@@ -11,7 +11,7 @@ import {
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import { HttpError, LinkService } from "../src/services/link-service";
-import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
+import { AlwaysAcceptedKyc, FakeOffRampStateRepository, FakeTelemetryRepository } from "./fakes";
 
 const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", createdAt: Date.now() };
 
@@ -90,6 +90,7 @@ function makeService(links: LinkRepository, rail: RailPort): LinkService {
     offrampState: new FakeOffRampStateRepository(),
     kyc: new AlwaysAcceptedKyc(),
     stellar,
+    telemetry: new FakeTelemetryRepository(),
     correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
   });

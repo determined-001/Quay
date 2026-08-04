@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Container } from "../services/container";
@@ -26,7 +27,7 @@ export function telemetryRoutes(c: Container): Hono {
     if (!token) return ctx.json({ error: "telemetry_not_enabled" }, 404) as unknown as Response;
     const auth = ctx.req.header("authorization") ?? "";
     const provided = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (provided !== token) return ctx.json({ error: "unauthorized" }, 401) as unknown as Response;
+    if (!secureEqual(provided, token)) return ctx.json({ error: "unauthorized" }, 401) as unknown as Response;
     return null;
   }
 
@@ -72,6 +73,15 @@ export function telemetryRoutes(c: Container): Hono {
   });
 
   return app;
+}
+
+/** Constant-time string comparison — a plain `!==` on strings leaks the token
+ *  length and lets an attacker time responses to recover it byte-by-byte. */
+function secureEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false; // timingSafeEqual throws on length mismatch
+  return timingSafeEqual(ab, bb);
 }
 
 /** Wrap a CSV field in quotes if it contains commas, quotes, or newlines. */

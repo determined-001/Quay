@@ -21,6 +21,8 @@ import {
   type SellerRepository,
   type WebhookRepository,
   type IndicativePrice,
+  type OffRampTelemetryRepository,
+  type OffRampTelemetryRow,
 } from "@checkout/core";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -240,7 +242,7 @@ export class LinkService {
       offrampState: OffRampStateRepository;
       kyc: KycPort;
       stellar: StellarConfig;
-      telemetry: DrizzleOfframpTelemetryRepository;
+      telemetry: OffRampTelemetryRepository;
       /**
        * Optional anchor health probe. When omitted we default to a no-op
        * "always available" probe so existing test fixtures stay lightweight.
@@ -554,6 +556,28 @@ export class LinkService {
           throw new QuoteExpiredError(quote.quoteId);
         }
       }
+
+      // Write "quoted" telemetry row immediately after getting the firm quote.
+      const telRow: OffRampTelemetryRow = {
+        id: `tel_${quote.quoteId}`,
+        anchorDomain: anchorDomainFromOfframp(this.deps.offramp),
+        corridor: `${link.asset.code}/${body.targetCurrency}`,
+        sellAsset: link.asset.issuer
+          ? `stellar:${link.asset.code}:${link.asset.issuer}`
+          : `stellar:native`,
+        sellAmount: sourceAmount,
+        indicativeRate: null,
+        quotedRate: quote.rate,
+        quotedAt: Date.now(),
+        initiatedAt: null,
+        settledAt: null,
+        effectiveRate: null,
+        feeAmount: null,
+        status: "quoted",
+        failureReason: null,
+      };
+      // Telemetry must never block the cash-out — swallow and move on.
+      await this.deps.telemetry.upsert(telRow).catch(() => {});
 
       job = await this.deps.offramp.initiate({
         linkId: link.id,

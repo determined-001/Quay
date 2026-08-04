@@ -8,7 +8,7 @@ import {
   type HorizonStatus,
 } from "@checkout/stellar";
 import { MockAnchorOffRamp, NoKycRequired, TestAnchorKyc, TestAnchorOffRamp } from "@checkout/offramp";
-import type { KycPort, OffRampPort, OffRampStateRepository } from "@checkout/core";
+import type { KycPort, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
 import { env } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey } from "../crypto/pii";
@@ -20,6 +20,7 @@ import {
   DrizzleTokenRevocationRepository,
   DrizzleOffRampStateRepository,
   DrizzleKycRepository,
+  DrizzleOfframpTelemetryRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -42,6 +43,7 @@ export interface Container {
   webhooks: DrizzleWebhookRepository;
   db: DB;
   kyc: KycPort;
+  telemetry: OffRampTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   horizonStatus(): HorizonStatus;
   /** Optional SSRF guard override for webhook URLs. Tests inject a permissive
@@ -79,6 +81,7 @@ export async function createContainer(): Promise<Container> {
   const stateRepo = new DrizzleWatcherStateRepository(db);
   const revocationsRepo = new DrizzleTokenRevocationRepository(db);
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
+  const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
 
   const seller = resolveSellerKeypairOrWallet();
   const sellerWallet = seller.publicKey;
@@ -167,6 +170,7 @@ export async function createContainer(): Promise<Container> {
     webhooks: webhooksRepo,
     db,
     kyc,
+    telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     horizonStatus: () => pollingWatcher.getStatus(),
     metricsToken,

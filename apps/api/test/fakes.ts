@@ -8,6 +8,9 @@ import type {
   OffRampPort,
   OffRampQuote,
   OffRampStateRepository,
+  OffRampTelemetryRepository,
+  OffRampTelemetryRow,
+  OffRampTelemetrySummary,
   PaymentLink,
   StoredOffRampJob,
   StoredOffRampQuote,
@@ -264,5 +267,25 @@ export class ScriptedKyc implements KycPort {
   }
   async submit(sellerId: string): Promise<KycRecord> {
     return this.statusImpl(sellerId);
+  }
+}
+
+/** In-memory OffRampTelemetryRepository. Captures the rows the service writes
+ *  so tests can assert on the passive telemetry trail without a database. */
+export class FakeTelemetryRepository implements OffRampTelemetryRepository {
+  readonly rows: OffRampTelemetryRow[] = [];
+
+  async upsert(row: OffRampTelemetryRow): Promise<void> {
+    const existing = this.rows.findIndex((r) => r.id === row.id);
+    if (existing === -1) this.rows.push({ ...row });
+    else this.rows[existing] = { ...row };
+  }
+
+  async summary(): Promise<OffRampTelemetrySummary[]> {
+    return [];
+  }
+
+  async all(): Promise<OffRampTelemetryRow[]> {
+    return [...this.rows];
   }
 }

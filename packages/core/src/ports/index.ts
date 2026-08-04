@@ -228,6 +228,57 @@ export interface OffRampStateRepository {
 }
 
 // ---------------------------------------------------------------------------
+// Off-ramp telemetry port
+// ---------------------------------------------------------------------------
+// Passive, append-only dataset of cash-out progress. No product surface
+// consumes it yet; it exists to accumulate the dataset — cheap to record now,
+// impossible to backfill later. Writes must never block the cash-out path.
+
+export type OffRampTelemetryStatus = "quoted" | "initiated" | "settled" | "failed";
+
+export interface OffRampTelemetryRow {
+  id: string;
+  anchorDomain: string;
+  corridor: string; // e.g. "USDC/NGN"
+  sellAsset: string;
+  sellAmount: string;
+  /** In-memory mock/testanchor rate at quote time, if available. */
+  indicativeRate: string | null;
+  /** The firm rate returned by quote(). */
+  quotedRate: string;
+  quotedAt: number;
+  initiatedAt: number | null;
+  settledAt: number | null;
+  /** Derived from the anchor-reported amount_out at settlement (NOT the quote). */
+  effectiveRate: string | null;
+  /** sell_amount minus the anchor-implied back-calculated sell equivalent. */
+  feeAmount: string | null;
+  status: OffRampTelemetryStatus;
+  failureReason: string | null;
+}
+
+export interface OffRampTelemetrySummary {
+  anchorDomain: string;
+  corridor: string;
+  count: number;
+  settledCount: number;
+  failedCount: number;
+  /** p50 settlement latency in ms (null when no settled rows). */
+  latencyP50Ms: number | null;
+  /** p95 settlement latency in ms (null when no settled rows). */
+  latencyP95Ms: number | null;
+  /** mean of (quotedRate - effectiveRate) / quotedRate, as a fraction (null when no data). */
+  meanSpread: number | null;
+}
+
+export interface OffRampTelemetryRepository {
+  upsert(row: OffRampTelemetryRow): Promise<void>;
+  summary(): Promise<OffRampTelemetrySummary[]>;
+  /** Anonymised dump — seller/link identities excluded — for CSV export. */
+  all(): Promise<OffRampTelemetryRow[]>;
+}
+
+// ---------------------------------------------------------------------------
 // KYC port (SEP-12)
 // ---------------------------------------------------------------------------
 // No real anchor will pay out against fabricated identity data, so this is

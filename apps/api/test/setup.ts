@@ -26,6 +26,7 @@ import type {
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import type { DB } from "../src/db/client";
+import { FakeTelemetryRepository } from "./fakes";
 
 // ---------------------------------------------------------------------------
 //  Test DB — in-memory libSQL
@@ -213,6 +214,7 @@ export interface TestContainer extends Container {
   offramp: FakeOffRampPort;
   db: DB;
   client: Client;
+  telemetry: FakeTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   /** Mints a bearer token for a seller, so route tests can authenticate. */
   tokenFor(sellerId: string, wallet: string): Promise<string>;
@@ -228,6 +230,7 @@ export async function createTestContainer(): Promise<TestContainer> {
   const offramp = new FakeOffRampPort();
 
   const offrampState = new DrizzleOffRampStateRepository(repos.db);
+  const telemetry = new FakeTelemetryRepository();
 
   const service = new LinkService({
     links: repos.links,
@@ -238,6 +241,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     offrampState,
     kyc: new NoKycRequired(),
     stellar: testStellarConfig,
+    telemetry,
     correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
   });
@@ -257,6 +261,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     db: repos.db,
     client: repos.client,
     kyc: new NoKycRequired() as unknown as Container["kyc"],
+    telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     webhookGuard: async () => ({ ok: true }) as const,

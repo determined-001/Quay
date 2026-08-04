@@ -12,7 +12,7 @@ import type {
 import { XLM } from "@checkout/core";
 import { WatcherLoop } from "../src/worker/watcher-loop";
 import { LinkService } from "../src/services/link-service";
-import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
+import { AlwaysAcceptedKyc, FakeOffRampStateRepository, FakeTelemetryRepository } from "./fakes";
 
 const DESTINATION = "GDEST000000000000000000000000000000000000000000000000000";
 
@@ -377,6 +377,7 @@ describe("WatcherLoop - matching integration", () => {
       offramp: makeUnusedOffRampPort(),
       offrampState: new FakeOffRampStateRepository(),
       kyc: new AlwaysAcceptedKyc(),
+      telemetry: new FakeTelemetryRepository(),
       correlation: "memo" as const,
       stellar: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", usdcIssuer: "GISSUER" } as never,
     });
