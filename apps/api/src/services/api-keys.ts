@@ -4,7 +4,7 @@
  * Security model
  * ──────────────
  * • The plaintext key is returned to the caller exactly once and never stored
- *   or logged here (the schema stores only the scrypt hash + an 8-char prefix).
+ *   or logged here (the schema stores only the scrypt hash + a lookup prefix).
  * • Verification uses `crypto.timingSafeEqual` so the comparison is always
  *   constant-time regardless of whether the hash matches.
  * • `offramp:initiate` is not included in the default scope set because it
@@ -86,16 +86,28 @@ function base62(buf: Buffer): string {
 export type KeyEnvironment = "live" | "test";
 
 /**
+ * Length of the DB lookup prefix, in characters. The scheme label
+ * ("ak_live_" / "ak_test_") is itself 8 chars and identical for every key in
+ * that environment, so a prefix of exactly 8 chars is the constant label and
+ * carries zero of the key's randomness — every live key would collide on the
+ * same "prefix", making the lookup index useless (and, combined with a capped
+ * query, unresolvable once enough keys exist). Extending into the random body
+ * gives the prefix real selectivity while staying short enough to store/index/
+ * display safely.
+ */
+export const KEY_PREFIX_LEN = 16;
+
+/**
  * Generate a new key in the format `ak_live_<32 random base62>` or
  * `ak_test_<32 random base62>`.
  *
- * Returns both the plaintext key (shown ONCE to the caller) and the 8-char
- * searchable prefix stored in the database.
+ * Returns both the plaintext key (shown ONCE to the caller) and the
+ * `KEY_PREFIX_LEN`-char searchable prefix stored in the database.
  */
 export function generateApiKey(env: KeyEnvironment): { plaintext: string; prefix: string } {
   const body = base62(randomBytes(32));          // 32 bytes → 32 base62 chars
   const plaintext = `ak_${env}_${body}`;
-  const prefix = plaintext.slice(0, 8);          // "ak_live_" or "ak_test"
+  const prefix = plaintext.slice(0, KEY_PREFIX_LEN);
   return { plaintext, prefix };
 }
 

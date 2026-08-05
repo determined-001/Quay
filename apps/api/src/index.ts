@@ -15,6 +15,7 @@ import { demoRoutes } from "./routes/demo";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
 import { requestContext } from "./request-context";
+import { buildAuthMiddleware, apiKeyRateLimitKey } from "./middleware/auth";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
 

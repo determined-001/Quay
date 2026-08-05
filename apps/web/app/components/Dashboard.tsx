@@ -549,6 +549,10 @@ export default function Dashboard() {
           onSuccess={handleCashOutSuccess}
         />
       )}
+        </>
+      )}
+
+      {tab === "api-keys" && <ApiKeys />}
     </>
   );
 }

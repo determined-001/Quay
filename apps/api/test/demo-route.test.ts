@@ -27,6 +27,7 @@ function fakeContainer(deleteDemo: () => Promise<number>): Container {
     links: { deleteDemo } as unknown as Container["links"],
     sellers: sellers as unknown as Container["sellers"],
     webhooks: {} as Container["webhooks"],
+    apiKeys: {} as Container["apiKeys"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: seller.wallet },
     kyc: {} as Container["kyc"],
     db: {} as Container["db"],

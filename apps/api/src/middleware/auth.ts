@@ -3,6 +3,9 @@ import type { Context, MiddlewareHandler, Next } from "hono";
 import type { Seller, SellerRepository, TokenRevocationRepository } from "@checkout/core";
 import type { SessionIssuer } from "../services/session";
 import type { RequestContextVariables } from "../request-context";
+import type { ApiKey, DrizzleApiKeyRepository } from "../repos/index";
+import { ALL_SCOPES, KEY_PREFIX_LEN, verifyApiKey, type ApiKeyScope } from "../services/api-keys";
+import { clientIp } from "./rate-limit";
 
 export const SESSION_COOKIE = "session";
 
@@ -69,10 +72,12 @@ export function requireSeller(deps: {
 
 /**
  * Variables set by `buildAuthMiddleware` on every authenticated request.
- * Extends the session context with the scope set the request is authorized for:
- * the key's own scopes on the API-key path, or ALL_SCOPES on the session path.
+ * Extends RequestContextVariables (requestId/logger — `requestContext` is
+ * installed ahead of this middleware in index.ts, same as AuthedVariables)
+ * with the scope set the request is authorized for: the key's own scopes on
+ * the API-key path, or ALL_SCOPES on the session path.
  */
-export interface AuthVariables {
+export interface AuthVariables extends RequestContextVariables {
   seller: Seller;
   /** Scopes granted to this request — the key's scopes, or ALL_SCOPES for a
    *  session (a logged-in seller is the root user of their own account). */
@@ -96,12 +101,12 @@ function looksLikeApiKey(value: string): boolean {
 }
 
 /**
- * Verify a raw key against the store. Fast pre-filter on the 8-char prefix
+ * Verify a raw key against the store. Fast pre-filter on the lookup prefix
  * (indexed, cheap) before the scrypt round-trip; then constant-time verify
  * against every active candidate sharing that prefix.
  */
 async function resolveApiKey(raw: string, repo: DrizzleApiKeyRepository): Promise<ApiKey | null> {
-  const prefix = raw.slice(0, 8);
+  const prefix = raw.slice(0, KEY_PREFIX_LEN);
   const candidates = await repo.findAllActiveByPrefix(prefix);
   for (const candidate of candidates) {
     if (await verifyApiKey(raw, candidate.hash)) return candidate;
@@ -188,12 +193,12 @@ export function requireScope(scope: ApiKeyScope): MiddlewareHandler<{ Variables:
 
 /**
  * Rate-limit key that is per-API-key for `Bearer ak_…` callers (bucketed by the
- * key's 8-char prefix — issue #40 item 4) and per-client-IP for everyone else.
+ * key's lookup prefix — issue #40 item 4) and per-client-IP for everyone else.
  * Mount via `rateLimit({ keyFor: apiKeyRateLimitKey })` on routes a key can hit.
  */
 export function apiKeyRateLimitKey(ctx: Context, trustProxyHops: number): string {
   const header = ctx.req.header("authorization");
   const bearer = header?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (bearer && looksLikeApiKey(bearer)) return `api-key:${bearer.slice(0, 8)}`;
+  if (bearer && looksLikeApiKey(bearer)) return `api-key:${bearer.slice(0, KEY_PREFIX_LEN)}`;
   return `ip:${clientIp(ctx, trustProxyHops)}`;
 }
