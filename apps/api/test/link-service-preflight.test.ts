@@ -48,6 +48,11 @@ function fakeWebhooks(): WebhookRepository {
   return {
     create: vi.fn(async (input) => ({ id: "whk_1", ...input, createdAt: Date.now() })),
     listBySeller: vi.fn(async () => []),
+    getById: vi.fn(async () => null),
+    rotateSecret: vi.fn(async () => null),
+    softDelete: vi.fn(async () => false),
+    listDeliveries: vi.fn(async () => ({ deliveries: [], nextCursor: null })),
+    listDeliveriesByLinkId: vi.fn(async () => []),
     recordDelivery: vi.fn(async () => {}),
   };
 }
@@ -86,6 +91,7 @@ function makeService(links: LinkRepository, rail: RailPort): LinkService {
     kyc: new AlwaysAcceptedKyc(),
     stellar,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 }
 
@@ -95,7 +101,7 @@ describe("LinkService.createLink — trustline preflight", () => {
     const rail = fakeRail(vi.fn(async () => {}));
     const service = makeService(links, rail);
 
-    const { link } = await service.createLink({ title: "T-shirt", amount: "10", assetCode: "USDC" });
+    const { link } = await service.createLink(seller.id, { title: "T-shirt", amount: "10", assetCode: "USDC" });
 
     expect(link.title).toBe("T-shirt");
     expect(links.create).toHaveBeenCalledTimes(1);
@@ -113,7 +119,7 @@ describe("LinkService.createLink — trustline preflight", () => {
 
     let caught: unknown;
     try {
-      await service.createLink({ title: "T-shirt", amount: "10", assetCode: "USDC" });
+      await service.createLink(seller.id, { title: "T-shirt", amount: "10", assetCode: "USDC" });
     } catch (err) {
       caught = err;
     }
@@ -136,7 +142,7 @@ describe("LinkService.createLink — trustline preflight", () => {
     );
     const service = makeService(links, rail);
 
-    await expect(service.createLink({ title: "T-shirt", amount: "10", assetCode: "USDC" })).rejects.toThrow("horizon is down");
+    await expect(service.createLink(seller.id, { title: "T-shirt", amount: "10", assetCode: "USDC" })).rejects.toThrow("horizon is down");
   });
 });
 
