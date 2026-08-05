@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type {
+  LinkPaymentRecord,
   LinkRepository,
   NormalizedPayment,
   PaymentLink,
@@ -10,7 +11,7 @@ import type {
   RailPort,
   OffRampPort,
 } from "@checkout/core";
-import { XLM } from "@checkout/core";
+import { XLM, fromStroops, toStroops } from "@checkout/core";
 import { WatcherLoop } from "../src/worker/watcher-loop";
 import { LinkService } from "../src/services/link-service";
 import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
@@ -80,6 +81,8 @@ function makeFakeStateRepo() {
 
 function makeFakeLinkRepo(initial: PaymentLink[]): LinkRepository {
   const byId = new Map(initial.map((l) => [l.id, l]));
+  const payments: LinkPaymentRecord[] = [];
+  const seenTxHashes = new Set<string>();
   return {
     async create(): Promise<PaymentLink> {
       throw new Error("not used in this test");
@@ -104,6 +107,17 @@ function makeFakeLinkRepo(initial: PaymentLink[]): LinkRepository {
     },
     async save(link: PaymentLink): Promise<void> {
       byId.set(link.id, link);
+    },
+    async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+      if (seenTxHashes.has(payment.txHash)) return; // duplicate tx_hash — no-op
+      seenTxHashes.add(payment.txHash);
+      payments.push(payment);
+    },
+    async sumPaymentsForLink(linkId: string): Promise<string> {
+      const total = payments
+        .filter((p) => p.linkId === linkId)
+        .reduce((sum, p) => sum + toStroops(p.amount), 0n);
+      return fromStroops(total);
     },
   };
 }
@@ -197,13 +211,19 @@ function makeTestLink(overrides: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
     offrampIndicativeRate: null,
     offrampRate: null,
     offrampRateDelta: null,
+    offrampFeeAmount: null,
+    offrampFeeCurrency: null,
+    offrampFeeSource: null,
+    offrampNetTargetAmount: null,
     expiresAt: null,
+    isDemo: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     ...overrides,
