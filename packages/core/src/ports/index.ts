@@ -1,5 +1,9 @@
 import type { AssetRef, PaymentLink } from "../domain/payment-link";
 import type { NormalizedPayment } from "../matching/match-payment";
+import type { Logger } from "./logger";
+
+export type { Logger } from "./logger";
+export { NOOP_LOGGER } from "./logger";
 
 // ---------------------------------------------------------------------------
 // Settlement rail port
@@ -90,6 +94,20 @@ export interface WatcherPort {
 //   initiate() ~ SEP-24 / SEP-31 (start a withdrawal/payout to local rails)
 //   status()   ~ poll the transfer to settlement
 
+/** Describes a single field the anchor needs before initiating a payout. */
+export interface PayoutFieldDescriptor {
+  /** Machine-readable field name, e.g. "dest", "dest_extra". */
+  name: string;
+  /** Human-readable label from the anchor, e.g. "Bank Account Number". */
+  label: string;
+  /** Optional longer explanation shown beneath the input. */
+  description?: string;
+  /** When true, the field may be omitted. */
+  optional: boolean;
+  /** If present, the field is a select/radio rather than a free-text input. */
+  choices?: string[];
+}
+
 export type OffRampMode = "seller_initiated" | "inline";
 
 export interface OffRampQuote {
@@ -97,9 +115,11 @@ export interface OffRampQuote {
   sourceAsset: AssetRef;
   sourceAmount: string;
   targetCurrency: string; // ISO code, e.g. "NGN"
-  targetAmount: string; // what the seller will receive
+  targetAmount: string; // gross amount before fees
   rate: string; // sourceAsset -> targetCurrency
   expiresAt: number; // epoch ms — after this the quote is void
+  fee: { amount: string; currency: string; source: "anchor" | "estimated" };
+  netTargetAmount: string; // what the seller actually receives
 }
 
 /** Thrown when a quote's expiresAt has passed or is unparsable (NaN). */
@@ -140,18 +160,23 @@ export interface OffRampJob {
   reason?: string; // set when failed
 }
 
+export type OffRampInitiation =
+  | { kind: "fields"; jobId: string }
+  | { kind: "interactive"; jobId: string; url: string };
+
 export interface OffRampPort {
   readonly mode: OffRampMode;
-  quote(input: {
-    linkId: string;
-    sourceAsset: AssetRef;
-    sourceAmount: string;
-    targetCurrency: string;
-  }): Promise<OffRampQuote>;
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob>;
+  quote(
+    input: { linkId: string; sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampQuote>;
+  initiate(
+    input: { linkId: string; quoteId: string; payout: SellerPayoutRef },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampInitiation>;
   /** Throws {@link OffRampJobNotFoundError} when `jobId` has no known state — a
    *  crash/redeploy wiped an in-memory-only implementation, or the id is bogus. */
-  status(jobId: string): Promise<OffRampJob>;
+  status(jobId: string, opts?: { logger?: Logger }): Promise<OffRampJob>;
   /**
    * Indicative prices for all available buy currencies — SEP-38 GET /prices.
    * Unauthenticated, no quote consumed. Used by the dashboard to show rates
@@ -162,6 +187,13 @@ export interface OffRampPort {
     sourceAsset: AssetRef;
     sourceAmount: string;
   }): Promise<IndicativePrice[]>;
+  /**
+   * Field descriptors the anchor requires before it will initiate a payout —
+   * SEP-6 GET /info for a real anchor, a fixed set for the mock. Drives the
+   * dynamic cash-out form (issue #32) so the dashboard never hardcodes bank
+   * fields.
+   */
+  offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]>;
 }
 
 /** One indicative price entry from SEP-38 GET /prices (issue 3.5). */
@@ -302,6 +334,20 @@ export interface CreateLinkInput {
   amount: string;
   asset: AssetRef;
   expiresAt: number | null;
+  /** When true this row was created by the demo seed script. */
+  isDemo?: boolean;
+}
+
+/** One incoming payment recorded against a link — the authoritative ledger
+ *  row cumulative accounting sums over (issue 1.4). `txHash` is unique so a
+ *  reprocessed payment can never double-count. */
+export interface LinkPaymentRecord {
+  linkId: string;
+  txHash: string;
+  payer: string;
+  amount: string;
+  asset: AssetRef;
+  createdAt: number;
 }
 
 export interface LinkRepository {
@@ -316,12 +362,24 @@ export interface LinkRepository {
   /** Active (or underpaid) links whose value lands in `destination`. */
   openLinksForDestination(destination: string): Promise<PaymentLink[]>;
   save(link: PaymentLink): Promise<void>;
+  /** Append a payment to the link's ledger. A duplicate `txHash` is a no-op —
+   *  cumulative accounting must never double-count a reprocessed payment. */
+  recordPayment(payment: LinkPaymentRecord): Promise<void>;
+  /** Sum of every payment ever recorded for this link, as a decimal string
+   *  ("0" if none). The authoritative source `paidAmount` is cached from. */
+  sumPaymentsForLink(linkId: string): Promise<string>;
 }
 
 export interface Seller {
   id: string;
   name: string;
   wallet: string;
+  /**
+   * The seller's last-used payout destination fields (e.g. bank account).
+   * Null until the seller completes their first cash-out. Treated as
+   * sensitive — never logged or included in webhook payloads.
+   */
+  payoutFields: Record<string, string> | null;
   createdAt: number;
 }
 
@@ -332,6 +390,9 @@ export interface SellerRepository {
   /** Wallet-native signup: SEP-10 proved control of `wallet`, so it IS the identity.
    *  Idempotent — returns the existing seller if one is already registered for it. */
   createIfAbsent(wallet: string): Promise<Seller>;
+  /** Persist the seller's last-used payout destination fields for reuse on the
+   *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
+  savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
 }
 
 /**

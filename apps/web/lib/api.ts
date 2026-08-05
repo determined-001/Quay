@@ -1,10 +1,23 @@
-import type { KycFieldSpec, KycStatus, PaymentLink, PaymentRequest } from "@checkout/core";
+import type { KycFieldSpec, KycStatus, PaymentLink, PaymentRequest, PayoutFieldDescriptor } from "@checkout/core";
 
-export type { PaymentLink, PaymentRequest };
+export type { PaymentLink, PaymentRequest, PayoutFieldDescriptor };
 
 export interface LinkWithRequest {
   link: PaymentLink;
   request: PaymentRequest;
+}
+
+/** Anchor field descriptors + the seller's previously-saved (masked) payout
+ *  fields for the cash-out form (issue #32). */
+export interface OfframpRequirements {
+  /** Anchor's field descriptors — drives the dynamic form. */
+  descriptors: PayoutFieldDescriptor[];
+  /**
+   * Previously-saved values, masked to last 4 chars server-side. Null on first
+   * cash-out. The form uses these to show "already on file" and skips fields
+   * the seller leaves blank (meaning "reuse saved value").
+   */
+  savedFields: Record<string, string> | null;
 }
 
 /** A webhook delivery record for timeline display. */
@@ -274,6 +287,9 @@ export const api = {
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
 
+  /** Anchor field descriptors + masked saved payout fields for the cash-out form (issue #32). */
+  getOfframpRequirements: (id: string) => http<OfframpRequirements>(`/links/${id}/offramp-requirements`),
+
   getDetail: (id: string) => http<LinkDetail>(`/links/${id}/detail`),
 
   getReceipt: (reference: string) => http<PublicReceipt>(`/r/${reference}`),
@@ -285,6 +301,17 @@ export const api = {
     ),
 
   health: () => http<HealthResponse>("/health"),
+
+  quoteCashOut: (id: string, targetCurrency: string) =>
+    http<{
+      quoteId: string;
+      sourceAmount: string;
+      targetCurrency: string;
+      targetAmount: string; // Gross
+      rate: string;
+      fee: { amount: string; currency: string; source: string };
+      netTargetAmount: string; // Net
+    }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
 
   cashOut: (
     id: string,

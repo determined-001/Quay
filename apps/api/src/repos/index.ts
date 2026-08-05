@@ -7,6 +7,7 @@ import type {
   KycRecord,
   KycRepository,
   KycStatus,
+  LinkPaymentRecord,
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
@@ -24,6 +25,7 @@ import type {
 import type { DB } from "../db/client";
 import {
   links,
+  linkPayments,
   sellers,
   webhooks,
   webhookDeliveries,
@@ -35,6 +37,7 @@ import {
   revokedTokens,
   apiKeys,
 } from "../db/schema";
+import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
 import { encryptSecret, last4 } from "../services/secret-crypto";
@@ -61,13 +64,19 @@ function rowToLink(row: LinkRow): PaymentLink {
     txHash: row.txHash ?? null,
     payer: row.payer ?? null,
     paidAmount: row.paidAmount ?? null,
+    overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
     offrampStatus: row.offrampStatus ?? null,
     offrampIndicativeRate: row.offrampIndicativeRate ?? null,
     offrampRate: row.offrampRate ?? null,
     offrampRateDelta: row.offrampRateDelta ?? null,
+    offrampFeeAmount: row.offrampFeeAmount ?? null,
+    offrampFeeCurrency: row.offrampFeeCurrency ?? null,
+    offrampFeeSource: row.offrampFeeSource ?? null,
+    offrampNetTargetAmount: row.offrampNetTargetAmount ?? null,
     expiresAt: row.expiresAt ?? null,
+    isDemo: row.isDemo ?? false,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -92,13 +101,19 @@ export class DrizzleLinkRepository implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
       offrampIndicativeRate: null,
       offrampRate: null,
       offrampRateDelta: null,
+      offrampFeeAmount: null,
+      offrampFeeCurrency: null,
+      offrampFeeSource: null,
+      offrampNetTargetAmount: null,
       expiresAt: input.expiresAt,
+      isDemo: input.isDemo ?? false,
       createdAt: now,
       updatedAt: now,
     };
@@ -150,16 +165,67 @@ export class DrizzleLinkRepository implements LinkRepository {
         txHash: link.txHash,
         payer: link.payer,
         paidAmount: link.paidAmount,
+        overpaidAmount: link.overpaidAmount,
         offrampJobId: link.offrampJobId,
         offrampTargetCurrency: link.offrampTargetCurrency,
         offrampStatus: link.offrampStatus,
         offrampIndicativeRate: link.offrampIndicativeRate,
         offrampRate: link.offrampRate,
         offrampRateDelta: link.offrampRateDelta,
+        offrampFeeAmount: link.offrampFeeAmount,
+        offrampFeeCurrency: link.offrampFeeCurrency,
+        offrampFeeSource: link.offrampFeeSource,
+        offrampNetTargetAmount: link.offrampNetTargetAmount,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
   }
+
+  /** Delete all rows flagged as demo data. Called by `pnpm demo:reset`. */
+  async deleteDemo(): Promise<number> {
+    const rows = await this.db.select({ id: links.id }).from(links).where(eq(links.isDemo, true));
+    if (rows.length > 0) {
+      await this.db.delete(links).where(eq(links.isDemo, true));
+    }
+    return rows.length;
+  }
+
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    await this.db
+      .insert(linkPayments)
+      .values({
+        id: newId("pmt"),
+        linkId: payment.linkId,
+        txHash: payment.txHash,
+        payer: payment.payer,
+        amount: payment.amount,
+        assetCode: payment.asset.code,
+        assetIssuer: payment.asset.issuer,
+        createdAt: payment.createdAt,
+      })
+      .onConflictDoNothing({ target: linkPayments.txHash });
+  }
+
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const rows = await this.db
+      .select({ amount: linkPayments.amount })
+      .from(linkPayments)
+      .where(eq(linkPayments.linkId, linkId));
+    const total = rows.reduce((sum, r) => sum + toStroops(r.amount), 0n);
+    return fromStroops(total);
+  }
+}
+
+function rowToSeller(row: typeof sellers.$inferSelect): Seller {
+  let payoutFields: Record<string, string> | null = null;
+  if (row.payoutFieldsJson) {
+    try {
+      payoutFields = JSON.parse(row.payoutFieldsJson) as Record<string, string>;
+    } catch {
+      payoutFields = null;
+    }
+  }
+  return { id: row.id, name: row.name, wallet: row.wallet, payoutFields, createdAt: row.createdAt };
 }
 
 export class DrizzleSellerRepository implements SellerRepository {
@@ -173,27 +239,45 @@ export class DrizzleSellerRepository implements SellerRepository {
       if (existing[0].wallet !== wallet) {
         await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
       }
-      return { ...existing[0], wallet };
+      return rowToSeller({ ...existing[0], wallet });
     }
-    const seller: Seller = { id: newId("sel"), name, wallet, createdAt: Date.now() };
+    const now = Date.now();
+    const seller: typeof sellers.$inferSelect = {
+      id: newId("sel"),
+      name,
+      wallet,
+      payoutFieldsJson: null,
+      createdAt: now,
+    };
     await this.db.insert(sellers).values(seller);
-    return seller;
+    return rowToSeller(seller);
   }
 
   async getDefault(): Promise<Seller> {
     const rows = await this.db.select().from(sellers).limit(1);
     if (!rows[0]) throw new Error("No default seller seeded");
-    return rows[0];
+    return rowToSeller(rows[0]);
   }
 
   async findById(id: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
-    return rows[0] ?? null;
+    return rows[0] ? rowToSeller(rows[0]) : null;
+  }
+
+  async savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void> {
+    await this.db
+      .update(sellers)
+      .set({ payoutFieldsJson: JSON.stringify(fields) })
+      .where(eq(sellers.id, sellerId));
   }
 
   async findByWallet(wallet: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
-    return rows[0] ?? null;
+    // Must go through rowToSeller — the raw row carries payoutFieldsJson but
+    // not the parsed payoutFields; every other read path already does this,
+    // and this is the SEP-10 login path, so skipping it would make the payout
+    // reuse feature silently do nothing for wallet-logged-in sellers.
+    return rows[0] ? rowToSeller(rows[0]) : null;
   }
 
   async createIfAbsent(wallet: string): Promise<Seller> {
@@ -556,135 +640,5 @@ export class DrizzleKycRepository implements KycRepository {
       .insert(sellerKyc)
       .values(row)
       .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
-  }
-}
-
-export interface ApiKey {
-  id: string;
-  sellerId: string;
-  name: string;
-  /** First 8 chars of the plaintext key — safe to display / index. */
-  prefix: string;
-  /** scrypt hash of the full plaintext key. The plaintext is never stored. */
-  hash: string;
-  scopes: ApiKeyScope[];
-  lastUsedAt: number | null;
-  createdAt: number;
-  revokedAt: number | null;
-}
-
-type ApiKeyRow = typeof apiKeys.$inferSelect;
-
-function rowToApiKey(row: ApiKeyRow): ApiKey {
-  return {
-    id: row.id,
-    sellerId: row.sellerId,
-    name: row.name,
-    prefix: row.prefix,
-    hash: row.hash,
-    scopes: decodeScopesFromDb(row.scopes),
-    lastUsedAt: row.lastUsedAt ?? null,
-    createdAt: row.createdAt,
-    revokedAt: row.revokedAt ?? null,
-  };
-}
-
-/**
- * Persistence for scoped API keys (issue #40, 6.3).
- *
- * Prefix lookup: the auth middleware pre-filters on the 8-char prefix (cheap,
- * indexed) before spending a full scrypt verify, and only ever sees hashes.
- */
-export class DrizzleApiKeyRepository {
-  constructor(private readonly db: DB) {}
-
-  async create(input: {
-    sellerId: string;
-    name: string;
-    prefix: string;
-    hash: string;
-    scopes: ApiKeyScope[];
-  }): Promise<ApiKey> {
-    const now = Date.now();
-    const row: ApiKeyRow = {
-      id: newId("ak"),
-      sellerId: input.sellerId,
-      name: input.name,
-      prefix: input.prefix,
-      hash: input.hash,
-      scopes: encodeScopesForDb(input.scopes),
-      lastUsedAt: null,
-      createdAt: now,
-      revokedAt: null,
-    };
-    await this.db.insert(apiKeys).values(row);
-    return rowToApiKey(row);
-  }
-
-  /** Find all keys (active or not) for a seller. */
-  async listBySeller(sellerId: string): Promise<ApiKey[]> {
-    const rows = await this.db
-      .select()
-      .from(apiKeys)
-      .where(eq(apiKeys.sellerId, sellerId));
-    return rows.map(rowToApiKey).sort((a, b) => b.createdAt - a.createdAt);
-  }
-
-  /**
-   * Find a non-revoked key by its 8-char prefix for fast pre-filtering before
-   * the expensive scrypt verify. Returns null when no active key with that
-   * prefix exists (saves the scrypt round-trip for unknown prefixes).
-   */
-  async findActiveByPrefix(prefix: string): Promise<ApiKey | null> {
-    const rows = await this.db
-      .select()
-      .from(apiKeys)
-      .where(eq(apiKeys.prefix, prefix))
-      .limit(10); // prefix is not unique in theory; verify hash for all matches
-    const active = rows.filter((r) => r.revokedAt === null).map(rowToApiKey);
-    return active[0] ?? null;
-  }
-
-  /**
-   * Same as findActiveByPrefix but returns all non-revoked rows sharing the
-   * prefix (extremely unlikely >1, but correct to check all before failing).
-   */
-  async findAllActiveByPrefix(prefix: string): Promise<ApiKey[]> {
-    const rows = await this.db
-      .select()
-      .from(apiKeys)
-      .where(eq(apiKeys.prefix, prefix))
-      .limit(10);
-    return rows.filter((r) => r.revokedAt === null).map(rowToApiKey);
-  }
-
-  async findById(id: string): Promise<ApiKey | null> {
-    const rows = await this.db
-      .select()
-      .from(apiKeys)
-      .where(eq(apiKeys.id, id))
-      .limit(1);
-    return rows[0] ? rowToApiKey(rows[0]) : null;
-  }
-
-  /** Soft-delete: set revokedAt to now. */
-  async revoke(id: string): Promise<void> {
-    await this.db
-      .update(apiKeys)
-      .set({ revokedAt: Date.now() })
-      .where(eq(apiKeys.id, id));
-  }
-
-  /**
-   * Fire-and-forget last_used_at update. Call after a successful verification;
-   * the promise is intentionally not awaited on the hot path so auth latency
-   * is not affected by a DB round-trip. Returns the promise so the caller can
-   * attach a `.catch()` (an unhandled rejection would take the process down).
-   */
-  touchLastUsed(id: string): Promise<unknown> {
-    return this.db
-      .update(apiKeys)
-      .set({ lastUsedAt: Date.now() })
-      .where(eq(apiKeys.id, id));
   }
 }

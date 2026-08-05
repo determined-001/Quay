@@ -1,19 +1,24 @@
-import type {
-  CreateLinkInput,
-  KycPort,
-  KycRecord,
-  LinkRepository,
-  OffRampJob,
-  OffRampMode,
-  OffRampPort,
-  OffRampQuote,
-  OffRampStateRepository,
-  PaymentLink,
-  StoredOffRampJob,
-  StoredOffRampQuote,
-  Webhook,
-  WebhookDelivery,
-  WebhookRepository,
+import {
+  fromStroops,
+  toStroops,
+  type CreateLinkInput,
+  type KycPort,
+  type KycRecord,
+  type LinkPaymentRecord,
+  type LinkRepository,
+  type OffRampInitiation,
+  type OffRampJob,
+  type OffRampMode,
+  type OffRampPort,
+  type OffRampQuote,
+  type OffRampStateRepository,
+  type PaymentLink,
+  type PayoutFieldDescriptor,
+  type StoredOffRampJob,
+  type StoredOffRampQuote,
+  type Webhook,
+  type WebhookDelivery,
+  type WebhookRepository,
 } from "@checkout/core";
 import { encryptSecret } from "../src/services/secret-crypto";
 
@@ -34,13 +39,19 @@ export function makeLink(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: "tx1",
     payer: "GBUYER",
     paidAmount: "10",
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
     offrampIndicativeRate: null,
     offrampRate: null,
     offrampRateDelta: null,
+    offrampFeeAmount: null,
+    offrampFeeCurrency: null,
+    offrampFeeSource: null,
+    offrampNetTargetAmount: null,
     expiresAt: null,
+    isDemo: false,
     createdAt: 0,
     updatedAt: 0,
     ...over,
@@ -50,6 +61,8 @@ export function makeLink(over: Partial<PaymentLink> = {}): PaymentLink {
 /** In-memory LinkRepository, seeded from a fixed list of links. */
 export class FakeLinkRepository implements LinkRepository {
   private readonly byId = new Map<string, PaymentLink>();
+  private readonly payments: LinkPaymentRecord[] = [];
+  private readonly seenTxHashes = new Set<string>();
 
   constructor(seed: PaymentLink[] = []) {
     for (const l of seed) this.byId.set(l.id, l);
@@ -61,13 +74,19 @@ export class FakeLinkRepository implements LinkRepository {
       offrampIndicativeRate: null,
       offrampRate: null,
       offrampRateDelta: null,
+      offrampFeeAmount: null,
+      offrampFeeCurrency: null,
+      offrampFeeSource: null,
+      offrampNetTargetAmount: null,
       status: "active",
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
+      isDemo: input.isDemo ?? false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -103,6 +122,19 @@ export class FakeLinkRepository implements LinkRepository {
 
   async save(link: PaymentLink): Promise<void> {
     this.byId.set(link.id, { ...link });
+  }
+
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    if (this.seenTxHashes.has(payment.txHash)) return; // duplicate tx_hash — no-op
+    this.seenTxHashes.add(payment.txHash);
+    this.payments.push(payment);
+  }
+
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const total = this.payments
+      .filter((p) => p.linkId === linkId)
+      .reduce((sum, p) => sum + toStroops(p.amount), 0n);
+    return fromStroops(total);
   }
 
   get(id: string): PaymentLink | undefined {
@@ -223,11 +255,14 @@ export class ScriptedOffRamp implements OffRampPort {
   async quote(): Promise<OffRampQuote> {
     throw new Error("not used in these tests");
   }
-  async initiate(): Promise<OffRampJob> {
+  async initiate(): Promise<OffRampInitiation> {
     throw new Error("not used in these tests");
   }
   async status(jobId: string): Promise<OffRampJob> {
     return this.statusImpl(jobId);
+  }
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 }
 

@@ -1,9 +1,11 @@
 import type {
   AssetRef,
+  OffRampInitiation,
   OffRampJob,
   OffRampMode,
   OffRampPort,
   OffRampQuote,
+  PayoutFieldDescriptor,
   SellerPayoutRef,
 } from "@checkout/core";
 import { metrics } from "../metrics";
@@ -60,12 +62,16 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     return this.call("quote", () => this.inner.quote(input));
   }
 
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob> {
+  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampInitiation> {
     return this.call("initiate", () => this.inner.initiate(input));
   }
 
   status(jobId: string): Promise<OffRampJob> {
     return this.call("status", () => this.inner.status(jobId));
+  }
+
+  offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]> {
+    return this.call("offrampRequirements", () => this.inner.offrampRequirements(assetCode));
   }
 
   private async call<T>(method: string, fn: () => Promise<T>): Promise<T> {

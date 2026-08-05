@@ -4,6 +4,13 @@ export const sellers = sqliteTable("sellers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   wallet: text("wallet").notNull().unique(),
+  /**
+   * JSON-serialised Record<string,string> of the seller's last-used payout
+   * fields (e.g. bank account number). Never emitted in logs or webhooks;
+   * exposed to the dashboard only in masked form. Null until the seller
+   * completes their first cash-out.
+   */
+  payoutFieldsJson: text("payout_fields_json"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -21,6 +28,8 @@ export const links = sqliteTable("links", {
   txHash: text("tx_hash"),
   payer: text("payer"),
   paidAmount: text("paid_amount"),
+  /** Surplus once cumulative payments exceed the requested amount (issue 1.4). */
+  overpaidAmount: text("overpaid_amount"),
   offrampJobId: text("offramp_job_id"),
   offrampTargetCurrency: text("offramp_target_currency"),
   offrampStatus: text("offramp_status"),
@@ -30,9 +39,31 @@ export const links = sqliteTable("links", {
   offrampRate: text("offramp_rate"),
   /** Absolute delta: firm − indicative (issue 3.5 telemetry). */
   offrampRateDelta: text("offramp_rate_delta"),
+  /** Anchor fee quoted at cash-out time (issue 1.5), so the receipt can reproduce it. */
+  offrampFeeAmount: text("offramp_fee_amount"),
+  offrampFeeCurrency: text("offramp_fee_currency"),
+  offrampFeeSource: text("offramp_fee_source"), // "anchor" | "estimated"
+  offrampNetTargetAmount: text("offramp_net_target_amount"),
   expiresAt: integer("expires_at"),
+  /** Set to 1 for rows created by the demo seed script. Shown as a badge in the
+   *  dashboard and cleaned up by `pnpm demo:reset` / POST /demo/reset. */
+  isDemo: integer("is_demo", { mode: "boolean" }).notNull().default(false),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+});
+
+// Authoritative ledger of every payment recorded against a link — cumulative
+// accounting (issue 1.4) sums these rather than trusting a single payment.
+// `txHash` is unique so a reprocessed payment can never double-count.
+export const linkPayments = sqliteTable("link_payments", {
+  id: text("id").primaryKey(),
+  linkId: text("link_id").notNull(),
+  txHash: text("tx_hash").notNull().unique(),
+  payer: text("payer").notNull(),
+  amount: text("amount").notNull(),
+  assetCode: text("asset_code").notNull(),
+  assetIssuer: text("asset_issuer"), // null = native XLM
+  createdAt: integer("created_at").notNull(),
 });
 
 export const webhooks = sqliteTable("webhooks", {
@@ -129,31 +160,4 @@ export const revokedTokens = sqliteTable("revoked_tokens", {
   jti: text("jti").primaryKey(),
   expiresAt: integer("expires_at").notNull(),
   revokedAt: integer("revoked_at").notNull(),
-});
-
-/**
- * Scoped API keys for programmatic access (issue #40, 6.3).
- *
- * Security invariants:
- *   - `hash` is an scrypt digest of the full key — the plaintext is NEVER stored.
- *   - `prefix` is the first 8 chars of the key (safe to index and display).
- *   - `scopes` is a comma-separated list drawn from ApiKeyScope.
- *   - `revokedAt` non-null means the key is invalid regardless of hash match.
- *   - `lastUsedAt` is updated asynchronously (fire-and-forget) to avoid adding
- *     latency to the hot path.
- */
-export const apiKeys = sqliteTable("api_keys", {
-  id: text("id").primaryKey(),
-  sellerId: text("seller_id").notNull(),
-  name: text("name").notNull(),
-  /** First 8 chars of the plaintext key — used for display / lookup. */
-  prefix: text("prefix").notNull(),
-  /** scrypt hash of the full plaintext key (hex-encoded). */
-  hash: text("hash").notNull(),
-  /** Comma-separated scope list, e.g. "links:read,links:write". */
-  scopes: text("scopes").notNull(),
-  lastUsedAt: integer("last_used_at"),
-  createdAt: integer("created_at").notNull(),
-  /** Non-null when the key has been revoked. */
-  revokedAt: integer("revoked_at"),
 });

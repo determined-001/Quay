@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  fromStroops,
+  toStroops,
+  type LinkPaymentRecord,
   type LinkRepository,
   type NormalizedPayment,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampPort,
   type OffRampQuote,
   type PaymentLink,
+  type PayoutFieldDescriptor,
   type RailPort,
   type Seller,
   type Webhook,
@@ -37,13 +42,19 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
     offrampIndicativeRate: null,
     offrampRate: null,
     offrampRateDelta: null,
+    offrampFeeAmount: null,
+    offrampFeeCurrency: null,
+    offrampFeeSource: null,
+    offrampNetTargetAmount: null,
     expiresAt: null,
+    isDemo: false,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
     ...over,
@@ -64,6 +75,10 @@ class FakeLinkRepo implements LinkRepository {
       offrampIndicativeRate: null,
       offrampRate: null,
       offrampRateDelta: null,
+      offrampFeeAmount: null,
+      offrampFeeCurrency: null,
+      offrampFeeSource: null,
+      offrampNetTargetAmount: null,
       title: input.title,
       amount: input.amount,
       asset: input.asset,
@@ -71,10 +86,12 @@ class FakeLinkRepo implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
       expiresAt: input.expiresAt,
+      isDemo: input.isDemo ?? false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -108,6 +125,19 @@ class FakeLinkRepo implements LinkRepository {
   async save(l: PaymentLink): Promise<void> {
     this.byId.set(l.id, { ...l, updatedAt: Date.now() });
   }
+  private readonly payments: LinkPaymentRecord[] = [];
+  private readonly seenTxHashes = new Set<string>();
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    if (this.seenTxHashes.has(payment.txHash)) return;
+    this.seenTxHashes.add(payment.txHash);
+    this.payments.push(payment);
+  }
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const total = this.payments
+      .filter((p) => p.linkId === linkId)
+      .reduce((sum, p) => sum + toStroops(p.amount), 0n);
+    return fromStroops(total);
+  }
 }
 
 class FakeSellerRepo {
@@ -124,6 +154,7 @@ class FakeSellerRepo {
   async createIfAbsent(): Promise<Seller> {
     return this.seller;
   }
+  async savePayoutFields(): Promise<void> {}
 }
 
 // Captures successful deliveries (2xx) so tests can introspect the body.
@@ -187,11 +218,14 @@ class FakeOffRamp implements OffRampPort {
   async quote(): Promise<OffRampQuote> {
     throw new Error("not used in this suite");
   }
-  async initiate(): Promise<OffRampJob> {
+  async initiate(): Promise<OffRampInitiation> {
     throw new Error("not used in this suite");
   }
   async status(): Promise<OffRampJob> {
     throw new Error("not used in this suite");
+  }
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 }
 
@@ -259,6 +293,7 @@ async function makeFixture(): Promise<Fixture> {
     id: "s_1",
     name: "Demo",
     wallet: DEST,
+    payoutFields: null,
     createdAt: 1_700_000_000_000,
   });
   const service = new LinkService({

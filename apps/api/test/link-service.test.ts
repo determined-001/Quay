@@ -40,10 +40,12 @@ function makeService(opts: {
   return new LinkService({
     links: opts.links,
     sellers: {
-      getDefault: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", createdAt: 0 }),
-      findById: async () => null,
+      getDefault: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 }),
+      findById: async (id) =>
+        id === "sel_1" ? { id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 } : null,
       findByWallet: async () => null,
-      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", createdAt: 0 }),
+      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 }),
+      savePayoutFields: async () => {},
     },
     webhooks: opts.webhooks ?? new FakeWebhookRepository(),
     rail: UNUSED_RAIL,
@@ -199,7 +201,7 @@ describe("LinkService.triggerCashOut — KYC gate", () => {
     const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 60_000 });
     const service = makeService({ links, offramp, offrampState, kyc: new AlwaysAcceptedKyc() });
 
-    const job = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    const { job } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
 
     expect(job.status).toBe("pending");
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
@@ -214,7 +216,7 @@ describe("LinkService + MockAnchorOffRamp — restart survives (integration)", (
     // "Pre-restart" process: trigger the cash-out.
     const preRestartOfframp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 0 });
     const preRestartService = makeService({ links, offramp: preRestartOfframp, offrampState });
-    const job = await preRestartService.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    const { job } = await preRestartService.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
 
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
     expect(links.get("lnk_1")?.offrampJobId).toBe(job.jobId);
