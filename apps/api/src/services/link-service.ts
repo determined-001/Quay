@@ -585,6 +585,40 @@ export class LinkService {
     });
   }
 
+  /**
+   * Fetch a firm quote for a cash-out — gross, fee, and net — without
+   * initiating anything (issue 1.5). Same gates as `triggerCashOut` up to
+   * the quote step, so the seller sees exactly the numbers they'd get by
+   * actually committing, but nothing state-changing happens here: no quote
+   * is initiated, no job is created, the link is left untouched.
+   */
+  async quoteCashOut(linkId: string, targetCurrency: string, opts: ServiceCallOptions = {}): Promise<OffRampQuote> {
+    const log = (opts.logger ?? this.deps.logger!);
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+    if (link.status !== "paid") {
+      throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
+    }
+    if (!this.health.isAvailable()) {
+      throw new HttpError(503, "anchor_unavailable");
+    }
+    const kyc = await this.deps.kyc.status(link.sellerId);
+    if (kyc.status !== "ACCEPTED") {
+      throw new HttpError(403, "kyc_required");
+    }
+
+    const sourceAmount = link.paidAmount ?? link.amount;
+    try {
+      return await this.deps.offramp.quote(
+        { linkId: link.id, sourceAsset: link.asset, sourceAmount, targetCurrency },
+        { logger: log },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp error: ${message}`);
+    }
+  }
+
   /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
   async triggerCashOut(
     linkId: string,
@@ -703,6 +737,13 @@ export class LinkService {
         link.offrampRateDelta = (firm - indicative).toFixed(6);
       }
     }
+
+    // Fee (issue 1.5): persisted at initiation time so a receipt can reproduce
+    // gross/fee/net without recomputing against a rate that may have moved on.
+    link.offrampFeeAmount = quote.fee.amount;
+    link.offrampFeeCurrency = quote.fee.currency;
+    link.offrampFeeSource = quote.fee.source;
+    link.offrampNetTargetAmount = quote.netTargetAmount;
 
     await this.deps.links.save(link);
     metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });

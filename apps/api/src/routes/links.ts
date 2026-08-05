@@ -132,6 +132,27 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     }
   });
 
+  // Firm cash-out quote — gross/fee/net — without initiating anything (issue
+  // 1.5). Seller-only: mirrors the ownership check on cash-out itself, since
+  // this exercises the same KYC/health gates and hits the anchor for real.
+  app.get("/:id/cash-out/quote", auth, async (ctx) => {
+    const linkId = ctx.req.param("id");
+    const targetCurrency = ctx.req.query("targetCurrency");
+    if (!targetCurrency) return ctx.json({ error: "invalid_query", message: "targetCurrency is required" }, 400);
+    try {
+      const existing = await c.service.getLink(linkId);
+      if (!existing) return ctx.json({ error: "not_found" }, 404);
+      if (existing.link.sellerId !== ctx.get("seller").id) {
+        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+      }
+      const quote = await c.service.quoteCashOut(linkId, targetCurrency, { logger: getLogger(ctx) });
+      return ctx.json(quote);
+    } catch (err) {
+      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
+      throw err;
+    }
+  });
+
   // Seller-initiated cash-out to local currency.
   app.post("/:id/cash-out", strictRateLimit, auth, idempotent, async (ctx) => {
     const log = getLogger(ctx);

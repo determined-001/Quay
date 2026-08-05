@@ -279,7 +279,6 @@ export const api = {
       netTargetAmount: string; // Net
     }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
 
-  cashOut: (id: string, targetCurrency: string, payoutFields: Record<string, string> = {}) =>
   cashOut: (
     id: string,
     targetCurrency: string,

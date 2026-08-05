@@ -51,6 +51,10 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     offrampIndicativeRate: null,
     offrampRate: null,
     offrampRateDelta: null,
+    offrampFeeAmount: null,
+    offrampFeeCurrency: null,
+    offrampFeeSource: null,
+    offrampNetTargetAmount: null,
     expiresAt: null,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
@@ -263,6 +267,10 @@ class FakeLinkRepoForAnchor implements LinkRepository {
       offrampIndicativeRate: null,
       offrampRate: null,
       offrampRateDelta: null,
+      offrampFeeAmount: null,
+      offrampFeeCurrency: null,
+      offrampFeeSource: null,
+      offrampNetTargetAmount: null,
       expiresAt: input.expiresAt,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -448,6 +456,8 @@ class FlakyOffRamp implements OffRampPort {
       targetAmount: "16500",
       rate: "1650",
       expiresAt: Date.now() + 60_000,
+      fee: { amount: "165", currency: "NGN", source: "estimated" },
+      netTargetAmount: "16335",
     };
   }
   async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampInitiation> {

@@ -151,14 +151,17 @@ export class FakeOffRampPort implements OffRampPort {
     targetCurrency: string;
   }): Promise<OffRampQuote> {
     const rate = input.targetCurrency === "NGN" ? 1650 : 1;
+    const targetAmount = (Number(input.sourceAmount) * rate).toFixed(2);
     return {
       quoteId: `quote_${this.nextQuoteId++}`,
       sourceAsset: input.sourceAsset,
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
-      targetAmount: (Number(input.sourceAmount) * rate).toFixed(2),
+      targetAmount,
       rate: String(rate),
       expiresAt: Date.now() + 300_000,
+      fee: { amount: "0", currency: input.targetCurrency, source: "estimated" },
+      netTargetAmount: targetAmount,
     };
   }
 

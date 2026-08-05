@@ -58,6 +58,16 @@ export interface PaymentLink {
    * (issue 3.5 / 3.8 telemetry).
    */
   offrampRateDelta: string | null;
+  /**
+   * Anchor fee quoted at the moment cash-out was initiated (issue 1.5), so a
+   * receipt can reproduce gross/fee/net without recomputing against a rate
+   * that may have moved since. `offrampFeeSource` is "anchor" when the anchor
+   * itself reported it (SEP-38 total_price), "estimated" for the mock adapter.
+   */
+  offrampFeeAmount: string | null;
+  offrampFeeCurrency: string | null;
+  offrampFeeSource: string | null;
+  offrampNetTargetAmount: string | null;
   expiresAt: number | null; // epoch ms
   createdAt: number;
   updatedAt: number;

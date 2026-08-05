@@ -79,14 +79,22 @@ export class AnchorOffRamp implements OffRampPort {
       price: q.price,
     });
 
+    // Gross is what sourceAmount converts to at the quoted rate; buyAmount is
+    // what the anchor actually pays out — the difference is its fee (issue 1.5).
+    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
+    const netTargetAmount = q.buyAmount;
+    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+
     return {
       quoteId: q.id,
       sourceAsset: input.sourceAsset,
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
-      targetAmount: q.buyAmount,
+      targetAmount: grossTargetAmount,
       rate: q.price,
       expiresAt: Date.parse(q.expiresAt),
+      fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
+      netTargetAmount,
     };
   }
 

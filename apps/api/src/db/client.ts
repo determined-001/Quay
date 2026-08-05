@@ -21,6 +21,8 @@ const BOOTSTRAP_SQL = [
      tx_hash TEXT, payer TEXT, paid_amount TEXT, overpaid_amount TEXT,
      offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
      offramp_indicative_rate TEXT, offramp_rate TEXT, offramp_rate_delta TEXT,
+     offramp_fee_amount TEXT, offramp_fee_currency TEXT, offramp_fee_source TEXT,
+     offramp_net_target_amount TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   // Cumulative payment ledger (issue 1.4) — one row per payment ever recorded

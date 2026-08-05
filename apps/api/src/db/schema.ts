@@ -32,6 +32,11 @@ export const links = sqliteTable("links", {
   offrampRate: text("offramp_rate"),
   /** Absolute delta: firm − indicative (issue 3.5 telemetry). */
   offrampRateDelta: text("offramp_rate_delta"),
+  /** Anchor fee quoted at cash-out time (issue 1.5), so the receipt can reproduce it. */
+  offrampFeeAmount: text("offramp_fee_amount"),
+  offrampFeeCurrency: text("offramp_fee_currency"),
+  offrampFeeSource: text("offramp_fee_source"), // "anchor" | "estimated"
+  offrampNetTargetAmount: text("offramp_net_target_amount"),
   expiresAt: integer("expires_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),

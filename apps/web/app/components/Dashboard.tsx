@@ -488,6 +488,36 @@ export default function Dashboard() {
         )}
       </section>
 
+      <section className="panel">
+        <h2>Export</h2>
+        <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          Download all links as CSV for your accounting. Optionally filter by date range.
+        </p>
+        <div className="csv-export-row">
+          <div className="field csv-field">
+            <label htmlFor="csv-from">From</label>
+            <input
+              id="csv-from"
+              type="date"
+              value={csvFrom}
+              onChange={(e) => setCsvFrom(e.target.value)}
+            />
+          </div>
+          <div className="field csv-field">
+            <label htmlFor="csv-to">To</label>
+            <input
+              id="csv-to"
+              type="date"
+              value={csvTo}
+              onChange={(e) => setCsvTo(e.target.value)}
+            />
+          </div>
+          <button className="btn" onClick={handleCsvExport} disabled={exporting}>
+            {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+        </div>
+      </section>
+
       {cashOutQuote && (
         <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
           <div className="panel" style={{ width: 400, maxWidth: "90%", margin: 0 }}>
