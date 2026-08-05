@@ -405,28 +405,47 @@ export class LinkService {
     if (outcome.kind === "paid") {
       const link = outcome.link;
       if (!canTransition(link.status, "paid")) return false; // already settled/terminal
+      await this.deps.links.recordPayment({
+        linkId: link.id,
+        txHash: payment.txHash,
+        payer: payment.from,
+        amount: normalizeAmount(payment.amount),
+        asset: payment.asset,
+        createdAt: Date.now(),
+      });
+      const cumulative = await this.deps.links.sumPaymentsForLink(link.id);
       link.status = "paid";
       link.txHash = payment.txHash;
       link.payer = payment.from;
-      link.paidAmount = normalizeAmount(payment.amount);
+      link.paidAmount = cumulative;
+      link.overpaidAmount = outcome.overpaid ? normalizeAmount(outcome.overpaidAmount) : null;
       await this.deps.links.save(link);
       metrics.linkStatusTransitionsTotal.inc({ to: "paid" });
       const paidAt = Date.parse(payment.createdAt);
       if (!Number.isNaN(paidAt)) metrics.paymentToPaidLatencySeconds.observe((Date.now() - paidAt) / 1000);
-      await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid });
+      await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid, overpaidAmount: link.overpaidAmount });
       return true;
     }
 
     if (outcome.kind === "underpaid") {
       const link = outcome.link;
       if (!canTransition(link.status, "underpaid")) return false;
+      await this.deps.links.recordPayment({
+        linkId: link.id,
+        txHash: payment.txHash,
+        payer: payment.from,
+        amount: normalizeAmount(payment.amount),
+        asset: payment.asset,
+        createdAt: Date.now(),
+      });
+      const cumulative = await this.deps.links.sumPaymentsForLink(link.id);
       link.status = "underpaid";
       link.txHash = payment.txHash;
       link.payer = payment.from;
-      link.paidAmount = normalizeAmount(payment.amount);
+      link.paidAmount = cumulative;
       await this.deps.links.save(link);
       metrics.linkStatusTransitionsTotal.inc({ to: "underpaid" });
-      await this.fireWebhook(link, "link.underpaid", {});
+      await this.fireWebhook(link, "link.underpaid", { outstanding: outcome.outstanding });
       return false;
     }
 

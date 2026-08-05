@@ -304,6 +304,18 @@ export interface CreateLinkInput {
   expiresAt: number | null;
 }
 
+/** One incoming payment recorded against a link — the authoritative ledger
+ *  row cumulative accounting sums over (issue 1.4). `txHash` is unique so a
+ *  reprocessed payment can never double-count. */
+export interface LinkPaymentRecord {
+  linkId: string;
+  txHash: string;
+  payer: string;
+  amount: string;
+  asset: AssetRef;
+  createdAt: number;
+}
+
 export interface LinkRepository {
   create(input: CreateLinkInput): Promise<PaymentLink>;
   findById(id: string): Promise<PaymentLink | null>;
@@ -316,6 +328,12 @@ export interface LinkRepository {
   /** Active (or underpaid) links whose value lands in `destination`. */
   openLinksForDestination(destination: string): Promise<PaymentLink[]>;
   save(link: PaymentLink): Promise<void>;
+  /** Append a payment to the link's ledger. A duplicate `txHash` is a no-op —
+   *  cumulative accounting must never double-count a reprocessed payment. */
+  recordPayment(payment: LinkPaymentRecord): Promise<void>;
+  /** Sum of every payment ever recorded for this link, as a decimal string
+   *  ("0" if none). The authoritative source `paidAmount` is cached from. */
+  sumPaymentsForLink(linkId: string): Promise<string>;
 }
 
 export interface Seller {
