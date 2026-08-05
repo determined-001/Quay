@@ -1,10 +1,12 @@
 import {
   OffRampJobNotFoundError,
   type AssetRef,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampMode,
   type OffRampPort,
   type OffRampQuote,
+  type IndicativePrice,
   type OffRampStateRepository,
   type SellerPayoutRef,
 } from "@checkout/core";
@@ -65,6 +67,25 @@ export class MockAnchorOffRamp implements OffRampPort {
     this.alwaysFail = opts.alwaysFail ?? false;
   }
 
+  /**
+   * Indicative prices for all mock corridors — no network call, no quote burned
+   * (issue 3.5). Mirrors the shape of SEP-38 GET /prices so the dashboard can
+   * use the same path for both mock and testanchor modes.
+   */
+  async indicativePrices(input: {
+    sourceAsset: AssetRef;
+    sourceAmount: string;
+  }): Promise<IndicativePrice[]> {
+    // The mock doesn't vary rates by amount, but we accept the parameter so the
+    // call-site is uniform with the real adapter.
+    void input;
+    return Object.entries(MOCK_RATES).map(([currency, rate]) => ({
+      targetCurrency: currency,
+      price: String(rate),
+      deliveryMethods: ["BANK_TRANSFER"],
+    }));
+  }
+
   async quote(input: {
     linkId: string;
     sourceAsset: AssetRef;
@@ -106,7 +127,7 @@ export class MockAnchorOffRamp implements OffRampPort {
     linkId: string;
     quoteId: string;
     payout: SellerPayoutRef;
-  }): Promise<OffRampJob> {
+  }): Promise<OffRampInitiation> {
     const q = await this.state.getQuote(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
     if (Date.now() > q.expiresAt) throw new Error("Quote expired");
@@ -129,14 +150,7 @@ export class MockAnchorOffRamp implements OffRampPort {
       updatedAt: now,
     });
 
-    return {
-      jobId,
-      linkId: input.linkId,
-      status: "pending",
-      targetCurrency: q.buyCurrency,
-      targetAmount,
-      rate: q.price,
-    };
+    return { kind: "fields", jobId };
   }
 
   async status(jobId: string): Promise<OffRampJob> {
