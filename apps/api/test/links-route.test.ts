@@ -20,6 +20,7 @@ const ownedLink: PaymentLink = {
   txHash: null,
   payer: null,
   paidAmount: null,
+  overpaidAmount: null,
   offrampJobId: null,
   offrampTargetCurrency: null,
   offrampStatus: null,

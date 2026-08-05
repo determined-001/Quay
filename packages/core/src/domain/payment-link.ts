@@ -36,6 +36,7 @@ export interface PaymentLink {
   txHash: string | null;
   payer: string | null;
   paidAmount: string | null;
+  overpaidAmount: string | null;
   // off-ramp (filled when the seller cashes out)
   offrampJobId: string | null;
   offrampTargetCurrency: string | null;

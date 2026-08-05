@@ -18,11 +18,20 @@ const BOOTSTRAP_SQL = [
      id TEXT PRIMARY KEY, reference TEXT NOT NULL UNIQUE, seller_id TEXT NOT NULL,
      destination TEXT NOT NULL, muxed_id TEXT, title TEXT NOT NULL, amount TEXT NOT NULL,
      asset_code TEXT NOT NULL, asset_issuer TEXT, status TEXT NOT NULL,
-     tx_hash TEXT, payer TEXT, paid_amount TEXT,
+     tx_hash TEXT, payer TEXT, paid_amount TEXT, overpaid_amount TEXT,
      offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
      offramp_indicative_rate TEXT, offramp_rate TEXT, offramp_rate_delta TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
+  // Cumulative payment ledger (issue 1.4) — one row per payment ever recorded
+  // against a link, `tx_hash` unique so a reprocessed payment can't double-count.
+  `CREATE TABLE IF NOT EXISTS link_payments (
+     id TEXT PRIMARY KEY, link_id TEXT NOT NULL, tx_hash TEXT NOT NULL UNIQUE,
+     payer TEXT NOT NULL, amount TEXT NOT NULL,
+     asset_code TEXT NOT NULL, asset_issuer TEXT,
+     created_at INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS link_payments_link_id_idx ON link_payments (link_id)`,
   `CREATE TABLE IF NOT EXISTS webhooks (
      id TEXT PRIMARY KEY, seller_id TEXT NOT NULL, url TEXT NOT NULL,
      secret_encrypted TEXT NOT NULL, secret_last4 TEXT NOT NULL,
@@ -81,6 +90,7 @@ const MIGRATION_SQL = [
   `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,
+  `ALTER TABLE links ADD COLUMN overpaid_amount TEXT`,
 ];
 
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {

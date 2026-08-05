@@ -5,6 +5,7 @@ import type {
   KycRecord,
   KycRepository,
   KycStatus,
+  LinkPaymentRecord,
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
@@ -22,6 +23,7 @@ import type {
 import type { DB } from "../db/client";
 import {
   links,
+  linkPayments,
   sellers,
   webhooks,
   webhookDeliveries,
@@ -32,6 +34,7 @@ import {
   sellerKyc,
   revokedTokens,
 } from "../db/schema";
+import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
 import { encryptSecret, last4 } from "../services/secret-crypto";
@@ -58,6 +61,7 @@ function rowToLink(row: LinkRow): PaymentLink {
     txHash: row.txHash ?? null,
     payer: row.payer ?? null,
     paidAmount: row.paidAmount ?? null,
+    overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
     offrampStatus: row.offrampStatus ?? null,
@@ -89,6 +93,7 @@ export class DrizzleLinkRepository implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
@@ -147,6 +152,7 @@ export class DrizzleLinkRepository implements LinkRepository {
         txHash: link.txHash,
         payer: link.payer,
         paidAmount: link.paidAmount,
+        overpaidAmount: link.overpaidAmount,
         offrampJobId: link.offrampJobId,
         offrampTargetCurrency: link.offrampTargetCurrency,
         offrampStatus: link.offrampStatus,
@@ -156,6 +162,31 @@ export class DrizzleLinkRepository implements LinkRepository {
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
+  }
+
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    await this.db
+      .insert(linkPayments)
+      .values({
+        id: newId("pmt"),
+        linkId: payment.linkId,
+        txHash: payment.txHash,
+        payer: payment.payer,
+        amount: payment.amount,
+        assetCode: payment.asset.code,
+        assetIssuer: payment.asset.issuer,
+        createdAt: payment.createdAt,
+      })
+      .onConflictDoNothing({ target: linkPayments.txHash });
+  }
+
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const rows = await this.db
+      .select({ amount: linkPayments.amount })
+      .from(linkPayments)
+      .where(eq(linkPayments.linkId, linkId));
+    const total = rows.reduce((sum, r) => sum + toStroops(r.amount), 0n);
+    return fromStroops(total);
   }
 }
 
