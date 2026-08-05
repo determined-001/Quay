@@ -7,6 +7,7 @@ import type {
   OffRampMode,
   OffRampPort,
   OffRampQuote,
+  PayoutFieldDescriptor,
   SellerPayoutRef,
 } from "@checkout/core";
 import { getSep38Quote } from "./sep38";
@@ -56,6 +57,15 @@ export class AnchorOffRamp implements OffRampPort {
     this.sellerKeypair = opts.sellerKeypair;
     this.horizonUrl = opts.horizonUrl || "https://horizon-testnet.stellar.org";
     this.sep24 = new Sep24Client(opts.sellerKeypair, opts.homeDomain);
+  }
+
+  /**
+   * SEP-24 is interactive — the anchor's own hosted UI collects payout details
+   * directly from the seller during `initiate()`, so there are no descriptors
+   * to fetch up front (issue #32).
+   */
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 
   async quote(input: {
