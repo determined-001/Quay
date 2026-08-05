@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  fromStroops,
+  toStroops,
   type KycPort,
   type KycRecord,
+  type LinkPaymentRecord,
   type LinkRepository,
   type NormalizedPayment,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampJobStatus,
   type OffRampPort,
@@ -20,6 +24,7 @@ import {
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import { AnchorHealth, LinkService } from "../src/services/link-service";
+import { encryptSecret } from "../src/services/secret-crypto";
 import { Hono } from "hono";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -39,9 +44,13 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
+    offrampIndicativeRate: null,
+    offrampRate: null,
+    offrampRateDelta: null,
     expiresAt: null,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
@@ -247,9 +256,13 @@ class FakeLinkRepoForAnchor implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
+      offrampIndicativeRate: null,
+      offrampRate: null,
+      offrampRateDelta: null,
       expiresAt: input.expiresAt,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -279,6 +292,19 @@ class FakeLinkRepoForAnchor implements LinkRepository {
   async save(l: PaymentLink): Promise<void> {
     this.byId.set(l.id, { ...l });
   }
+  private readonly payments: LinkPaymentRecord[] = [];
+  private readonly seenTxHashes = new Set<string>();
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    if (this.seenTxHashes.has(payment.txHash)) return;
+    this.seenTxHashes.add(payment.txHash);
+    this.payments.push(payment);
+  }
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const total = this.payments
+      .filter((p) => p.linkId === linkId)
+      .reduce((sum, p) => sum + toStroops(p.amount), 0n);
+    return fromStroops(total);
+  }
 }
 
 class FakeSellerRepoForAnchor {
@@ -300,18 +326,45 @@ class FakeSellerRepoForAnchor {
 class FakeWebhookRepoForAnchor implements WebhookRepository {
   stored: Webhook[] = [];
   async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
-    const w: Webhook = { id: "whk_x", sellerId: input.sellerId, url: input.url, secret: input.secret, createdAt: Date.now() };
+    const w: Webhook = {
+      id: "whk_x",
+      sellerId: input.sellerId,
+      url: input.url,
+      secretEncrypted: encryptSecret(input.secret),
+      secretLast4: input.secret.slice(-4),
+      previousSecretEncrypted: null,
+      previousSecretLast4: null,
+      previousSecretExpiresAt: null,
+      deletedAt: null,
+      createdAt: Date.now(),
+    };
     this.stored.push(w);
     return w;
   }
   async listBySeller(sellerId: string): Promise<Webhook[]> {
-    return this.stored.filter((h) => h.sellerId === sellerId);
+    return this.stored.filter((h) => h.sellerId === sellerId && h.deletedAt === null);
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async getById(id: string, sellerId: string): Promise<Webhook | null> {
+    return this.stored.find((h) => h.id === id && h.sellerId === sellerId) ?? null;
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async rotateSecret(): Promise<Webhook | null> {
+    return null;
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async softDelete(): Promise<boolean> {
+    return false;
   }
   async listDeliveriesByLinkId(): Promise<WebhookDelivery[]> {
     return [];
   }
   async recordDelivery(_d: WebhookDelivery): Promise<void> {
     /* capture elsewhere via fetch interception */
+  }
+  /** Not exercised by these anchor-health tests — just satisfies the interface. */
+  async listDeliveries(): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }> {
+    return { deliveries: [], nextCursor: null };
   }
 }
 
@@ -397,8 +450,8 @@ class FlakyOffRamp implements OffRampPort {
       expiresAt: Date.now() + 60_000,
     };
   }
-  async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampJob> {
-    return { jobId: "ofr_1", linkId: "lnk_1", status: "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
+  async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampInitiation> {
+    return { kind: "fields", jobId: "ofr_1" };
   }
   async status(jobId: string): Promise<OffRampJob> {
     if (this.opts.statusShouldThrow) {
@@ -439,17 +492,18 @@ function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
     stellar: STELLAR,
     health,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
   const captureRoute = new Hono();
   // Mirror the production cash-out route shape for HTTP-level assertions.
   captureRoute.post("/:id/cash-out", async (ctx) => {
     const body = (await ctx.req.json().catch(() => ({}))) as Record<string, unknown>;
     try {
-      const job = await service.triggerCashOut(ctx.req.param("id"), {
+      const { job, initiation } = await service.triggerCashOut(ctx.req.param("id"), {
         targetCurrency: typeof body.targetCurrency === "string" ? body.targetCurrency : "NGN",
         payoutFields: (body.payoutFields as Record<string, string> | undefined) ?? {},
       });
-      return ctx.json({ job }, 200);
+      return ctx.json({ job, initiation }, 200);
     } catch (err) {
       if (err instanceof Error && "status" in err) {
         return ctx.json(
@@ -472,7 +526,7 @@ describe("LinkService with AnchorHealth", () => {
         offrampCalls.push("quote");
         throw new Error("should not be called when breaker is open");
       }
-      async initiate(): Promise<OffRampJob> {
+      async initiate(): Promise<OffRampInitiation> {
         offrampCalls.push("initiate");
         throw new Error("should not be called when breaker is open");
       }
@@ -624,6 +678,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
 
     await repo.save(
@@ -653,7 +708,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       async quote(): Promise<OffRampQuote> {
         throw new Error("unused");
       },
-      async initiate(): Promise<OffRampJob> {
+      async initiate(): Promise<OffRampInitiation> {
         throw new Error("unused");
       },
       async status(jobId: string): Promise<OffRampJob> {
@@ -672,6 +727,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
       link({
@@ -717,6 +773,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
       link({ id: "lnk_3", status: "offramp_pending", offrampJobId: "ofr_x", offrampTargetCurrency: "NGN" }),
@@ -737,7 +794,7 @@ describe("LinkService.pollCashOuts attribution", () => {
     const offramp = {
       mode: "seller_initiated" as const,
       async quote(): Promise<OffRampQuote> { throw new Error("unused"); },
-      async initiate(): Promise<OffRampJob> { throw new Error("unused"); },
+      async initiate(): Promise<OffRampInitiation> { throw new Error("unused"); },
       async status(_jobId: string): Promise<OffRampJob> {
         statusCalls++;
         throw new Error("anchor 502");
@@ -754,6 +811,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       stellar: STELLAR,
       health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
       link({ id: "lnk_bo", status: "offramp_pending", offrampJobId: "ofr_bo", offrampTargetCurrency: "NGN" }),

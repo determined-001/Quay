@@ -14,6 +14,7 @@ import { SessionIssuer } from "../src/services/session";
 import type { Container } from "../src/services/container";
 import { NoKycRequired } from "@checkout/offramp";
 import { LinkService } from "../src/services/link-service";
+import { NOOP_LOGGER } from "@checkout/core";
 import type {
   AssetRef,
   PaymentRequest,
@@ -23,6 +24,7 @@ import type {
   OffRampPort,
   OffRampQuote,
   OffRampJob,
+  OffRampInitiation,
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import type { DB } from "../src/db/client";
@@ -164,15 +166,8 @@ export class FakeOffRampPort implements OffRampPort {
     linkId: string;
     quoteId: string;
     payout: { currency: string; fields: Record<string, string> };
-  }): Promise<OffRampJob> {
-    return {
-      jobId: `job_${this.nextJobId++}`,
-      linkId: input.linkId,
-      status: "pending",
-      targetCurrency: input.payout.currency,
-      targetAmount: "1000.00",
-      rate: "1650",
-    };
+  }): Promise<OffRampInitiation> {
+    return { kind: "fields", jobId: `job_${this.nextJobId++}` };
   }
 
   async status(_jobId: string): Promise<OffRampJob> {
@@ -239,6 +234,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     kyc: new NoKycRequired(),
     stellar: testStellarConfig,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 
   const session = new SessionIssuer("test-session-secret");
@@ -246,6 +242,7 @@ export async function createTestContainer(): Promise<TestContainer> {
 
   return {
     service,
+    logger: NOOP_LOGGER,
     links: repos.links,
     sellers: repos.sellers,
     webhooks: repos.webhooks,
@@ -258,6 +255,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     kyc: new NoKycRequired() as unknown as Container["kyc"],
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
+    webhookGuard: async () => ({ ok: true }) as const,
     metricsToken: "test-metrics-token",
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,

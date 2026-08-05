@@ -126,7 +126,7 @@ export function describeError(err: CheckoutError): string {
 /**
  * Thin fetch wrapper.
  *
- * - 2xx → parse JSON and return `T`
+ * - 2xx → parse JSON and return `T` (204 → `undefined`, e.g. DELETE /webhooks/:id)
  * - 4xx/5xx → extract `{ error: string }` envelope and throw `CheckoutError`
  * - Network failure → throw `CheckoutError` with code `"unreachable"`
  */
@@ -177,6 +177,7 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
     throw new CheckoutError(code, res.status, detail, missingFields, details);
   }
 
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -190,11 +191,45 @@ function parseJsonObject(raw: string): Record<string, unknown> | null {
   }
 }
 
+/** One anchor-advertised indicative price (issue 3.5). Never a firm quote. */
+export interface IndicativePrice {
+  targetCurrency: string;
+  price: string;
+  deliveryMethods: string[];
+}
+
+export interface OfframpPreview {
+  indicative: true;
+  prices: IndicativePrice[];
+  sourceAmount: string;
+}
+
 export interface CreateLinkInput {
   title: string;
   amount: string;
   assetCode: "USDC" | "XLM";
   expiresInMinutes?: number;
+}
+
+export interface WebhookDelivery {
+  id: string;
+  webhookId: string;
+  linkId: string;
+  event: string;
+  statusCode: number | null;
+  ok: boolean;
+  error: string | null;
+  createdAt: number;
+}
+
+export interface Webhook {
+  id: string;
+  url: string;
+  secretLast4: string;
+  previousSecretLast4: string | null;
+  previousSecretExpiresAt: number | null;
+  deletedAt: number | null;
+  createdAt: number;
 }
 
 export interface AuthChallenge {
@@ -224,6 +259,12 @@ export const api = {
   getDetail: (id: string) => http<LinkDetail>(`/links/${id}/detail`),
 
   getReceipt: (reference: string) => http<PublicReceipt>(`/r/${reference}`),
+
+  /** Indicative SEP-38 prices for a paid link — no firm quote is consumed. */
+  getOfframpPreview: (id: string, currency?: string) =>
+    http<OfframpPreview>(
+      `/links/${id}/offramp-preview${currency ? `?currency=${encodeURIComponent(currency)}` : ""}`,
+    ),
 
   health: () => http<HealthResponse>("/health"),
 
@@ -262,4 +303,24 @@ export const api = {
 
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),
+
+  listWebhooks: () => http<{ webhooks: Webhook[] }>("/webhooks"),
+
+  createWebhook: (url: string) =>
+    http<Webhook & { secret: string }>("/webhooks", { method: "POST", body: JSON.stringify({ url }) }),
+
+  deleteWebhook: (id: string) => http<void>(`/webhooks/${id}`, { method: "DELETE" }),
+
+  rotateWebhookSecret: (id: string) =>
+    http<Webhook & { secret: string }>(`/webhooks/${id}/rotate-secret`, { method: "POST" }),
+
+  listWebhookDeliveries: (id: string, opts: { limit?: number; cursor?: string | null } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    const qs = params.toString();
+    return http<{ deliveries: WebhookDelivery[]; nextCursor: string | null }>(
+      `/webhooks/${id}/deliveries${qs ? `?${qs}` : ""}`,
+    );
+  },
 };

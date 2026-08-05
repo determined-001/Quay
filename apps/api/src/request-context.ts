@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
-import type { Logger } from "@checkout/core";
+import { NOOP_LOGGER, type Logger } from "@checkout/core";
 
 export interface RequestContextVariables {
   /** Stable id for the whole request, surfaced as `x-request-id`. */
@@ -49,11 +49,17 @@ function isSafeRequestId(v: string | undefined): v is string {
   return /^[\x21-\x7e]+$/.test(v);
 }
 
-/** Typed convenience accessor — `c.get('logger')` would otherwise be `unknown`. */
-export function getLogger(ctx: Context<AppEnv>): Logger {
-  return ctx.get("logger");
+/** Typed convenience accessor — `c.get('logger')` would otherwise be `unknown`.
+ *  Generic over any Env whose Variables extend RequestContextVariables, so it
+ *  accepts a route's own (wider) context type — e.g. one that also carries
+ *  AuthedVariables — without Hono's invariant Env generics rejecting it.
+ *  Falls back to NOOP_LOGGER if `requestContext` wasn't installed ahead of
+ *  this handler (e.g. a route-level test harness) — a missing logger should
+ *  never turn into a 500 for the caller. */
+export function getLogger<E extends { Variables: RequestContextVariables }>(ctx: Context<E>): Logger {
+  return ctx.get("logger") ?? NOOP_LOGGER;
 }
 
-export function getRequestId(ctx: Context<AppEnv>): string {
+export function getRequestId<E extends { Variables: RequestContextVariables }>(ctx: Context<E>): string {
   return ctx.get("requestId");
 }

@@ -18,14 +18,14 @@ describe("MockAnchorOffRamp", () => {
     });
     expect(Number(quote.targetAmount)).toBeGreaterThan(0);
 
-    const job = await offramp.initiate({
+    const initiation = await offramp.initiate({
       linkId: "lnk_1",
       quoteId: quote.quoteId,
       payout: { currency: "NGN", fields: {} },
     });
-    expect(job.status).toBe("pending");
+    expect(initiation.kind).toBe("fields");
 
-    const polled = await offramp.status(job.jobId);
+    const polled = await offramp.status(initiation.jobId);
     expect(polled.status).toBe("settled");
     expect(polled.targetAmount).toBe(quote.targetAmount);
   });

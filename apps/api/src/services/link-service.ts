@@ -1,8 +1,11 @@
 import {
   CannotReceiveError,
   canTransition,
+  isQuoteExpired,
+  QuoteExpiredError,
   normalizeAmount,
   OffRampJobNotFoundError,
+  NOOP_LOGGER,
   type CashOutBody,
   type CreateLinkBody,
   type KycPort,
@@ -10,6 +13,7 @@ import {
   type Logger,
   type MatchOutcome,
   type NormalizedPayment,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampQuote,
   type OffRampPort,
@@ -19,6 +23,7 @@ import {
   type RailPort,
   type SellerRepository,
   type WebhookRepository,
+  type IndicativePrice,
 } from "@checkout/core";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -28,6 +33,11 @@ import { metrics } from "../metrics";
 export interface LinkWithRequest {
   link: PaymentLink;
   request: PaymentRequest;
+}
+
+/** Per-call logger override — omit to fall back to the service's own ambient logger. */
+export interface ServiceCallOptions {
+  logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,9 +255,15 @@ export class LinkService {
       health?: AnchorHealth;
       // "memo" (default) or "muxed" — see packages/stellar/src/stellar-rail.ts.
       correlation: "memo" | "muxed";
+      /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
+       *  a permissive one so they do not depend on live DNS resolution. */
+      webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
+      /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
+      logger?: Logger;
     },
   ) {
-    this.sender = new WebhookSender(deps.webhooks);
+    this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
+    this.sender = new WebhookSender(deps.webhooks, { guard: deps.webhookGuard, logger: this.deps.logger });
     this.health =
       deps.health ?? new AnchorHealth({ enabled: false, url: null, homeDomain: null });
   }
@@ -268,7 +284,8 @@ export class LinkService {
     });
   }
 
-  async createLink(sellerId: string, body: CreateLinkBody): Promise<LinkWithRequest> {
+  async createLink(sellerId: string, body: CreateLinkBody, opts: ServiceCallOptions = {}): Promise<LinkWithRequest> {
+    const log = opts.logger ?? this.deps.logger!;
     const seller = await this.deps.sellers.findById(sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
     const asset = resolveAsset(body.assetCode, this.deps.stellar);
@@ -358,6 +375,54 @@ export class LinkService {
   }
 
   /**
+   * Return indicative FX rates for a paid link — SEP-38 GET /prices, no quote
+   * consumed (issue 3.5). The response is clearly labelled indicative so the
+   * dashboard can show it without burning a firm quote on every page visit.
+   *
+   * Side effect: persists the indicative rate for the requested `targetCurrency`
+   * against the link so `triggerCashOut` can later compute the spread delta.
+   *
+   * Returns null when the adapter does not implement `indicativePrices` (e.g.
+   * a future adapter that can only provide firm quotes).
+   */
+  async getOfframpPreview(
+    linkId: string,
+    targetCurrency?: string,
+  ): Promise<{ indicative: true; prices: IndicativePrice[]; sourceAmount: string } | null> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+    if (link.status !== "paid") {
+      throw new HttpError(409, `Link must be paid to preview off-ramp (is "${link.status}")`);
+    }
+    if (!this.deps.offramp.indicativePrices) return null;
+
+    const sourceAmount = link.paidAmount ?? link.amount;
+    let prices: IndicativePrice[];
+    try {
+      prices = await this.deps.offramp.indicativePrices({
+        sourceAsset: link.asset,
+        sourceAmount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp preview error: ${message}`);
+    }
+
+    // Persist the indicative rate for the target currency so triggerCashOut()
+    // can compute the indicative-vs-firm delta (issue 3.5 telemetry).
+    const currency = targetCurrency ?? link.offrampTargetCurrency;
+    if (currency) {
+      const match = prices.find((p) => p.targetCurrency === currency);
+      if (match && link.offrampIndicativeRate !== match.price) {
+        link.offrampIndicativeRate = match.price;
+        await this.deps.links.save(link);
+      }
+    }
+
+    return { indicative: true, prices, sourceAmount };
+  }
+
+  /**
    * Apply a matched payment to its link. Returns whether the link advanced to
    * `paid` (so the watcher can decide what to log). Idempotency of the *payment*
    * (processed-tx ledger) is the caller's responsibility; here we additionally
@@ -374,7 +439,7 @@ export class LinkService {
     // (`txHash + pagingToken` already bound); elsewhere txHash appears in the
     // per-event payload. Either way pino's parent chain + payload merge gives
     // us the correlations we need without re-binding the same key.
-    const log = (opts.logger ?? this.deps.logger);
+    const log = (opts.logger ?? this.deps.logger!);
 
     if (outcome.kind === "paid") {
       const link = outcome.link;
@@ -386,15 +451,29 @@ export class LinkService {
         return false; // already settled/terminal
       }
       const from = link.status;
+      await this.deps.links.recordPayment({
+        linkId: link.id,
+        txHash: payment.txHash,
+        payer: payment.from,
+        amount: normalizeAmount(payment.amount),
+        asset: payment.asset,
+        createdAt: Date.now(),
+      });
+      const cumulative = await this.deps.links.sumPaymentsForLink(link.id);
       link.status = "paid";
       link.txHash = payment.txHash;
       link.payer = payment.from;
-      link.paidAmount = normalizeAmount(payment.amount);
+      link.paidAmount = cumulative;
+      link.overpaidAmount = outcome.overpaid ? normalizeAmount(outcome.overpaidAmount) : null;
       await this.deps.links.save(link);
       metrics.linkStatusTransitionsTotal.inc({ to: "paid" });
+      log.info(
+        { event: "link.transition", linkId: link.id, txHash: payment.txHash, from, to: "paid", overpaid: outcome.overpaid },
+        "link paid",
+      );
       const paidAt = Date.parse(payment.createdAt);
       if (!Number.isNaN(paidAt)) metrics.paymentToPaidLatencySeconds.observe((Date.now() - paidAt) / 1000);
-      await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid });
+      await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid, overpaidAmount: link.overpaidAmount });
       return true;
     }
 
@@ -408,13 +487,26 @@ export class LinkService {
         return false;
       }
       const from = link.status;
+      await this.deps.links.recordPayment({
+        linkId: link.id,
+        txHash: payment.txHash,
+        payer: payment.from,
+        amount: normalizeAmount(payment.amount),
+        asset: payment.asset,
+        createdAt: Date.now(),
+      });
+      const cumulative = await this.deps.links.sumPaymentsForLink(link.id);
       link.status = "underpaid";
       link.txHash = payment.txHash;
       link.payer = payment.from;
-      link.paidAmount = normalizeAmount(payment.amount);
+      link.paidAmount = cumulative;
       await this.deps.links.save(link);
       metrics.linkStatusTransitionsTotal.inc({ to: "underpaid" });
-      await this.fireWebhook(link, "link.underpaid", {});
+      log.info(
+        { event: "link.transition", linkId: link.id, txHash: payment.txHash, from, to: "underpaid", outstanding: outcome.outstanding },
+        "link underpaid",
+      );
+      await this.fireWebhook(link, "link.underpaid", { outstanding: outcome.outstanding });
       return false;
     }
 
@@ -494,13 +586,21 @@ export class LinkService {
   }
 
   /** Seller-initiated cash-out: quote -> initiate -> move link to offramp_pending. */
-  async triggerCashOut(linkId: string, body: CashOutBody, opts: ServiceCallOptions = {}): Promise<OffRampJob> {
-    const baseLog = (opts.logger ?? this.deps.logger);
+  async triggerCashOut(
+    linkId: string,
+    body: CashOutBody,
+    opts: ServiceCallOptions = {},
+  ): Promise<{
+    job: OffRampJob & { quoteExpiresAt: number; quoteExpiresInSeconds: number };
+    initiation: OffRampInitiation;
+  }> {
+    const baseLog = (opts.logger ?? this.deps.logger!);
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
     if (link.status !== "paid") {
       throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
     }
+    const child = baseLog.child({ linkId: link.id });
 
     // Fail fast when the breaker is open: never attempt to call a known-dead
     // anchor. The HTTP layer maps this to 503 anchor_unavailable.
@@ -518,16 +618,31 @@ export class LinkService {
     }
 
     const sourceAmount = link.paidAmount ?? link.amount;
-    let quote: OffRampQuote;
-    let job: OffRampJob;
-    const t0 = Date.now();
-    try {
-      quote = await this.deps.offramp.quote({
+
+    // Extracted so the expiry guard below can ask for a second, fresh quote
+    // without duplicating the request shape.
+    const fetchFreshQuote = () =>
+      this.deps.offramp.quote({
         linkId: link.id,
         sourceAsset: link.asset,
         sourceAmount,
         targetCurrency: body.targetCurrency,
       }, { logger: child });
+
+    let quote: OffRampQuote;
+    let initiation: OffRampInitiation;
+    const t0 = Date.now();
+    try {
+      quote = await fetchFreshQuote();
+
+      // Guard: reject quotes with unparsable or already-expired expiresAt.
+      if (isQuoteExpired(quote)) {
+        // One automatic re-quote in case of clock skew or a very short TTL.
+        quote = await fetchFreshQuote();
+        if (isQuoteExpired(quote)) {
+          throw new QuoteExpiredError(quote.quoteId);
+        }
+      }
       child.info(
         {
           event: "cashout.quote",
@@ -542,7 +657,7 @@ export class LinkService {
       );
 
       const t1 = Date.now();
-      job = await this.deps.offramp.initiate({
+      initiation = await this.deps.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
         payout: { currency: body.targetCurrency, fields: body.payoutFields },
@@ -551,8 +666,7 @@ export class LinkService {
         {
           event: "cashout.initiate",
           anchor: this.deps.offramp.mode,
-          jobId: job.jobId,
-          targetCurrency: job.targetCurrency,
+          jobId: initiation.jobId,
           durationMs: Date.now() - t1,
         },
         "cash-out initiated",
@@ -564,23 +678,61 @@ export class LinkService {
         "cash-out failed",
       );
       if (err instanceof HttpError) throw err;
+      if (err instanceof QuoteExpiredError) {
+        throw new HttpError(409, `quote_expired: ${err.message}`);
+      }
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
 
     const from = link.status;
+    const jobId = initiation.jobId;
     link.status = "offramp_pending";
-    link.offrampJobId = job.jobId;
-    link.offrampTargetCurrency = job.targetCurrency;
+    link.offrampJobId = jobId;
+    link.offrampTargetCurrency = quote.targetCurrency;
     link.offrampStatus = "pending";
+
+    // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
+    // offrampIndicativeRate may already be set if the seller visited the preview
+    // endpoint before committing; if not, we leave it null so the delta is skipped.
+    link.offrampRate = quote.rate;
+    if (link.offrampIndicativeRate !== null) {
+      const indicative = Number(link.offrampIndicativeRate);
+      const firm = Number(quote.rate);
+      if (Number.isFinite(indicative) && Number.isFinite(firm) && indicative !== 0) {
+        // Delta: firm − indicative (positive = anchor moved rate in seller's favour).
+        link.offrampRateDelta = (firm - indicative).toFixed(6);
+      }
+    }
+
     await this.deps.links.save(link);
     metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
+    child.info(
+      { event: "link.transition", linkId: link.id, from, to: "offramp_pending", jobId },
+      "cash-out initiated, link moved to offramp_pending",
+    );
     this.cashOutStartedAt.set(link.id, Date.now());
-    return job;
+
+    const job: OffRampJob = {
+      jobId,
+      linkId: link.id,
+      status: "pending",
+      targetCurrency: quote.targetCurrency,
+      targetAmount: quote.targetAmount,
+      rate: quote.rate,
+    };
+
+    const now = Date.now();
+    const quoteExpiresInSeconds = Math.max(0, Math.floor((quote.expiresAt - now) / 1000));
+
+    return {
+      job: { ...job, quoteExpiresAt: quote.expiresAt, quoteExpiresInSeconds },
+      initiation,
+    };
   }
 
   /** Advance any pending cash-outs by polling the off-ramp adapter. */
   async pollCashOuts(opts: ServiceCallOptions = {}): Promise<void> {
-    const log = (opts.logger ?? this.deps.logger);
+    const log = (opts.logger ?? this.deps.logger!);
     const pending = await this.deps.links.listByStatus("offramp_pending");
     const now = Date.now();
     for (const link of pending) {
@@ -595,9 +747,10 @@ export class LinkService {
       const next = this.nextPollAtByLinkId.get(link.id);
       if (next !== undefined && now < next) continue;
 
+      const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
       let job: OffRampJob;
       try {
-        job = await this.deps.offramp.status(link.offrampJobId);
+        job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
         // Successful poll clears any prior in-memory last_error + backoff.
         this.lastPollErrorByLinkId.delete(link.id);
         this.consecutivePollErrorsByLinkId.delete(link.id);
@@ -634,6 +787,7 @@ export class LinkService {
         await this.deps.links.save(link);
         metrics.linkStatusTransitionsTotal.inc({ to: "offramp_settled" });
         this.observeSettlementDuration(link.id, "settled");
+        child.info({ event: "link.transition", from, to: link.status }, "off-ramp settled");
         await this.fireWebhook(link, "offramp.settled", {
           targetCurrency: job.targetCurrency,
           targetAmount: job.targetAmount,
@@ -643,14 +797,13 @@ export class LinkService {
         link.status = "offramp_failed";
         link.offrampStatus = "failed";
         await this.deps.links.save(link);
+        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
+        this.observeSettlementDuration(link.id, "failed");
         child.info(
           { event: "link.transition", from, to: link.status, reason: job.reason },
           "off-ramp failed",
         );
         await this.fireWebhook(link, "offramp.failed", { reason: job.reason }, opts);
-        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
-        this.observeSettlementDuration(link.id, "failed");
-        await this.fireWebhook(link, "offramp.failed", { reason: job.reason });
       }
     }
   }
@@ -710,7 +863,7 @@ export class LinkService {
     link: PaymentLink,
     event: string,
     extra: Record<string, unknown>,
-    opts: ServiceCallOptions,
+    opts: ServiceCallOptions = {},
   ): Promise<void> {
     const hooks = await this.deps.webhooks.listBySeller(link.sellerId);
     if (hooks.length === 0) return;
@@ -726,7 +879,7 @@ export class LinkService {
         txHash: link.txHash,
         ...extra,
       },
-    }, opts);
+    }, { logger: opts.logger ?? this.deps.logger! });
   }
 }
 

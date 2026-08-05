@@ -1,10 +1,11 @@
-import { eq, and, inArray, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt } from "drizzle-orm";
 import type {
   CreateLinkInput,
   KycFieldSpec,
   KycRecord,
   KycRepository,
   KycStatus,
+  LinkPaymentRecord,
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
@@ -22,6 +23,7 @@ import type {
 import type { DB } from "../db/client";
 import {
   links,
+  linkPayments,
   sellers,
   webhooks,
   webhookDeliveries,
@@ -32,8 +34,10 @@ import {
   sellerKyc,
   revokedTokens,
 } from "../db/schema";
+import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
+import { encryptSecret, last4 } from "../services/secret-crypto";
 
 type LinkRow = typeof links.$inferSelect;
 
@@ -57,9 +61,13 @@ function rowToLink(row: LinkRow): PaymentLink {
     txHash: row.txHash ?? null,
     payer: row.payer ?? null,
     paidAmount: row.paidAmount ?? null,
+    overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
     offrampStatus: row.offrampStatus ?? null,
+    offrampIndicativeRate: row.offrampIndicativeRate ?? null,
+    offrampRate: row.offrampRate ?? null,
+    offrampRateDelta: row.offrampRateDelta ?? null,
     expiresAt: row.expiresAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -85,9 +93,13 @@ export class DrizzleLinkRepository implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
+      offrampIndicativeRate: null,
+      offrampRate: null,
+      offrampRateDelta: null,
       expiresAt: input.expiresAt,
       createdAt: now,
       updatedAt: now,
@@ -140,12 +152,41 @@ export class DrizzleLinkRepository implements LinkRepository {
         txHash: link.txHash,
         payer: link.payer,
         paidAmount: link.paidAmount,
+        overpaidAmount: link.overpaidAmount,
         offrampJobId: link.offrampJobId,
         offrampTargetCurrency: link.offrampTargetCurrency,
         offrampStatus: link.offrampStatus,
+        offrampIndicativeRate: link.offrampIndicativeRate,
+        offrampRate: link.offrampRate,
+        offrampRateDelta: link.offrampRateDelta,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
+  }
+
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    await this.db
+      .insert(linkPayments)
+      .values({
+        id: newId("pmt"),
+        linkId: payment.linkId,
+        txHash: payment.txHash,
+        payer: payment.payer,
+        amount: payment.amount,
+        assetCode: payment.asset.code,
+        assetIssuer: payment.asset.issuer,
+        createdAt: payment.createdAt,
+      })
+      .onConflictDoNothing({ target: linkPayments.txHash });
+  }
+
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const rows = await this.db
+      .select({ amount: linkPayments.amount })
+      .from(linkPayments)
+      .where(eq(linkPayments.linkId, linkId));
+    const total = rows.reduce((sum, r) => sum + toStroops(r.amount), 0n);
+    return fromStroops(total);
   }
 }
 
@@ -198,26 +239,88 @@ function shortWallet(wallet: string): string {
   return `${wallet.slice(0, 4)}…${wallet.slice(-4)}`;
 }
 
+function rowToWebhook(row: typeof webhooks.$inferSelect): Webhook {
+  return {
+    id: row.id,
+    sellerId: row.sellerId,
+    url: row.url,
+    secretEncrypted: row.secretEncrypted,
+    secretLast4: row.secretLast4,
+    previousSecretEncrypted: row.previousSecretEncrypted,
+    previousSecretLast4: row.previousSecretLast4,
+    previousSecretExpiresAt: row.previousSecretExpiresAt,
+    deletedAt: row.deletedAt,
+    createdAt: row.createdAt,
+  };
+}
+
 export class DrizzleWebhookRepository implements WebhookRepository {
   constructor(private readonly db: DB) {}
 
   async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
-    const hook: Webhook = {
+    const row = {
       id: newId("whk"),
       sellerId: input.sellerId,
       url: input.url,
-      secret: input.secret,
+      secretEncrypted: encryptSecret(input.secret),
+      secretLast4: last4(input.secret),
+      previousSecretEncrypted: null,
+      previousSecretLast4: null,
+      previousSecretExpiresAt: null,
+      deletedAt: null,
       createdAt: Date.now(),
     };
-    await this.db.insert(webhooks).values(hook);
-    return hook;
+    await this.db.insert(webhooks).values(row);
+    return rowToWebhook(row);
   }
 
   async listBySeller(sellerId: string): Promise<Webhook[]> {
-    return this.db.select().from(webhooks).where(eq(webhooks.sellerId, sellerId));
+    const rows = await this.db
+      .select()
+      .from(webhooks)
+      .where(and(eq(webhooks.sellerId, sellerId), isNull(webhooks.deletedAt)));
+    return rows.map(rowToWebhook);
   }
 
-  async recordDelivery(d: WebhookDelivery): Promise<void> {
+  async getById(id: string, sellerId: string, opts?: { includeDeleted?: boolean }): Promise<Webhook | null> {
+    const conditions = [eq(webhooks.id, id), eq(webhooks.sellerId, sellerId)];
+    if (!opts?.includeDeleted) conditions.push(isNull(webhooks.deletedAt));
+    const rows = await this.db
+      .select()
+      .from(webhooks)
+      .where(and(...conditions))
+      .limit(1);
+    return rows[0] ? rowToWebhook(rows[0]) : null;
+  }
+
+  async rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null> {
+    const existing = await this.getById(id, sellerId);
+    if (!existing) return null;
+
+    const updated = {
+      secretEncrypted: encryptSecret(newSecret),
+      secretLast4: last4(newSecret),
+      previousSecretEncrypted: existing.secretEncrypted,
+      previousSecretLast4: existing.secretLast4,
+      previousSecretExpiresAt: Date.now() + overlapMs,
+    };
+    await this.db
+      .update(webhooks)
+      .set(updated)
+      .where(and(eq(webhooks.id, id), eq(webhooks.sellerId, sellerId)));
+
+    return { ...existing, ...updated };
+  }
+
+  async softDelete(id: string, sellerId: string): Promise<boolean> {
+    const result = await this.db
+      .update(webhooks)
+      .set({ deletedAt: Date.now() })
+      .where(and(eq(webhooks.id, id), eq(webhooks.sellerId, sellerId), isNull(webhooks.deletedAt)));
+    return (result.rowsAffected ?? 0) > 0;
+  }
+
+  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void> {
     await this.db.insert(webhookDeliveries).values({
       id: newId("whd"),
       webhookId: d.webhookId,
@@ -230,6 +333,36 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     });
   }
 
+  async listDeliveries(
+    webhookId: string,
+    sellerId: string,
+    opts: { limit: number; cursor?: string | null },
+  ): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }> {
+    // Ownership check — a merchant may only read deliveries for their own
+    // webhook. Deleted webhooks are included on purpose: history must stay
+    // visible after an endpoint is removed.
+    const owned = await this.getById(webhookId, sellerId, { includeDeleted: true });
+    if (!owned) return { deliveries: [], nextCursor: null };
+
+    const cursorCreatedAt = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
+    const conditions = [eq(webhookDeliveries.webhookId, webhookId)];
+    if (cursorCreatedAt !== null) conditions.push(lt(webhookDeliveries.createdAt, cursorCreatedAt));
+
+    // Fetch one extra row to know whether there's a next page.
+    const rows = await this.db
+      .select()
+      .from(webhookDeliveries)
+      .where(and(...conditions))
+      .orderBy(desc(webhookDeliveries.createdAt))
+      .limit(opts.limit + 1);
+
+    const page = rows.slice(0, opts.limit);
+    const last = page[page.length - 1];
+    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt) : null;
+
+    return { deliveries: page, nextCursor };
+  }
+
   async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
     const rows = await this.db
       .select()
@@ -237,6 +370,7 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       .where(eq(webhookDeliveries.linkId, linkId))
       .orderBy(webhookDeliveries.createdAt);
     return rows.map((r) => ({
+      id: r.id,
       webhookId: r.webhookId,
       linkId: r.linkId,
       event: r.event,
@@ -246,6 +380,16 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       createdAt: r.createdAt,
     }));
   }
+}
+
+function encodeDeliveryCursor(createdAt: number): string {
+  return Buffer.from(String(createdAt), "utf8").toString("base64url");
+}
+
+function decodeDeliveryCursor(cursor: string): number {
+  const decoded = Number(Buffer.from(cursor, "base64url").toString("utf8"));
+  if (!Number.isFinite(decoded)) throw new Error("Invalid cursor");
+  return decoded;
 }
 
 export class DrizzleWatcherStateRepository implements WatcherStateRepository {

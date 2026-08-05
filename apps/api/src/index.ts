@@ -12,6 +12,7 @@ import { wellKnownRoutes } from "./routes/well-known";
 import { kycRoutes } from "./routes/kyc";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
+import { requestContext } from "./request-context";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
 
@@ -21,6 +22,9 @@ async function main(): Promise<void> {
 
   const app = new Hono();
   const rateLimitStore = env.redisUrl ? new RedisStore(env.redisUrl) : new MemoryStore();
+  // MUST be installed before rate-limit (and everything else) so a 429 still
+  // carries a requestId, and every route handler can call getLogger(ctx).
+  app.use("*", requestContext(logger));
   app.use(
     "*",
     cors({
@@ -106,10 +110,17 @@ async function main(): Promise<void> {
   container.start();
 
   let server: ReturnType<typeof serve> | undefined = serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
-    console.log(`[api] listening on http://localhost:${info.port}`);
-    console.log(`[api] network=${container.config.network}  horizon=${container.config.horizonUrl}`);
-    console.log(`[api] seller wallet (receives funds): ${container.config.sellerWallet}`);
-    console.log(`[watcher] polling every ${env.pollMs}ms`);
+    logger.info(
+      {
+        event: "api.listening",
+        port: info.port,
+        network: container.config.network,
+        horizon: container.config.horizonUrl,
+        sellerWallet: container.config.sellerWallet,
+        pollMs: env.pollMs,
+      },
+      `listening on http://localhost:${info.port}`,
+    );
   });
 
   const shutdown = (signal: string) => {

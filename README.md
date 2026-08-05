@@ -192,6 +192,7 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
 | SEP-7 payment-request URIs | **Real**, spec-correct (native vs issued asset, memo ≤28 bytes, %20 encoding, network passphrase). |
 | Horizon payment watching + memo matching | **Real** logic against the Stellar SDK v16 API. Polling (restart-safe), idempotent via persisted cursor + processed-tx ledger. One Horizon request per page (`join=transactions` for the memo lookup, not one-plus-N), and a transaction-fetch failure retries the tick rather than silently parking a matchable payment as `no_memo`. Every Horizon call retries transient failures (3 attempts, exponential backoff + full jitter, honors `Retry-After` on 429) and can fail over to `HORIZON_URL_FALLBACK`; sustained failure shows up in `GET /health` instead of silently going idle. |
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
+| Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. Encrypted backups (`pnpm db:backup`) and a tested restore path (`pnpm db:restore`) exist — see [the runbook](docs/RUNBOOK.md) for the honest RPO/RTO (nightly backups ⇒ up to 24h RPO, not continuous protection). |
 | Account/trustline preflight | **Real.** `POST /links` checks the seller's wallet actually exists and (for USDC) has an authorized, under-limit trustline before the link goes live — `422 destination_cannot_receive` otherwise, with a SEP-7 deep link to add the trustline. Re-checked in `GET /health` so a revoked trustline shows up in ops, not as a dead checkout page. |
 | Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
@@ -230,6 +231,7 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
 - **[Architecture](docs/ARCHITECTURE.md)** — package graph, the three ports, sequence diagrams for each flow, the status machine, and how to add a new chain/anchor/rail.
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
+- **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, anchor outage, watcher-stuck, stuck off-ramp jobs, and the incident template.
 - **[SCF Build proposal](docs/PROPOSAL.md)** — the problem, the wedge, milestones, budget, traction, and risk register.
 - **[Contributing](CONTRIBUTING.md)** — setup, the check suite, and PR guidelines.
 - **[Security policy](SECURITY.md)** — how to report a vulnerability privately.

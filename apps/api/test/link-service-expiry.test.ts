@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  fromStroops,
+  toStroops,
+  type LinkPaymentRecord,
   type LinkRepository,
   type NormalizedPayment,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampPort,
   type OffRampQuote,
@@ -14,6 +18,7 @@ import {
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
+import { encryptSecret } from "../src/services/secret-crypto";
 import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
 import { Hono } from "hono";
 
@@ -36,9 +41,13 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
+    offrampIndicativeRate: null,
+    offrampRate: null,
+    offrampRateDelta: null,
     expiresAt: null,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
@@ -57,6 +66,9 @@ class FakeLinkRepo implements LinkRepository {
       sellerId: input.sellerId,
       destination: input.destination,
       muxedId: input.muxedId ?? null,
+      offrampIndicativeRate: null,
+      offrampRate: null,
+      offrampRateDelta: null,
       title: input.title,
       amount: input.amount,
       asset: input.asset,
@@ -64,6 +76,7 @@ class FakeLinkRepo implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
@@ -101,6 +114,19 @@ class FakeLinkRepo implements LinkRepository {
   async save(l: PaymentLink): Promise<void> {
     this.byId.set(l.id, { ...l, updatedAt: Date.now() });
   }
+  private readonly payments: LinkPaymentRecord[] = [];
+  private readonly seenTxHashes = new Set<string>();
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    if (this.seenTxHashes.has(payment.txHash)) return;
+    this.seenTxHashes.add(payment.txHash);
+    this.payments.push(payment);
+  }
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const total = this.payments
+      .filter((p) => p.linkId === linkId)
+      .reduce((sum, p) => sum + toStroops(p.amount), 0n);
+    return fromStroops(total);
+  }
 }
 
 class FakeSellerRepo {
@@ -128,11 +154,28 @@ class FakeWebhookRepo implements WebhookRepository {
       id: "whk_1",
       sellerId: input.sellerId,
       url: input.url,
-      secret: input.secret,
+      secretEncrypted: encryptSecret(input.secret),
+      secretLast4: input.secret.slice(-4),
+      previousSecretEncrypted: null,
+      previousSecretLast4: null,
+      previousSecretExpiresAt: null,
+      deletedAt: null,
       createdAt: Date.now(),
     };
     this.stored.push(w);
     return w;
+  }
+  async getById(): Promise<null> {
+    return null;
+  }
+  async rotateSecret(): Promise<null> {
+    return null;
+  }
+  async softDelete(): Promise<boolean> {
+    return false;
+  }
+  async listDeliveries(): Promise<{ deliveries: never[]; nextCursor: null }> {
+    return { deliveries: [], nextCursor: null };
   }
   async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
     return this.deliveries.filter((d) => d.linkId === linkId);
@@ -163,7 +206,7 @@ class FakeOffRamp implements OffRampPort {
   async quote(): Promise<OffRampQuote> {
     throw new Error("not used in this suite");
   }
-  async initiate(): Promise<OffRampJob> {
+  async initiate(): Promise<OffRampInitiation> {
     throw new Error("not used in this suite");
   }
   async status(): Promise<OffRampJob> {
@@ -247,6 +290,8 @@ async function makeFixture(): Promise<Fixture> {
     kyc: new AlwaysAcceptedKyc(),
     stellar: STELLAR,
     correlation: "memo",
+    // Avoid live DNS in unit tests; ssrf-guard.test.ts covers the guard.
+    webhookGuard: async () => ({ ok: true }) as const,
   });
   // Build a Hono sub-app that mirrors what `routes/links.ts` would mount but
   // depends only on `service`. The full Container has fields the route doesn't

@@ -1,7 +1,7 @@
 import type { AssetRef, PaymentLink } from "../domain/payment-link";
 import type { NormalizedPayment } from "../matching/match-payment";
-
 import type { Logger } from "./logger";
+
 export type { Logger } from "./logger";
 export { NOOP_LOGGER } from "./logger";
 
@@ -106,6 +106,23 @@ export interface OffRampQuote {
   expiresAt: number; // epoch ms — after this the quote is void
 }
 
+/** Thrown when a quote's expiresAt has passed or is unparsable (NaN). */
+export class QuoteExpiredError extends Error {
+  constructor(readonly quoteId: string) {
+    super(`Quote ${quoteId} has expired`);
+    this.name = "QuoteExpiredError";
+  }
+}
+
+/**
+ * Returns true when a quote is expired or has an unparsable expiresAt (NaN).
+ * NaN comparisons always return false in JS, so we must guard explicitly.
+ */
+export function isQuoteExpired(quote: OffRampQuote, now: number = Date.now()): boolean {
+  if (Number.isNaN(quote.expiresAt)) return true;
+  return now >= quote.expiresAt;
+}
+
 /** Where the seller wants their local-currency payout to land. */
 export interface SellerPayoutRef {
   currency: string; // "NGN"
@@ -127,18 +144,43 @@ export interface OffRampJob {
   reason?: string; // set when failed
 }
 
+export type OffRampInitiation =
+  | { kind: "fields"; jobId: string }
+  | { kind: "interactive"; jobId: string; url: string };
+
 export interface OffRampPort {
   readonly mode: OffRampMode;
-  quote(input: {
-    linkId: string;
-    sourceAsset: AssetRef;
-    sourceAmount: string;
-    targetCurrency: string;
-  }): Promise<OffRampQuote>;
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob>;
+  quote(
+    input: { linkId: string; sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampQuote>;
+  initiate(
+    input: { linkId: string; quoteId: string; payout: SellerPayoutRef },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampInitiation>;
   /** Throws {@link OffRampJobNotFoundError} when `jobId` has no known state — a
    *  crash/redeploy wiped an in-memory-only implementation, or the id is bogus. */
-  status(jobId: string): Promise<OffRampJob>;
+  status(jobId: string, opts?: { logger?: Logger }): Promise<OffRampJob>;
+  /**
+   * Indicative prices for all available buy currencies — SEP-38 GET /prices.
+   * Unauthenticated, no quote consumed. Used by the dashboard to show rates
+   * before the seller commits to a firm quote (issue 3.5).
+   * Optional: adapters that cannot provide indicative pricing may omit this.
+   */
+  indicativePrices?(input: {
+    sourceAsset: AssetRef;
+    sourceAmount: string;
+  }): Promise<IndicativePrice[]>;
+}
+
+/** One indicative price entry from SEP-38 GET /prices (issue 3.5). */
+export interface IndicativePrice {
+  /** ISO-4217 buy currency, e.g. "NGN". */
+  targetCurrency: string;
+  /** Indicative exchange rate: 1 sourceAsset unit = `price` targetCurrency units. */
+  price: string;
+  /** Delivery methods advertised by the anchor, e.g. ["WIRE"]. */
+  deliveryMethods: string[];
 }
 
 /** Typed miss for {@link OffRampPort.status}, so callers (the cash-out poller)
@@ -271,6 +313,18 @@ export interface CreateLinkInput {
   expiresAt: number | null;
 }
 
+/** One incoming payment recorded against a link — the authoritative ledger
+ *  row cumulative accounting sums over (issue 1.4). `txHash` is unique so a
+ *  reprocessed payment can never double-count. */
+export interface LinkPaymentRecord {
+  linkId: string;
+  txHash: string;
+  payer: string;
+  amount: string;
+  asset: AssetRef;
+  createdAt: number;
+}
+
 export interface LinkRepository {
   create(input: CreateLinkInput): Promise<PaymentLink>;
   findById(id: string): Promise<PaymentLink | null>;
@@ -283,6 +337,12 @@ export interface LinkRepository {
   /** Active (or underpaid) links whose value lands in `destination`. */
   openLinksForDestination(destination: string): Promise<PaymentLink[]>;
   save(link: PaymentLink): Promise<void>;
+  /** Append a payment to the link's ledger. A duplicate `txHash` is a no-op —
+   *  cumulative accounting must never double-count a reprocessed payment. */
+  recordPayment(payment: LinkPaymentRecord): Promise<void>;
+  /** Sum of every payment ever recorded for this link, as a decimal string
+   *  ("0" if none). The authoritative source `paidAmount` is cached from. */
+  sumPaymentsForLink(linkId: string): Promise<string>;
 }
 
 export interface Seller {
@@ -301,15 +361,35 @@ export interface SellerRepository {
   createIfAbsent(wallet: string): Promise<Seller>;
 }
 
+/**
+ * A registered webhook endpoint.
+ *
+ * The signing secret is never stored in plaintext — only `secretEncrypted`
+ * (reversible, AES-256-GCM; the platform must be able to decrypt it to sign
+ * outgoing deliveries) plus `secretLast4` for display. API routes must never
+ * serialize `secretEncrypted` / `previousSecretEncrypted` in a response; the
+ * raw secret is only ever returned once, directly from `create`/`rotateSecret`,
+ * before it's encrypted for storage.
+ */
 export interface Webhook {
   id: string;
   sellerId: string;
   url: string;
-  secret: string;
+  secretEncrypted: string;
+  secretLast4: string;
+  /** Set during the 24h post-rotation overlap window; null otherwise. */
+  previousSecretEncrypted: string | null;
+  previousSecretLast4: string | null;
+  previousSecretExpiresAt: number | null;
+  deletedAt: number | null;
   createdAt: number;
 }
 
+/** Fields safe to return from any API route — never includes secret material. */
+export type PublicWebhook = Omit<Webhook, "secretEncrypted" | "previousSecretEncrypted">;
+
 export interface WebhookDelivery {
+  id: string;
   webhookId: string;
   linkId: string;
   event: string;
@@ -321,8 +401,24 @@ export interface WebhookDelivery {
 
 export interface WebhookRepository {
   create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
+  /** Active (non-deleted) webhooks for a seller. Used for both dispatch and listing. */
   listBySeller(sellerId: string): Promise<Webhook[]>;
-  recordDelivery(d: WebhookDelivery): Promise<void>;
+  /** Scoped to the owning seller to prevent cross-tenant access (IDOR). */
+  getById(id: string, sellerId: string, opts?: { includeDeleted?: boolean }): Promise<Webhook | null>;
+  /**
+   * Rotates the signing secret. The previous secret remains valid for
+   * `overlapMs` so in-flight receivers can be redeployed without dropping
+   * events (see WebhookSender, which signs with both during the overlap).
+   */
+  rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null>;
+  /** Soft delete — keeps delivery history browsable after removal. */
+  softDelete(id: string, sellerId: string): Promise<boolean>;
+  recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void>;
+  listDeliveries(
+    webhookId: string,
+    sellerId: string,
+    opts: { limit: number; cursor?: string | null },
+  ): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }>;
   listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]>;
 }
 

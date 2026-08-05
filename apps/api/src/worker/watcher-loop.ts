@@ -11,6 +11,12 @@ import { AnchorHealth, type LinkService } from "../services/link-service";
 import { env } from "../env";
 import { metrics } from "../metrics";
 
+/** Horizon's own page size default (see `HorizonWatcher.fetchSince`) - kept in sync explicitly rather than duplicated as a bare number in two files. */
+const DEFAULT_PAGE_LIMIT = 200;
+
+/** Hard cap on pages drained per account per tick (issue 2.2) - bounds one tick's worst-case latency instead of looping until the backlog is empty, which could starve other accounts' ticks. Hitting this repeatedly is the signal to move to a streaming watcher (issue 2.1), not to raise this number further. */
+const DEFAULT_MAX_PAGES_PER_TICK = 10;
+
 /**
  * Per-account state for adaptive polling and circuit breaking.
  */
@@ -58,10 +64,19 @@ export interface WatcherMetrics {
  *   1. the persisted cursor means we don't refetch already-seen operations;
  *   2. the processed-tx ledger guards the crash window before a cursor is saved;
  *   3. the domain transition guard means a duplicate can never double-apply.
+ *
+ * A single Horizon page is bounded by `pageLimit` (default 200, matching
+ * `HorizonWatcher.fetchSince`'s own default). If more than `pageLimit`
+ * payments landed since the last tick, `processAccount` keeps paging - up to
+ * `maxPagesPerTick` pages - within the *same* tick, persisting the cursor
+ * after every page (not once at the end), so a crash mid-drain resumes from
+ * the last completed page rather than replaying the whole backlog.
  */
 export class WatcherLoop {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private readonly pageLimit: number;
+  private readonly maxPagesPerTick: number;
   private currentTick: Promise<void> | null = null;
   private accountStates = new Map<string, AccountState>();
   private roundRobinCursor = 0;
@@ -81,9 +96,14 @@ export class WatcherLoop {
       service: LinkService;
       pollMs: number;
       logger?: Logger;
+      pageLimit?: number;
+      maxPagesPerTick?: number;
+      log?: (msg: string) => void;
     },
   ) {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
+    this.pageLimit = deps.pageLimit ?? DEFAULT_PAGE_LIMIT;
+    this.maxPagesPerTick = deps.maxPagesPerTick ?? DEFAULT_MAX_PAGES_PER_TICK;
   }
 
   start(): void {
@@ -238,7 +258,7 @@ export class WatcherLoop {
     }
 
     try {
-      await this.processAccount(account);
+      await this.processAccount(account, this.deps.logger!.child({ account }));
       
       // Reset error state on success
       state.consecutiveErrors = 0;
@@ -333,76 +353,101 @@ export class WatcherLoop {
       return;
     }
 
-    const payments = await this.deps.watcher.fetchSince(account, cursor);
-    
-    // Track idle ticks for adaptive polling
-    if (payments.length === 0) {
-      state.consecutiveIdleTicks++;
-      return;
-    }
-
-    state.consecutiveIdleTicks = 0;
-
+    // Fetched once per account per tick, not once per page - the set of open
+    // links doesn't change mid-drain (a payment landing this tick can't also
+    // close a link before we've matched it), so re-fetching per page would
+    // just be wasted I/O.
     const open = await this.deps.links.openLinksForDestination(account);
     const byRef = new Map<string, PaymentLink>(open.map((l) => [l.reference, l]));
     const byMuxedId = new Map<string, PaymentLink>(
       open.filter((l) => l.muxedId).map((l) => [l.muxedId as string, l]),
     );
 
-    let lastToken = cursor;
-    for (const payment of payments) {
-      lastToken = payment.pagingToken;
-      const child = log.child({ txHash: payment.txHash, pagingToken: payment.pagingToken });
-      if (await this.deps.state.isProcessed(payment.txHash)) {
-        child.info({ event: "payment.duplicate" }, "skipping already-processed payment");
-        continue;
+    let pageCursor = cursor;
+
+    for (let page = 1; page <= this.maxPagesPerTick; page++) {
+      const payments = await this.deps.watcher.fetchSince(account, pageCursor, this.pageLimit);
+      if (payments.length === 0) {
+        // Nothing at all this tick counts as idle for the adaptive-polling
+        // backoff; a partially-drained backlog does not.
+        if (page === 1) state.consecutiveIdleTicks++;
+        break;
       }
+      state.consecutiveIdleTicks = 0;
 
-      const outcome = matchPayment(payment, (ref) => byRef.get(ref), (id) => byMuxedId.get(id));
-      metrics.paymentsMatchedTotal.inc({ outcome: outcome.kind });
-      const linkId =
-        outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
-          ? outcome.link.id
-          : null;
-      child.info(
-        { event: "payment.matched", outcome: outcome.kind, linkId, amount: payment.amount, memo: payment.memo },
-        `payment ${outcome.kind}`,
-      );
-
-      if (outcome.kind === "paid" || outcome.kind === "underpaid") {
-        const becamePaid = await this.deps.service.applyMatch(payment, outcome);
-        this.deps.log?.(
-          `payment ${short(payment.txHash)} -> ${outcome.kind}` +
-            (becamePaid ? ` (link ${linkId} PAID)` : ""),
-        );
-      } else if (
-        outcome.kind === "unknown_reference" &&
-        payment.memo &&
-        payment.memoType !== "none"
-      ) {
-        // Memo matched nothing in the OPEN set. Before we give up, check
-        // whether the memo belongs to a link that *used to* be open but has
-        // since been expired or cancelled by the seller. If so, the buyer
-        // paid a dead link: do NOT resurrect it, fire payment.unmatched so
-        // the seller can refund the buyer out-of-band.
-        const terminal = await this.deps.links.findByReference(payment.memo);
-        if (
-          terminal &&
-          terminal.destination === account &&
-          (terminal.status === "expired" || terminal.status === "cancelled")
-        ) {
-          await this.deps.service.recordUnmatchedPayment(payment, terminal);
-          this.deps.log?.(
-            `payment ${short(payment.txHash)} -> unmatched against ` +
-              `${terminal.status} link ${terminal.id}`,
-          );
+      let lastToken = pageCursor;
+      for (const payment of payments) {
+        lastToken = payment.pagingToken;
+        const child = log.child({ txHash: payment.txHash, pagingToken: payment.pagingToken });
+        if (await this.deps.state.isProcessed(payment.txHash)) {
+          child.info({ event: "payment.duplicate" }, "skipping already-processed payment");
+          continue;
         }
+
+        const outcome = matchPayment(payment, (ref) => byRef.get(ref), (id) => byMuxedId.get(id));
+        metrics.paymentsMatchedTotal.inc({ outcome: outcome.kind });
+        const linkId =
+          outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
+            ? outcome.link.id
+            : null;
+        child.info(
+          { event: "payment.matched", outcome: outcome.kind, linkId, amount: payment.amount, memo: payment.memo },
+          `payment ${outcome.kind}`,
+        );
+
+        if (outcome.kind === "paid" || outcome.kind === "underpaid") {
+          const becamePaid = await this.deps.service.applyMatch(payment, outcome, { logger: child });
+          this.deps.log?.(
+            `payment ${short(payment.txHash)} -> ${outcome.kind}` +
+              (becamePaid ? ` (link ${linkId} PAID)` : ""),
+          );
+        } else if (
+          outcome.kind === "unknown_reference" &&
+          payment.memo &&
+          payment.memoType !== "none"
+        ) {
+          // Memo matched nothing in the OPEN set. Before we give up, check
+          // whether the memo belongs to a link that *used to* be open but has
+          // since been expired or cancelled by the seller. If so, the buyer
+          // paid a dead link: do NOT resurrect it, fire payment.unmatched so
+          // the seller can refund the buyer out-of-band.
+          const terminal = await this.deps.links.findByReference(payment.memo);
+          if (
+            terminal &&
+            terminal.destination === account &&
+            (terminal.status === "expired" || terminal.status === "cancelled")
+          ) {
+            await this.deps.service.recordUnmatchedPayment(payment, terminal);
+            child.info(
+              { event: "payment.unmatched", linkId: terminal.id, status: terminal.status },
+              `payment unmatched against ${terminal.status} link ${terminal.id}`,
+            );
+          }
+        }
+
+        await this.deps.state.markProcessed(payment.txHash, linkId);
       }
 
-      await this.deps.state.markProcessed(payment.txHash, linkId);
-    }
+      pageCursor = lastToken;
+      // Persisted after *every* page, not once at the end of the whole
+      // drain - a crash between pages resumes from the last completed page
+      // instead of replaying the entire backlog from the tick's start.
+      await this.deps.state.setCursor(account, pageCursor);
 
-    await this.deps.state.setCursor(account, lastToken);
+      if (payments.length < this.pageLimit) {
+        // Short page: caught up for this tick.
+        return;
+      }
+
+      if (page === this.maxPagesPerTick) {
+        const message =
+          `watcher account ${short(account)} hit maxPagesPerTick (${this.maxPagesPerTick}) - ` +
+          `backlog not fully drained this tick, more remains for the next poll. ` +
+          `If this recurs, move this account to a streaming watcher (issue 2.1).`;
+        this.deps.log?.(message);
+        log.info({ event: "watcher.account.batch", account, maxPagesPerTick: this.maxPagesPerTick }, message);
+      }
+    }
   }
 }
 

@@ -8,10 +8,11 @@ import {
   type HorizonStatus,
 } from "@checkout/stellar";
 import { MockAnchorOffRamp, NoKycRequired, TestAnchorKyc, TestAnchorOffRamp } from "@checkout/offramp";
-import type { KycPort, OffRampPort, OffRampStateRepository } from "@checkout/core";
+import type { KycPort, Logger, OffRampPort, OffRampStateRepository } from "@checkout/core";
 import { env } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey } from "../crypto/pii";
+import { createLogger } from "../logger";
 import {
   DrizzleLinkRepository,
   DrizzleSellerRepository,
@@ -37,6 +38,7 @@ import { CircuitBreakerOffRamp } from "./circuit-breaker";
 
 export interface Container {
   service: LinkService;
+  logger: Logger;
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
@@ -44,6 +46,9 @@ export interface Container {
   kyc: KycPort;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   horizonStatus(): HorizonStatus;
+  /** Optional SSRF guard override for webhook URLs. Tests inject a permissive
+   *  one so route tests do not depend on live DNS. */
+  webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
   metricsToken: string;
   watcherLagSeconds(): number;
   circuitBreakerState(): number;
@@ -138,6 +143,9 @@ export async function createContainer(): Promise<Container> {
     service,
     pollMs: env.pollMs,
     logger,
+    pageLimit: env.watchPageLimit,
+    maxPagesPerTick: env.watchMaxPagesPerTick,
+    log: (m) => console.log(`[watcher] ${m}`),
   });
 
   const metricsToken = resolveMetricsToken();
@@ -163,6 +171,7 @@ export async function createContainer(): Promise<Container> {
 
   return {
     service,
+    logger,
     links: linksRepo,
     sellers: sellersRepo,
     webhooks: webhooksRepo,
@@ -314,7 +323,7 @@ function createKyc(sellerKeypair: Keypair | null, db: DB): KycPort {
   }
   if (!sellerKeypair) {
     throw new Error(
-      "OFFRAMP=testanchor requires the seller's secret key to sign SEP-10 auth: " +
+      `OFFRAMP=${env.offramp} requires the seller's secret key to sign SEP-10 auth: ` +
         "set DEFAULT_SELLER_SECRET (matching DEFAULT_SELLER_WALLET), or leave " +
         "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
     );

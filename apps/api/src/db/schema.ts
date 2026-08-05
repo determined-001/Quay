@@ -21,19 +21,46 @@ export const links = sqliteTable("links", {
   txHash: text("tx_hash"),
   payer: text("payer"),
   paidAmount: text("paid_amount"),
+  /** Surplus once cumulative payments exceed the requested amount (issue 1.4). */
+  overpaidAmount: text("overpaid_amount"),
   offrampJobId: text("offramp_job_id"),
   offrampTargetCurrency: text("offramp_target_currency"),
   offrampStatus: text("offramp_status"),
+  /** Indicative rate captured at preview time (issue 3.5 telemetry). */
+  offrampIndicativeRate: text("offramp_indicative_rate"),
+  /** Firm rate from the SEP-38 POST /quote (issue 3.5 telemetry). */
+  offrampRate: text("offramp_rate"),
+  /** Absolute delta: firm − indicative (issue 3.5 telemetry). */
+  offrampRateDelta: text("offramp_rate_delta"),
   expiresAt: integer("expires_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+});
+
+// Authoritative ledger of every payment recorded against a link — cumulative
+// accounting (issue 1.4) sums these rather than trusting a single payment.
+// `txHash` is unique so a reprocessed payment can never double-count.
+export const linkPayments = sqliteTable("link_payments", {
+  id: text("id").primaryKey(),
+  linkId: text("link_id").notNull(),
+  txHash: text("tx_hash").notNull().unique(),
+  payer: text("payer").notNull(),
+  amount: text("amount").notNull(),
+  assetCode: text("asset_code").notNull(),
+  assetIssuer: text("asset_issuer"), // null = native XLM
+  createdAt: integer("created_at").notNull(),
 });
 
 export const webhooks = sqliteTable("webhooks", {
   id: text("id").primaryKey(),
   sellerId: text("seller_id").notNull(),
   url: text("url").notNull(),
-  secret: text("secret").notNull(),
+  secretEncrypted: text("secret_encrypted").notNull(),
+  secretLast4: text("secret_last4").notNull(),
+  previousSecretEncrypted: text("previous_secret_encrypted"),
+  previousSecretLast4: text("previous_secret_last4"),
+  previousSecretExpiresAt: integer("previous_secret_expires_at"),
+  deletedAt: integer("deleted_at"),
   createdAt: integer("created_at").notNull(),
 });
 

@@ -1,20 +1,25 @@
-import type {
-  CreateLinkInput,
-  KycPort,
-  KycRecord,
-  LinkRepository,
-  OffRampJob,
-  OffRampMode,
-  OffRampPort,
-  OffRampQuote,
-  OffRampStateRepository,
-  PaymentLink,
-  StoredOffRampJob,
-  StoredOffRampQuote,
-  Webhook,
-  WebhookDelivery,
-  WebhookRepository,
+import {
+  fromStroops,
+  toStroops,
+  type CreateLinkInput,
+  type KycPort,
+  type KycRecord,
+  type LinkPaymentRecord,
+  type LinkRepository,
+  type OffRampInitiation,
+  type OffRampJob,
+  type OffRampMode,
+  type OffRampPort,
+  type OffRampQuote,
+  type OffRampStateRepository,
+  type PaymentLink,
+  type StoredOffRampJob,
+  type StoredOffRampQuote,
+  type Webhook,
+  type WebhookDelivery,
+  type WebhookRepository,
 } from "@checkout/core";
+import { encryptSecret } from "../src/services/secret-crypto";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 const ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
@@ -33,9 +38,13 @@ export function makeLink(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: "tx1",
     payer: "GBUYER",
     paidAmount: "10",
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
+    offrampIndicativeRate: null,
+    offrampRate: null,
+    offrampRateDelta: null,
     expiresAt: null,
     createdAt: 0,
     updatedAt: 0,
@@ -46,6 +55,8 @@ export function makeLink(over: Partial<PaymentLink> = {}): PaymentLink {
 /** In-memory LinkRepository, seeded from a fixed list of links. */
 export class FakeLinkRepository implements LinkRepository {
   private readonly byId = new Map<string, PaymentLink>();
+  private readonly payments: LinkPaymentRecord[] = [];
+  private readonly seenTxHashes = new Set<string>();
 
   constructor(seed: PaymentLink[] = []) {
     for (const l of seed) this.byId.set(l.id, l);
@@ -54,10 +65,14 @@ export class FakeLinkRepository implements LinkRepository {
   async create(input: CreateLinkInput): Promise<PaymentLink> {
     const link: PaymentLink = {
       ...input,
+      offrampIndicativeRate: null,
+      offrampRate: null,
+      offrampRateDelta: null,
       status: "active",
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
@@ -98,6 +113,19 @@ export class FakeLinkRepository implements LinkRepository {
     this.byId.set(link.id, { ...link });
   }
 
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    if (this.seenTxHashes.has(payment.txHash)) return; // duplicate tx_hash — no-op
+    this.seenTxHashes.add(payment.txHash);
+    this.payments.push(payment);
+  }
+
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const total = this.payments
+      .filter((p) => p.linkId === linkId)
+      .reduce((sum, p) => sum + toStroops(p.amount), 0n);
+    return fromStroops(total);
+  }
+
   get(id: string): PaymentLink | undefined {
     return this.byId.get(id);
   }
@@ -108,7 +136,18 @@ export class FakeWebhookRepository implements WebhookRepository {
   private readonly hooks: Webhook[] = [];
 
   async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
-    const hook: Webhook = { id: `whk_${this.hooks.length}`, ...input, createdAt: Date.now() };
+    const hook: Webhook = {
+      id: `whk_${this.hooks.length}`,
+      sellerId: input.sellerId,
+      url: input.url,
+      secretEncrypted: encryptSecret(input.secret),
+      secretLast4: input.secret.slice(-4),
+      previousSecretEncrypted: null,
+      previousSecretLast4: null,
+      previousSecretExpiresAt: null,
+      deletedAt: null,
+      createdAt: Date.now(),
+    };
     this.hooks.push(hook);
     return hook;
   }
@@ -118,11 +157,49 @@ export class FakeWebhookRepository implements WebhookRepository {
   }
 
   async listBySeller(sellerId: string): Promise<Webhook[]> {
-    return this.hooks.filter((h) => h.sellerId === sellerId);
+    return this.hooks.filter((h) => h.sellerId === sellerId && h.deletedAt === null);
   }
 
-  async recordDelivery(d: WebhookDelivery): Promise<void> {
-    this.deliveries.push(d);
+  async getById(id: string, sellerId: string, opts?: { includeDeleted?: boolean }): Promise<Webhook | null> {
+    const hook = this.hooks.find((h) => h.id === id && h.sellerId === sellerId);
+    if (!hook) return null;
+    if (hook.deletedAt !== null && !opts?.includeDeleted) return null;
+    return hook;
+  }
+
+  async rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null> {
+    const hook = await this.getById(id, sellerId);
+    if (!hook) return null;
+    hook.previousSecretEncrypted = hook.secretEncrypted;
+    hook.previousSecretLast4 = hook.secretLast4;
+    hook.previousSecretExpiresAt = Date.now() + overlapMs;
+    hook.secretEncrypted = encryptSecret(newSecret);
+    hook.secretLast4 = newSecret.slice(-4);
+    return hook;
+  }
+
+  async softDelete(id: string, sellerId: string): Promise<boolean> {
+    const hook = await this.getById(id, sellerId);
+    if (!hook) return false;
+    hook.deletedAt = Date.now();
+    return true;
+  }
+
+  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void> {
+    this.deliveries.push({ ...d, id: `whd_${this.deliveries.length}`, createdAt: Date.now() });
+  }
+
+  async listDeliveries(
+    webhookId: string,
+    sellerId: string,
+    opts: { limit: number; cursor?: string | null },
+  ): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }> {
+    const owned = await this.getById(webhookId, sellerId, { includeDeleted: true });
+    if (!owned) return { deliveries: [], nextCursor: null };
+    const matching = this.deliveries
+      .filter((d) => d.webhookId === webhookId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return { deliveries: matching.slice(0, opts.limit), nextCursor: null };
   }
 }
 
@@ -167,7 +244,7 @@ export class ScriptedOffRamp implements OffRampPort {
   async quote(): Promise<OffRampQuote> {
     throw new Error("not used in these tests");
   }
-  async initiate(): Promise<OffRampJob> {
+  async initiate(): Promise<OffRampInitiation> {
     throw new Error("not used in these tests");
   }
   async status(jobId: string): Promise<OffRampJob> {

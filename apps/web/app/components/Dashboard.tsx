@@ -85,6 +85,50 @@ function ErrorBanner({
   );
 }
 
+/**
+ * Inline indicative rate badge shown next to a paid link (issue 3.5).
+ * Fetches once when the component mounts; clearly labelled "indicative" so
+ * the seller understands no firm quote has been consumed.
+ */
+function IndicativeRateBadge({ linkId }: { linkId: string }) {
+  const [price, setPrice] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getOfframpPreview(linkId, OFFRAMP_CURRENCY)
+      .then((preview) => {
+        if (cancelled) return;
+        const entry = preview.prices.find((p) => p.targetCurrency === OFFRAMP_CURRENCY);
+        setPrice(entry?.price ?? null);
+      })
+      .catch(() => {
+        // Non-fatal: the rate preview is best-effort.
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [linkId]);
+
+  if (loading) return <span className="muted" style={{ fontSize: "0.75rem" }}>rate…</span>;
+  if (!price) return null;
+
+  return (
+    <span
+      className="muted"
+      style={{ fontSize: "0.75rem" }}
+      title="Indicative rate from SEP-38 GET /prices — no firm quote consumed"
+    >
+      ~{Number(price).toLocaleString()} {OFFRAMP_CURRENCY}
+      <span style={{ marginLeft: 3, opacity: 0.6 }}>(indicative)</span>
+    </span>
+  );
+}
+
 interface TableProps {
   links: PaymentLink[];
   copied: string | null;
@@ -113,7 +157,15 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableP
                 {link.title}
               </Link>
             </td>
-            <td className="amt">{amountLabel(link)}</td>
+            <td className="amt">
+              {amountLabel(link)}
+              {/* Indicative rate shown inline for paid links — no firm quote burned */}
+              {link.status === "paid" && (
+                <div style={{ marginTop: 2 }}>
+                  <IndicativeRateBadge linkId={link.id} />
+                </div>
+              )}
+            </td>
             <td>
               <StatusPill status={link.status} />
             </td>
@@ -252,6 +304,19 @@ export default function Dashboard() {
     setTimeout(() => setCopied((c) => (c === id ? null : c)), 1500);
   }
 
+  async function copyWidgetHtml(link: PaymentLink) {
+    const host = window.location.origin;
+    const snippet = `<script src="${host}/widget.js" defer></script>\n<button data-quay-link="${link.id}" data-quay-label="Pay ${link.amount} ${link.asset.code}">Pay</button>`;
+    await navigator.clipboard.writeText(snippet);
+    setCopied(`widget_${link.id}`);
+    setTimeout(() => setCopied((c) => (c === `widget_${link.id}` ? null : c)), 1500);
+  }
+
+  /**
+   * Cash-out: this is the only place a firm SEP-38 quote is consumed.
+   * The indicative rate shown inline in the table is from GET /prices
+   * and does not commit to anything (issue 3.5).
+   */
   async function cashOut(id: string) {
     setActionError(null);
     try {

@@ -71,6 +71,8 @@ if (offramp !== "mock" && offramp !== "testanchor") {
 
 export const env = {
   network,
+  // JSON-line log verbosity. trace|debug|info|warn|error|fatal, default "info".
+  logLevel: process.env.LOG_LEVEL || "info",
   horizonUrl: process.env.HORIZON_URL || undefined,
   // Optional standby Horizon endpoint. The watcher switches to it after
   // several consecutive failures on the primary, and back on recovery.
@@ -87,6 +89,13 @@ export const env = {
   databaseAuthToken: process.env.DATABASE_AUTH_TOKEN || undefined,
   apiPort: Number(process.env.API_PORT ?? "8787"),
   pollMs: Number(process.env.WATCH_POLL_MS ?? "6000"),
+  // Per-account Horizon page size and the max pages drained per account per
+  // tick before the rest waits for the next poll (issue 2.2). Raising
+  // WATCH_MAX_PAGES_PER_TICK trades tick latency for backlog-drain speed;
+  // if it's routinely maxed out, that's the signal to move to a streaming
+  // watcher (issue 2.1), not to keep raising this.
+  watchPageLimit: Number(process.env.WATCH_PAGE_LIMIT ?? "200"),
+  watchMaxPagesPerTick: Number(process.env.WATCH_MAX_PAGES_PER_TICK ?? "10"),
   // "poll" (default, restart-safe MVP behavior) or "stream" (Horizon SSE,
   // opt-in until proven). See packages/stellar/src/streaming-horizon-watcher.ts.
   watchMode,
