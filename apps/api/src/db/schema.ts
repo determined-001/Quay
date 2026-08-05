@@ -21,6 +21,8 @@ export const links = sqliteTable("links", {
   txHash: text("tx_hash"),
   payer: text("payer"),
   paidAmount: text("paid_amount"),
+  /** Surplus once cumulative payments exceed the requested amount (issue 1.4). */
+  overpaidAmount: text("overpaid_amount"),
   offrampJobId: text("offramp_job_id"),
   offrampTargetCurrency: text("offramp_target_currency"),
   offrampStatus: text("offramp_status"),
@@ -33,6 +35,20 @@ export const links = sqliteTable("links", {
   expiresAt: integer("expires_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+});
+
+// Authoritative ledger of every payment recorded against a link — cumulative
+// accounting (issue 1.4) sums these rather than trusting a single payment.
+// `txHash` is unique so a reprocessed payment can never double-count.
+export const linkPayments = sqliteTable("link_payments", {
+  id: text("id").primaryKey(),
+  linkId: text("link_id").notNull(),
+  txHash: text("tx_hash").notNull().unique(),
+  payer: text("payer").notNull(),
+  amount: text("amount").notNull(),
+  assetCode: text("asset_code").notNull(),
+  assetIssuer: text("asset_issuer"), // null = native XLM
+  createdAt: integer("created_at").notNull(),
 });
 
 export const webhooks = sqliteTable("webhooks", {

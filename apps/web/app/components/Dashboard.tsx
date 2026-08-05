@@ -312,6 +312,14 @@ export default function Dashboard() {
     setTimeout(() => setCopied((c) => (c === id ? null : c)), 1500);
   }
 
+  async function copyWidgetHtml(link: PaymentLink) {
+    const host = window.location.origin;
+    const snippet = `<script src="${host}/widget.js" defer></script>\n<button data-quay-link="${link.id}" data-quay-label="Pay ${link.amount} ${link.asset.code}">Pay</button>`;
+    await navigator.clipboard.writeText(snippet);
+    setCopied(`widget_${link.id}`);
+    setTimeout(() => setCopied((c) => (c === `widget_${link.id}` ? null : c)), 1500);
+  }
+
   /**
    * Cash-out: this is the only place a firm SEP-38 quote is consumed.
    * The indicative rate shown inline in the table is from GET /prices

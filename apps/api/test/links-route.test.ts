@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PaymentLink, Seller, SellerRepository, TokenRevocationRepository } from "@checkout/core";
+import { NOOP_LOGGER, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
@@ -20,6 +20,7 @@ const ownedLink: PaymentLink = {
   txHash: null,
   payer: null,
   paidAmount: null,
+  overpaidAmount: null,
   offrampJobId: null,
   offrampTargetCurrency: null,
   offrampStatus: null,
@@ -53,6 +54,7 @@ function fakeContainer(): Container {
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
     } as unknown as Container["service"],
+    logger: NOOP_LOGGER,
     links: {} as Container["links"],
     sellers: sellers as unknown as Container["sellers"],
     webhooks: {} as Container["webhooks"],

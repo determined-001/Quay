@@ -71,6 +71,8 @@ if (offramp !== "mock" && offramp !== "testanchor") {
 
 export const env = {
   network,
+  // JSON-line log verbosity. trace|debug|info|warn|error|fatal, default "info".
+  logLevel: process.env.LOG_LEVEL || "info",
   horizonUrl: process.env.HORIZON_URL || undefined,
   // Optional standby Horizon endpoint. The watcher switches to it after
   // several consecutive failures on the primary, and back on recovery.
