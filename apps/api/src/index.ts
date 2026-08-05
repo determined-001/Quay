@@ -5,6 +5,7 @@ import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
 import { webhookRoutes } from "./routes/webhooks";
+import { apiKeyRoutes } from "./routes/api-keys";
 import { publicRoutes } from "./routes/public";
 import { metricsRoutes } from "./routes/metrics";
 import { authRoutes } from "./routes/auth";
@@ -14,6 +15,7 @@ import { demoRoutes } from "./routes/demo";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
 import { requestContext } from "./request-context";
+import { buildAuthMiddleware, apiKeyRateLimitKey } from "./middleware/auth";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
 
@@ -30,7 +32,7 @@ async function main(): Promise<void> {
     "*",
     cors({
       origin: env.corsOrigins,
-      allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
+      allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
       // The session cookie is sent cross-origin (API and web app are separate
       // hosts) — credentials: true plus an explicit (non-"*") origin list is
       // required for the browser to actually attach/accept it.
@@ -46,11 +48,15 @@ async function main(): Promise<void> {
       trustProxyHops: env.trustProxyHops,
     }),
   );
+  // Strict limiter for money/management routes. `keyFor` gives every API key
+  // its own bucket (per-key rate limit, issue #40 item 4); everyone else is
+  // still bucketed by client IP (issue #86).
   const strictRateLimit = rateLimit({
     windowMs: env.rateLimitStrictWindowMs,
     max: env.rateLimitStrictMax,
     store: rateLimitStore,
     trustProxyHops: env.trustProxyHops,
+    keyFor: apiKeyRateLimitKey,
   });
 
   app.get("/health", async (ctx) => {
@@ -91,6 +97,19 @@ async function main(): Promise<void> {
   app.route("/links", linkRoutes(container, strictRateLimit));
   app.route("/webhooks", webhookRoutes(container));
   app.route("/r", publicRoutes(container));
+
+  // API-key management (issue #40). Requires a session or an API key that
+  // carries `api-keys:manage` — an unauthenticated caller gets a 401, and a
+  // key without the scope gets a 403, so no one can mint keys by default.
+  const apiKeyAuth = buildAuthMiddleware({
+    session: container.auth.session,
+    sellers: container.sellers,
+    revocations: container.auth.revocations,
+    apiKeyRepo: container.apiKeys,
+  });
+  app.use("/api-keys", strictRateLimit, apiKeyAuth);
+  app.use("/api-keys/*", strictRateLimit, apiKeyAuth);
+  app.route("/api-keys", apiKeyRoutes(container));
 
   // CORS for public receipt endpoint (accessible from any origin).
   app.use("/r/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"] }));

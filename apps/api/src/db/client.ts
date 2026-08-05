@@ -100,6 +100,19 @@ const BOOTSTRAP_SQL = [
      status TEXT NOT NULL,
      failure_reason TEXT
    )`,
+  // API keys for programmatic access (issue #40, 6.3).
+  // hash = scrypt digest — plaintext is NEVER persisted.
+  `CREATE TABLE IF NOT EXISTS api_keys (
+     id TEXT PRIMARY KEY,
+     seller_id TEXT NOT NULL,
+     name TEXT NOT NULL,
+     prefix TEXT NOT NULL,
+     hash TEXT NOT NULL,
+     scopes TEXT NOT NULL,
+     last_used_at INTEGER,
+     created_at INTEGER NOT NULL,
+     revoked_at INTEGER
+   )`,
 ];
 
 /**

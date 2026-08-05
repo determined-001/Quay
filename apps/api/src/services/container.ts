@@ -8,7 +8,7 @@ import {
   type HorizonStatus,
 } from "@checkout/stellar";
 import { MockAnchorOffRamp, NoKycRequired, TestAnchorKyc, TestAnchorOffRamp } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository } from "@checkout/core";
+import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
 import { env } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey } from "../crypto/pii";
@@ -22,6 +22,7 @@ import {
   DrizzleOffRampStateRepository,
   DrizzleKycRepository,
   DrizzleOfframpTelemetryRepository,
+  DrizzleApiKeyRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -43,6 +44,7 @@ export interface Container {
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
+  apiKeys: DrizzleApiKeyRepository;
   db: DB;
   kyc: KycPort;
   telemetry: OffRampTelemetryRepository;
@@ -91,6 +93,7 @@ export async function createContainer(): Promise<Container> {
   const revocationsRepo = new DrizzleTokenRevocationRepository(db);
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
+  const apiKeysRepo = new DrizzleApiKeyRepository(db);
 
   const seller = resolveSellerKeypairOrWallet(logger);
   const sellerWallet = seller.publicKey;
@@ -179,6 +182,7 @@ export async function createContainer(): Promise<Container> {
     links: linksRepo,
     sellers: sellersRepo,
     webhooks: webhooksRepo,
+    apiKeys: apiKeysRepo,
     db,
     kyc,
     telemetry: telemetryRepo,

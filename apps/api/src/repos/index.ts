@@ -1,4 +1,6 @@
 import { and, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import type { ApiKeyScope } from "../services/api-keys";
+import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
   CreateLinkInput,
   KycFieldSpec,
@@ -38,6 +40,7 @@ import {
   sellerKyc,
   revokedTokens,
   offrampTelemetry,
+  apiKeys,
 } from "../db/schema";
 import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
@@ -644,3 +647,237 @@ export class DrizzleKycRepository implements KycRepository {
       .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
   }
 }
+
+function rowToTelemetry(row: typeof offrampTelemetry.$inferSelect): OffRampTelemetryRow {
+  return {
+    id: row.id,
+    anchorDomain: row.anchorDomain,
+    corridor: row.corridor,
+    sellAsset: row.sellAsset,
+    sellAmount: row.sellAmount,
+    indicativeRate: row.indicativeRate,
+    quotedRate: row.quotedRate,
+    quotedAt: row.quotedAt,
+    initiatedAt: row.initiatedAt,
+    settledAt: row.settledAt,
+    effectiveRate: row.effectiveRate,
+    feeAmount: row.feeAmount,
+    status: row.status as OffRampTelemetryStatus,
+    failureReason: row.failureReason,
+  };
+}
+
+/** nearest-rank percentile over an ascending-sorted array; null on empty input. */
+function percentile(sortedAsc: number[], p: number): number | null {
+  if (sortedAsc.length === 0) return null;
+  const idx = Math.max(0, Math.ceil(p * sortedAsc.length) - 1);
+  return sortedAsc[idx] ?? null;
+}
+
+/**
+ * Persistence for passive off-ramp telemetry (issue #20, 3.8). `upsert` is
+ * keyed by `id` — one row per cash-out, replaced in place as it progresses
+ * through quoted -> initiated -> settled / failed. No product surface reads
+ * this except the operator-only /telemetry routes.
+ */
+export class DrizzleOfframpTelemetryRepository implements OffRampTelemetryRepository {
+  constructor(private readonly db: DB) {}
+
+  async upsert(row: OffRampTelemetryRow): Promise<void> {
+    const dbRow: typeof offrampTelemetry.$inferInsert = {
+      id: row.id,
+      anchorDomain: row.anchorDomain,
+      corridor: row.corridor,
+      sellAsset: row.sellAsset,
+      sellAmount: row.sellAmount,
+      indicativeRate: row.indicativeRate,
+      quotedRate: row.quotedRate,
+      quotedAt: row.quotedAt,
+      initiatedAt: row.initiatedAt,
+      settledAt: row.settledAt,
+      effectiveRate: row.effectiveRate,
+      feeAmount: row.feeAmount,
+      status: row.status,
+      failureReason: row.failureReason,
+    };
+    await this.db
+      .insert(offrampTelemetry)
+      .values(dbRow)
+      .onConflictDoUpdate({ target: offrampTelemetry.id, set: dbRow });
+  }
+
+  async all(): Promise<OffRampTelemetryRow[]> {
+    const rows = await this.db.select().from(offrampTelemetry);
+    return rows.map(rowToTelemetry);
+  }
+
+  async summary(): Promise<OffRampTelemetrySummary[]> {
+    const rows = await this.all();
+    const groups = new Map<string, OffRampTelemetryRow[]>();
+    for (const r of rows) {
+      const key = `${r.anchorDomain} ${r.corridor}`;
+      const list = groups.get(key);
+      if (list) list.push(r);
+      else groups.set(key, [r]);
+    }
+
+    const out: OffRampTelemetrySummary[] = [];
+    for (const [key, list] of groups) {
+      const [anchorDomain, corridor] = key.split(" ") as [string, string];
+      const settled = list.filter((r) => r.status === "settled");
+      const failed = list.filter((r) => r.status === "failed");
+      const latencies = settled
+        .filter((r): r is OffRampTelemetryRow & { initiatedAt: number; settledAt: number } =>
+          r.initiatedAt !== null && r.settledAt !== null,
+        )
+        .map((r) => r.settledAt - r.initiatedAt)
+        .sort((a, b) => a - b);
+      const spreads = settled
+        .filter((r) => r.effectiveRate !== null)
+        .map((r) => (Number(r.quotedRate) - Number(r.effectiveRate)) / Number(r.quotedRate));
+
+      out.push({
+        anchorDomain,
+        corridor,
+        count: list.length,
+        settledCount: settled.length,
+        failedCount: failed.length,
+        latencyP50Ms: percentile(latencies, 0.5),
+        latencyP95Ms: percentile(latencies, 0.95),
+        meanSpread: spreads.length > 0 ? spreads.reduce((a, b) => a + b, 0) / spreads.length : null,
+      });
+    }
+    return out;
+  }
+}
+
+export interface ApiKey {
+  id: string;
+  sellerId: string;
+  name: string;
+  /** Lookup prefix of the plaintext key — safe to display / index. */
+  prefix: string;
+  /** scrypt hash of the full plaintext key. The plaintext is never stored. */
+  hash: string;
+  scopes: ApiKeyScope[];
+  lastUsedAt: number | null;
+  createdAt: number;
+  revokedAt: number | null;
+}
+
+type ApiKeyRow = typeof apiKeys.$inferSelect;
+
+function rowToApiKey(row: ApiKeyRow): ApiKey {
+  return {
+    id: row.id,
+    sellerId: row.sellerId,
+    name: row.name,
+    prefix: row.prefix,
+    hash: row.hash,
+    scopes: decodeScopesFromDb(row.scopes),
+    lastUsedAt: row.lastUsedAt ?? null,
+    createdAt: row.createdAt,
+    revokedAt: row.revokedAt ?? null,
+  };
+}
+
+/**
+ * Persistence for scoped API keys (issue #40, 6.3).
+ *
+ * Prefix lookup: the auth middleware pre-filters on the lookup prefix (cheap,
+ * indexed) before spending a full scrypt verify, and only ever sees hashes.
+ */
+export class DrizzleApiKeyRepository {
+  constructor(private readonly db: DB) {}
+
+  async create(input: {
+    sellerId: string;
+    name: string;
+    prefix: string;
+    hash: string;
+    scopes: ApiKeyScope[];
+  }): Promise<ApiKey> {
+    const now = Date.now();
+    const row: ApiKeyRow = {
+      id: newId("ak"),
+      sellerId: input.sellerId,
+      name: input.name,
+      prefix: input.prefix,
+      hash: input.hash,
+      scopes: encodeScopesForDb(input.scopes),
+      lastUsedAt: null,
+      createdAt: now,
+      revokedAt: null,
+    };
+    await this.db.insert(apiKeys).values(row);
+    return rowToApiKey(row);
+  }
+
+  /** Find all keys (active or not) for a seller. */
+  async listBySeller(sellerId: string): Promise<ApiKey[]> {
+    const rows = await this.db
+      .select()
+      .from(apiKeys)
+      .where(eq(apiKeys.sellerId, sellerId));
+    return rows.map(rowToApiKey).sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /**
+   * Find a non-revoked key by its lookup prefix for fast pre-filtering before
+   * the expensive scrypt verify. Returns null when no active key with that
+   * prefix exists (saves the scrypt round-trip for unknown prefixes).
+   */
+  async findActiveByPrefix(prefix: string): Promise<ApiKey | null> {
+    const rows = await this.db
+      .select()
+      .from(apiKeys)
+      .where(eq(apiKeys.prefix, prefix))
+      .limit(10); // prefix is not guaranteed unique; verify hash for all matches
+    const active = rows.filter((r) => r.revokedAt === null).map(rowToApiKey);
+    return active[0] ?? null;
+  }
+
+  /**
+   * Same as findActiveByPrefix but returns all non-revoked rows sharing the
+   * prefix (extremely unlikely >1, but correct to check all before failing).
+   */
+  async findAllActiveByPrefix(prefix: string): Promise<ApiKey[]> {
+    const rows = await this.db
+      .select()
+      .from(apiKeys)
+      .where(eq(apiKeys.prefix, prefix))
+      .limit(10);
+    return rows.filter((r) => r.revokedAt === null).map(rowToApiKey);
+  }
+
+  async findById(id: string): Promise<ApiKey | null> {
+    const rows = await this.db
+      .select()
+      .from(apiKeys)
+      .where(eq(apiKeys.id, id))
+      .limit(1);
+    return rows[0] ? rowToApiKey(rows[0]) : null;
+  }
+
+  /** Soft-delete: set revokedAt to now. */
+  async revoke(id: string): Promise<void> {
+    await this.db
+      .update(apiKeys)
+      .set({ revokedAt: Date.now() })
+      .where(eq(apiKeys.id, id));
+  }
+
+  /**
+   * Fire-and-forget last_used_at update. Call after a successful verification;
+   * the promise is intentionally not awaited on the hot path so auth latency
+   * is not affected by a DB round-trip. Returns the promise so the caller can
+   * attach a `.catch()` (an unhandled rejection would take the process down).
+   */
+  touchLastUsed(id: string): Promise<unknown> {
+    return this.db
+      .update(apiKeys)
+      .set({ lastUsedAt: Date.now() })
+      .where(eq(apiKeys.id, id));
+  }
+}
+>>>>>>> origin/main

@@ -161,3 +161,57 @@ export const revokedTokens = sqliteTable("revoked_tokens", {
   expiresAt: integer("expires_at").notNull(),
   revokedAt: integer("revoked_at").notNull(),
 });
+
+/**
+ * Passive off-ramp telemetry (issue #20, 3.8). One row per cash-out, upserted
+ * by id as it progresses through quoted -> initiated -> settled / failed.
+ * No product surface consumes this yet — it exists purely to accumulate the
+ * dataset (anchor settlement latency, effective spread) cheaply now, since it
+ * can't be backfilled later.
+ */
+export const offrampTelemetry = sqliteTable("offramp_telemetry", {
+  id: text("id").primaryKey(),
+  anchorDomain: text("anchor_domain").notNull(),
+  corridor: text("corridor").notNull(),
+  sellAsset: text("sell_asset").notNull(),
+  sellAmount: text("sell_amount").notNull(),
+  /** In-memory mock/testanchor rate at quote time, if available. */
+  indicativeRate: text("indicative_rate"),
+  /** The firm rate returned by quote(). */
+  quotedRate: text("quoted_rate").notNull(),
+  quotedAt: integer("quoted_at").notNull(),
+  initiatedAt: integer("initiated_at"),
+  settledAt: integer("settled_at"),
+  /** Derived from the anchor-reported amount_out at settlement, not the quote. */
+  effectiveRate: text("effective_rate"),
+  feeAmount: text("fee_amount"),
+  status: text("status").notNull(),
+  failureReason: text("failure_reason"),
+});
+
+/**
+ * Scoped API keys for programmatic access (issue #40, 6.3).
+ *
+ * Security invariants:
+ *   - `hash` is an scrypt digest of the full key — the plaintext is NEVER stored.
+ *   - `prefix` is a lookup prefix of the key (safe to index and display).
+ *   - `scopes` is a comma-separated list drawn from ApiKeyScope.
+ *   - `revokedAt` non-null means the key is invalid regardless of hash match.
+ *   - `lastUsedAt` is updated asynchronously (fire-and-forget) to avoid adding
+ *     latency to the hot path.
+ */
+export const apiKeys = sqliteTable("api_keys", {
+  id: text("id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  name: text("name").notNull(),
+  /** Lookup prefix of the plaintext key — used for display / lookup. */
+  prefix: text("prefix").notNull(),
+  /** scrypt hash of the full plaintext key (hex-encoded). */
+  hash: text("hash").notNull(),
+  /** Comma-separated scope list, e.g. "links:read,links:write". */
+  scopes: text("scopes").notNull(),
+  lastUsedAt: integer("last_used_at"),
+  createdAt: integer("created_at").notNull(),
+  /** Non-null when the key has been revoked. */
+  revokedAt: integer("revoked_at"),
+});

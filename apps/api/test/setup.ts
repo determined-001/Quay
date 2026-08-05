@@ -9,6 +9,7 @@ import {
   DrizzleWatcherStateRepository,
   DrizzleOffRampStateRepository,
   DrizzleTokenRevocationRepository,
+  DrizzleApiKeyRepository,
 } from "../src/repos/index";
 import { SessionIssuer } from "../src/services/session";
 import type { Container } from "../src/services/container";
@@ -234,6 +235,7 @@ export async function createTestContainer(): Promise<TestContainer> {
 
   const offrampState = new DrizzleOffRampStateRepository(repos.db);
   const telemetry = new FakeTelemetryRepository();
+  const apiKeys = new DrizzleApiKeyRepository(repos.db);
 
   const service = new LinkService({
     links: repos.links,
@@ -258,6 +260,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     links: repos.links,
     sellers: repos.sellers,
     webhooks: repos.webhooks,
+    apiKeys,
     state: repos.state,
     rail,
     watcher,
