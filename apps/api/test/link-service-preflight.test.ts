@@ -13,7 +13,7 @@ import type { StellarConfig } from "@checkout/stellar";
 import { HttpError, LinkService } from "../src/services/link-service";
 import { AlwaysAcceptedKyc, FakeOffRampStateRepository, FakeTelemetryRepository } from "./fakes";
 
-const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", createdAt: Date.now() };
+const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", payoutFields: null, createdAt: Date.now() };
 
 const stellar: StellarConfig = {
   network: "testnet",
@@ -24,7 +24,7 @@ const stellar: StellarConfig = {
 
 function fakeLinks(): LinkRepository {
   return {
-    create: vi.fn(async (input) => ({ ...input, status: "active", txHash: null, payer: null, paidAmount: null, offrampJobId: null, offrampTargetCurrency: null, offrampStatus: null, createdAt: Date.now(), updatedAt: Date.now() }) as PaymentLink),
+    create: vi.fn(async (input) => ({ ...input, status: "active", txHash: null, payer: null, paidAmount: null, overpaidAmount: null, offrampJobId: null, offrampTargetCurrency: null, offrampStatus: null, createdAt: Date.now(), updatedAt: Date.now() }) as PaymentLink),
     findById: vi.fn(async () => null),
     findByReference: vi.fn(async () => null),
     listBySeller: vi.fn(async () => []),
@@ -32,6 +32,8 @@ function fakeLinks(): LinkRepository {
     activeDestinations: vi.fn(async () => []),
     openLinksForDestination: vi.fn(async () => []),
     save: vi.fn(async () => {}),
+    recordPayment: vi.fn(async () => {}),
+    sumPaymentsForLink: vi.fn(async () => "0"),
   };
 }
 
@@ -41,6 +43,7 @@ function fakeSellers(): SellerRepository {
     findById: vi.fn(async () => seller),
     findByWallet: vi.fn(async () => seller),
     createIfAbsent: vi.fn(async () => seller),
+    savePayoutFields: vi.fn(async () => {}),
   };
 }
 
@@ -77,6 +80,7 @@ function fakeOfframp(): OffRampPort {
     quote: vi.fn(),
     initiate: vi.fn(),
     status: vi.fn(),
+    offrampRequirements: vi.fn(async () => []),
   };
 }
 

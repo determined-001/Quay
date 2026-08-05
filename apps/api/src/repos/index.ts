@@ -5,6 +5,7 @@ import type {
   KycRecord,
   KycRepository,
   KycStatus,
+  LinkPaymentRecord,
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
@@ -26,6 +27,7 @@ import type {
 import type { DB } from "../db/client";
 import {
   links,
+  linkPayments,
   sellers,
   webhooks,
   webhookDeliveries,
@@ -37,6 +39,7 @@ import {
   revokedTokens,
   offrampTelemetry,
 } from "../db/schema";
+import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
 import { encryptSecret, last4 } from "../services/secret-crypto";
@@ -63,13 +66,19 @@ function rowToLink(row: LinkRow): PaymentLink {
     txHash: row.txHash ?? null,
     payer: row.payer ?? null,
     paidAmount: row.paidAmount ?? null,
+    overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
     offrampStatus: row.offrampStatus ?? null,
     offrampIndicativeRate: row.offrampIndicativeRate ?? null,
     offrampRate: row.offrampRate ?? null,
     offrampRateDelta: row.offrampRateDelta ?? null,
+    offrampFeeAmount: row.offrampFeeAmount ?? null,
+    offrampFeeCurrency: row.offrampFeeCurrency ?? null,
+    offrampFeeSource: row.offrampFeeSource ?? null,
+    offrampNetTargetAmount: row.offrampNetTargetAmount ?? null,
     expiresAt: row.expiresAt ?? null,
+    isDemo: row.isDemo ?? false,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -94,13 +103,19 @@ export class DrizzleLinkRepository implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
       offrampIndicativeRate: null,
       offrampRate: null,
       offrampRateDelta: null,
+      offrampFeeAmount: null,
+      offrampFeeCurrency: null,
+      offrampFeeSource: null,
+      offrampNetTargetAmount: null,
       expiresAt: input.expiresAt,
+      isDemo: input.isDemo ?? false,
       createdAt: now,
       updatedAt: now,
     };
@@ -152,16 +167,67 @@ export class DrizzleLinkRepository implements LinkRepository {
         txHash: link.txHash,
         payer: link.payer,
         paidAmount: link.paidAmount,
+        overpaidAmount: link.overpaidAmount,
         offrampJobId: link.offrampJobId,
         offrampTargetCurrency: link.offrampTargetCurrency,
         offrampStatus: link.offrampStatus,
         offrampIndicativeRate: link.offrampIndicativeRate,
         offrampRate: link.offrampRate,
         offrampRateDelta: link.offrampRateDelta,
+        offrampFeeAmount: link.offrampFeeAmount,
+        offrampFeeCurrency: link.offrampFeeCurrency,
+        offrampFeeSource: link.offrampFeeSource,
+        offrampNetTargetAmount: link.offrampNetTargetAmount,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
   }
+
+  /** Delete all rows flagged as demo data. Called by `pnpm demo:reset`. */
+  async deleteDemo(): Promise<number> {
+    const rows = await this.db.select({ id: links.id }).from(links).where(eq(links.isDemo, true));
+    if (rows.length > 0) {
+      await this.db.delete(links).where(eq(links.isDemo, true));
+    }
+    return rows.length;
+  }
+
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    await this.db
+      .insert(linkPayments)
+      .values({
+        id: newId("pmt"),
+        linkId: payment.linkId,
+        txHash: payment.txHash,
+        payer: payment.payer,
+        amount: payment.amount,
+        assetCode: payment.asset.code,
+        assetIssuer: payment.asset.issuer,
+        createdAt: payment.createdAt,
+      })
+      .onConflictDoNothing({ target: linkPayments.txHash });
+  }
+
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const rows = await this.db
+      .select({ amount: linkPayments.amount })
+      .from(linkPayments)
+      .where(eq(linkPayments.linkId, linkId));
+    const total = rows.reduce((sum, r) => sum + toStroops(r.amount), 0n);
+    return fromStroops(total);
+  }
+}
+
+function rowToSeller(row: typeof sellers.$inferSelect): Seller {
+  let payoutFields: Record<string, string> | null = null;
+  if (row.payoutFieldsJson) {
+    try {
+      payoutFields = JSON.parse(row.payoutFieldsJson) as Record<string, string>;
+    } catch {
+      payoutFields = null;
+    }
+  }
+  return { id: row.id, name: row.name, wallet: row.wallet, payoutFields, createdAt: row.createdAt };
 }
 
 export class DrizzleSellerRepository implements SellerRepository {
@@ -175,27 +241,45 @@ export class DrizzleSellerRepository implements SellerRepository {
       if (existing[0].wallet !== wallet) {
         await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
       }
-      return { ...existing[0], wallet };
+      return rowToSeller({ ...existing[0], wallet });
     }
-    const seller: Seller = { id: newId("sel"), name, wallet, createdAt: Date.now() };
+    const now = Date.now();
+    const seller: typeof sellers.$inferSelect = {
+      id: newId("sel"),
+      name,
+      wallet,
+      payoutFieldsJson: null,
+      createdAt: now,
+    };
     await this.db.insert(sellers).values(seller);
-    return seller;
+    return rowToSeller(seller);
   }
 
   async getDefault(): Promise<Seller> {
     const rows = await this.db.select().from(sellers).limit(1);
     if (!rows[0]) throw new Error("No default seller seeded");
-    return rows[0];
+    return rowToSeller(rows[0]);
   }
 
   async findById(id: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
-    return rows[0] ?? null;
+    return rows[0] ? rowToSeller(rows[0]) : null;
+  }
+
+  async savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void> {
+    await this.db
+      .update(sellers)
+      .set({ payoutFieldsJson: JSON.stringify(fields) })
+      .where(eq(sellers.id, sellerId));
   }
 
   async findByWallet(wallet: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
-    return rows[0] ?? null;
+    // Must go through rowToSeller — the raw row carries payoutFieldsJson but
+    // not the parsed payoutFields; every other read path already does this,
+    // and this is the SEP-10 login path, so skipping it would make the payout
+    // reuse feature silently do nothing for wallet-logged-in sellers.
+    return rows[0] ? rowToSeller(rows[0]) : null;
   }
 
   async createIfAbsent(wallet: string): Promise<Seller> {
@@ -559,143 +643,4 @@ export class DrizzleKycRepository implements KycRepository {
       .values(row)
       .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
   }
-}
-
-// ---------------------------------------------------------------------------
-// Off-ramp telemetry repository (issue #20)
-// ---------------------------------------------------------------------------
-// Passive, append-only dataset of cash-out progress. Writes go through
-// `upsert` (keyed by telemetry row id) so the three cash-out transitions can
-// each touch their slice of a row without racing the poller.
-
-export class DrizzleOfframpTelemetryRepository implements OffRampTelemetryRepository {
-  constructor(private readonly db: DB) {}
-
-  async upsert(row: OffRampTelemetryRow): Promise<void> {
-    await this.db
-      .insert(offrampTelemetry)
-      .values({
-        id: row.id,
-        anchorDomain: row.anchorDomain,
-        corridor: row.corridor,
-        sellAsset: row.sellAsset,
-        sellAmount: row.sellAmount,
-        indicativeRate: row.indicativeRate,
-        quotedRate: row.quotedRate,
-        quotedAt: row.quotedAt,
-        initiatedAt: row.initiatedAt,
-        settledAt: row.settledAt,
-        effectiveRate: row.effectiveRate,
-        feeAmount: row.feeAmount,
-        status: row.status,
-        failureReason: row.failureReason,
-      })
-      .onConflictDoUpdate({
-        target: offrampTelemetry.id,
-        // Only the lifecycle columns ever change; the quote-time snapshot
-        // (rates, sell amount, quotedAt) is immutable once written.
-        set: {
-          initiatedAt: row.initiatedAt,
-          settledAt: row.settledAt,
-          effectiveRate: row.effectiveRate,
-          feeAmount: row.feeAmount,
-          status: row.status,
-          failureReason: row.failureReason,
-        },
-      });
-  }
-
-  async findById(id: string): Promise<OffRampTelemetryRow | null> {
-    const rows = await this.db
-      .select()
-      .from(offrampTelemetry)
-      .where(eq(offrampTelemetry.id, id))
-      .limit(1);
-    return rows[0] ? this.toRow(rows[0]) : null;
-  }
-
-  async findByJobId(jobId: string): Promise<OffRampTelemetryRow | null> {
-    // id is the telemetry row id which equals "tel_<jobId>" by convention in LinkService.
-    return this.findById(`tel_${jobId}`);
-  }
-
-  async summary(): Promise<OffRampTelemetrySummary[]> {
-    const all = await this.db.select().from(offrampTelemetry);
-    // Group by (anchorDomain, corridor)
-    const groups = new Map<string, (typeof all)[number][]>();
-    for (const r of all) {
-      const key = `${r.anchorDomain}||${r.corridor}`;
-      const g = groups.get(key) ?? [];
-      g.push(r);
-      groups.set(key, g);
-    }
-
-    const result: OffRampTelemetrySummary[] = [];
-    for (const rows of groups.values()) {
-      const first = rows[0]!;
-      const settled = rows.filter((r) => r.status === "settled");
-      const failed = rows.filter((r) => r.status === "failed");
-
-      // Settlement latency: initiatedAt -> settledAt
-      const latencies = settled
-        .filter((r) => r.initiatedAt != null && r.settledAt != null)
-        .map((r) => r.settledAt! - r.initiatedAt!)
-        .sort((a, b) => a - b);
-
-      // Spread: (quotedRate - effectiveRate) / quotedRate
-      const spreads = settled
-        .filter((r) => r.effectiveRate != null)
-        .map((r) => {
-          const q = Number(r.quotedRate);
-          const e = Number(r.effectiveRate!);
-          return q === 0 ? 0 : (q - e) / q;
-        });
-
-      result.push({
-        anchorDomain: first.anchorDomain,
-        corridor: first.corridor,
-        count: rows.length,
-        settledCount: settled.length,
-        failedCount: failed.length,
-        latencyP50Ms: percentile(latencies, 50),
-        latencyP95Ms: percentile(latencies, 95),
-        meanSpread: spreads.length > 0 ? spreads.reduce((a, b) => a + b, 0) / spreads.length : null,
-      });
-    }
-    return result;
-  }
-
-  /** All rows ordered by quotedAt ascending — for CSV export. */
-  async all(): Promise<OffRampTelemetryRow[]> {
-    const rows = await this.db.select().from(offrampTelemetry);
-    return rows
-      .sort((a, b) => a.quotedAt - b.quotedAt)
-      .map((r) => this.toRow(r));
-  }
-
-  private toRow(r: typeof offrampTelemetry.$inferSelect): OffRampTelemetryRow {
-    return {
-      id: r.id,
-      anchorDomain: r.anchorDomain,
-      corridor: r.corridor,
-      sellAsset: r.sellAsset,
-      sellAmount: r.sellAmount,
-      indicativeRate: r.indicativeRate,
-      quotedRate: r.quotedRate,
-      quotedAt: r.quotedAt,
-      initiatedAt: r.initiatedAt,
-      settledAt: r.settledAt,
-      effectiveRate: r.effectiveRate,
-      feeAmount: r.feeAmount,
-      status: r.status as OffRampTelemetryStatus,
-      failureReason: r.failureReason,
-    };
-  }
-}
-
-/** Nearest-rank percentile. Returns null for empty arrays. */
-function percentile(sorted: number[], p: number): number | null {
-  if (sorted.length === 0) return null;
-  const idx = Math.ceil((p / 100) * sorted.length) - 1;
-  return sorted[Math.max(0, idx)]!;
 }
