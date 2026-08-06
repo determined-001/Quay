@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { NOOP_LOGGER } from "@checkout/core";
 import type { Container } from "../src/services/container";
 import { telemetryRoutes } from "../src/routes/telemetry";
 import { FakeTelemetryRepository } from "./fakes";
@@ -6,9 +7,11 @@ import { FakeTelemetryRepository } from "./fakes";
 function fakeContainer(): Container {
   return {
     service: {} as Container["service"],
+    logger: NOOP_LOGGER,
     links: {} as Container["links"],
     sellers: {} as Container["sellers"],
     webhooks: {} as Container["webhooks"],
+    apiKeys: {} as Container["apiKeys"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: "GSELLER" },
     kyc: {} as Container["kyc"],
     db: {} as Container["db"],

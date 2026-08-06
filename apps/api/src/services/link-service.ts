@@ -810,6 +810,20 @@ export class LinkService {
     );
     this.cashOutStartedAt.set(link.id, Date.now());
 
+    // Passive telemetry (issue #20, 3.8) — never blocks the cash-out response.
+    const storedJob = await this.deps.offrampState.getJob(jobId).catch(() => null);
+    void this.recordTelemetry(jobId, {
+      anchorDomain: storedJob?.anchor ?? this.deps.offramp.mode,
+      corridor: `${link.asset.code}/${quote.targetCurrency}`,
+      sellAsset: link.asset.code,
+      sellAmount: sourceAmount,
+      indicativeRate: link.offrampIndicativeRate,
+      quotedRate: quote.rate,
+      quotedAt: t0,
+      initiatedAt: Date.now(),
+      status: "initiated",
+    });
+
     const job: OffRampJob = {
       jobId,
       linkId: link.id,
@@ -890,6 +904,27 @@ export class LinkService {
           targetCurrency: job.targetCurrency,
           targetAmount: job.targetAmount,
         }, opts);
+
+        // Passive telemetry (issue #20, 3.8): effective_rate derived from the
+        // anchor-reported amount_out at settlement, NOT the quoted rate — the
+        // whole point of this dataset is measuring the spread between them.
+        // Awaited (errors are swallowed inside recordTelemetry) rather than
+        // fire-and-forget, so a slow store can't race past the write.
+        {
+          const existingRows = await this.deps.telemetry.all().catch(() => []);
+          const existing = existingRows.find((r) => r.id === `tel_${link.offrampJobId}`);
+          const quotedRate = existing?.quotedRate ?? job.rate;
+          const sourceAmount = link.paidAmount ?? link.amount;
+          const effectiveRate = String(Number(job.targetAmount) / Number(sourceAmount));
+          const feeAmount = (Number(quotedRate) * Number(sourceAmount) - Number(job.targetAmount)).toFixed(6);
+          await this.recordTelemetry(link.offrampJobId!, {
+            quotedRate,
+            settledAt: Date.now(),
+            effectiveRate,
+            feeAmount,
+            status: "settled",
+          });
+        }
       } else if (job.status === "failed") {
         const from = link.status;
         link.status = "offramp_failed";
@@ -902,7 +937,46 @@ export class LinkService {
           "off-ramp failed",
         );
         await this.fireWebhook(link, "offramp.failed", { reason: job.reason }, opts);
+
+        await this.recordTelemetry(link.offrampJobId!, {
+          status: "failed",
+          failureReason: job.reason ?? null,
+        });
       }
+    }
+  }
+
+  /**
+   * Passive off-ramp telemetry (issue #20, 3.8): best-effort read-merge-write
+   * keyed by `tel_<jobId>` so quote/initiate/settle/fail all land on the same
+   * row. Never throws — a telemetry blip must never block or fail a cash-out.
+   */
+  private async recordTelemetry(
+    jobId: string,
+    patch: Partial<OffRampTelemetryRow>,
+  ): Promise<void> {
+    try {
+      const id = `tel_${jobId}`;
+      const existing = (await this.deps.telemetry.all()).find((r) => r.id === id);
+      const base: OffRampTelemetryRow = existing ?? {
+        id,
+        anchorDomain: "unknown",
+        corridor: "unknown",
+        sellAsset: "unknown",
+        sellAmount: "0",
+        indicativeRate: null,
+        quotedRate: "0",
+        quotedAt: Date.now(),
+        initiatedAt: null,
+        settledAt: null,
+        effectiveRate: null,
+        feeAmount: null,
+        status: "quoted",
+        failureReason: null,
+      };
+      await this.deps.telemetry.upsert({ ...base, ...patch, id });
+    } catch {
+      // Telemetry is best-effort — never let it affect the cash-out path.
     }
   }
 

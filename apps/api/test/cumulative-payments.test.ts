@@ -5,6 +5,7 @@ import {
   AlwaysAcceptedKyc,
   FakeLinkRepository,
   FakeOffRampStateRepository,
+  FakeTelemetryRepository,
   FakeWebhookRepository,
   ScriptedOffRamp,
   makeLink,
@@ -64,6 +65,7 @@ function makeTestService(links: FakeLinkRepository): LinkService {
     offrampState: new FakeOffRampStateRepository(),
     kyc: new AlwaysAcceptedKyc(),
     stellar: STELLAR,
+    telemetry: new FakeTelemetryRepository(),
     correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
   });
