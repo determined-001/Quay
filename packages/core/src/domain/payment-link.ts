@@ -24,6 +24,10 @@ export interface PaymentLink {
   reference: string; // short, <=28 bytes — embedded as the Stellar MEMO_TEXT
   sellerId: string;
   destination: string; // seller's G-address (payments land here, non-custodial)
+  // SEP-23 muxed id embedded in the M-address handed to the payer when
+  // CORRELATION=muxed. Null in memo mode (the default) — the two correlation
+  // paths are independent, and a link only ever uses one.
+  muxedId: string | null;
   title: string;
   amount: string; // requested amount, canonical decimal string
   asset: AssetRef;
@@ -32,11 +36,53 @@ export interface PaymentLink {
   txHash: string | null;
   payer: string | null;
   paidAmount: string | null;
+  overpaidAmount: string | null;
   // off-ramp (filled when the seller cashes out)
   offrampJobId: string | null;
   offrampTargetCurrency: string | null;
   offrampStatus: string | null;
+  /**
+   * Indicative rate shown to the seller before they committed (issue 3.5).
+   * Stored at the moment the seller opens the cash-out form (GET offramp-preview).
+   * The delta with `offrampRate` is the anchor's real spread.
+   */
+  offrampIndicativeRate: string | null;
+  /**
+   * The firm rate from the SEP-38 POST /quote used to initiate this cash-out.
+   * Stored by triggerCashOut() (issue 3.5).
+   */
+  offrampRate: string | null;
+  /**
+   * Absolute difference between the indicative and firm rates (firm − indicative),
+   * as a decimal string. Persisted so the spread is queryable without recomputing
+   * (issue 3.5 / 3.8 telemetry).
+   */
+  offrampRateDelta: string | null;
+  /**
+   * Anchor fee quoted at the moment cash-out was initiated (issue 1.5), so a
+   * receipt can reproduce gross/fee/net without recomputing against a rate
+   * that may have moved since. `offrampFeeSource` is "anchor" when the anchor
+   * itself reported it (SEP-38 total_price), "estimated" for the mock adapter.
+   */
+  offrampFeeAmount: string | null;
+  offrampFeeCurrency: string | null;
+  offrampFeeSource: string | null;
+  offrampNetTargetAmount: string | null;
+  /**
+   * On-chain settlement attestation (issue 9.2). Null until the attester has
+   * written the receipt to the registry — which is allowed to be forever: a
+   * link is `paid` because the classic ledger says so, and attestation never
+   * gates that. `attestationContractId` is stored per link rather than read
+   * from config at render time so redeploying the registry cannot silently
+   * repoint every historical receipt at a contract that never held it.
+   */
+  attestationContractId: string | null;
+  attestationTxHash: string | null;
+  attestationLedger: number | null;
+  attestedAt: number | null; // epoch ms
   expiresAt: number | null; // epoch ms
+  /** True for rows created by the demo seed script. Displayed as a badge in the UI. */
+  isDemo: boolean;
   createdAt: number;
   updatedAt: number;
 }

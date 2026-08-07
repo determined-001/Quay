@@ -4,9 +4,16 @@
 # The web app deploys separately to Vercel; the database is Turso (external).
 #
 # Secrets (sync: false) to set in the Render dashboard on first deploy:
-#   DATABASE_URL          libsql://<db-name>-<org>.turso.io
-#   DATABASE_AUTH_TOKEN   from `turso db tokens create <db>` or the Turso dashboard
-#   DEFAULT_SELLER_SECRET S... secret for DEFAULT_SELLER_WALLET (SEP-10 signing)
+#   DATABASE_URL                    libsql://<db-name>-<org>.turso.io
+#   DATABASE_AUTH_TOKEN             from `turso db tokens create <db>` or the Turso dashboard
+#   DEFAULT_SELLER_SECRET           S... secret for DEFAULT_SELLER_WALLET (SEP-10 signing)
+#   KYC_ENCRYPTION_KEY              64 hex chars — REQUIRED whenever OFFRAMP=testanchor
+#   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED in production
+#   JWT_SECRET                      session signing secret
+#   SERVER_SIGNING_SECRET           S... the platform's own stable SEP-10 identity
+#
+# Generate each 64-hex value with:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 services:
   - type: web
@@ -31,9 +38,35 @@ services:
         value: https://quay-web.vercel.app
       - key: DEFAULT_SELLER_WALLET
         value: GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY
+      # The domain this service identifies as in SEP-10 challenges and in
+      # /.well-known/stellar.toml. Unset, env.ts falls back to
+      # `localhost:8787` and every challenge is issued for localhost — wallet
+      # login cannot work against the deployed API at all.
+      - key: HOME_DOMAIN
+        value: quay-api.onrender.com
       - key: DATABASE_URL
         sync: false
       - key: DATABASE_AUTH_TOKEN
         sync: false
       - key: DEFAULT_SELLER_SECRET
+        sync: false
+      # OFFRAMP=testanchor above makes this REQUIRED: env.ts resolves it with
+      # req() at module load, so the process cannot boot without it. It
+      # encrypts seller SEP-12 KYC field values at rest.
+      - key: KYC_ENCRYPTION_KEY
+        sync: false
+      # Encrypts webhook signing secrets at rest. Without it the process falls
+      # back to a hardcoded, public dev key — anyone with the repo could then
+      # decrypt stored secrets and forge delivery signatures. NODE_ENV is
+      # `production` in the image, so a missing value is a hard boot failure.
+      - key: WEBHOOK_SECRET_ENCRYPTION_KEY
+        sync: false
+      # Signs session JWTs. Auto-generated per boot when unset, which logs
+      # every seller out on each restart and deploy.
+      - key: JWT_SECRET
+        sync: false
+      # The platform's own SEP-10 signing identity, published as SIGNING_KEY in
+      # stellar.toml. Auto-generated per boot when unset, so the advertised key
+      # changes on every restart and any wallet that cached it breaks.
+      - key: SERVER_SIGNING_SECRET
         sync: false

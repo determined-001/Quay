@@ -8,3 +8,11 @@ dist
 .env
 .env.local
 PR.md
+
+# Build/run artifacts that have been staged by accident before.
+coverage
+test-results
+.vercel
+
+# Rust / Soroban build output
+contracts/target

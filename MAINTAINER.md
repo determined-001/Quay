@@ -160,4 +160,16 @@ None of these move the band; they only cost the days remaining:
 - Streaming `WatcherPort` implementation — polling is fine at this scale.
 - Extra CI workflows.
 - A Soroban contract for its own sake — off-architecture; the SEP path is the depth story.
+  **Revisited 2026-08-06 (post-W7).** This still stands as written, and
+  `contracts/quay-attest` is not an exception to it — it is not a contract "for
+  its own sake". The SEP path remains the depth story; what the attestation
+  registry does is close the one hole that story leaves open. Quay tells a seller
+  their invoice was paid, and that claim currently lives only in Quay's own
+  database, so a receipt is exactly as trustworthy as whoever runs the API. A
+  non-custodial checkout that asks you to trust its operator's database has
+  given something back. The contract holds no funds and has no authority over
+  any — it records that a payment which already settled on the classic ledger
+  did settle — so it reinforces the custody boundary rather than crossing it.
+  An escrow or quote-lock contract *would* cross it, and stays out of scope for
+  the reasons in `docs/PROPOSAL.md` §6.
 - A second repo — never split the project.
