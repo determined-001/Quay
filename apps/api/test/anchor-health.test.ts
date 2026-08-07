@@ -508,7 +508,7 @@ class FlakyOffRamp implements OffRampPort {
     };
   }
   async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampInitiation> {
-    return { kind: "fields", jobId: "ofr_1" };
+    return { kind: "fields", job: { jobId: "ofr_1", linkId: "lnk_1", status: "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" } }
   }
   async status(jobId: string): Promise<OffRampJob> {
     if (this.opts.statusShouldThrow) {
@@ -648,6 +648,38 @@ describe("LinkService with AnchorHealth", () => {
     const snap = built.service.healthSnapshot();
     expect(snap.state).toBe("closed");
     expect(snap.url).toBeNull();
+  });
+  it("triggerCashOut handles interactive arm correctly and moves link to offramp_pending", async () => {
+    class InteractiveOffRamp implements OffRampPort {
+      readonly mode = "seller_initiated" as const;
+      async quote(): Promise<OffRampQuote> {
+        return { quoteId: "q1", sourceAsset: { code: "USDC", issuer: null }, sourceAmount: "10", targetCurrency: "NGN", targetAmount: "16500", rate: "1650", expiresAt: Date.now() + 60000 };
+      }
+      async initiate(): Promise<OffRampInitiation> {
+        return {
+          kind: "interactive",
+          job: { jobId: "ofr_interactive", linkId: "lnk_1", status: "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" },
+          url: "https://example.com/interactive"
+        };
+      }
+      async status(): Promise<OffRampJob> {
+        throw new Error("not implemented");
+      }
+    }
+
+    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null });
+    const built = buildSvcWithHealth(health, new InteractiveOffRamp());
+    await built.repo.save(link({ status: "paid" }));
+
+    const initiation = await built.service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(initiation.kind).toBe("interactive");
+    if (initiation.kind === "interactive") {
+      expect(initiation.url).toBe("https://example.com/interactive");
+    }
+
+    const l = await built.repo.findById("lnk_1");
+    expect(l!.status).toBe("offramp_pending");
+    expect(l!.offrampJobId).toBe("ofr_interactive");
   });
 });
 

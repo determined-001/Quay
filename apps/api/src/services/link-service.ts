@@ -828,6 +828,14 @@ export class LinkService {
     }
 
     const sourceAmount = link.paidAmount ?? link.amount;
+    let quote: OffRampQuote;
+    let initiation: OffRampInitiation;
+    try {
+      quote = await this.deps.offramp.quote({
+        sourceAsset: link.asset,
+        sourceAmount,
+        targetCurrency: body.targetCurrency,
+      });
 
     // Extracted so the expiry guard below can ask for a second, fresh quote
     // without duplicating the request shape.
@@ -894,6 +902,7 @@ export class LinkService {
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
 
+    const job = initiation.job;
     // Persist the (unmasked) merged fields for future reuse — never logged.
     if (Object.keys(mergedFields).length > 0) {
       await this.deps.sellers.savePayoutFields(seller.id, mergedFields);
@@ -927,6 +936,7 @@ export class LinkService {
     link.offrampNetTargetAmount = quote.netTargetAmount;
 
     await this.deps.links.save(link);
+    return initiation;
     metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
     child.info(
       { event: "link.transition", linkId: link.id, from, to: "offramp_pending", jobId },

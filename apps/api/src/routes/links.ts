@@ -206,6 +206,11 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     }
     log.info({ event: "cashout.request.received", linkId }, "cash-out request received");
     try {
+      const result = await c.service.triggerCashOut(ctx.req.param("id"), parsed.data);
+      if (result.kind === "interactive") {
+        return ctx.json({ job: result.job, interactiveUrl: result.url });
+      }
+      return ctx.json({ job: result.job });
       const existing = await c.service.getLink(linkId);
       if (!existing) return ctx.json({ error: "not_found" }, 404);
       if (existing.link.sellerId !== ctx.get("seller").id) {
