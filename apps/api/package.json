@@ -29,7 +29,7 @@
   "devDependencies": {
     "drizzle-kit": "0.31.10",
     "esbuild": "0.28.1",
-    "tsx": "4.23.5",
+    "tsx": "4.23.9",
     "vitest": "4.1.10"
   }
 }
