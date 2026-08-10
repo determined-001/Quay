@@ -57,6 +57,10 @@ export interface Container {
    *  one so route tests do not depend on live DNS. */
   webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
   metricsToken: string;
+  /** Whether settlements are being attested on-chain, and to which registry.
+   *  Surfaced on /health so "the contract is deployed" and "the product calls
+   *  it" can be told apart from outside, without an account or a log tail. */
+  attestation: { enabled: boolean; contractId: string | null };
   watcherLagSeconds(): number;
   circuitBreakerState(): number;
   auth: {
@@ -68,6 +72,8 @@ export interface Container {
   };
   start(): void;
   stop(): void;
+  /** Readiness probe: can this instance actually serve traffic right now (i.e. is the database reachable)? Distinct from liveness (`/health`) - a process can be alive but not yet/no-longer able to serve. */
+  ready(): Promise<boolean>;
   getWatcherCircuitBreakerStatus(): AccountCircuitBreakerStatus[];
   getWatcherMetrics(): WatcherMetrics;
 }
@@ -129,7 +135,7 @@ export async function createContainer(): Promise<Container> {
   // Anchor health probe + circuit breaker (issue #19, 3.7). In mock mode the
   // probe is disabled and short-circuits to "always available" so the dev
   // surface still works offline; in testanchor mode we hit the real anchor.
-  const anchorHealth = buildAnchorHealth(env.offramp);
+  const anchorHealth = buildAnchorHealth(env.offramp, sellerWallet);
 
   // Resolved before the service because the attester IS the SEP-10 signing
   // identity: the key a wallet already authenticated against is the one that
@@ -208,6 +214,7 @@ export async function createContainer(): Promise<Container> {
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     horizonStatus: () => pollingWatcher.getStatus(),
     metricsToken,
+    attestation: { enabled: attestation !== undefined, contractId: attestation?.contractId ?? null },
     watcherLagSeconds: () => loop.getLagSeconds(),
     circuitBreakerState: () => offramp.getStateNumeric(),
     auth: { challenge, session, stellarToml, revocations: revocationsRepo, secureCookie: env.cookieSecure },
@@ -248,6 +255,14 @@ export async function createContainer(): Promise<Container> {
     getWatcherMetrics() {
       return loop.getMetrics();
     },
+    async ready() {
+      try {
+        await client.execute("SELECT 1");
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
 
@@ -257,7 +272,7 @@ export async function createContainer(): Promise<Container> {
  * the surface minimal and don't pollute env.ts which lives outside the
  * scope of issue 3.7).
  */
-function buildAnchorHealth(offrampKind: "mock" | "testanchor"): AnchorHealth {
+function buildAnchorHealth(offrampKind: "mock" | "testanchor", probeAccount: string): AnchorHealth {
   const enabled = offrampKind === "testanchor";
   const url = enabled ? process.env.ANCHOR_URL ?? "https://testanchor.stellar.org" : null;
   const homeDomain = enabled ? process.env.ANCHOR_HOME_DOMAIN ?? "testanchor.stellar.org" : null;
@@ -267,6 +282,9 @@ function buildAnchorHealth(offrampKind: "mock" | "testanchor"): AnchorHealth {
     enabled,
     url,
     homeDomain,
+    // The configured seller wallet is a real, funded account, which is what the
+    // anchor requires to issue a challenge.
+    probeAccount: enabled ? probeAccount : null,
     failureThreshold: Number.isFinite(failureThreshold) && failureThreshold > 0 ? failureThreshold : 3,
     cooldownMs: Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : 30_000,
   });
@@ -287,7 +305,16 @@ function createAttestation(
   networkPassphrase: string,
   logger: Logger,
 ): SorobanAttestation | undefined {
-  if (!env.attestationContractId) return undefined;
+  if (!env.attestationContractId) {
+    // Say so. A silent undefined here means the deployed API takes payments and
+    // attests nothing, and the only outward sign is a receipt quietly missing a
+    // block nobody was watching for.
+    logger.warn(
+      { event: "attestation.disabled", reason: "no_contract_id" },
+      "ATTESTATION_CONTRACT_ID is not set — settlements will not be attested on-chain",
+    );
+    return undefined;
+  }
   if (!env.sorobanRpcUrl) {
     logger.warn(
       { event: "attestation.disabled", reason: "no_rpc_url" },

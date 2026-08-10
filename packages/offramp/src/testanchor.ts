@@ -17,7 +17,7 @@ import {
 import { NOOP_LOGGER } from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { getSep38Prices, getSep38Quote } from "./sep38";
-import { getSep6Transaction, getSep6WithdrawInfo, startSep6Withdraw } from "./sep6";
+import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6Withdraw } from "./sep6";
 
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
@@ -51,6 +51,13 @@ export interface TestAnchorOptions {
   state: OffRampStateRepository;
   baseUrl?: string;
   homeDomain?: string;
+  /**
+   * Preferred SEP-6 withdrawal type (e.g. "bank_account").
+   * If omitted the adapter reads /sep6/info and uses the single enabled type,
+   * or fails with the list when the anchor offers more than one.
+   * Maps to the OFFRAMP_TYPE env var.
+   */
+  preferredWithdrawType?: string;
   /** Optional logger; if absent, all anchor.* events are dropped (NOOP_LOGGER). */
   logger?: Logger;
 }
@@ -68,10 +75,14 @@ export class TestAnchorOffRamp implements OffRampPort {
   private readonly auth: Sep10Client;
   private readonly state: OffRampStateRepository;
   private readonly logger: Logger;
+  /** Operator's chosen SEP-6 withdraw type; undefined means "infer, and refuse
+   *  if the anchor offers more than one". See resolveWithdrawType. */
+  private readonly preferredWithdrawType: string | undefined;
 
   constructor(opts: TestAnchorOptions) {
     this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
     this.state = opts.state;
+    this.preferredWithdrawType = opts.preferredWithdrawType;
     this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.testanchor" });
     this.auth = new Sep10Client(opts.sellerKeypair, {
       baseUrl: this.baseUrl,
@@ -125,11 +136,24 @@ export class TestAnchorOffRamp implements OffRampPort {
       );
     }
     const log = (opts.logger ?? this.logger);
+
+    // Validate amount against /sep6/info and discover the withdrawal type.
+    // Sep6ValidationError propagates as-is so callers can surface anchor limits.
+    const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
+      this.baseUrl,
+      input.sourceAsset.code,
+      input.sourceAmount,
+      this.preferredWithdrawType,
+    );
+
     const jwt = await this.auth.token({ logger: log });
     const q = await getSep38Quote(this.baseUrl, jwt, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
+      // Use the delivery method matching the resolved withdraw type when the
+      // anchor publishes one; fall back to omitting it so the anchor chooses.
+      buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
     }, log);
 
     const expiresAt = Date.parse(q.expiresAt);
@@ -140,6 +164,9 @@ export class TestAnchorOffRamp implements OffRampPort {
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
       price: q.price,
+      // Persisted so initiate() withdraws on the rail this price was quoted
+      // for, rather than re-deriving it and possibly landing on another.
+      withdrawType,
       expiresAt,
       createdAt: Date.now(),
     });
@@ -172,11 +199,20 @@ export class TestAnchorOffRamp implements OffRampPort {
 
     const jwt = await this.auth.token({ logger: baseLog });
 
+    // A quote stored before `withdrawType` existed has none. Re-resolve from
+    // /info rather than defaulting to "bank_account" — assuming the rail is
+    // exactly what this PR exists to stop doing.
+    const withdrawType =
+      q.withdrawType ??
+      (await resolveWithdrawType(this.baseUrl, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
+        .type;
+
     const withdraw = await startSep6Withdraw(this.baseUrl, jwt, {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,
       account: this.auth.publicKey,
-      type: input.payout.fields.type ?? "bank_account",
+      // The type discovered from /sep6/info at quote time — never assumed.
+      type: withdrawType,
       dest: input.payout.fields.dest,
       destExtra: input.payout.fields.dest_extra,
     }, baseLog);

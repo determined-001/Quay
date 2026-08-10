@@ -60,6 +60,7 @@ async function main(): Promise<void> {
     keyFor: apiKeyRateLimitKey(container.apiKeys),
   });
 
+  // Liveness: the process is up and answering HTTP at all.
   app.get("/health", async (ctx) => {
     const usdcTrustline = await container.service
       .checkSellerUsdcTrustline()
@@ -74,17 +75,30 @@ async function main(): Promise<void> {
       // can tell "the anchor is down" apart from "the API is down" without
       // tailing logs.
       anchor: container.service.healthSnapshot(),
+      // On-chain settlement attestation (issue 9.2). Published here because
+      // "the contract is deployed" and "the running product actually calls it"
+      // are different claims, and only the second one is worth anything to
+      // someone deciding whether to trust a receipt. `enabled: false` is the
+      // honest answer when it is off, not an omission.
+      attestation: container.attestation,
     });
   });
 
-  app.get("/ready", (ctx) => {
+  // Readiness: can this instance actually serve traffic right now? Distinct
+  // from liveness — a container HEALTHCHECK / orchestrator readiness probe
+  // should use this, not /health, to decide whether to route traffic here.
+  // `ok` gates on the database ONLY. Watcher circuit-breaker state is reported
+  // for diagnostics but deliberately does NOT fail readiness: this endpoint is
+  // now Render's healthCheckPath and the Dockerfile HEALTHCHECK, and a Horizon
+  // blip opening a breaker must not depool an instance that can still serve
+  // checkout pages and link creation.
+  app.get("/ready", async (ctx) => {
+    const ok = await container.ready();
     const circuitBreakers = container.getWatcherCircuitBreakerStatus();
     const metrics = container.getWatcherMetrics();
-    
-    const hasOpenCircuitBreakers = circuitBreakers.some((cb) => cb.isOpen);
-    
+
     return ctx.json({
-      ok: !hasOpenCircuitBreakers,
+      ok,
       circuitBreakers,
       metrics: {
         accountsWatched: metrics.accountsWatched,
@@ -92,7 +106,7 @@ async function main(): Promise<void> {
         circuitBreakersOpen: metrics.circuitBreakersOpen,
         perAccountLag: Object.fromEntries(metrics.perAccountLag),
       },
-    });
+    }, ok ? 200 : 503);
   });
 
   app.route("/links", linkRoutes(container, strictRateLimit));
@@ -149,10 +163,27 @@ async function main(): Promise<void> {
     );
   });
 
+  // Graceful shutdown: stop accepting new connections, let in-flight HTTP
+  // requests finish, then stop the watcher/poller. A hard deadline guards
+  // against a connection that never closes (e.g. a stuck keep-alive) so the
+  // process still exits before the orchestrator's own SIGKILL timeout.
+  let shuttingDown = false;
   const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info({ event: "api.shutdown", signal }, "shutting down");
-    container.stop();
-    process.exit(0);
+
+    const forceExit = setTimeout(() => {
+      logger.warn({ event: "api.shutdown.forced" }, "shutdown grace period elapsed - forcing exit");
+      process.exit(1);
+    }, 10_000);
+    forceExit.unref();
+
+    server.close(() => {
+      container.stop();
+      clearTimeout(forceExit);
+      process.exit(0);
+    });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

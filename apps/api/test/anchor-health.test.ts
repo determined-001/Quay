@@ -110,7 +110,7 @@ afterEach(() => {
 
 describe("AnchorHealth (probe + circuit breaker)", () => {
   it("in a config-disabled mode (mock), probe always succeeds and stays closed without IO", async () => {
-    const h = new AnchorHealth({ enabled: false, url: null, homeDomain: null });
+    const h = new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null });
     configureFetch(() => ({ ok: false, status: 500 }));
     const snap = await h.probe();
     expect(snap.state).toBe("closed");
@@ -121,7 +121,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
 
   it("happy path: TOML + SEP-10 challenge with transaction + /info all 200 -> closed, probes.all true", async () => {
     const url = "https://testanchor.stellar.org";
-    const h = new AnchorHealth({ enabled: true, url, homeDomain: "testanchor.stellar.org" });
+    const h = new AnchorHealth({ enabled: true, url, homeDomain: "testanchor.stellar.org" , probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY"});
     configureFetch((u) => {
       if (u.endsWith("/.well-known/stellar.toml")) return { ok: true };
       if (u.endsWith("/auth") || u.includes("/auth?")) {
@@ -143,7 +143,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
   });
 
   it("failure threshold: 3 consecutive probes open the breaker", async () => {
-    const h = new AnchorHealth({ enabled: true, url: "https://testanchor.stellar.org", homeDomain: "x.example" });
+    const h = new AnchorHealth({ enabled: true, url: "https://testanchor.stellar.org", homeDomain: "x.example" , probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY"});
     configureFetch(() => ({ ok: false, status: 502 }));
 
     await h.probe();
@@ -158,7 +158,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
   });
 
   it("opens immediately on hard errors (timeouts) and reports a sensible lastError", async () => {
-    const h = new AnchorHealth({ enabled: true, url: "https://testanchor.stellar.org", homeDomain: "x.example" });
+    const h = new AnchorHealth({ enabled: true, url: "https://testanchor.stellar.org", homeDomain: "x.example" , probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY"});
     configureFetch(() => ({ ok: false, status: 599 })); // arbitrary failure code
     await h.probe();
     expect(h.snapshot().consecutiveFailures).toBe(1);
@@ -179,7 +179,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs,
     });
@@ -199,7 +199,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "testanchor.stellar.org",
+      homeDomain: "testanchor.stellar.org", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs,
     });
@@ -224,7 +224,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs,
     });
@@ -252,7 +252,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "testanchor.stellar.org",
+      homeDomain: "testanchor.stellar.org", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 2,
       cooldownMs: 1_000_000,
     });
@@ -604,7 +604,7 @@ describe("LinkService with AnchorHealth", () => {
     const health = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs: 1_000_000, // never auto-close during the test
     });
@@ -629,7 +629,7 @@ describe("LinkService with AnchorHealth", () => {
   });
 
   it("a 502 still wraps single-call upstream failures (NOT 503) when the breaker is closed", async () => {
-    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null }); // always available
+    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }); // always available
     const built = buildSvcWithHealth(health, new FlakyOffRamp({ quoteShouldThrow: true }));
     await built.repo.save(link({ status: "paid" }));
     const res = await built.captureRoute.request("http://x/lnk_1/cash-out", {
@@ -643,7 +643,7 @@ describe("LinkService with AnchorHealth", () => {
   });
 
   it("healthSnapshot reflects the breaker state and is exposed on the service", async () => {
-    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null });
+    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null });
     const built = buildSvcWithHealth(health, new FlakyOffRamp());
     const snap = built.service.healthSnapshot();
     expect(snap.state).toBe("closed");
@@ -690,7 +690,7 @@ describe("GET /health exposes anchor state", () => {
     const health = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "testanchor.stellar.org",
+      homeDomain: "testanchor.stellar.org", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs: 60_000,
     });
@@ -736,7 +736,7 @@ describe("GET /health exposes anchor state", () => {
     const health = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs: 60_000,
     });
@@ -773,7 +773,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
     });
@@ -826,7 +826,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
     });
@@ -873,7 +873,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
     });
@@ -915,7 +915,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
     });
@@ -935,5 +935,134 @@ describe("LinkService.pollCashOuts attribution", () => {
     // Recording kept going — last_error is still set; status remains pending.
     expect(service.lastPollErrorFor("lnk_bo")).toContain("anchor 502");
     expect((await repo.findById("lnk_bo"))!.status).toBe("offramp_pending");
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  BUG-4.17 — the probe must ask about a real account.
+//
+//  The SEP-10 liveness probe used a hardcoded all-zero address. testanchor
+//  validates the `account` parameter and answers `400 {"error":"Invalid
+//  account."}`, so the probe failed on every tick against a perfectly healthy
+//  anchor. Observed live: `lastSuccessAt: null`, `consecutiveFailures: 2` with
+//  a threshold of 3 — one tick from opening the breaker and failing every
+//  cash-out with 503 anchor_unavailable.
+// ---------------------------------------------------------------------------
+describe("AnchorHealth probe account", () => {
+  it("asks for a challenge for the configured account, not a placeholder", async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      seen.push(url);
+      if (url.includes("/.well-known/stellar.toml")) return new Response("ok", { status: 200 });
+      if (url.includes("/auth")) return new Response(JSON.stringify({ transaction: "AAA" }), { status: 200 });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const health = new AnchorHealth({
+        enabled: true,
+        url: "https://anchor.test",
+        homeDomain: "anchor.test",
+        probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      });
+      const snap = await health.probe();
+
+      const authCall = seen.find((u) => u.includes("/auth"));
+      expect(authCall).toBeDefined();
+      expect(authCall).toContain("account=GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY");
+      // The placeholder that caused the false outage must not reappear.
+      expect(authCall).not.toContain("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK5KQ");
+      expect(snap.probes.sep10).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("stays disabled rather than probing with no account configured", async () => {
+    const health = new AnchorHealth({
+      enabled: true,
+      url: "https://anchor.test",
+      homeDomain: "anchor.test",
+      probeAccount: null,
+    });
+    // Short-circuits to healthy without IO, the same as mock mode — better than
+    // probing with a placeholder and reporting a false outage.
+    const snap = await health.probe();
+    expect(snap.state).toBe("closed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  BUG-4.19 — the probe must exercise the endpoints the product actually uses.
+//
+//  Third bug of this shape in one evening. The probe checked `/info`; the
+//  off-ramp adapter calls `/sep6/info`. testanchor answers 404 and 200
+//  respectively, so /health reported an outage against a healthy anchor and the
+//  breaker opened, failing live cash-outs with 503.
+//
+//  A probe that checks an endpoint the product never calls tells you nothing
+//  when it passes, and lies when it fails.
+// ---------------------------------------------------------------------------
+describe("AnchorHealth probe endpoints", () => {
+  it("probes the same /sep6/info the off-ramp adapter calls", async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      seen.push(url);
+      if (url.includes("stellar.toml")) return new Response("ok", { status: 200 });
+      if (url.includes("/auth")) return new Response(JSON.stringify({ transaction: "AAA" }), { status: 200 });
+      // Order matters: "/sep6/info" also ends with "/info", so the specific
+      // path has to be matched first. Mirrors testanchor, where the bare path
+      // does not exist.
+      if (url.includes("/sep6/info")) return new Response("{}", { status: 200 });
+      if (url.endsWith("/info")) return new Response("not found", { status: 404 });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const health = new AnchorHealth({
+        enabled: true,
+        url: "https://anchor.test",
+        homeDomain: "anchor.test",
+        probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      });
+      const snap = await health.probe();
+
+      expect(seen.some((u) => u.includes("/sep6/info"))).toBe(true);
+      expect(snap.probes.info).toBe(true);
+      expect(snap.state).toBe("closed");
+      expect(snap.lastError).toBeNull();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("still reports a genuine /sep6/info outage", async () => {
+    // The point is not to make the probe unfailable — a real 503 must still
+    // count against the breaker.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      if (url.includes("stellar.toml")) return new Response("ok", { status: 200 });
+      if (url.includes("/auth")) return new Response(JSON.stringify({ transaction: "AAA" }), { status: 200 });
+      return new Response("upstream down", { status: 503 });
+    }) as typeof fetch;
+
+    try {
+      const health = new AnchorHealth({
+        enabled: true,
+        url: "https://anchor.test",
+        homeDomain: "anchor.test",
+        probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      });
+      const snap = await health.probe();
+      expect(snap.probes.info).toBe(false);
+      expect(snap.lastError).toMatch(/503/);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

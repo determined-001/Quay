@@ -69,6 +69,37 @@ if (offramp !== "mock" && offramp !== "testanchor") {
   throw new Error(`OFFRAMP must be "mock" or "testanchor", got "${offramp}"`);
 }
 
+
+/**
+ * The domain this service identifies as in SEP-10 challenges and in
+ * `/.well-known/stellar.toml`.
+ *
+ * Order matters:
+ *
+ *  1. `HOME_DOMAIN`, when the deployment sits behind a domain of its own — a
+ *     custom domain or a proxy. Then the host the platform knows about and the
+ *     host wallets fetch the TOML from are genuinely different, and only the
+ *     operator can say which is which.
+ *  2. The hosting platform's own answer. Render injects
+ *     `RENDER_EXTERNAL_HOSTNAME`; there is no reason to make someone retype a
+ *     value the platform already knows, and every reason not to — an unset
+ *     variable silently produced `WEB_AUTH_ENDPOINT="https://localhost:8787/auth"`
+ *     on a live deploy, which breaks wallet login while everything reports
+ *     healthy.
+ *  3. localhost, for local development.
+ */
+function resolveHomeDomain(): string {
+  const explicit = process.env.HOME_DOMAIN?.trim();
+  if (explicit) return explicit;
+
+  // Render sets this on every service. Other platforms expose an equivalent;
+  // add them here rather than pushing the problem back onto the operator.
+  const platform = process.env.RENDER_EXTERNAL_HOSTNAME?.trim();
+  if (platform) return platform;
+
+  return `localhost:${Number(process.env.API_PORT ?? "8787")}`;
+}
+
 export const env = {
   network,
   // JSON-line log verbosity. trace|debug|info|warn|error|fatal, default "info".
@@ -131,8 +162,8 @@ export const env = {
   metricsToken: process.env.METRICS_TOKEN || undefined,
   // Domain we identify as in SEP-10 challenges + stellar.toml. Should match where
   // this API is actually reachable in production.
-  homeDomain: process.env.HOME_DOMAIN || `localhost:${Number(process.env.API_PORT ?? "8787")}`,
-  webAuthDomain: process.env.WEB_AUTH_DOMAIN || process.env.HOME_DOMAIN || `localhost:${Number(process.env.API_PORT ?? "8787")}`,
+  homeDomain: resolveHomeDomain(),
+  webAuthDomain: process.env.WEB_AUTH_DOMAIN || resolveHomeDomain(),
   // Secret key for the identity that SIGNS SEP-10 challenges (our server, not any
   // seller). Auto-generates a throwaway testnet keypair if unset. Required on
   // public network — a login server's signing key must be stable across restarts.

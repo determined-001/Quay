@@ -12,6 +12,11 @@
 #   JWT_SECRET                      session signing secret
 #   SERVER_SIGNING_SECRET           S... the platform's own stable SEP-10 identity
 #
+# SERVER_SIGNING_SECRET is also the on-chain attester (issue 9.2), so its
+# account MUST be funded on testnet to pay contract invocation fees. An
+# unfunded attester fails attestation only — settlement is proven by the
+# classic ledger and never blocks on it.
+#
 # Generate each 64-hex value with:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
@@ -22,7 +27,10 @@ services:
     plan: starter
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
-    healthCheckPath: /health
+    # /ready checks the database is actually reachable (readiness), not just
+    # that the process is up (/health, liveness) - matches the Dockerfile's
+    # own HEALTHCHECK target. See apps/api/src/index.ts.
+    healthCheckPath: /ready
     envVars:
       - key: API_PORT
         value: "8787"
@@ -38,12 +46,11 @@ services:
         value: https://quay-web.vercel.app
       - key: DEFAULT_SELLER_WALLET
         value: GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY
-      # The domain this service identifies as in SEP-10 challenges and in
-      # /.well-known/stellar.toml. Unset, env.ts falls back to
-      # `localhost:8787` and every challenge is issued for localhost — wallet
-      # login cannot work against the deployed API at all.
-      - key: HOME_DOMAIN
-        value: quay-api.onrender.com
+      # HOME_DOMAIN is intentionally NOT declared here. env.ts derives it from
+      # RENDER_EXTERNAL_HOSTNAME, which Render injects into every service, so
+      # there is nothing to keep in sync and nothing to forget. Set it in the
+      # dashboard only if a custom domain or proxy is put in front, where the
+      # host wallets fetch stellar.toml from stops matching the platform's.
       - key: DATABASE_URL
         sync: false
       - key: DATABASE_AUTH_TOKEN
@@ -70,3 +77,14 @@ services:
       # changes on every restart and any wallet that cached it breaks.
       - key: SERVER_SIGNING_SECRET
         sync: false
+      # On-chain settlement attestation (issue 9.2). WITHOUT THIS the API boots
+      # green, takes payments, and attests nothing — `createAttestation` returns
+      # undefined and every receipt renders without the block. That failure is
+      # invisible from the outside, which is exactly why it is declared here
+      # rather than left to the dashboard: the contract being deployed and the
+      # product actually calling it are two different claims.
+      # Contract id is public (see contracts/README.md), so it is not a secret.
+      - key: ATTESTATION_CONTRACT_ID
+        value: CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3
+      - key: SOROBAN_RPC_URL
+        value: https://soroban-testnet.stellar.org

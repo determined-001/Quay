@@ -72,9 +72,20 @@ touching logs.
   "network": "testnet",
   "sellerWallet": "G...",
   "usdcTrustline": { "ok": true },
-  "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 }
+  "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 },
+  "attestation": {
+    "enabled": true,
+    "contractId": "CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3"
+  }
 }
 ```
+`attestation` reports whether this instance is writing settlement attestations
+on-chain, and to which registry. It is published because "the contract is
+deployed" and "the running product actually calls it" are different claims, and
+only the second is worth anything to someone deciding whether to trust a
+receipt. `enabled: false` (with `contractId: null`) is the honest answer when
+`ATTESTATION_CONTRACT_ID` is unset — settlement is unaffected either way.
+
 `ok` is pure liveness (the process is up) — check `horizon.degraded` for whether
 the ledger watcher is actually keeping up. Every Horizon call (`packages/stellar`)
 goes through a retry policy first — 3 attempts, exponential backoff with full
@@ -354,6 +365,78 @@ checkout page).
 **403** — `{ "error": "forbidden", "message": "..." }`: the link exists but
 belongs to a different seller.
 **404** — `{ "error": "not_found" }`
+
+---
+
+## `GET /r/:reference`
+
+**Public — no auth.** The buyer-facing receipt, keyed by the payment reference
+(the same value carried in the Stellar memo). Deliberately narrow: it returns
+only what is safe to hand a stranger holding the link. It never includes
+`sellerId`, `isDemo`, or any of the off-ramp economics (`offrampRate`,
+`offrampFeeAmount`, `offrampNetTargetAmount`) — a buyer must not learn the
+seller's realized FX rate or anchor fees.
+
+Only settled links resolve. An `active`, `expired` or `cancelled` link returns
+`404`: an unpaid link is not a receipt.
+
+**200**
+```json
+{
+  "reference": "pl_0eipnodm7s2o",
+  "title": "Order #1042",
+  "amount": "3",
+  "asset": { "code": "XLM", "issuer": null },
+  "status": "paid",
+  "txHash": "b166269ace8a96efe...",
+  "payer": "G...",
+  "paidAmount": "3",
+  "createdAt": 1786094880000,
+  "updatedAt": 1786094898582,
+  "attestation": {
+    "contractId": "CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3",
+    "refHash": "cdd4838dc2edbe2721bb609126eb230a53a1cc3e3e8a706cd96c0f41d7d7498f",
+    "txHash": "7b62b57563d31f35d5f7cc27f115061a6890d20f342b5ccf09d3ca18276e6874",
+    "ledger": 4014880,
+    "attestedAt": 1786094898582
+  }
+}
+```
+
+### Verifying a receipt without trusting this API
+
+`attestation` is the point of the endpoint. Quay saying a link is `paid` is a
+claim about its own database; the attestation is the same fact recorded in a
+Soroban registry Quay cannot rewrite, so the receipt can be checked against the
+ledger instead of against us.
+
+- `refHash` is `sha256(reference)` and is **what the registry is keyed by** —
+  the reference itself is never written on-chain, because it is effectively an
+  invoice id and publishing them would leak a seller's invoice volume and
+  sequence to any observer. Recompute it yourself from `reference`; you do not
+  have to take this field's word for it either.
+- `txHash` is the transaction that *wrote the attestation*, not the payment.
+  The payment's own hash is the top-level `txHash`. They are two facts on two
+  different ledgers. It is `null` (with `ledger: null`) when the attestation was
+  found already present rather than written by this instance — the registry
+  stores the fact, not the invocation that carried it.
+- `attestation` is `null` when the payment has not been attested. That is not an
+  error: settlement is proven by the classic ledger regardless, and a missing
+  block is the honest display rather than a claim of verifiability that isn't
+  there.
+
+```bash
+REF=pl_0eipnodm7s2o
+REFHASH=$(node -e "console.log(require('crypto').createHash('sha256').update('$REF').digest('hex'))")
+
+stellar contract invoke \
+  --id CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3 \
+  --source <any-funded-account> --network testnet --send=no \
+  -- verify --ref_hash $REFHASH
+```
+
+**404** — `{ "error": "not_found" }`: unknown reference, or the link is not
+settled.
 
 ---
 

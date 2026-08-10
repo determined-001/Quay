@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { env } from "../env";
 import {
   WatcherLoop,
   type AccountCircuitBreakerStatus,
@@ -172,7 +173,7 @@ describe("WatcherLoop fan-out with fairness", () => {
     expect(maxLag).toBeLessThan(pollMs * 20); // Should not be starved for 20 ticks
   });
 
-  it("should back off idle accounts", async () => {
+  it("should back off idle accounts — polling them less, but never stopping", async () => {
     let fakeTime = 1000;
     const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => fakeTime);
 
@@ -180,30 +181,31 @@ describe("WatcherLoop fan-out with fairness", () => {
     (mockLinks.activeDestinations as any).mockResolvedValue(accounts);
 
     (mockState.getCursor as any).mockResolvedValue("cursor");
-    (mockWatcher.fetchSince as any).mockImplementation(
-      async (account: string) => {
-        if (account === "idle_account") return [];
-        return [{ txHash: `tx_${fakeTime}`, pagingToken: `token_${fakeTime}` }];
-      },
-    );
+    // Count real polls per account. `perAccountLag` cannot express this: it is
+    // `now - lastProcessedAt` with a frozen clock, so it reports 0 for whichever
+    // accounts happened to be polled on the final tick and says nothing about
+    // the ticks in between.
+    const polls: Record<string, number> = { idle_account: 0, active_account: 0 };
+    (mockWatcher.fetchSince as any).mockImplementation(async (account: string) => {
+      polls[account] = (polls[account] ?? 0) + 1;
+      if (account === "idle_account") return [];
+      return [{ txHash: `tx_${fakeTime}`, pagingToken: `token_${fakeTime}` }];
+    });
     (mockLinks.openLinksForDestination as any).mockResolvedValue([]);
     (mockState.isProcessed as any).mockResolvedValue(false);
 
     await loop.runOnce();
-
-    // Run enough ticks to trigger backoff
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < 40; i++) {
       fakeTime += 100;
       await loop.runOnce();
     }
 
-    const metrics = loop.getMetrics();
+    // Backed off relative to the busy account...
+    expect(polls.idle_account ?? 0).toBeLessThan(polls.active_account ?? 0);
+    // ...but still polled. BUG-4.22: this used to stop permanently, so a
+    // payment arriving after the account went quiet was never seen.
+    expect(polls.idle_account ?? 0).toBeGreaterThan(env.watcherIdleBackoffTicks);
 
-    // Active account should have lower lag than idle account
-    const activeLag = metrics.perAccountLag.get("active_account") || 0;
-    const idleLag = metrics.perAccountLag.get("idle_account") || 0;
-
-    expect(activeLag).toBeLessThan(idleLag);
     dateSpy.mockRestore();
   });
 

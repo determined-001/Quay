@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { setCookie, deleteCookie } from "hono/cookie";
 import { z } from "zod";
 import { AuthError, type ChallengeService } from "../services/challenge";
+import { SignerLookupUnavailableError } from "../services/horizon-signers";
 import type { SessionIssuer } from "../services/session";
 import type { SellerRepository, TokenRevocationRepository } from "@checkout/core";
 import { requireSeller, SESSION_COOKIE, type AuthedVariables } from "../middleware/auth";
@@ -44,6 +45,12 @@ export function authRoutes(deps: {
       account = await deps.challenge.verify(parsed.data.transaction);
     } catch (err) {
       if (err instanceof AuthError) return ctx.json({ error: err.message }, 401);
+      if (err instanceof SignerLookupUnavailableError) {
+        // The request was fine; we could not reach the ledger to check it.
+        // 503 says "try again", which is true. A 500 says "we are broken",
+        // which sends the caller looking for a fault that isn't theirs.
+        return ctx.json({ error: "horizon_unavailable" }, 503);
+      }
       throw err;
     }
 

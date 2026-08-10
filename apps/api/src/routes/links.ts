@@ -1,5 +1,5 @@
 import { Hono, type MiddlewareHandler } from "hono";
-import { createLinkSchema, cashOutSchema, type PaymentLink } from "@checkout/core";
+import { createLinkSchema, cashOutSchema, submitPaymentSchema, type PaymentLink } from "@checkout/core";
 import type { Container } from "../services/container";
 import { HttpError } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
@@ -196,6 +196,26 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
   // guard mounted here, any key carrying only the default
   // links:read/links:write/webhooks:manage set could cash a paid link out — the
   // scope was documented and enforced nowhere.
+  // Relay a transaction the buyer signed in their own wallet (issue #31).
+  // Public and strict-rate-limited: the payer is a buyer holding a link, not an
+  // authenticated seller, so there is no account to gate on. The XDR itself is
+  // validated in full by the service before anything reaches Horizon.
+  app.post("/:id/submit", strictRateLimit, async (ctx) => {
+    const parsed = submitPaymentSchema.safeParse(await safeJson(ctx));
+    if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+    try {
+      const result = await c.service.submitPayment(ctx.req.param("id"), parsed.data.signedXdr, {
+        logger: ctx.get("logger"),
+      });
+      return ctx.json(result, 200);
+    } catch (err) {
+      if (err instanceof HttpError) {
+        return ctx.json({ error: err.message }, err.status as 400 | 404 | 409 | 502);
+      }
+      throw err;
+    }
+  });
+
   app.post("/:id/cash-out", strictRateLimit, auth, requireScope("offramp:initiate"), idempotent, async (ctx) => {
     const log = getLogger(ctx);
     const linkId = ctx.req.param("id");

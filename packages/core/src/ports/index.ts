@@ -226,6 +226,10 @@ export class OffRampJobNotFoundError extends Error {
 export interface StoredOffRampQuote {
   quoteId: string;
   linkId: string;
+  /** SEP-6 withdraw type resolved at quote time. `initiate()` must reuse it —
+   *  quoting for one rail and withdrawing on another is how a seller ends up
+   *  paid at a rate that was never quoted for their actual payout method. */
+  withdrawType?: string;
   sellAsset: AssetRef;
   sellAmount: string;
   buyCurrency: string;

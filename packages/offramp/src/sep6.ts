@@ -60,6 +60,207 @@ export async function getSep6WithdrawInfo(
   }));
 }
 
+// ---------------------------------------------------------------------------
+// SEP-6 /info capability discovery
+// ---------------------------------------------------------------------------
+// `getSep6WithdrawInfo` above answers "what fields does the form need". This
+// pair answers the questions that have to be settled *before* a quote is
+// requested: which withdrawal type are we doing, and will the anchor accept
+// this amount at all. Asking after quoting means burning a firm quote to
+// discover a limit the anchor published all along.
+
+/** One withdrawal type (`bank_account`, `cash`, …) under an asset. */
+export interface Sep6WithdrawType {
+  fields: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
+  /** Per-type bounds. When present these are tighter than the asset's own. */
+  minAmount?: number;
+  maxAmount?: number;
+}
+
+export interface Sep6AssetInfo {
+  enabled: boolean;
+  minAmount?: number;
+  maxAmount?: number;
+  feeFixed?: number;
+  feePercent?: number;
+  types: Record<string, Sep6WithdrawType>;
+}
+
+export interface Sep6Info {
+  withdraw: Record<string, Sep6AssetInfo>;
+}
+
+/**
+ * Refused *before* a quote is requested, carrying the anchor's own published
+ * limits so the caller can tell the seller what would be accepted rather than
+ * just that this wasn't.
+ */
+export class Sep6ValidationError extends Error {
+  constructor(
+    message: string,
+    readonly limits: { minAmount?: number; maxAmount?: number } = {},
+    readonly availableTypes: string[] = [],
+  ) {
+    super(message);
+    this.name = "Sep6ValidationError";
+  }
+}
+
+const INFO_TTL_MS = 5 * 60_000;
+const infoCache = new Map<string, { at: number; info: Sep6Info }>();
+
+/**
+ * GET /sep6/info, parsed into the shape the domain uses and cached per base URL
+ * for 5 minutes. Capability discovery does not change between two cash-outs a
+ * minute apart, and an anchor should not be polled once per checkout for it.
+ */
+export async function getSep6Info(baseUrl: string, logger?: Logger): Promise<Sep6Info> {
+  const cached = infoCache.get(baseUrl);
+  if (cached && Date.now() - cached.at < INFO_TTL_MS) return cached.info;
+
+  const log = (logger ?? NOOP_LOGGER).child({ component: "sep6", baseUrl });
+  const res = await fetch(new URL("/sep6/info", baseUrl));
+  if (!res.ok) {
+    log.warn({ event: "anchor.sep6.info.fail", statusCode: res.status }, "SEP-6 /info failed");
+    throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
+  }
+
+  const body = (await res.json()) as {
+    withdraw?: Record<
+      string,
+      {
+        enabled?: boolean;
+        min_amount?: number;
+        max_amount?: number;
+        fee_fixed?: number;
+        fee_percent?: number;
+        types?: Record<
+          string,
+          {
+            fields?: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
+            min_amount?: number;
+            max_amount?: number;
+          }
+        >;
+      }
+    >;
+  };
+
+  const withdraw: Record<string, Sep6AssetInfo> = {};
+  for (const [code, raw] of Object.entries(body.withdraw ?? {})) {
+    const types: Record<string, Sep6WithdrawType> = {};
+    for (const [typeName, rawType] of Object.entries(raw.types ?? {})) {
+      types[typeName] = {
+        fields: rawType.fields ?? {},
+        minAmount: rawType.min_amount,
+        maxAmount: rawType.max_amount,
+      };
+    }
+    withdraw[code] = {
+      enabled: raw.enabled ?? false,
+      minAmount: raw.min_amount,
+      maxAmount: raw.max_amount,
+      feeFixed: raw.fee_fixed,
+      feePercent: raw.fee_percent,
+      types,
+    };
+  }
+
+  const info: Sep6Info = { withdraw };
+  infoCache.set(baseUrl, { at: Date.now(), info });
+  return info;
+}
+
+/** Test seam — drops the cached /info for a base URL, or all of them. */
+export function clearSep6InfoCache(baseUrl?: string): void {
+  if (baseUrl) infoCache.delete(baseUrl);
+  else infoCache.clear();
+}
+
+/**
+ * Decide which withdrawal type to use and confirm the anchor will take this
+ * amount, from the anchor's own published capabilities.
+ *
+ * Ambiguity is an error rather than a guess: if an anchor offers several types
+ * and no preference was configured, picking one silently would route a seller's
+ * money down a rail nobody chose.
+ */
+export async function resolveWithdrawType(
+  baseUrl: string,
+  assetCode: string,
+  amount: string,
+  preferredType?: string,
+  logger?: Logger,
+): Promise<{
+  type: string;
+  typeInfo: Sep6WithdrawType;
+  feeFixed?: number;
+  feePercent?: number;
+}> {
+  const info = await getSep6Info(baseUrl, logger);
+  const asset = info.withdraw[assetCode];
+  if (!asset) {
+    throw new Sep6ValidationError(
+      `Anchor does not list ${assetCode} for withdrawal`,
+      {},
+      Object.keys(info.withdraw),
+    );
+  }
+  if (!asset.enabled) {
+    throw new Sep6ValidationError(`Anchor has withdrawal of ${assetCode} disabled`);
+  }
+
+  const typeNames = Object.keys(asset.types);
+  let type: string;
+  if (preferredType) {
+    if (!typeNames.includes(preferredType)) {
+      throw new Sep6ValidationError(
+        `Anchor does not offer withdraw type "${preferredType}" for ${assetCode}`,
+        { minAmount: asset.minAmount, maxAmount: asset.maxAmount },
+        typeNames,
+      );
+    }
+    type = preferredType;
+  } else if (typeNames.length === 1) {
+    type = typeNames[0]!;
+  } else {
+    throw new Sep6ValidationError(
+      typeNames.length === 0
+        ? `Anchor lists no withdraw types for ${assetCode}`
+        : `Anchor offers ${typeNames.length} withdraw types for ${assetCode}; set OFFRAMP_TYPE to choose one`,
+      { minAmount: asset.minAmount, maxAmount: asset.maxAmount },
+      typeNames,
+    );
+  }
+
+  const typeInfo = asset.types[type]!;
+  // Per-type bounds win where present — an anchor may take 1 USDC by cash and
+  // 50 by wire, and the asset-level figure is only the outer envelope.
+  const minAmount = typeInfo.minAmount ?? asset.minAmount;
+  const maxAmount = typeInfo.maxAmount ?? asset.maxAmount;
+  const value = Number(amount);
+
+  if (!Number.isFinite(value)) {
+    throw new Sep6ValidationError(`Amount "${amount}" is not a number`, { minAmount, maxAmount }, typeNames);
+  }
+  if (minAmount !== undefined && value < minAmount) {
+    throw new Sep6ValidationError(
+      `Amount ${amount} is below the anchor's minimum of ${minAmount} ${assetCode}`,
+      { minAmount, maxAmount },
+      typeNames,
+    );
+  }
+  if (maxAmount !== undefined && value > maxAmount) {
+    throw new Sep6ValidationError(
+      `Amount ${amount} is above the anchor's maximum of ${maxAmount} ${assetCode}`,
+      { minAmount, maxAmount },
+      typeNames,
+    );
+  }
+
+  return { type, typeInfo, feeFixed: asset.feeFixed, feePercent: asset.feePercent };
+}
+
 export interface Sep6TransactionResult {
   id: string;
   status: string;

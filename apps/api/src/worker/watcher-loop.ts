@@ -24,10 +24,31 @@ interface AccountState {
   consecutiveErrors: number;
   lastErrorTime: number;
   consecutiveIdleTicks: number;
+  /** Ticks skipped since this account was last actually polled. */
+  skippedTicks: number;
   lastActivityTime: number;
   isNewAccount: boolean;
   lastProcessedAt: number;
 }
+
+/**
+ * How many ticks to skip between polls of an idle account.
+ *
+ * Bounded on purpose. The watcher only ever looks at destinations returned by
+ * `activeDestinations()` — accounts that have an OPEN link — so an idle account
+ * here is one where a buyer is being shown "waiting for payment" right now.
+ * Stretching that interval indefinitely is indistinguishable from the product
+ * being broken, which is exactly how it presented: a payment landed on-chain
+ * with the correct memo and the checkout page sat spinning.
+ */
+function idleStride(consecutiveIdleTicks: number, backoffTicks: number): number {
+  if (consecutiveIdleTicks < backoffTicks) return 1;
+  const steps = Math.floor(consecutiveIdleTicks / Math.max(1, backoffTicks));
+  return Math.min(MAX_IDLE_STRIDE, 1 + steps);
+}
+
+/** At the default 6s poll this caps the quiet-account interval at ~30s. */
+const MAX_IDLE_STRIDE = 5;
 
 /**
  * Circuit breaker status for a single account.
@@ -250,12 +271,26 @@ export class WatcherLoop {
       return;
     }
 
-    // Check adaptive interval - skip if idle for too long
-    if (state.consecutiveIdleTicks >= env.watcherIdleBackoffTicks && !state.isNewAccount) {
-      this.deps.log?.(`watcher account ${short(account)} idle for ${state.consecutiveIdleTicks} ticks, backing off`);
-      state.consecutiveIdleTicks++;
-      return;
+    // Adaptive polling: poll an idle account less often, NEVER stop polling it.
+    //
+    // This used to `return` outright once the idle count passed the threshold,
+    // and `consecutiveIdleTicks` is only ever reset inside `processAccount` —
+    // which that return prevented from running. So an account went permanently
+    // unwatched after ~10 idle ticks, and the counter just climbed (seen in
+    // production at 183). Every payment arriving after the first minute of a
+    // link's life was invisible until the process restarted.
+    const stride = idleStride(state.consecutiveIdleTicks, env.watcherIdleBackoffTicks);
+    if (stride > 1 && !state.isNewAccount) {
+      state.skippedTicks++;
+      if (state.skippedTicks < stride) {
+        this.deps.log?.(
+          `watcher account ${short(account)} quiet (${state.consecutiveIdleTicks} idle ticks), ` +
+            `polling every ${stride} ticks`,
+        );
+        return;
+      }
     }
+    state.skippedTicks = 0;
 
     try {
       await this.processAccount(account, this.deps.logger!.child({ account }));
@@ -318,6 +353,7 @@ export class WatcherLoop {
         consecutiveErrors: 0,
         lastErrorTime: 0,
         consecutiveIdleTicks: 0,
+        skippedTicks: 0,
         lastActivityTime: Date.now(),
         isNewAccount: true,
         lastProcessedAt: Date.now(),

@@ -76,6 +76,8 @@ function fakeContainer(): Container {
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     metricsToken: "test-metrics-token",
+    ready: async () => true,
+    attestation: { enabled: false, contractId: null },
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,
     getWatcherCircuitBreakerStatus: () => [],

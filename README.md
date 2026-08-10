@@ -235,6 +235,39 @@ seller using `DEFAULT_SELLER_SECRET`.
 
 ---
 
+## Docker image (`apps/api`)
+
+`apps/api/Dockerfile` is a 3-stage build (`deps` → `build` → `runtime`): the
+runtime stage carries only apps/api's real npm production dependencies (all
+workspace source is bundled into one compiled `dist/index.js` via esbuild -
+see the `build` script in `apps/api/package.json`) and runs as the non-root
+`node` user.
+
+- **Base image** is pinned by digest (`node:22-alpine@sha256:...`, see the
+  `ARG BASE_IMAGE` at the top of the Dockerfile) - bump it at least monthly,
+  or immediately on a disclosed CVE, per that same comment.
+- **Signals**: `tini` runs as PID 1 (`ENTRYPOINT`) so `SIGTERM` actually
+  reaches the Node process, which drains in-flight HTTP requests before
+  exiting (`apps/api/src/index.ts`).
+- **Health**: `/health` is liveness (process is up); `/ready` is readiness
+  (database is actually reachable) - the `HEALTHCHECK` and Render's
+  `healthCheckPath` both use `/ready`.
+- **Size target**: under 200 MB, enforced in CI (`.github/workflows/ci.yml`'s
+  `docker` job fails the build if it isn't). Not independently measured
+  outside CI in this change - no Docker daemon was available in the
+  environment this change was authored in, so the size shown above is a
+  target the CI job checks on every push, not a number hand-verified here.
+- **Security scanning**: the same CI job runs a Trivy scan, failing on any
+  HIGH/CRITICAL finding.
+- **Read-only root filesystem**: the app writes nothing to disk in
+  production (remote Turso database, no local files), so the image is
+  compatible with `docker run --read-only --tmpfs /tmp` or an orchestrator's
+  equivalent read-only-root setting - Render's blueprint format has no field
+  for this today, so it isn't set in `render.yaml`, but nothing in the image
+  requires a writable root filesystem.
+
+---
+
 ## What's real vs. stubbed
 
 | Piece | Status |

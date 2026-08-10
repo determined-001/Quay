@@ -34,6 +34,8 @@ function fakeContainer(deleteDemo: (sellerId?: string) => Promise<number>): Cont
     db: {} as Container["db"],
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     metricsToken: "test-metrics-token",
+    ready: async () => true,
+    attestation: { enabled: false, contractId: null },
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,

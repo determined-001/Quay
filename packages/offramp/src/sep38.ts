@@ -77,7 +77,13 @@ export async function getSep38Prices(
 export async function getSep38Quote(
   baseUrl: string,
   jwt: string,
-  input: { sellAsset: AssetRef; sellAmount: string; buyCurrency: string },
+  input: {
+    sellAsset: AssetRef;
+    sellAmount: string;
+    buyCurrency: string;
+    /** Delivery method for the buy asset. Discovered from /sep6/info or configured explicitly. */
+    buyDeliveryMethod?: string;
+  },
   logger?: Logger,
 ): Promise<Sep38QuoteResult> {
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep38", baseUrl });
@@ -98,7 +104,9 @@ export async function getSep38Quote(
       sell_asset: assetIdentifier(input.sellAsset),
       sell_amount: input.sellAmount,
       buy_asset: `iso4217:${input.buyCurrency}`,
-      buy_delivery_method: "WIRE",
+      ...(input.buyDeliveryMethod
+        ? { buy_delivery_method: input.buyDeliveryMethod }
+        : {}),
       context: "sep6",
     }),
   });

@@ -7,6 +7,9 @@ dist
 *.db-*
 .env
 .env.local
+.env.backup
+.env.*.backup
+.env.backup.*
 PR.md
 
 # Build/run artifacts that have been staged by accident before.
@@ -16,3 +19,8 @@ test-results
 
 # Rust / Soroban build output
 contracts/target
+
+# Maintainer-local planning notes and the one-off tooling that reads them.
+# Ignored, not just untracked, so a `git add -A` can't sweep them back in.
+ISSUES.md
+.github/create-issues.js
