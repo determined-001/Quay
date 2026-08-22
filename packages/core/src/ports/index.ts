@@ -216,6 +216,25 @@ export class OffRampJobNotFoundError extends Error {
   }
 }
 
+/**
+ * Thrown by every method of a deliberately disabled off-ramp adapter
+ * (`OFFRAMP=none`), so routes can answer 501 rather than 500.
+ *
+ * Distinct from "the anchor is down", which is a 502 and is retried. This says
+ * the deployment has no cash-out leg at all: sellers are paid directly on-chain
+ * and move their own funds. Nothing about it is transient, so nothing should
+ * retry it.
+ */
+export class OffRampDisabledError extends Error {
+  constructor(operation: string) {
+    super(
+      `Off-ramp is disabled on this deployment (OFFRAMP=none); "${operation}" is unavailable. ` +
+        "Payments settle directly to the seller's wallet.",
+    );
+    this.name = "OffRampDisabledError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Off-ramp state persistence
 // ---------------------------------------------------------------------------

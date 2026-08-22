@@ -22,6 +22,13 @@ import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
 // ===========================================================================
+// Despite the name, nothing here is testnet-specific: the SEP-10/38/6 flow is
+// identical against a production anchor. Only the DEFAULT_ constants point at
+// the testnet reference sandbox, and both are overridable (`baseUrl` /
+// `homeDomain`, wired to ANCHOR_URL / ANCHOR_HOME_DOMAIN). `OFFRAMP=anchor`
+// supplies a real anchor; `OFFRAMP=testanchor` is that same adapter with the
+// sandbox defaults filled in.
+//
 // Talks to the public Stellar testnet reference anchor by default. Same
 // `OffRampPort` contract as MockAnchorOffRamp, `seller_initiated` mode: the
 // seller already holds the stablecoin, this only quotes an FX rate and drives
@@ -41,7 +48,6 @@ import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6
 // KYC status is ACCEPTED — this adapter has no business fabricating identity
 // fields from whatever happened to be in a cash-out request.
 
-const ANCHOR_NAME = "testanchor";
 const DEFAULT_BASE_URL = "https://testanchor.stellar.org";
 const DEFAULT_HOME_DOMAIN = "testanchor.stellar.org";
 
@@ -78,12 +84,21 @@ export class TestAnchorOffRamp implements OffRampPort {
   /** Operator's chosen SEP-6 withdraw type; undefined means "infer, and refuse
    *  if the anchor offers more than one". See resolveWithdrawType. */
   private readonly preferredWithdrawType: string | undefined;
+  /**
+   * Identifies the anchor in persisted job rows and off-ramp telemetry. It is
+   * the anchor's home domain, not a build-time constant: with a configurable
+   * `baseUrl` the old hardcoded "testanchor" would have labelled every real
+   * mainnet payout as sandbox traffic, silently poisoning the corridor stats
+   * that `anchorDomain` exists to key.
+   */
+  private readonly anchorName: string;
 
   constructor(opts: TestAnchorOptions) {
     this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    this.anchorName = opts.homeDomain ?? DEFAULT_HOME_DOMAIN;
     this.state = opts.state;
     this.preferredWithdrawType = opts.preferredWithdrawType;
-    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.testanchor" });
+    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.anchor", anchor: this.anchorName });
     this.auth = new Sep10Client(opts.sellerKeypair, {
       baseUrl: this.baseUrl,
       homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
@@ -132,7 +147,7 @@ export class TestAnchorOffRamp implements OffRampPort {
   ): Promise<OffRampQuote> {
     if (input.sourceAsset.issuer === null) {
       throw new Error(
-        'The test anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
+        'This anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
       );
     }
     const log = (opts.logger ?? this.logger);
@@ -221,7 +236,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     await this.state.saveJob({
       jobId: withdraw.id,
       linkId: input.linkId,
-      anchor: ANCHOR_NAME,
+      anchor: this.anchorName,
       targetCurrency: q.buyCurrency,
       targetAmount: "",
       rate: q.price,
@@ -231,7 +246,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       createdAt: now,
       updatedAt: now,
     });
-    child.info({ event: "anchor.sep6.withdraw.init", withdrawId: withdraw.id, linkId: input.linkId }, "testanchor withdraw init");
+    child.info({ event: "anchor.sep6.withdraw.init", withdrawId: withdraw.id, linkId: input.linkId }, "anchor withdraw init");
 
     return {
       kind: "fields",
@@ -249,7 +264,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     const tx = await getSep6Transaction(this.baseUrl, jwt, jobId, baseLog);
     const status = mapSep6Status(tx.status);
     const targetAmount = tx.amountOut ?? job.targetAmount;
-    const reason = status === "failed" ? (tx.message ?? "testanchor: withdrawal failed") : null;
+    const reason = status === "failed" ? (tx.message ?? `${this.anchorName}: withdrawal failed`) : null;
 
     await this.state.updateJob(jobId, {
       targetAmount,

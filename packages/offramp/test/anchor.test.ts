@@ -1,4 +1,4 @@
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, Networks } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import { AnchorOffRamp, mapSep24Status } from "../src/anchor";
 import { parseStellarToml } from "../src/sep24";
@@ -35,6 +35,7 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("AnchorOffRamp (live)", () =
     const offramp = new AnchorOffRamp({
       homeDomain,
       sellerKeypair: Keypair.random(),
+      networkPassphrase: Networks.TESTNET,
     });
 
     const quote = await offramp.quote({

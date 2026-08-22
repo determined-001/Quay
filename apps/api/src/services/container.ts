@@ -7,9 +7,9 @@ import {
   StreamingHorizonWatcher,
   type HorizonStatus,
 } from "@checkout/stellar";
-import { MockAnchorOffRamp, NoKycRequired, TestAnchorKyc, TestAnchorOffRamp } from "@checkout/offramp";
+import { DisabledOffRamp, MockAnchorOffRamp, NoKycRequired, TestAnchorKyc, TestAnchorOffRamp } from "@checkout/offramp";
 import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
-import { env } from "../env";
+import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey } from "../crypto/pii";
 import { createLogger } from "../logger";
@@ -129,12 +129,13 @@ export async function createContainer(): Promise<Container> {
     env.watchMode === "stream"
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : pollingWatcher;
-  const offramp = new CircuitBreakerOffRamp(createOffRamp(seller.keypair, offrampStateRepo));
+  const offramp = new CircuitBreakerOffRamp(createOffRamp(seller.keypair, offrampStateRepo, logger));
   const kyc = createKyc(seller.keypair, db);
 
-  // Anchor health probe + circuit breaker (issue #19, 3.7). In mock mode the
-  // probe is disabled and short-circuits to "always available" so the dev
-  // surface still works offline; in testanchor mode we hit the real anchor.
+  // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
+  // off-ramp the probe is disabled and short-circuits to "always available" so
+  // the surface still works offline; for testanchor/anchor we hit the real
+  // anchor.
   const anchorHealth = buildAnchorHealth(env.offramp, sellerWallet);
 
   // Resolved before the service because the attester IS the SEP-10 signing
@@ -221,8 +222,15 @@ export async function createContainer(): Promise<Container> {
     start() {
       logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
       loop.start();
-      stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
-      stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
+      // With no off-ramp there is nothing to advance: no link can reach
+      // offramp_pending, so the poller would query an always-empty set on
+      // every tick forever. The anchor probe is likewise pointless with no
+      // anchor — buildAnchorHealth already disables it, and this skips the
+      // timer that would only call a disabled probe.
+      if (env.offramp !== "none") {
+        stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
+        stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
+      }
       if (attestation) {
         stopAttestationSweep = startAttestationSweeper(service, env.attestationSweepMs, logger);
       }
@@ -272,10 +280,12 @@ export async function createContainer(): Promise<Container> {
  * the surface minimal and don't pollute env.ts which lives outside the
  * scope of issue 3.7).
  */
-function buildAnchorHealth(offrampKind: "mock" | "testanchor", probeAccount: string): AnchorHealth {
-  const enabled = offrampKind === "testanchor";
-  const url = enabled ? process.env.ANCHOR_URL ?? "https://testanchor.stellar.org" : null;
-  const homeDomain = enabled ? process.env.ANCHOR_HOME_DOMAIN ?? "testanchor.stellar.org" : null;
+function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string): AnchorHealth {
+  const enabled = offrampKind === "testanchor" || offrampKind === "anchor";
+  // For OFFRAMP=anchor env.ts already required both of these, so the ??
+  // fallbacks only ever apply to the testanchor sandbox preset.
+  const url = enabled ? env.anchorUrl ?? "https://testanchor.stellar.org" : null;
+  const homeDomain = enabled ? env.anchorHomeDomain ?? "testanchor.stellar.org" : null;
   const failureThreshold = Number(process.env.ANCHOR_PROBE_FAILURE_THRESHOLD ?? "3");
   const cooldownMs = Number(process.env.ANCHOR_PROBE_COOLDOWN_MS ?? "30000");
   return new AnchorHealth({
@@ -406,24 +416,48 @@ function resolveSellerKeypairOrWallet(logger: Logger): { keypair: Keypair | null
   return { keypair: kp, publicKey: pub };
 }
 
-function createOffRamp(sellerKeypair: Keypair | null, state: OffRampStateRepository): OffRampPort {
+/**
+ * Both `testanchor` and `anchor` are the same SEP-6 adapter; they differ only
+ * in whether the endpoint is the SDF sandbox or an operator-supplied
+ * production anchor. Passing the URL/domain through as `undefined` for
+ * `testanchor` lets the adapter's own testnet defaults stand, so the sandbox
+ * preset keeps working with no configuration at all.
+ */
+function createOffRamp(
+  sellerKeypair: Keypair | null,
+  state: OffRampStateRepository,
+  logger: Logger,
+): OffRampPort {
+  if (env.offramp === "none") {
+    // No cash-out leg. Every method throws OffRampDisabledError, which the
+    // routes translate to 501 — see packages/offramp/src/disabled.ts.
+    return new DisabledOffRamp();
+  }
   if (env.offramp === "mock") {
     // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
     return new MockAnchorOffRamp({ state, settleAfterMs: 8000 });
   }
   if (!sellerKeypair) {
     throw new Error(
-      "OFFRAMP=testanchor requires the seller's secret key to sign SEP-10 auth: " +
+      `OFFRAMP=${env.offramp} requires the seller's secret key to sign SEP-10 auth: ` +
         "set DEFAULT_SELLER_SECRET (matching DEFAULT_SELLER_WALLET), or leave " +
         "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
     );
   }
-  return new TestAnchorOffRamp({ sellerKeypair, state });
+  return new TestAnchorOffRamp({
+    sellerKeypair,
+    state,
+    baseUrl: env.anchorUrl,
+    homeDomain: env.anchorHomeDomain,
+    preferredWithdrawType: env.offrampType,
+    logger,
+  });
 }
 
 function createKyc(sellerKeypair: Keypair | null, db: DB): KycPort {
-  if (env.offramp === "mock") {
-    // No real anchor, nothing to be compliant with — never gates the simulated cash-out.
+  if (env.offramp === "mock" || env.offramp === "none") {
+    // No real anchor, nothing to be compliant with. For "none" there is no
+    // cash-out to gate at all; for "mock" it never gates the simulated one.
     return new NoKycRequired();
   }
   if (!sellerKeypair) {
@@ -433,9 +467,14 @@ function createKyc(sellerKeypair: Keypair | null, db: DB): KycPort {
         "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
     );
   }
-  // env.kycEncryptionKey is guaranteed set when OFFRAMP=testanchor (see env.ts).
+  // env.kycEncryptionKey is guaranteed set whenever OFFRAMP != mock (see env.ts).
   const repo = new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey as string));
-  return new TestAnchorKyc({ sellerKeypair, repo });
+  return new TestAnchorKyc({
+    sellerKeypair,
+    repo,
+    baseUrl: env.anchorUrl,
+    homeDomain: env.anchorHomeDomain,
+  });
 }
 
 /**

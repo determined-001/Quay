@@ -1,4 +1,5 @@
 import { Asset, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { OffRampJobNotFoundError } from "@checkout/core";
 import type {
   AssetRef,
   OffRampInitiation,
@@ -17,6 +18,17 @@ export interface AnchorOptions {
   homeDomain: string;
   sellerKeypair: Keypair;
   horizonUrl?: string;
+  /**
+   * Passphrase of the network the send-leg transaction is signed for.
+   *
+   * Required, and deliberately not inferred. This used to be derived with
+   * `horizonUrl.includes("public")`, which gets mainnet exactly backwards:
+   * the pubnet endpoint is `https://horizon.stellar.org` and contains no
+   * "public" at all, so a mainnet deployment would have signed every
+   * withdrawal with the TESTNET passphrase. Use `Networks.PUBLIC` /
+   * `Networks.TESTNET` from @stellar/stellar-sdk.
+   */
+  networkPassphrase: string;
 }
 
 interface StoredQuote {
@@ -28,6 +40,8 @@ interface StoredQuote {
 
 interface StoredJob {
   linkId: string;
+  /** Asset the withdrawal was quoted in — the send leg must pay this, not XLM. */
+  sellAsset: AssetRef;
   targetCurrency: string;
   targetAmount: string;
   rate: string;
@@ -42,12 +56,26 @@ export function mapSep24Status(status: string): OffRampJobStatus {
   return "pending";
 }
 
+/**
+ * SEP-24 (interactive) off-ramp.
+ *
+ * DELIBERATELY NOT EXPORTED from `index.ts`, and not selectable via `OFFRAMP`.
+ * `TestAnchorOffRamp` (SEP-6) is the adapter wired into the container for both
+ * `OFFRAMP=testanchor` and `OFFRAMP=anchor`.
+ *
+ * The blocker is state durability, not protocol support: quotes and jobs here
+ * live in in-process `Map`s, while the SEP-6 adapter persists both through
+ * `OffRampStateRepository`. On a restart mid-withdrawal this loses `sendTxHash`,
+ * and money-adjacent state that does not survive a redeploy has no business on
+ * pubnet. Port it onto `OffRampStateRepository` before exporting it.
+ */
 export class AnchorOffRamp implements OffRampPort {
   readonly mode: OffRampMode = "seller_initiated";
 
   private readonly homeDomain: string;
   private readonly sellerKeypair: Keypair;
   private readonly horizonUrl: string;
+  private readonly networkPassphrase: string;
   private readonly sep24: Sep24Client;
   private readonly quotes = new Map<string, StoredQuote>();
   private readonly jobs = new Map<string, StoredJob>();
@@ -56,6 +84,7 @@ export class AnchorOffRamp implements OffRampPort {
     this.homeDomain = opts.homeDomain;
     this.sellerKeypair = opts.sellerKeypair;
     this.horizonUrl = opts.horizonUrl || "https://horizon-testnet.stellar.org";
+    this.networkPassphrase = opts.networkPassphrase;
     this.sep24 = new Sep24Client(opts.sellerKeypair, opts.homeDomain);
   }
 
@@ -127,6 +156,7 @@ export class AnchorOffRamp implements OffRampPort {
 
     this.jobs.set(interactiveResult.id, {
       linkId: input.linkId,
+      sellAsset: q.sellAsset,
       targetCurrency: q.buyCurrency,
       targetAmount: "",
       rate: q.price,
@@ -140,15 +170,14 @@ export class AnchorOffRamp implements OffRampPort {
   }
 
   async status(jobId: string): Promise<OffRampJob> {
-    let stored = this.jobs.get(jobId);
+    const stored = this.jobs.get(jobId);
     if (!stored) {
-      stored = {
-        linkId: "",
-        targetCurrency: "NGN",
-        targetAmount: "",
-        rate: "0",
-      };
-      this.jobs.set(jobId, stored);
+      // In-memory only: a restart loses every job. Fabricating a placeholder
+      // here (as this used to) is worse than failing — the placeholder has no
+      // sellAsset and no sendTxHash, so the send leg below would re-fire and
+      // pay the anchor a SECOND time for a withdrawal already funded. Refuse
+      // instead, and let the caller treat it as unknown state.
+      throw new OffRampJobNotFoundError(jobId);
     }
 
     const tx: Sep24Transaction = await this.sep24.getTransaction(jobId);
@@ -161,7 +190,8 @@ export class AnchorOffRamp implements OffRampPort {
           tx.withdrawAnchorAccount,
           tx.withdrawMemo,
           tx.withdrawMemoType || "text",
-          tx.amountIn || "0"
+          tx.amountIn || "0",
+          stored.sellAsset
         );
         stored.sendTxHash = hash;
       } catch (err) {
@@ -188,7 +218,8 @@ export class AnchorOffRamp implements OffRampPort {
     destination: string,
     memoStr: string,
     memoType: string,
-    amount: string
+    amount: string,
+    sellAsset: AssetRef
   ): Promise<string> {
     const server = new Horizon.Server(this.horizonUrl);
     const account = await server.loadAccount(this.sellerKeypair.publicKey());
@@ -202,16 +233,23 @@ export class AnchorOffRamp implements OffRampPort {
       memo = Memo.text(memoStr);
     }
 
+    // The send leg must pay the SAME asset the withdrawal was quoted in.
+    // This previously hardcoded `Asset.native()`, which sends XLM no matter
+    // what the seller is cashing out — on mainnet that hands the anchor the
+    // wrong asset for a USDC withdrawal, and the funds do not come back.
+    const asset =
+      sellAsset.issuer === null
+        ? Asset.native()
+        : new Asset(sellAsset.code, sellAsset.issuer);
+
     const tx = new TransactionBuilder(account, {
       fee: "10000",
-      networkPassphrase: this.horizonUrl.includes("public")
-        ? "Public Global Stellar Network ; September 2015"
-        : "Test SDF Network ; July 2015",
+      networkPassphrase: this.networkPassphrase,
     })
       .addOperation(
         Operation.payment({
           destination,
-          asset: Asset.native(), // Default native or issued asset transfer
+          asset,
           amount,
         })
       )

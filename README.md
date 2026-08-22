@@ -315,6 +315,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
 - **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, anchor outage, watcher-stuck, stuck off-ramp jobs, and the incident template.
+- **[Mainnet cutover](docs/MAINNET.md)** — choosing a production anchor, generating and funding real keys, the public-network guardrails and why each refuses to boot, and the pre-announcement verification list.
 - **[SCF Build proposal](docs/PROPOSAL.md)** — the problem, the wedge, milestones, budget, traction, and risk register.
 - **[Contributing](CONTRIBUTING.md)** — setup, the check suite, and PR guidelines.
 - **[Security policy](SECURITY.md)** — how to report a vulnerability privately.

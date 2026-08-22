@@ -1,5 +1,11 @@
 import { Hono, type MiddlewareHandler } from "hono";
-import { createLinkSchema, cashOutSchema, submitPaymentSchema, type PaymentLink } from "@checkout/core";
+import {
+  createLinkSchema,
+  cashOutSchema,
+  submitPaymentSchema,
+  OffRampDisabledError,
+  type PaymentLink,
+} from "@checkout/core";
 import type { Container } from "../services/container";
 import { HttpError } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
@@ -152,6 +158,15 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
   // Seller-only: it returns the seller's own saved payout destination, so it is
   // gated and ownership-checked like the other seller routes — never reachable
   // with just a link id.
+  // OFFRAMP=none refuses every adapter call. That is a permanent property of
+  // the deployment, not an anchor outage, so it answers 501 rather than the
+  // 502 an unreachable anchor gets — a client that retries a 502 would spin
+  // forever on this one.
+  const OFFRAMP_DISABLED_BODY = {
+    error: "offramp_disabled",
+    message: "This deployment has no cash-out leg. Payments settle directly to the seller's wallet.",
+  } as const;
+
   app.get("/:id/offramp-requirements", auth, requireScope("links:read"), async (ctx) => {
     try {
       const owned = await c.service.getLink(ctx.req.param("id"));
@@ -162,6 +177,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       const result = await c.service.getOfframpRequirements(ctx.req.param("id"));
       return ctx.json(result);
     } catch (err) {
+      if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
       if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 403 | 502);
       throw err;
     }
@@ -183,6 +199,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       const quote = await c.service.quoteCashOut(linkId, targetCurrency, { logger: getLogger(ctx) });
       return ctx.json(quote);
     } catch (err) {
+      if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
       if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
       throw err;
     }
@@ -236,6 +253,10 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       log.info({ event: "cashout.request.ok", linkId, jobId: job.jobId }, "cash-out request succeeded");
       return ctx.json({ job, initiation });
     } catch (err) {
+      if (err instanceof OffRampDisabledError) {
+        log.warn({ event: "cashout.request.disabled", linkId }, "cash-out requested but off-ramp is disabled");
+        return ctx.json(OFFRAMP_DISABLED_BODY, 501);
+      }
       if (err instanceof HttpError) {
         log.warn({ event: "cashout.request.error", linkId, error: err.message }, "cash-out request failed");
         return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);

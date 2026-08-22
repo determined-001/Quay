@@ -17,6 +17,7 @@
     "docs:check-status-diagram": "node scripts/gen-status-diagram.mjs --check",
     "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
     "sweep": "node scripts/uptime-check.mjs",
+    "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
     "demo:seed": "tsx scripts/demo-seed.ts",
     "demo:reset": "tsx scripts/demo-reset.ts"
   },
@@ -33,6 +34,7 @@
   "pnpm": {
     "overrides": {
       "axios": ">=1.18.0",
+      "nanoid": "^3.3.18",
       "postcss": ">=8.5.18",
       "sharp": ">=0.35.0"
     }

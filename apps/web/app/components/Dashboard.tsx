@@ -17,7 +17,16 @@ import CashOutModal from "./CashOutModal";
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
 const OFFRAMP_CURRENCY = process.env.NEXT_PUBLIC_OFFRAMP_CURRENCY ?? "NGN";
-const OFFRAMP_IS_MOCK = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "testanchor";
+// Only "mock" is simulated. Tested against the mode name rather than
+// `!== "testanchor"`, which was an allowlist of exactly one real backend: it
+// labelled OFFRAMP=anchor — a production anchor moving real money — as
+// "(simulated)", which is the one direction this label must never be wrong in.
+const OFFRAMP_IS_MOCK = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") === "mock";
+// OFFRAMP=none: the deployment takes payments and stops there. Sellers are paid
+// directly on-chain and move their own funds, so there is no cash-out button,
+// no KYC to collect, and no modal — the API answers 501 on those routes. Every
+// other surface (links, QR codes, the paid timeline) is unaffected.
+const OFFRAMP_ENABLED = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "none";
 const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
   ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
   : `Cash out to ${OFFRAMP_CURRENCY}`;
@@ -191,7 +200,7 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableP
               <button className="linkbtn" onClick={() => onCopy(link.id)}>
                 {copied === link.id ? "Copied" : "Copy link"}
               </button>
-              {link.status === "paid" && (
+              {OFFRAMP_ENABLED && link.status === "paid" && (
                 <>
                   {" · "}
                   {cashOutBlocked ? (
@@ -252,7 +261,7 @@ export default function Dashboard() {
   }, []);
 
   const refreshKyc = useCallback(async () => {
-    if (OFFRAMP_IS_MOCK) return; // no real anchor, nothing to verify
+    if (OFFRAMP_IS_MOCK || !OFFRAMP_ENABLED) return; // no real anchor, nothing to verify
     try {
       setKyc(await api.getKyc());
     } catch {
@@ -466,7 +475,7 @@ export default function Dashboard() {
         {actionError && <div className="err">{actionError}</div>}
       </section>
 
-      {!OFFRAMP_IS_MOCK && <KycPanel kyc={kyc} onUpdated={setKyc} />}
+      {OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK && <KycPanel kyc={kyc} onUpdated={setKyc} />}
 
       <section className="panel">
         <h2>Links</h2>
@@ -538,7 +547,7 @@ export default function Dashboard() {
       </section>
 
       {/* Cash-out modal — rendered when a link's "Cash out" button is clicked */}
-      {cashOutLinkId && cashOutLink && (
+      {OFFRAMP_ENABLED && cashOutLinkId && cashOutLink && (
         <CashOutModal
           linkId={cashOutLinkId}
           linkAmount={cashOutLink.paidAmount ?? cashOutLink.amount}
