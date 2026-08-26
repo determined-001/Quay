@@ -6,7 +6,9 @@
 # the ARG below - both stages that FROM it pick up the new digest together,
 # since they both reference the same ARG.
 #
-# node:22-alpine, tag "22-alpine", resolved 2026-07-28.
+# node:22-alpine, tag "22-alpine", resolved 2026-07-28. (The 2026-08-26
+# rebuild of the tag carries the same unpatched openssl and 2 MB more, which
+# breaks the size budget - the apk upgrade below is what clears the CVE.)
 ARG BASE_IMAGE=node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
 
 # ---------------------------------------------------------------------------
@@ -54,7 +56,12 @@ RUN pnpm build
 # npm runtime dependencies.
 # ---------------------------------------------------------------------------
 FROM ${BASE_IMAGE} AS runtime
-RUN apk add --no-cache tini && corepack enable
+# `apk upgrade` on top of the pinned digest: the base image is rebuilt on its
+# own cadence, so between rebuilds Alpine can publish a fixed openssl the tag
+# does not carry yet (CVE-2026-14456 was exactly that). Pinning keeps the
+# build reproducible; the upgrade keeps the Trivy gate honest. Named packages
+# only — a blanket `apk upgrade` costs ~2 MB and blows the image-size budget.
+RUN apk upgrade --no-cache libcrypto3 libssl3 && apk add --no-cache tini && corepack enable
 WORKDIR /app
 
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
