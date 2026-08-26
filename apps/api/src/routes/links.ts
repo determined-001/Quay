@@ -227,7 +227,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json(result, 200);
     } catch (err) {
       if (err instanceof HttpError) {
-        return ctx.json({ error: err.message }, err.status as 400 | 404 | 409 | 502);
+        return ctx.json({ error: err.message, ...(err.extra ?? {}) }, err.status as 400 | 404 | 409 | 502);
       }
       throw err;
     }

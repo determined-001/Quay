@@ -20,7 +20,7 @@ export const NETWORK_PASSPHRASE =
     ? "Public Global Stellar Network ; September 2015"
     : "Test SDF Network ; September 2015";
 
-type Kit = typeof import("@creit.tech/stellar-wallets-kit").StellarWalletsKit;
+type Kit = typeof import("@creit.tech/stellar-wallets-kit/sdk").StellarWalletsKit;
 
 let ready: Promise<Kit> | null = null;
 
@@ -33,8 +33,9 @@ async function kit(): Promise<Kit> {
       // is browser-facing code shipped to the buyer, and the hardware-wallet
       // and WalletConnect modules are large and pull in dependencies this app
       // has no use for.
-      const [mod, freighter, xbull, albedo, rabet, lobstr, hana] = await Promise.all([
-        import("@creit.tech/stellar-wallets-kit"),
+      const [mod, networks, freighter, xbull, albedo, rabet, lobstr, hana] = await Promise.all([
+        import("@creit.tech/stellar-wallets-kit/sdk"),
+        import("@creit.tech/stellar-wallets-kit/types"),
         import("@creit.tech/stellar-wallets-kit/modules/freighter"),
         import("@creit.tech/stellar-wallets-kit/modules/xbull"),
         import("@creit.tech/stellar-wallets-kit/modules/albedo"),
@@ -52,7 +53,7 @@ async function kit(): Promise<Kit> {
           new lobstr.LobstrModule(),
           new hana.HanaModule(),
         ],
-        network: NETWORK === "public" ? mod.Networks.PUBLIC : mod.Networks.TESTNET,
+        network: NETWORK === "public" ? networks.Networks.PUBLIC : networks.Networks.TESTNET,
       });
       return mod.StellarWalletsKit;
     })();
@@ -127,12 +128,23 @@ export async function detectWallet(): Promise<boolean> {
 
 /** Signs a SEP-10 challenge. Returns the signed XDR to post back to /auth. */
 export async function signChallenge(xdr: string, address: string): Promise<string> {
+  return signTransaction(xdr, address);
+}
+
+/** Signs an unsigned transaction with the already-selected wallet. */
+export async function signTransaction(xdr: string, address: string): Promise<string> {
   const k = await kit();
   const { signedTxXdr } = await k.signTransaction(xdr, {
     address,
     networkPassphrase: NETWORK_PASSPHRASE,
   });
   return signedTxXdr;
+}
+
+/** Reads the selected wallet's network so a wallet cannot sign for another chain. */
+export async function getWalletNetwork(): Promise<{ network: string; networkPassphrase: string }> {
+  const k = await kit();
+  return k.getNetwork();
 }
 
 /** Forgets the wallet selection. Independent of the API session. */

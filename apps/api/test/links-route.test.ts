@@ -166,3 +166,28 @@ describe("POST /links/:id/cancel — ownership", () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe("POST /links/:id/submit — public wallet relay", () => {
+  it("returns 400 for a malformed submit payload without invoking the service", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ signedXdr: 123 }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as Record<string, unknown>).error).toBe("invalid_body");
+  });
+
+  it("returns 400 for invalid JSON", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not json",
+    });
+
+    expect(res.status).toBe(400);
+  });
+});

@@ -29,8 +29,10 @@ Fixing this is the only pre-entry work item.
 - [ ] Secrets: `STELLAR_NETWORK=testnet`, `USDC_ISSUER_TESTNET`, `OFFRAMP=testanchor`,
       `DEFAULT_SELLER_WALLET` + `DEFAULT_SELLER_SECRET`, `CORS_ORIGINS=https://quay-web.vercel.app`.
 - [ ] Vercel env: `NEXT_PUBLIC_API_URL=<api url>`, `API_URL=<api url>`,
-      `NEXT_PUBLIC_OFFRAMP_MODE=testanchor`, `NEXT_PUBLIC_OFFRAMP_CURRENCY=USD`
-      (testanchor only quotes USD/CAD) — then **redeploy the web app**
+      `NEXT_PUBLIC_OFFRAMP_MODE=testanchor`, `NEXT_PUBLIC_OFFRAMP_CURRENCY=USD`,
+      `NEXT_PUBLIC_ENABLE_WALLET_PAY=true` when the desktop wallet path is ready
+      to expose (leave unset/false to keep QR and deep-link checkout only) — then
+      **redeploy the web app**
       (`NEXT_PUBLIC_*` is baked at build time).
 - [ ] Smoke-test the full stranger flow from a clean browser: create link → open
       checkout → pay testnet USDC with the memo → link flips paid → webhook fires →

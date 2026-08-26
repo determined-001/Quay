@@ -6,6 +6,7 @@ import { metrics } from "../src/metrics";
 const EXPECTED_METRIC_NAMES = [
   "payments_matched_total",
   "link_status_transitions_total",
+  "wallet_submissions_total",
   "webhook_attempts_total",
   "anchor_calls_total",
   "watcher_tick_duration_seconds",

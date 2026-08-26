@@ -188,6 +188,8 @@ signature is built for testnet and rejected by the network the API is watching �
 with no error message that names the cause. Also set:
 
 - `NEXT_PUBLIC_API_URL` / `API_URL` — the mainnet API origin
+- `NEXT_PUBLIC_ENABLE_WALLET_PAY=true` — enable the lazy-loaded desktop wallet
+  checkout path; leave unset/false to retain QR and deep-link fallbacks
 - `NEXT_PUBLIC_OFFRAMP_MODE=anchor` — so the dashboard labels cash-out honestly
 - `NEXT_PUBLIC_OFFRAMP_CURRENCY` — a currency your anchor actually quotes
 

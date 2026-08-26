@@ -106,6 +106,11 @@ export type ApiErrorCode =
   | "conflict"
   | "kyc_required" // seller's SEP-12 KYC isn't ACCEPTED yet — see `missingFields`
   | "destination_cannot_receive" // seller wallet can't receive the asset — see `details.trustlineUri`
+  | "payment_rejected" // wallet transaction was refused by Horizon; see `details.reason`
+  | "wallet_rejected" // buyer closed or rejected the wallet prompt
+  | "insufficient_balance"
+  | "missing_trustline"
+  | "wrong_network"
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
   | "server_error"; // 5xx or unexpected non-JSON response
 
@@ -138,6 +143,16 @@ export function describeError(err: CheckoutError): string {
       return "Identity verification is required before you can cash out. See the panel above.";
     case "destination_cannot_receive":
       return "Your wallet can't receive this asset yet. Add the trustline and try again.";
+    case "payment_rejected":
+      return "The network rejected this payment. Check your balance, trustline, and wallet network, then try again.";
+    case "insufficient_balance":
+      return "Your wallet does not have enough balance to pay this invoice.";
+    case "missing_trustline":
+      return "Your wallet needs a trustline for this asset before it can pay.";
+    case "wrong_network":
+      return "Your wallet is connected to the wrong Stellar network for this invoice.";
+    case "wallet_rejected":
+      return "The wallet request was cancelled.";
     case "unreachable":
       return "We can't reach the payment service right now. Check your connection and try again.";
     case "server_error":
@@ -185,20 +200,31 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
     const { error, missingFields: rawMissing, message, ...details } = body;
     const apiCode = typeof error === "string" ? error : undefined;
     const missingFields = Array.isArray(rawMissing) ? (rawMissing as string[]) : undefined;
+    const reason = typeof details.reason === "string" ? details.reason : undefined;
     const code: ApiErrorCode =
       res.status >= 500
         ? "server_error"
-        : res.status === 409
-          ? "conflict"
-          : apiCode === "not_found"
-            ? "not_found"
-            : apiCode === "invalid_body"
-              ? "invalid_body"
-              : apiCode === "kyc_required"
-                ? "kyc_required"
-                : apiCode === "destination_cannot_receive"
-                  ? "destination_cannot_receive"
-                  : "server_error";
+        : res.status === 409 && reason === "insufficient_balance"
+          ? "insufficient_balance"
+          : res.status === 409 && reason === "missing_trustline"
+            ? "missing_trustline"
+            : res.status === 409 && reason === "wrong_network"
+              ? "wrong_network"
+              : res.status === 409 && apiCode === "payment_rejected"
+                ? "payment_rejected"
+                : res.status === 409
+                  ? "conflict"
+                  : apiCode === "not_found"
+                    ? "not_found"
+                    : apiCode === "invalid_body"
+                      ? "invalid_body"
+                      : apiCode === "kyc_required"
+                        ? "kyc_required"
+                        : apiCode === "destination_cannot_receive"
+                          ? "destination_cannot_receive"
+                          : apiCode === "payment_rejected"
+                            ? "payment_rejected"
+                            : "server_error";
     const detail = typeof message === "string" ? message : (apiCode ?? res.statusText);
     throw new CheckoutError(code, res.status, detail, missingFields, details);
   }
@@ -299,6 +325,12 @@ export const api = {
   listLinks: () => http<{ links: PaymentLink[] }>("/links"),
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
+
+  submitPayment: (id: string, signedXdr: string) =>
+    http<{ txHash: string }>(`/links/${id}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ signedXdr }),
+    }),
 
   /** Anchor field descriptors + masked saved payout fields for the cash-out form (issue #32). */
   getOfframpRequirements: (id: string) => http<OfframpRequirements>(`/links/${id}/offramp-requirements`),

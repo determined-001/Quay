@@ -1,5 +1,7 @@
 import {
   compareAmount,
+  fromStroops,
+  toStroops,
   assetEquals,
   CannotReceiveError,
   canTransition,
@@ -738,6 +740,7 @@ export class LinkService {
       // Covers malformed base64, a different network's passphrase, and fee-bump
       // envelopes (which `Transaction` refuses) — all of which are "not the
       // thing we asked you to sign".
+      metrics.walletSubmissionsTotal.inc({ outcome: "invalid_xdr" });
       throw new HttpError(400, `invalid_xdr: ${err instanceof Error ? err.message : String(err)}`);
     }
 
@@ -766,7 +769,14 @@ export class LinkService {
     }
 
     // ---- destination, asset, amount, memo ---------------------------------
-    if (payment.destination !== link.destination) {
+    const expectedDestination = this.deps.rail.buildRequest({
+      destination: link.destination,
+      amount: link.amount,
+      asset: link.asset,
+      reference: link.reference,
+      muxedId: link.muxedId,
+    }).destination;
+    if (payment.destination !== expectedDestination) {
       throw new HttpError(409, "Transaction destination does not match the link destination");
     }
 
@@ -784,11 +794,15 @@ export class LinkService {
     }
 
     // Overpayment is allowed and reconciled by the watcher's cumulative
-    // accounting; underpayment is not something to submit and hope about.
-    if (compareAmount(payment.amount, link.amount) === "under") {
+    // accounting. For an underpaid link, only the outstanding amount remains
+    // due; requiring the original invoice amount here would make the wallet
+    // path unable to complete split payments.
+    const outstandingStroops = toStroops(link.amount) - (link.paidAmount ? toStroops(link.paidAmount) : 0n);
+    const outstanding = fromStroops(outstandingStroops > 0n ? outstandingStroops : 0n);
+    if (compareAmount(payment.amount, outstanding) === "under") {
       throw new HttpError(
         409,
-        `Amount too low: link expects ${link.amount}, transaction sends ${payment.amount}`,
+        `Amount too low: link expects ${outstanding}, transaction sends ${payment.amount}`,
       );
     }
 
@@ -804,6 +818,7 @@ export class LinkService {
     const server = new Horizon.Server(this.deps.stellar.horizonUrl);
     try {
       const res = await server.submitTransaction(tx);
+      metrics.walletSubmissionsTotal.inc({ outcome: "submitted" });
       log.info(
         { event: "payment.submitted", linkId: link.id, txHash: res.hash, reference: link.reference },
         "wallet-signed payment submitted",
@@ -819,8 +834,10 @@ export class LinkService {
           : err instanceof Error
             ? err.message
             : String(err);
-      log.warn({ event: "payment.submit.failed", linkId: link.id, error: detail }, "wallet submit rejected");
-      throw new HttpError(502, `Transaction submission failed: ${detail}`);
+      const reason = horizonPaymentReason(err);
+      metrics.walletSubmissionsTotal.inc({ outcome: "rejected" });
+      log.warn({ event: "payment.submit.failed", linkId: link.id, error: detail, reason }, "wallet submit rejected");
+      throw new HttpError(409, "payment_rejected", { reason, detail });
     }
   }
 
@@ -1319,6 +1336,28 @@ function memoText(memo: Memo): string | null {
   const v = memo.value;
   if (v === undefined || v === null) return null;
   return typeof v === "string" ? v : Buffer.from(v).toString("utf8");
+}
+
+function horizonPaymentReason(err: unknown): "insufficient_balance" | "missing_trustline" | "payment_rejected" {
+  const response = err as { response?: { data?: unknown } };
+  const data = response.response?.data;
+  const resultCodes =
+    data && typeof data === "object" && "extras" in data
+      ? (data as { extras?: { result_codes?: unknown } }).extras?.result_codes
+      : undefined;
+  const codes = resultCodes
+    ? Object.values(resultCodes as Record<string, unknown>).flatMap((value) =>
+        Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") :
+          typeof value === "string" ? [value] : [],
+      )
+    : [];
+  if (codes.some((code) => code.includes("UNDERFUNDED") || code.includes("LINE_FULL"))) {
+    return "insufficient_balance";
+  }
+  if (codes.some((code) => code.includes("NO_TRUST") || code.includes("NOT_AUTHORIZED"))) {
+    return "missing_trustline";
+  }
+  return "payment_rejected";
 }
 
 export class HttpError extends Error {

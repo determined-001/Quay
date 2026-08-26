@@ -217,6 +217,12 @@ const linkStatusTransitionsTotal = registry.counter(
   ["to"],
 );
 
+const walletSubmissionsTotal = registry.counter(
+  "wallet_submissions_total",
+  "Buyer wallet transaction relay attempts by outcome.",
+  ["outcome"], // submitted | invalid_xdr | rejected
+);
+
 const webhookAttemptsTotal = registry.counter(
   "webhook_attempts_total",
   "Webhook delivery attempts (each retry counts separately) by result.",
@@ -274,6 +280,7 @@ export const metrics = {
   registry,
   paymentsMatchedTotal,
   linkStatusTransitionsTotal,
+  walletSubmissionsTotal,
   webhookAttemptsTotal,
   anchorCallsTotal,
   watcherTickDurationSeconds,

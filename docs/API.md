@@ -177,6 +177,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | --- | --- |
 | `payments_matched_total` | `outcome` (`paid`, `underpaid`, `asset_mismatch`, `no_memo`, `unknown_reference`) |
 | `link_status_transitions_total` | `to` |
+| `wallet_submissions_total` | `outcome` (`submitted`, `invalid_xdr`, `rejected`) |
 | `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
 | `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
 
@@ -358,13 +359,40 @@ mean a checkout page that could never actually be paid — see
 
 ## `GET /links/:id`
 
-**Requires auth.** Fetch one link plus its payment request (used by the
-checkout page).
+**Public — no auth.** Fetch one link plus its payment request (used by the
+checkout page). The link id is the bearer capability; seller-only detail remains
+behind `GET /links/:id/detail`.
 
 **200** — same shape as the `POST /links` response.
-**403** — `{ "error": "forbidden", "message": "..." }`: the link exists but
-belongs to a different seller.
 **404** — `{ "error": "not_found" }`
+
+---
+
+## `POST /links/:id/submit`
+
+**Public — no auth.** The buyer submits a transaction signed by their own wallet.
+The API parses and validates the complete XDR before relaying it to Horizon. It
+accepts exactly one payment operation and verifies the destination, asset, amount,
+and required `MEMO_TEXT` against the link. It never marks the link paid directly;
+the ledger watcher remains the source of truth.
+
+**Request**
+```json
+{ "signedXdr": "AAAAAgAAAAA..." }
+```
+
+**200**
+```json
+{ "txHash": "b166269ace8a96efe..." }
+```
+
+**400** — malformed XDR, fee-bump envelope, or a transaction containing anything
+other than exactly one payment operation.
+
+**409** — the link is unavailable, or the transaction does not match the link.
+A Horizon rejection returns `{ "error": "payment_rejected", "reason": "...", "detail": "..." }`,
+where `reason` can distinguish `insufficient_balance`, `missing_trustline`, or a
+generic `payment_rejected`.
 
 ---
 
