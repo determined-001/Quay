@@ -49,6 +49,19 @@ Embed the lightweight modal checkout script tag in your HTML and attach it to an
 </script>
 ```
 
+**Self-hosting the widget?** Point the script tag at your own deployment and
+the widget infers the host from its own `<script src>` automatically - no
+extra config needed. If you load `widget.js` some other way (bundled,
+inlined, injected without a matching `<script src="...widget.js">` tag),
+`Quay.open()` **cannot detect the host and will not guess** — pass it explicitly:
+
+```js
+Quay.open({ linkId: "lnk_123", host: "https://checkout.your-domain.com" });
+```
+
+A widget that can't determine its host throws a clear error rather than
+silently pointing at someone else's deployment.
+
 ### 2. Create a Link via API
 
 Both write endpoints require authentication. Mint an API key from the dashboard
