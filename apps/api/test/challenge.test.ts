@@ -1,6 +1,12 @@
 import { Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
-import { AuthError, ChallengeService, type FetchAccountSigners } from "../src/services/challenge";
+import type { UsedChallengeStore } from "@checkout/core";
+import {
+  AuthError,
+  ChallengeService,
+  MemoryUsedChallengeStore,
+  type FetchAccountSigners,
+} from "../src/services/challenge";
 
 const HOME_DOMAIN = "quay.test";
 const WEB_AUTH_DOMAIN = "quay.test";
@@ -10,13 +16,17 @@ const NETWORK_PASSPHRASE = Networks.TESTNET;
 // to the "account id is its own sole signer" SEP-10 path — no network call.
 const noAccountsExist: FetchAccountSigners = async () => null;
 
-function makeService(fetchAccountSigners: FetchAccountSigners = noAccountsExist) {
+function makeService(
+  fetchAccountSigners: FetchAccountSigners = noAccountsExist,
+  usedChallengeStore?: UsedChallengeStore,
+) {
   return new ChallengeService({
     serverKeypair: Keypair.random(),
     homeDomain: HOME_DOMAIN,
     webAuthDomain: WEB_AUTH_DOMAIN,
     networkPassphrase: NETWORK_PASSPHRASE,
     fetchAccountSigners,
+    usedChallengeStore,
   });
 }
 
@@ -57,6 +67,40 @@ describe("ChallengeService", () => {
 
     await expect(service.verify(signedXdr)).resolves.toBe(client.publicKey());
     await expect(service.verify(signedXdr)).rejects.toThrow(/already been used/);
+  });
+
+  // Issue 6.7: with more than one API instance and no shared store, the same
+  // signed challenge could be redeemed once per instance. Two ChallengeService
+  // instances sharing one UsedChallengeStore models that deployment — the
+  // second instance to redeem the same signed challenge must still lose.
+  it("rejects a challenge already redeemed on another instance sharing the same store", async () => {
+    const serverKeypair = Keypair.random();
+    const sharedStore = new MemoryUsedChallengeStore();
+    const instanceA = new ChallengeService({
+      serverKeypair,
+      homeDomain: HOME_DOMAIN,
+      webAuthDomain: WEB_AUTH_DOMAIN,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      fetchAccountSigners: noAccountsExist,
+      usedChallengeStore: sharedStore,
+    });
+    const instanceB = new ChallengeService({
+      serverKeypair,
+      homeDomain: HOME_DOMAIN,
+      webAuthDomain: WEB_AUTH_DOMAIN,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      fetchAccountSigners: noAccountsExist,
+      usedChallengeStore: sharedStore,
+    });
+    const client = Keypair.random();
+
+    const { transaction, network_passphrase } = instanceA.build(client.publicKey());
+    const tx = TransactionBuilder.fromXDR(transaction, network_passphrase);
+    tx.sign(client);
+    const signedXdr = tx.toXDR();
+
+    await expect(instanceA.verify(signedXdr)).resolves.toBe(client.publicKey());
+    await expect(instanceB.verify(signedXdr)).rejects.toThrow(/already been used/);
   });
 
   it("rejects a challenge signed by the wrong account", async () => {

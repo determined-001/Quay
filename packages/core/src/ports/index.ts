@@ -652,3 +652,24 @@ export interface TokenRevocationRepository {
    *  expiry alone — safe to call opportunistically, no correctness impact. */
   sweepExpired(now: number): Promise<void>;
 }
+
+/**
+ * Single-use tracking for SEP-10 challenge transactions, keyed by the
+ * challenge's own tx hash. With more than one API instance, an in-memory
+ * implementation only enforces "used once per process" — the same signed
+ * challenge can be redeemed once on every instance inside its validity
+ * window, minting one session per instance from a single signature. A
+ * Redis-backed implementation (`SET NX` or equivalent) closes that gap by
+ * sharing the claim across instances.
+ */
+export interface UsedChallengeStore {
+  /**
+   * Atomically claims `hash` as used, valid until `expiresAt` (epoch
+   * seconds — the challenge's own timebound, so a claim never outlives the
+   * challenge it guards). Returns `true` when this call is the first to
+   * claim it (redemption proceeds), `false` when it was already claimed
+   * (the caller must reject the redemption). Must not have a check-then-set
+   * race between two concurrent callers claiming the same hash.
+   */
+  claim(hash: string, expiresAt: number): Promise<boolean>;
+}
