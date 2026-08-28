@@ -185,7 +185,22 @@ testnet one.
 This one is easy to miss and fails opaquely: the browser signs with the
 passphrase this variable selects, so leaving it unset means every wallet
 signature is built for testnet and rejected by the network the API is watching —
-with no error message that names the cause. Also set:
+with no error message that names the cause. Like every `NEXT_PUBLIC_*`
+variable, this is baked into the client bundle **at build time** — changing
+it and redeploying without rebuilding does nothing; the old value is still
+what's in the bundle a visitor's browser downloads.
+
+`NEXT_PUBLIC_API_URL` has the exact same failure shape, and it has actually
+happened: a Vercel build once ran with this unset, so the code's own
+`http://localhost:8787` local-dev fallback got baked into the production
+bundle instead, and every visitor's browser silently tried (and failed) to
+reach `localhost:8787` **on their own machine** — "Create link" just did
+nothing, no error naming the cause (`docs/FIXLOG.md`, BUG-1.4). The fallback
+now only applies outside a production build; a production build with this
+unset fails loudly in the browser instead, at load time, rather than issuing
+doomed requests — but that guard only catches "unset," not "wrong region/
+wrong deployment," so still set it deliberately rather than relying on the
+guard to catch a typo'd URL. Also set:
 
 - `NEXT_PUBLIC_API_URL` / `API_URL` — the mainnet API origin
 - `NEXT_PUBLIC_ENABLE_WALLET_PAY=true` — enable the lazy-loaded desktop wallet

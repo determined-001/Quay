@@ -73,7 +73,44 @@ export interface KycView {
 }
 
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
-const BROWSER_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8787";
+//
+// This has actually broken production once already (docs/FIXLOG.md, BUG-1.4,
+// 2026-07-14): a Vercel build ran with NEXT_PUBLIC_API_URL unset, so this
+// fallback got baked into the client bundle, and every visitor's browser
+// silently tried (and failed) to reach `localhost:8787` on their own
+// machine - no error naming the real cause, just "Create link" doing
+// nothing. The fix that shipped afterward was procedural (a deploy-checklist
+// reminder), not code - nothing here actually stopped it from recurring.
+// This does: the fallback only applies outside production, and a production
+// build (NODE_ENV=production) missing the variable fails loudly, in the
+// browser, at load time - before any component gets a chance to issue a
+// doomed request. See docs/MAINNET.md's "NEXT_PUBLIC_*" footgun section.
+const DEV_FALLBACK = "http://localhost:8787";
+
+const BROWSER_BASE = ((): string => {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+  if (process.env.NODE_ENV !== "production") return DEV_FALLBACK;
+
+  // `typeof window` is a reliable environment check here (not a runtime
+  // toggle): Next.js produces genuinely separate server and browser
+  // bundles, and each evaluates this module's top level for the first time
+  // in its own environment - a browser bundle really does run this inside
+  // an actual browser. The server bundle doesn't need NEXT_PUBLIC_API_URL at
+  // all if API_URL is set (see apiBase() below), so it isn't punished for a
+  // client-only variable it never uses.
+  if (typeof window !== "undefined") {
+    throw new Error(
+      "NEXT_PUBLIC_API_URL is not set. This is a production build, so there is no " +
+        "localhost fallback - without it, every request from this browser would " +
+        "silently target the visitor's own machine (this exact failure has happened " +
+        "before - see docs/FIXLOG.md, BUG-1.4). Set NEXT_PUBLIC_API_URL and REBUILD: " +
+        "NEXT_PUBLIC_* values are baked in at build time, so redeploying alone will " +
+        "not pick up a newly-set value.",
+    );
+  }
+
+  return DEV_FALLBACK;
+})();
 
 export function apiBase(): string {
   if (typeof window === "undefined") {
