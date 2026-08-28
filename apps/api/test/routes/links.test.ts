@@ -119,6 +119,39 @@ describe("POST /links", () => {
     expect(link.expiresAt).toBeTypeOf("number");
     expect((link.expiresAt as number)).toBeGreaterThan(Date.now());
   });
+
+  // The demo seed script (apps/api/scripts/demo-seed.ts) needs a stable id for
+  // the one link the /demo storefront page's widget button links to directly.
+  it("creates a link with a custom id when isDemo is set", async () => {
+    const res = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Demo mug", amount: "25.00", isDemo: true, id: "demo_mug_123_test" }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json() as Record<string, unknown>;
+    expect((body.link as Record<string, unknown>).id).toBe("demo_mug_123_test");
+  });
+
+  it("rejects a custom id without isDemo — a real link must not get a predictable id", async () => {
+    const res = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Not demo", amount: "10", id: "guessable_id" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.error).toBe("invalid_body");
+  });
+
+  it("rejects an id with disallowed characters", async () => {
+    const res = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Bad id", amount: "10", isDemo: true, id: "Not Valid!" }),
+    });
+    expect(res.status).toBe(400);
+  });
 });
 
 // ---------------------------------------------------------------------------

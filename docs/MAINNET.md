@@ -276,8 +276,11 @@ Not blockers for a first cutover, but each has a real production cost:
 - **`REDIS_URL` unset.** Rate-limit counters live in an in-process `Map`, so N
   instances allow N times the configured limit. Set it before scaling past one
   instance.
-- **`scripts/demo-seed.ts` and `demo-reset.ts` are testnet-only.** They hardcode
-  `Networks.TESTNET` and friendbot. Do not run them against mainnet.
+- **`apps/api/scripts/demo-seed.ts` reads `STELLAR_NETWORK` like the API does**,
+  but Friendbot and the testanchor USDC dispenser only exist on testnet — on
+  public network it skips both with a clear message and expects the generated
+  buyer keypair to already be funded, or the payment step fails with the real
+  Horizon error rather than an obscure one.
 - **`.github/workflows/anchor-probe.yml` probes `testanchor.stellar.org`** and
   auto-files a GitHub issue when that sandbox is down. On a mainnet project it
   is watching the wrong host — repoint it at your anchor or disable it.

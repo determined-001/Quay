@@ -196,8 +196,9 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
 
 ### Demo seed (pre-populated dashboard)
 
-Instead of starting from a blank screen, seed the dashboard with real on-chain testnet data
-in about a minute:
+Instead of starting from a blank screen, seed the dashboard with real on-chain data in about a
+minute. It reads `STELLAR_NETWORK` the same way the API does (defaulting to testnet), so it
+works against a mainnet or self-hosted deployment too — not just testnet:
 
 ```bash
 # With the API already running on http://localhost:8787:
@@ -211,18 +212,22 @@ otherwise the dashboard you already know would have nothing to show.
 
 What it does:
 
-1. Generates a fresh buyer keypair and funds it via Friendbot (XLM) and the testanchor USDC
-   dispenser.
+1. Generates a fresh buyer keypair. On testnet, funds it via Friendbot (XLM) and the testanchor
+   USDC dispenser. On any other network neither exists, so this step is skipped with a clear
+   message — fund the printed buyer address yourself, or the payment step below fails with the
+   real Horizon error instead of an obscure one.
 2. Authenticates as the demo seller (SEP-10 challenge → session token).
-3. Creates several payment links via `POST /links` (flagged as demo data).
-4. Submits real Stellar testnet payments from the buyer to the seller wallet using each link's
-   memo so the on-chain watcher can match them.
+3. Creates several payment links via `POST /links` (flagged as demo data), including one with
+   the fixed id `demo_mug_123` that the `/demo` storefront page's "Pay with Quay" button links
+   to directly.
+4. Submits real Stellar payments from the buyer to the seller wallet using each link's memo so
+   the on-chain watcher can match them.
 5. Waits for the watcher to mark the links **paid**, then triggers a cash-out on one so the
    dashboard shows an `offramp_settled` row.
 
-Every seeded row is real on-chain testnet data — nothing is written directly to the database.
-Demo rows are labelled with a **demo** badge in the dashboard so they are easy to tell apart
-from links you create yourself.
+Every seeded row is real on-chain data — nothing is written directly to the database. Demo rows
+are labelled with a **demo** badge in the dashboard so they are easy to tell apart from links you
+create yourself.
 
 ```bash
 # Remove all demo-flagged rows:

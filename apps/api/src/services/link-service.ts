@@ -458,7 +458,7 @@ export class LinkService {
     }
 
     const link = await this.deps.links.create({
-      id: newId("lnk"),
+      id: body.id ?? newId("lnk"),
       reference: newReference(),
       sellerId: seller.id,
       destination: seller.wallet,

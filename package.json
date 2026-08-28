@@ -18,8 +18,8 @@
     "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
     "sweep": "node scripts/uptime-check.mjs",
     "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
-    "demo:seed": "tsx scripts/demo-seed.ts",
-    "demo:reset": "tsx scripts/demo-reset.ts"
+    "demo:seed": "pnpm --filter @checkout/api exec tsx scripts/demo-seed.ts",
+    "demo:reset": "pnpm --filter @checkout/api exec tsx scripts/demo-reset.ts"
   },
   "dependencies": {
     "@libsql/client": "0.17.4"
