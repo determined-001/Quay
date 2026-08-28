@@ -1,7 +1,22 @@
 import Script from "next/script";
 import Link from "next/link";
 
-export default function DemoPage() {
+async function getDemoLinkId(): Promise<string | null> {
+  try {
+    const base =
+      process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8787";
+    const res = await fetch(`${base}/demo/link`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { linkId: string | null };
+    return body.linkId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export default async function DemoPage() {
+  const linkId = await getDemoLinkId();
+
   return (
     <main className="shell shell--narrow">
       <header className="masthead">
@@ -27,15 +42,34 @@ export default function DemoPage() {
           </div>
 
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #30363d", display: "flex", gap: 12, alignItems: "center" }}>
-            {/* Embeddable Widget Button */}
-            <button
-              id="demo-pay-btn"
-              className="btn btn--primary"
-              data-quay-link="demo_mug_123"
-              data-quay-label="Pay $25.00 with Quay"
-            >
-              Pay $25.00 with Quay
-            </button>
+            {linkId ? (
+              <button
+                id="demo-pay-btn"
+                className="btn btn--primary"
+                data-quay-link={linkId}
+                data-quay-label="Pay $25.00 with Quay"
+              >
+                Pay $25.00 with Quay
+              </button>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <button
+                  id="demo-pay-btn"
+                  className="btn btn--primary"
+                  disabled
+                  title="Run pnpm demo:seed to activate this button"
+                >
+                  Pay $25.00 with Quay
+                </button>
+                <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+                  Demo not seeded.{" "}
+                  <code style={{ background: "#0d1117", padding: "1px 5px", borderRadius: 4 }}>
+                    pnpm demo:seed
+                  </code>{" "}
+                  to activate.
+                </p>
+              </div>
+            )}
             <Link className="linkbtn" href="/">
               Back to dashboard
             </Link>
@@ -45,7 +79,7 @@ export default function DemoPage() {
         <h3>Integration Snippet</h3>
         <pre style={{ background: "#0d1117", padding: 16, borderRadius: 8, overflowX: "auto", fontSize: 13 }} className="mono">
 {`<script src="https://quay-web.vercel.app/widget.js" defer></script>
-<button data-quay-link="lnk_123" data-quay-label="Pay $25.00">Pay</button>`}
+<button data-quay-link="${linkId ?? "lnk_your_id_here"}" data-quay-label="Pay $25.00">Pay</button>`}
         </pre>
       </div>
 
