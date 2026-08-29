@@ -68,6 +68,102 @@ prerequisite, not a preference:
   in a per-process `Map`. The persisted replay table still works; only the
   concurrent-duplicate guard is lost, and it guards a money endpoint.
 
+## Mainnet: a second, separate service
+
+Everything below this point was originally written against the single testnet
+Render service (`quay-api`). After the mainnet cutover (`docs/MAINNET.md`)
+there are **two independent services with two independent sets of secrets**:
+
+| | Testnet (default below) | Mainnet |
+|---|---|---|
+| Render service name | `quay-api` | `quay-api-mainnet` |
+| Blueprint | `render.yaml` | `render.mainnet.yaml` |
+| `STELLAR_NETWORK` | `testnet` | `public` |
+| API URL | `https://quay-api.onrender.com` | the host Render assigns `quay-api-mainnet`, or your custom domain if `HOME_DOMAIN` is set — check the Render dashboard, do not assume it |
+| Database | testnet Turso DB | a **separate** Turso DB — never point both services at the same one |
+| Off-ramp | `testanchor` (SDF sandbox) | `anchor` (a real production anchor) or `none` |
+
+Rotating, redeploying, or restoring one has **no effect** on the other. A
+`DATABASE_URL` accidentally pointed at the wrong service's database is not a
+typo that fails loudly — it is real payment data landing in (or being
+overwritten by) the wrong environment.
+
+### What's shared vs. what's per-environment
+
+- **Shared** (same code path, same repo, just pointed at a different target):
+  the push-to-`main` deploy trigger, the `/ready`-gates-traffic contract, the
+  `pnpm db:restore` / `pnpm db:backup` scripts and backup file format, and the
+  incident template at the bottom of this document.
+- **Per-environment** (must be done once for *each* service, independently):
+  which secrets are set (`render.mainnet.yaml`'s own header comment lists
+  mainnet's full secret set — it includes `ANCHOR_URL` / `ANCHOR_HOME_DOMAIN` /
+  `METRICS_TOKEN`, which testnet's `render.yaml` does not declare), which
+  Render service's logs/deploys you are watching, and which backup file you
+  restore from (see Restore below — testnet and mainnet backups are not
+  interchangeable).
+
+### Deploy — mainnet
+
+Same push-to-`main` mechanism as the Deploy section below; Render rebuilds
+both services from the same commit. What differs:
+
+- Watch **`quay-api-mainnet`**'s own deploy logs for `/ready` — it is a
+  separate Render service from `quay-api` with a separate log stream.
+- The public-network guardrails in `apps/api/src/env.ts` throw at boot on a
+  bad mainnet config (wrong off-ramp mode, a missing secret, a plain-HTTP
+  anchor URL, and more — the full table is in `docs/MAINNET.md`). A mainnet
+  deploy that fails to go `/ready` is very often a guardrail doing exactly its
+  job, not a code regression — read the boot error before assuming otherwise.
+- Run `docs/MAINNET.md` Phase 5's verification checklist after **every**
+  mainnet deploy, not just the first — it is cheap, and it catches a wrong
+  `SIGNING_KEY` or a rejected wallet signature before a real customer does.
+
+### Rollback — mainnet
+
+The Rollback section below (redeploy the previous successful build) applies
+identically — just pick `quay-api-mainnet` in the Render dashboard instead of
+`quay-api`.
+
+To abandon a mainnet cutover entirely rather than roll back one bad deploy
+(e.g. cutover happened before the service was actually ready for traffic),
+follow `docs/MAINNET.md`'s own Rollback section instead: stop routing traffic
+to `quay-api-mainnet` and point the web app's `NEXT_PUBLIC_API_URL` (and
+`NEXT_PUBLIC_STELLAR_NETWORK`) back at testnet. Either way, payments already
+settled on the public ledger cannot be rolled back — only the service in front
+of them can be.
+
+### Restore — mainnet
+
+Same `pnpm db:restore` script and procedure as the Restore section below, with
+two things that must never be crossed:
+
+- **Restore only from a backup taken of `quay-api-mainnet`'s own database.**
+  Restoring a testnet backup into the mainnet database replaces real
+  payment/off-ramp/KYC rows with fake ones; restoring a mainnet backup into
+  testnet leaks real seller PII into a lower-trust environment.
+- Confirm whatever nightly backup job you set up for mainnet
+  (`docs/MAINNET.md`'s Database note) is actually pointed at the mainnet
+  `DATABASE_URL` *before* an incident, not while triaging one.
+
+The quarterly scratch-drill procedure and the restore-drill log below are
+shared — a drill exercises the backup/restore code path itself, which is
+identical for both environments.
+
+### Key rotation — mainnet
+
+Same procedures as the Key rotation section below, run against
+`quay-api-mainnet`'s own secret values — rotating a key on `quay-api`
+(testnet) never touches mainnet's copy of that key, and vice versa. Two
+mainnet-only notes:
+
+- **`ANCHOR_URL` / `ANCHOR_HOME_DOMAIN`** only exist on mainnet
+  (`OFFRAMP=anchor`). Changing anchors is not a rotation — treat it as picking
+  a new anchor (`docs/MAINNET.md` Phase 1) and re-verify its SEP-10/SEP-38/
+  SEP-6 support before pointing production traffic at it.
+- **`METRICS_TOKEN`** is `sync: false` on mainnet the same as testnet — rotate
+  it the same way, but remember any external scraper reading the mainnet
+  `/metrics` endpoint needs the new token too.
+
 ## Deploy
 
 Render deploys `apps/api` as a single always-on Docker web service (starter
@@ -79,7 +175,12 @@ app deploys separately to Vercel.
 1. Confirm `pnpm typecheck && pnpm test && pnpm build` is green on `main`
    (CI - `.github/workflows/ci.yml` - already gates this on every push/PR).
 2. Render picks up the new commit and rebuilds `apps/api/Dockerfile`.
-3. Watch the Render deploy logs for the health check (`/health`) to go green.
+3. Watch the Render deploy logs for the health check (`/ready`) to go green —
+   **not** `/health`. `render.yaml`/`render.mainnet.yaml`'s `healthCheckPath`
+   and the Dockerfile's own `HEALTHCHECK` both gate traffic on `/ready`, which
+   checks the database is actually reachable; `/health` is liveness-only and
+   returns `ok: true` unconditionally, so watching it go green tells you the
+   process started, not that it can serve a request.
 4. Confirm the watcher loop resumed: check for `payment ... ->` log lines, or
    query `watcher_cursors` for a recent `updated_at` on a watched account.
 
