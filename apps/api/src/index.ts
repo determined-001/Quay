@@ -111,6 +111,17 @@ async function main(): Promise<void> {
 
   app.route("/links", linkRoutes(container, strictRateLimit));
   app.route("/webhooks", webhookRoutes(container));
+
+  // Receipt-specific limiter: tighter than the global cap but looser than
+  // the strict bucket — buyers legitimately refresh receipts, but an IP
+  // rotating through 120/min is well past what a public-read route needs.
+  const receiptRateLimit = rateLimit({
+    windowMs: env.rateLimitWindowMs,
+    max: Math.floor(env.rateLimitMax / 2),
+    store: rateLimitStore,
+    trustProxyHops: env.trustProxyHops,
+  });
+  app.use("/r/*", receiptRateLimit);
   app.route("/r", publicRoutes(container));
 
   // API-key management (issue #40). Requires a session or an API key that
@@ -129,6 +140,11 @@ async function main(): Promise<void> {
   // CORS for public receipt endpoint (accessible from any origin).
   app.use("/r/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"] }));
   app.route("/metrics", metricsRoutes(container));
+  // /auth is a sensitive route — every attempt triggers a Horizon account
+  // lookup, making it both an authentication surface and an outbound-traffic
+  // amplifier.  Apply the strict limiter so brute-force or rotation attacks
+  // hit 429 well before the global cap.
+  app.use("/auth", strictRateLimit);
   app.route(
     "/auth",
     authRoutes({
