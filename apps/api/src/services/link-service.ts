@@ -304,8 +304,11 @@ export class LinkService {
   }
 
   /** Webhook deliveries currently in flight (including in-process retries). */
+  /** Pending rows in the durable webhook queue. Since #101 this is a real
+   *  backlog depth rather than a count of in-process HTTP calls, which is what
+   *  the `webhook_deliveries_in_flight` gauge was always meant to mean. */
   webhookQueueDepth(): number {
-    return this.sender.inFlightCount;
+    return this.sender.pendingDepth;
   }
 
   /**

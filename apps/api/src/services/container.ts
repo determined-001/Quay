@@ -39,6 +39,7 @@ import { horizonSignerFetcher } from "./horizon-signers";
 import { SessionIssuer } from "./session";
 import type { StellarTomlConfig } from "../routes/well-known";
 import { CircuitBreakerOffRamp } from "./circuit-breaker";
+import { WebhookWorker } from "../worker/webhook-worker";
 import { assertKeyConfigured } from "./secret-crypto";
 
 export interface Container {
@@ -181,6 +182,9 @@ export async function createContainer(): Promise<Container> {
     log: (m) => console.log(`[watcher] ${m}`),
   });
 
+  const webhookWorker = new WebhookWorker(webhooksRepo, {
+    log: (m) => console.log(`[webhook] ${m}`),
+  });
   const metricsToken = resolveMetricsToken();
   const challenge = new ChallengeService({
     serverKeypair,
@@ -221,19 +225,10 @@ export async function createContainer(): Promise<Container> {
     auth: { challenge, session, stellarToml, revocations: revocationsRepo, secureCookie: env.cookieSecure },
     start() {
       logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
-      loop.start();
-      // With no off-ramp there is nothing to advance: no link can reach
-      // offramp_pending, so the poller would query an always-empty set on
-      // every tick forever. The anchor probe is likewise pointless with no
-      // anchor — buildAnchorHealth already disables it, and this skips the
-      // timer that would only call a disabled probe.
-      if (env.offramp !== "none") {
-        stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
-        stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
-      }
-      if (attestation) {
-        stopAttestationSweep = startAttestationSweeper(service, env.attestationSweepMs, logger);
-      }
+https://github.com/determined-001/Quay/pull/182/conflict?name=apps%252Fapi%252Fsrc%252Fservices%252Fcontainer.ts&ancestor_oid=0bb51ed81105b3760baf3068b9781ba0d3ee7c40&base_oid=23366f3ada0d0c27a8f5c4b7e010acd30ead689d&head_oid=67a2014e11125ceffa78aa12c690533ada2d7078      loop.start();
+      webhookWorker.start();
+      stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
+      stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
       const sweepTimer = setInterval(
         () => void revocationsRepo.sweepExpired(Math.floor(Date.now() / 1000)),
         60 * 60 * 1000, // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
@@ -242,6 +237,7 @@ export async function createContainer(): Promise<Container> {
     },
     async stop() {
       await loop.stop();
+      webhookWorker.stop();
       stopPoller?.();
       stopRevocationSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();

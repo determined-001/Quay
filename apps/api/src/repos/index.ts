@@ -1,6 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
-import type { ApiKeyScope } from "../services/api-keys";
-import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
+import { eq, and, inArray, lt, lte } from "drizzle-orm";
 import type {
   CreateLinkInput,
   KycFieldSpec,
@@ -18,6 +16,7 @@ import type {
   StoredOffRampQuote,
   Webhook,
   WebhookDelivery,
+  WebhookQueueEntry,
   WebhookRepository,
   WatcherStateRepository,
   OffRampTelemetryRepository,
@@ -33,6 +32,7 @@ import {
   sellers,
   webhooks,
   webhookDeliveries,
+  webhookQueue,
   watcherCursors,
   processedTx,
   offrampQuotes,
@@ -402,50 +402,19 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     return rows.map(rowToWebhook);
   }
 
-  async getById(id: string, sellerId: string, opts?: { includeDeleted?: boolean }): Promise<Webhook | null> {
-    const conditions = [eq(webhooks.id, id), eq(webhooks.sellerId, sellerId)];
-    if (!opts?.includeDeleted) conditions.push(isNull(webhooks.deletedAt));
-    const rows = await this.db
-      .select()
-      .from(webhooks)
-      .where(and(...conditions))
-      .limit(1);
-    return rows[0] ? rowToWebhook(rows[0]) : null;
+  async findWebhookById(id: string): Promise<Webhook | null> {
+    const rows = await this.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
+    return rows[0] ?? null;
   }
 
-  async rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null> {
-    const existing = await this.getById(id, sellerId);
-    if (!existing) return null;
-
-    const updated = {
-      secretEncrypted: encryptSecret(newSecret),
-      secretLast4: last4(newSecret),
-      previousSecretEncrypted: existing.secretEncrypted,
-      previousSecretLast4: existing.secretLast4,
-      previousSecretExpiresAt: Date.now() + overlapMs,
-    };
-    await this.db
-      .update(webhooks)
-      .set(updated)
-      .where(and(eq(webhooks.id, id), eq(webhooks.sellerId, sellerId)));
-
-    return { ...existing, ...updated };
-  }
-
-  async softDelete(id: string, sellerId: string): Promise<boolean> {
-    const result = await this.db
-      .update(webhooks)
-      .set({ deletedAt: Date.now() })
-      .where(and(eq(webhooks.id, id), eq(webhooks.sellerId, sellerId), isNull(webhooks.deletedAt)));
-    return (result.rowsAffected ?? 0) > 0;
-  }
-
-  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void> {
+  async recordDelivery(d: WebhookDelivery): Promise<void> {
     await this.db.insert(webhookDeliveries).values({
       id: newId("whd"),
       webhookId: d.webhookId,
       linkId: d.linkId,
       event: d.event,
+      attempt: d.attempt,
+      queueEntryId: d.queueEntryId,
       statusCode: d.statusCode,
       ok: d.ok,
       error: d.error,
@@ -453,34 +422,104 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     });
   }
 
-  async listDeliveries(
-    webhookId: string,
-    sellerId: string,
-    opts: { limit: number; cursor?: string | null },
-  ): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }> {
-    // Ownership check — a merchant may only read deliveries for their own
-    // webhook. Deleted webhooks are included on purpose: history must stay
-    // visible after an endpoint is removed.
-    const owned = await this.getById(webhookId, sellerId, { includeDeleted: true });
-    if (!owned) return { deliveries: [], nextCursor: null };
+  // ---------------------------------------------------------------------------
+  // Queue operations
+  // ---------------------------------------------------------------------------
 
-    const cursorCreatedAt = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
-    const conditions = [eq(webhookDeliveries.webhookId, webhookId)];
-    if (cursorCreatedAt !== null) conditions.push(lt(webhookDeliveries.createdAt, cursorCreatedAt));
+  async enqueue(
+    entry: Omit<WebhookQueueEntry, "attempts" | "status" | "lastStatusCode" | "lastError" | "updatedAt">,
+  ): Promise<WebhookQueueEntry> {
+    const now = Date.now();
+    const row = {
+      id: entry.id,
+      webhookId: entry.webhookId,
+      linkId: entry.linkId,
+      event: entry.event,
+      payload: entry.payload,
+      attempts: 0,
+      nextAttemptAt: entry.nextAttemptAt,
+      status: "pending" as const,
+      lastStatusCode: null,
+      lastError: null,
+      createdAt: entry.createdAt,
+      updatedAt: now,
+    };
+    await this.db.insert(webhookQueue).values(row);
+    return row;
+  }
 
-    // Fetch one extra row to know whether there's a next page.
+  /**
+   * Claim up to `limit` pending rows whose next_attempt_at <= now.
+   *
+   * SQLite is single-writer, so the read-then-update within a single synchronous
+   * call is safe against concurrent processes sharing the same file. For a
+   * multi-process / Turso setup the `status = 'claimed'` write acts as an
+   * optimistic lock: if two workers race, only one's UPDATE will match the row
+   * (the other will find status ≠ 'pending' on the next SELECT and skip it).
+   */
+  async claimDue(now: number, limit: number): Promise<WebhookQueueEntry[]> {
+    // 1. Find candidates.
+    const candidates = await this.db
+      .select()
+      .from(webhookQueue)
+      .where(
+        and(
+          eq(webhookQueue.status, "pending"),
+          lte(webhookQueue.nextAttemptAt, now),
+        ),
+      )
+      .limit(limit);
+
+    if (candidates.length === 0) return [];
+
+    const ids = candidates.map((r) => r.id);
+
+    // 2. Atomically transition pending → claimed and take the affected rows
+    //    straight off the UPDATE via RETURNING.
+    //
+    //    RETURNING is what makes this safe across instances: it yields exactly
+    //    the rows *this* statement transitioned. Re-SELECTing status='claimed'
+    //    afterwards would also match rows a concurrent worker had just claimed
+    //    between our UPDATE and our SELECT, and both workers would deliver the
+    //    same webhook.
+    const claimed = await this.db
+      .update(webhookQueue)
+      .set({ status: "claimed", updatedAt: Date.now() })
+      .where(
+        and(
+          inArray(webhookQueue.id, ids),
+          eq(webhookQueue.status, "pending"),
+        ),
+      )
+      .returning();
+
+    return claimed.map(rowToQueueEntry);
+  }
+
+  async updateQueueEntry(
+    id: string,
+    patch: Pick<WebhookQueueEntry, "status" | "attempts" | "nextAttemptAt" | "lastStatusCode" | "lastError">,
+  ): Promise<void> {
+    await this.db
+      .update(webhookQueue)
+      .set({
+        status: patch.status,
+        attempts: patch.attempts,
+        nextAttemptAt: patch.nextAttemptAt,
+        lastStatusCode: patch.lastStatusCode,
+        lastError: patch.lastError,
+        updatedAt: Date.now(),
+      })
+      .where(eq(webhookQueue.id, id));
+  }
+
+  async findQueueEntry(id: string): Promise<WebhookQueueEntry | null> {
     const rows = await this.db
       .select()
-      .from(webhookDeliveries)
-      .where(and(...conditions))
-      .orderBy(desc(webhookDeliveries.createdAt))
-      .limit(opts.limit + 1);
-
-    const page = rows.slice(0, opts.limit);
-    const last = page[page.length - 1];
-    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt) : null;
-
-    return { deliveries: page, nextCursor };
+      .from(webhookQueue)
+      .where(eq(webhookQueue.id, id))
+      .limit(1);
+    return rows[0] ? rowToQueueEntry(rows[0]) : null;
   }
 
   async listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]> {
@@ -494,6 +533,8 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       webhookId: r.webhookId,
       linkId: r.linkId,
       event: r.event,
+      attempt: r.attempt,
+      queueEntryId: r.queueEntryId,
       statusCode: r.statusCode,
       ok: r.ok,
       error: r.error,
@@ -502,6 +543,23 @@ export class DrizzleWebhookRepository implements WebhookRepository {
   }
 }
 
+type QueueRow = typeof webhookQueue.$inferSelect;
+
+function rowToQueueEntry(row: QueueRow): WebhookQueueEntry {
+  return {
+    id: row.id,
+    webhookId: row.webhookId,
+    linkId: row.linkId,
+    event: row.event,
+    payload: row.payload,
+    attempts: row.attempts,
+    nextAttemptAt: row.nextAttemptAt,
+    status: row.status as WebhookQueueEntry["status"],
+    lastStatusCode: row.lastStatusCode,
+    lastError: row.lastError,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 function encodeDeliveryCursor(createdAt: number): string {
   return Buffer.from(String(createdAt), "utf8").toString("base64url");
 }
