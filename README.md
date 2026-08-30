@@ -50,10 +50,20 @@ Embed the lightweight modal checkout script tag in your HTML and attach it to an
 ```
 
 ### 2. Create a Link via API
+
+Both write endpoints require authentication. Mint an API key from the dashboard
+(**API keys → Create**, after signing in with your Stellar wallet) and send it
+as a bearer token — the plaintext key is shown once, at creation.
+
+Keys are scoped. The default set (`links:read`, `links:write`,
+`webhooks:manage`) covers everything in this quickstart; `offramp:initiate`
+moves money and must be requested explicitly.
+
 Generate a payment link from your backend server:
 
 ```bash
 curl -X POST https://quay-api.onrender.com/links \
+  -H "Authorization: Bearer ak_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "title": "T-shirt",
@@ -87,6 +97,7 @@ Register your endpoint to receive real-time JSON notifications when payments lan
 
 ```bash
 curl -X POST https://quay-api.onrender.com/webhooks \
+  -H "Authorization: Bearer ak_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{ "url": "https://your-domain.com/api/webhooks/checkout" }'
 ```
@@ -183,6 +194,78 @@ pnpm build       # builds the web app
 pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live demo
 ```
 
+### Demo seed (pre-populated dashboard)
+
+Instead of starting from a blank screen, seed the dashboard with real on-chain testnet data
+in about a minute:
+
+```bash
+# With the API already running on http://localhost:8787:
+pnpm demo:seed
+```
+
+Prerequisite: `DEFAULT_SELLER_SECRET` in `.env` (matching the `DEFAULT_SELLER_WALLET` the API
+is running with). Since auth landed, every `/links` route is seller-authenticated, so the script
+logs in as the configured demo seller via SEP-10 and creates the links under that same seller —
+otherwise the dashboard you already know would have nothing to show.
+
+What it does:
+
+1. Generates a fresh buyer keypair and funds it via Friendbot (XLM) and the testanchor USDC
+   dispenser.
+2. Authenticates as the demo seller (SEP-10 challenge → session token).
+3. Creates several payment links via `POST /links` (flagged as demo data).
+4. Submits real Stellar testnet payments from the buyer to the seller wallet using each link's
+   memo so the on-chain watcher can match them.
+5. Waits for the watcher to mark the links **paid**, then triggers a cash-out on one so the
+   dashboard shows an `offramp_settled` row.
+
+Every seeded row is real on-chain testnet data — nothing is written directly to the database.
+Demo rows are labelled with a **demo** badge in the dashboard so they are easy to tell apart
+from links you create yourself.
+
+```bash
+# Remove all demo-flagged rows:
+pnpm demo:reset
+```
+
+`demo:reset` calls `POST /demo/reset` on the running API. It's testnet-only (returns 403 on
+the public network) and requires a seller session, so the script logs in as the same demo
+seller using `DEFAULT_SELLER_SECRET`.
+
+---
+
+## Docker image (`apps/api`)
+
+`apps/api/Dockerfile` is a 3-stage build (`deps` → `build` → `runtime`): the
+runtime stage carries only apps/api's real npm production dependencies (all
+workspace source is bundled into one compiled `dist/index.js` via esbuild -
+see the `build` script in `apps/api/package.json`) and runs as the non-root
+`node` user.
+
+- **Base image** is pinned by digest (`node:22-alpine@sha256:...`, see the
+  `ARG BASE_IMAGE` at the top of the Dockerfile) - bump it at least monthly,
+  or immediately on a disclosed CVE, per that same comment.
+- **Signals**: `tini` runs as PID 1 (`ENTRYPOINT`) so `SIGTERM` actually
+  reaches the Node process, which drains in-flight HTTP requests before
+  exiting (`apps/api/src/index.ts`).
+- **Health**: `/health` is liveness (process is up); `/ready` is readiness
+  (database is actually reachable) - the `HEALTHCHECK` and Render's
+  `healthCheckPath` both use `/ready`.
+- **Size target**: under 200 MB, enforced in CI (`.github/workflows/ci.yml`'s
+  `docker` job fails the build if it isn't). Not independently measured
+  outside CI in this change - no Docker daemon was available in the
+  environment this change was authored in, so the size shown above is a
+  target the CI job checks on every push, not a number hand-verified here.
+- **Security scanning**: the same CI job runs a Trivy scan, failing on any
+  HIGH/CRITICAL finding.
+- **Read-only root filesystem**: the app writes nothing to disk in
+  production (remote Turso database, no local files), so the image is
+  compatible with `docker run --read-only --tmpfs /tmp` or an orchestrator's
+  equivalent read-only-root setting - Render's blueprint format has no field
+  for this today, so it isn't set in `render.yaml`, but nothing in the image
+  requires a writable root filesystem.
+
 ---
 
 ## What's real vs. stubbed
@@ -232,6 +315,7 @@ pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live 
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
 - **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, anchor outage, watcher-stuck, stuck off-ramp jobs, and the incident template.
+- **[Mainnet cutover](docs/MAINNET.md)** — choosing a production anchor, generating and funding real keys, the public-network guardrails and why each refuses to boot, and the pre-announcement verification list.
 - **[SCF Build proposal](docs/PROPOSAL.md)** — the problem, the wedge, milestones, budget, traction, and risk register.
 - **[Contributing](CONTRIBUTING.md)** — setup, the check suite, and PR guidelines.
 - **[Security policy](SECURITY.md)** — how to report a vulnerability privately.

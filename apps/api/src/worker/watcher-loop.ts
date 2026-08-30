@@ -1,9 +1,11 @@
 import {
   matchPayment,
   type LinkRepository,
+  type Logger,
   type PaymentLink,
   type WatcherPort,
   type WatcherStateRepository,
+  NOOP_LOGGER,
 } from "@checkout/core";
 import { AnchorHealth, type LinkService } from "../services/link-service";
 import { env } from "../env";
@@ -22,10 +24,31 @@ interface AccountState {
   consecutiveErrors: number;
   lastErrorTime: number;
   consecutiveIdleTicks: number;
+  /** Ticks skipped since this account was last actually polled. */
+  skippedTicks: number;
   lastActivityTime: number;
   isNewAccount: boolean;
   lastProcessedAt: number;
 }
+
+/**
+ * How many ticks to skip between polls of an idle account.
+ *
+ * Bounded on purpose. The watcher only ever looks at destinations returned by
+ * `activeDestinations()` — accounts that have an OPEN link — so an idle account
+ * here is one where a buyer is being shown "waiting for payment" right now.
+ * Stretching that interval indefinitely is indistinguishable from the product
+ * being broken, which is exactly how it presented: a payment landed on-chain
+ * with the correct memo and the checkout page sat spinning.
+ */
+function idleStride(consecutiveIdleTicks: number, backoffTicks: number): number {
+  if (consecutiveIdleTicks < backoffTicks) return 1;
+  const steps = Math.floor(consecutiveIdleTicks / Math.max(1, backoffTicks));
+  return Math.min(MAX_IDLE_STRIDE, 1 + steps);
+}
+
+/** At the default 6s poll this caps the quiet-account interval at ~30s. */
+const MAX_IDLE_STRIDE = 5;
 
 /**
  * Circuit breaker status for a single account.
@@ -93,11 +116,13 @@ export class WatcherLoop {
       state: WatcherStateRepository;
       service: LinkService;
       pollMs: number;
+      logger?: Logger;
       pageLimit?: number;
       maxPagesPerTick?: number;
       log?: (msg: string) => void;
     },
   ) {
+    this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
     this.pageLimit = deps.pageLimit ?? DEFAULT_PAGE_LIMIT;
     this.maxPagesPerTick = deps.maxPagesPerTick ?? DEFAULT_MAX_PAGES_PER_TICK;
   }
@@ -246,15 +271,29 @@ export class WatcherLoop {
       return;
     }
 
-    // Check adaptive interval - skip if idle for too long
-    if (state.consecutiveIdleTicks >= env.watcherIdleBackoffTicks && !state.isNewAccount) {
-      this.deps.log?.(`watcher account ${short(account)} idle for ${state.consecutiveIdleTicks} ticks, backing off`);
-      state.consecutiveIdleTicks++;
-      return;
+    // Adaptive polling: poll an idle account less often, NEVER stop polling it.
+    //
+    // This used to `return` outright once the idle count passed the threshold,
+    // and `consecutiveIdleTicks` is only ever reset inside `processAccount` —
+    // which that return prevented from running. So an account went permanently
+    // unwatched after ~10 idle ticks, and the counter just climbed (seen in
+    // production at 183). Every payment arriving after the first minute of a
+    // link's life was invisible until the process restarted.
+    const stride = idleStride(state.consecutiveIdleTicks, env.watcherIdleBackoffTicks);
+    if (stride > 1 && !state.isNewAccount) {
+      state.skippedTicks++;
+      if (state.skippedTicks < stride) {
+        this.deps.log?.(
+          `watcher account ${short(account)} quiet (${state.consecutiveIdleTicks} idle ticks), ` +
+            `polling every ${stride} ticks`,
+        );
+        return;
+      }
     }
+    state.skippedTicks = 0;
 
     try {
-      await this.processAccount(account);
+      await this.processAccount(account, this.deps.logger!.child({ account }));
       
       // Reset error state on success
       state.consecutiveErrors = 0;
@@ -314,6 +353,7 @@ export class WatcherLoop {
         consecutiveErrors: 0,
         lastErrorTime: 0,
         consecutiveIdleTicks: 0,
+        skippedTicks: 0,
         lastActivityTime: Date.now(),
         isNewAccount: true,
         lastProcessedAt: Date.now(),
@@ -333,7 +373,7 @@ export class WatcherLoop {
     return chunks;
   }
 
-  private async processAccount(account: string): Promise<void> {
+  private async processAccount(account: string, log: Logger): Promise<void> {
     const cursor = await this.deps.state.getCursor(account);
     const state = this.getOrCreateAccountState(account);
 
@@ -342,6 +382,10 @@ export class WatcherLoop {
     if (cursor === null) {
       const latest = await this.deps.watcher.latestCursor(account);
       await this.deps.state.setCursor(account, latest ?? "");
+      log.info(
+        { event: "watcher.account.seeded", fromCursor: null, toCursor: latest },
+        "watcher account seeded",
+      );
       return;
     }
 
@@ -370,7 +414,11 @@ export class WatcherLoop {
       let lastToken = pageCursor;
       for (const payment of payments) {
         lastToken = payment.pagingToken;
-        if (await this.deps.state.isProcessed(payment.txHash)) continue;
+        const child = log.child({ txHash: payment.txHash, pagingToken: payment.pagingToken });
+        if (await this.deps.state.isProcessed(payment.txHash)) {
+          child.info({ event: "payment.duplicate" }, "skipping already-processed payment");
+          continue;
+        }
 
         const outcome = matchPayment(payment, (ref) => byRef.get(ref), (id) => byMuxedId.get(id));
         metrics.paymentsMatchedTotal.inc({ outcome: outcome.kind });
@@ -378,9 +426,13 @@ export class WatcherLoop {
           outcome.kind === "paid" || outcome.kind === "underpaid" || outcome.kind === "asset_mismatch"
             ? outcome.link.id
             : null;
+        child.info(
+          { event: "payment.matched", outcome: outcome.kind, linkId, amount: payment.amount, memo: payment.memo },
+          `payment ${outcome.kind}`,
+        );
 
         if (outcome.kind === "paid" || outcome.kind === "underpaid") {
-          const becamePaid = await this.deps.service.applyMatch(payment, outcome);
+          const becamePaid = await this.deps.service.applyMatch(payment, outcome, { logger: child });
           this.deps.log?.(
             `payment ${short(payment.txHash)} -> ${outcome.kind}` +
               (becamePaid ? ` (link ${linkId} PAID)` : ""),
@@ -402,9 +454,9 @@ export class WatcherLoop {
             (terminal.status === "expired" || terminal.status === "cancelled")
           ) {
             await this.deps.service.recordUnmatchedPayment(payment, terminal);
-            this.deps.log?.(
-              `payment ${short(payment.txHash)} -> unmatched against ` +
-                `${terminal.status} link ${terminal.id}`,
+            child.info(
+              { event: "payment.unmatched", linkId: terminal.id, status: terminal.status },
+              `payment unmatched against ${terminal.status} link ${terminal.id}`,
             );
           }
         }
@@ -424,20 +476,48 @@ export class WatcherLoop {
       }
 
       if (page === this.maxPagesPerTick) {
-        this.deps.log?.(
+        const message =
           `watcher account ${short(account)} hit maxPagesPerTick (${this.maxPagesPerTick}) - ` +
-            `backlog not fully drained this tick, more remains for the next poll. ` +
-            `If this recurs, move this account to a streaming watcher (issue 2.1).`,
-        );
+          `backlog not fully drained this tick, more remains for the next poll. ` +
+          `If this recurs, move this account to a streaming watcher (issue 2.1).`;
+        this.deps.log?.(message);
+        log.info({ event: "watcher.account.batch", account, maxPagesPerTick: this.maxPagesPerTick }, message);
       }
     }
   }
 }
 
 /** Periodically advance any pending seller cash-outs. */
-export function startCashOutPoller(service: LinkService, intervalMs: number): () => void {
+export function startCashOutPoller(service: LinkService, intervalMs: number, logger?: Logger): () => void {
+  const log = logger ?? NOOP_LOGGER;
+  const pollerLogger = log.child({ component: "cashout-poller" });
   const timer = setInterval(() => {
-    void service.pollCashOuts().catch(() => {});
+    void service.pollCashOuts().catch((err) => {
+      pollerLogger.error({ event: "cashout.tick.error", error: stringifyErr(err) }, "cash-out tick error");
+    });
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
+/**
+ * Periodically retry attestation for settled links that don't have one.
+ *
+ * Deliberately its own timer rather than a rider on the cash-out poller: that
+ * one runs every few seconds because a seller is waiting on it, whereas an
+ * unattested receipt is a slow-moving backlog and hammering a Soroban RPC at
+ * watcher cadence would be pure waste. `sweepUnattested` never rejects, so the
+ * catch here is defensive only.
+ */
+export function startAttestationSweeper(
+  service: LinkService,
+  intervalMs: number,
+  logger?: Logger,
+): () => void {
+  const log = (logger ?? NOOP_LOGGER).child({ component: "attestation-sweeper" });
+  const timer = setInterval(() => {
+    void service.sweepUnattested(20, { logger: log }).catch((err) => {
+      log.error({ event: "attestation.sweep.error", error: stringifyErr(err) }, "attestation sweep error");
+    });
   }, intervalMs);
   return () => clearInterval(timer);
 }

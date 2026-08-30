@@ -79,5 +79,8 @@ export async function normalizePayment(
     memoType,
     toMuxedId: r.to_muxed_id ?? null,
     createdAt: r.created_at,
+    // Horizon exposes the sequence as `ledger_attr` on the transaction record;
+    // plain `ledger` is the method that fetches the ledger itself.
+    ledger: tx.ledger_attr ?? 0,
   };
 }

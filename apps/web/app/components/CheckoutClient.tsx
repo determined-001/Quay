@@ -1,8 +1,16 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { api, type LinkWithRequest, type PaymentLink } from "../../lib/api";
+
+const WalletPayButton = dynamic(() => import("./WalletPayButton"), {
+  ssr: false,
+  loading: () => <div className="status-rail">Loading wallet payment…</div>,
+});
+
+const WALLET_PAY_ENABLED = process.env.NEXT_PUBLIC_ENABLE_WALLET_PAY === "true";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -47,6 +55,12 @@ function terminalCopy(status: string): { heading: string; detail: string } {
 export default function CheckoutClient({ initial }: { initial: LinkWithRequest }) {
   const { request } = initial;
   const [link, setLink] = useState(initial.link);
+  const [submittedTxHash, setSubmittedTxHash] = useState<string | null>(null);
+
+  const markSubmitted = useCallback((txHash: string) => {
+    setSubmittedTxHash(txHash);
+  }, []);
+  const walletPayment = { link, request };
 
   // Polling state
   const [consecutiveFails, setConsecutiveFails] = useState(0);
@@ -144,6 +158,30 @@ export default function CheckoutClient({ initial }: { initial: LinkWithRequest }
     );
   }
 
+  // ── RENDER: Optimistic submission -----------------------------------------
+
+  if (submittedTxHash) {
+    return (
+      <div className="checkout">
+        <div className="status-icon" aria-hidden>
+          ✓
+        </div>
+        <div className="error-heading">Payment submitted</div>
+        <p className="muted" style={{ marginTop: 8 }}>
+          Your wallet signed the payment. Waiting for the Stellar network to confirm it.
+        </p>
+        <div className="memo-note" style={{ marginTop: 24 }}>
+          <div className="k">Submission</div>
+          <div className="v">{submittedTxHash}</div>
+        </div>
+        <div className="status-rail">
+          <span className="spinner" aria-hidden />
+          Waiting for confirmation…
+        </div>
+      </div>
+    );
+  }
+
   // ── RENDER: Underpaid ────────────────────────────────────────────────────
 
   if (link.status === "underpaid") {
@@ -162,6 +200,9 @@ export default function CheckoutClient({ initial }: { initial: LinkWithRequest }
           <div className="k">Transaction</div>
           <div className="v">{link.txHash ?? "confirmed on-chain"}</div>
         </div>
+        {WALLET_PAY_ENABLED && (
+          <WalletPayButton initial={walletPayment} onSubmitted={markSubmitted} />
+        )}
       </div>
     );
   }
@@ -225,6 +266,10 @@ export default function CheckoutClient({ initial }: { initial: LinkWithRequest }
       <p className="muted" style={{ fontSize: 13 }}>
         Scan with a Stellar wallet, or
       </p>
+
+      {WALLET_PAY_ENABLED && (
+        <WalletPayButton initial={walletPayment} disabled={Boolean(submittedTxHash)} onSubmitted={markSubmitted} />
+      )}
 
       <a
         className="btn btn--primary btn--block"

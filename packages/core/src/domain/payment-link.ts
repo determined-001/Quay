@@ -36,6 +36,7 @@ export interface PaymentLink {
   txHash: string | null;
   payer: string | null;
   paidAmount: string | null;
+  overpaidAmount: string | null;
   // off-ramp (filled when the seller cashes out)
   offrampJobId: string | null;
   offrampTargetCurrency: string | null;
@@ -57,7 +58,31 @@ export interface PaymentLink {
    * (issue 3.5 / 3.8 telemetry).
    */
   offrampRateDelta: string | null;
+  /**
+   * Anchor fee quoted at the moment cash-out was initiated (issue 1.5), so a
+   * receipt can reproduce gross/fee/net without recomputing against a rate
+   * that may have moved since. `offrampFeeSource` is "anchor" when the anchor
+   * itself reported it (SEP-38 total_price), "estimated" for the mock adapter.
+   */
+  offrampFeeAmount: string | null;
+  offrampFeeCurrency: string | null;
+  offrampFeeSource: string | null;
+  offrampNetTargetAmount: string | null;
+  /**
+   * On-chain settlement attestation (issue 9.2). Null until the attester has
+   * written the receipt to the registry — which is allowed to be forever: a
+   * link is `paid` because the classic ledger says so, and attestation never
+   * gates that. `attestationContractId` is stored per link rather than read
+   * from config at render time so redeploying the registry cannot silently
+   * repoint every historical receipt at a contract that never held it.
+   */
+  attestationContractId: string | null;
+  attestationTxHash: string | null;
+  attestationLedger: number | null;
+  attestedAt: number | null; // epoch ms
   expiresAt: number | null; // epoch ms
+  /** True for rows created by the demo seed script. Displayed as a badge in the UI. */
+  isDemo: boolean;
   createdAt: number;
   updatedAt: number;
 }

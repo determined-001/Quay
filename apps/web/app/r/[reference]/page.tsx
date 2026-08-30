@@ -11,6 +11,11 @@ function addressUrl(network: string, addr: string): string {
   return `${base}/account/${addr}`;
 }
 
+function contractUrl(network: string, contractId: string): string {
+  const base = network === "public" ? "https://stellar.expert/explorer/public" : "https://stellar.expert/explorer/testnet";
+  return `${base}/contract/${contractId}`;
+}
+
 function formatDate(ts: number): string {
   return new Date(ts).toLocaleString(undefined, {
     year: "numeric",
@@ -107,6 +112,38 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
         )}
 
         <div className="receipt-divider" />
+
+        {/* On-chain attestation. Stated plainly in both directions: claiming a
+            receipt is independently verifiable when it isn't would be worse
+            than saying nothing, and the absence is not an error — settlement is
+            proven by the payment above either way. */}
+        {receipt.attestation ? (
+          <>
+            <div className="receipt-row">
+              <span className="receipt-label">Attested on-chain</span>
+              <a
+                href={contractUrl(network, receipt.attestation.contractId)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mono explorer-link"
+              >
+                {receipt.attestation.contractId.slice(0, 8)}…{receipt.attestation.contractId.slice(-6)}
+              </a>
+            </div>
+            <div className="receipt-row">
+              <span className="receipt-label">Registry key</span>
+              <span className="receipt-value mono">
+                {receipt.attestation.refHash.slice(0, 16)}…
+              </span>
+            </div>
+            <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+              This payment is recorded in a Soroban registry that Quay cannot rewrite. Verify it
+              yourself with <code className="mono">verify(ref_hash)</code> on the contract above —
+              you do not have to take this page&apos;s word for it.
+            </p>
+            <div className="receipt-divider" />
+          </>
+        ) : null}
 
         <div className="receipt-footer-meta">
           <span className="muted">Settled on Stellar {network === "public" ? "Mainnet" : "Testnet"}</span>

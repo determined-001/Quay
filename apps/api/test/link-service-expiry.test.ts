@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  fromStroops,
+  toStroops,
+  type LinkPaymentRecord,
   type LinkRepository,
   type NormalizedPayment,
+  type OffRampInitiation,
   type OffRampJob,
   type OffRampPort,
   type OffRampQuote,
   type PaymentLink,
+  type PayoutFieldDescriptor,
   type RailPort,
   type Seller,
   type Webhook,
@@ -14,7 +19,8 @@ import {
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
-import { AlwaysAcceptedKyc, FakeOffRampStateRepository } from "./fakes";
+import { encryptSecret } from "../src/services/secret-crypto";
+import { AlwaysAcceptedKyc, FakeOffRampStateRepository, FakeTelemetryRepository } from "./fakes";
 import { Hono } from "hono";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -36,13 +42,23 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
     offrampIndicativeRate: null,
     offrampRate: null,
     offrampRateDelta: null,
+    offrampFeeAmount: null,
+    offrampFeeCurrency: null,
+    offrampFeeSource: null,
+    offrampNetTargetAmount: null,
+    attestationContractId: null,
+    attestationTxHash: null,
+    attestationLedger: null,
+    attestedAt: null,
     expiresAt: null,
+    isDemo: false,
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
     ...over,
@@ -63,6 +79,14 @@ class FakeLinkRepo implements LinkRepository {
       offrampIndicativeRate: null,
       offrampRate: null,
       offrampRateDelta: null,
+      offrampFeeAmount: null,
+      offrampFeeCurrency: null,
+      offrampFeeSource: null,
+      offrampNetTargetAmount: null,
+      attestationContractId: null,
+      attestationTxHash: null,
+      attestationLedger: null,
+      attestedAt: null,
       title: input.title,
       amount: input.amount,
       asset: input.asset,
@@ -70,10 +94,12 @@ class FakeLinkRepo implements LinkRepository {
       txHash: null,
       payer: null,
       paidAmount: null,
+      overpaidAmount: null,
       offrampJobId: null,
       offrampTargetCurrency: null,
       offrampStatus: null,
       expiresAt: input.expiresAt,
+      isDemo: input.isDemo ?? false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -107,6 +133,27 @@ class FakeLinkRepo implements LinkRepository {
   async save(l: PaymentLink): Promise<void> {
     this.byId.set(l.id, { ...l, updatedAt: Date.now() });
   }
+  private readonly payments: LinkPaymentRecord[] = [];
+  private readonly seenTxHashes = new Set<string>();
+  async recordPayment(payment: LinkPaymentRecord): Promise<void> {
+    if (this.seenTxHashes.has(payment.txHash)) return;
+    this.seenTxHashes.add(payment.txHash);
+    this.payments.push(payment);
+  }
+  async sumPaymentsForLink(linkId: string): Promise<string> {
+    const total = this.payments
+      .filter((p) => p.linkId === linkId)
+      .reduce((sum, p) => sum + toStroops(p.amount), 0n);
+    return fromStroops(total);
+  }
+  async paymentLedger(txHash: string): Promise<number | null> {
+    return this.payments.find((p) => p.txHash === txHash)?.ledger ?? null;
+  }
+  async listUnattested(limit: number): Promise<PaymentLink[]> {
+    return [...this.byId.values()]
+      .filter((l) => l.txHash !== null && l.attestedAt === null && l.status !== "active")
+      .slice(0, limit);
+  }
 }
 
 class FakeSellerRepo {
@@ -123,6 +170,7 @@ class FakeSellerRepo {
   async createIfAbsent(): Promise<Seller> {
     return this.seller;
   }
+  async savePayoutFields(): Promise<void> {}
 }
 
 // Captures successful deliveries (2xx) so tests can introspect the body.
@@ -134,7 +182,12 @@ class FakeWebhookRepo implements WebhookRepository {
       id: "whk_1",
       sellerId: input.sellerId,
       url: input.url,
-      secret: input.secret,
+      secretEncrypted: encryptSecret(input.secret),
+      secretLast4: input.secret.slice(-4),
+      previousSecretEncrypted: null,
+      previousSecretLast4: null,
+      previousSecretExpiresAt: null,
+      deletedAt: null,
       createdAt: Date.now(),
     };
     this.stored.push(w);
@@ -182,11 +235,14 @@ class FakeOffRamp implements OffRampPort {
   async quote(): Promise<OffRampQuote> {
     throw new Error("not used in this suite");
   }
-  async initiate(): Promise<OffRampJob> {
+  async initiate(): Promise<OffRampInitiation> {
     throw new Error("not used in this suite");
   }
   async status(): Promise<OffRampJob> {
     throw new Error("not used in this suite");
+  }
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 }
 
@@ -254,6 +310,7 @@ async function makeFixture(): Promise<Fixture> {
     id: "s_1",
     name: "Demo",
     wallet: DEST,
+    payoutFields: null,
     createdAt: 1_700_000_000_000,
   });
   const service = new LinkService({
@@ -265,7 +322,10 @@ async function makeFixture(): Promise<Fixture> {
     offrampState: new FakeOffRampStateRepository(),
     kyc: new AlwaysAcceptedKyc(),
     stellar: STELLAR,
+    telemetry: new FakeTelemetryRepository(),
     correlation: "memo",
+    // Avoid live DNS in unit tests; ssrf-guard.test.ts covers the guard.
+    webhookGuard: async () => ({ ok: true }) as const,
   });
   // Build a Hono sub-app that mirrors what `routes/links.ts` would mount but
   // depends only on `service`. The full Container has fields the route doesn't
@@ -429,6 +489,7 @@ describe("LinkService.recordUnmatchedPayment", () => {
       memoType: "text",
       toMuxedId: null,
       createdAt: "2026-06-19T12:00:00Z",
+      ledger: 1,
     };
 
     await f.service.recordUnmatchedPayment(payment, l);

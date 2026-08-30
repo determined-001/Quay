@@ -16,21 +16,25 @@
     "docs:status-diagram": "node scripts/gen-status-diagram.mjs",
     "docs:check-status-diagram": "node scripts/gen-status-diagram.mjs --check",
     "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
-    "sweep": "node scripts/uptime-check.mjs"
+    "sweep": "node scripts/uptime-check.mjs",
+    "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
+    "demo:seed": "tsx scripts/demo-seed.ts",
+    "demo:reset": "tsx scripts/demo-reset.ts"
   },
   "dependencies": {
     "@libsql/client": "0.17.4"
   },
   "devDependencies": {
-    "turbo": "2.9.18",
-    "typescript": "6.0.3",
-    "tsx": "4.22.4",
-    "vitest": "4.1.9",
-    "@types/node": "25.9.3"
+    "turbo": "2.10.8",
+    "typescript": "7.0.2",
+    "tsx": "4.23.9",
+    "vitest": "4.1.10",
+    "@types/node": "26.1.2"
   },
   "pnpm": {
     "overrides": {
       "axios": ">=1.18.0",
+      "nanoid": "^3.3.18",
       "postcss": ">=8.5.18",
       "sharp": ">=0.35.0"
     }

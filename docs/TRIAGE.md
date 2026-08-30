@@ -23,9 +23,9 @@ No issue should remain untriaged or unlabelled. Every open issue must be assigne
 2. **`type:*`** — Intent of the issue (`type:bug`, `type:feature`, `type:docs`, `type:test`, `type:refactor`, `type:perf`, `type:security`, `type:dx`, `type:ops`)
 3. **`complexity:*`** — Estimated effort (`complexity:trivial` = 100 points, `complexity:medium` = 150, `complexity:high` = 200)
 
-The authoritative definitions live in `LABEL_DEFS` in `.github/create-issues.js`
-and are mirrored in [`.github/labels.yml`](../.github/labels.yml). The `area:*`
-major maps one-to-one onto the backlog numbering in `ISSUES.md`.
+The authoritative definitions live in [`.github/labels.yml`](../.github/labels.yml).
+Each `area:*` corresponds to one major in the maintainer's backlog numbering, so
+an issue's area and its `<major>.<minor>` id always agree.
 
 Optionally add:
 - **`good-first-issue`**: Genuinely self-contained, well-scoped tasks suitable for newcomers.

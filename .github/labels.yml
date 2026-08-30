@@ -1,9 +1,8 @@
 # GitHub label taxonomy for Stellar Checkout.
 #
-# This file mirrors LABEL_DEFS in .github/create-issues.js, which is the
-# authoritative source — it is what actually creates these labels when the
-# backlog in ISSUES.md is pushed to GitHub. Keep the two in step: a name or
-# colour that drifts here produces a duplicate label on the repo.
+# This file is the authoritative label taxonomy: every label on the repo should
+# appear here, and adding one starts by adding it here. A name or colour that
+# drifts from what is already on GitHub produces a duplicate label.
 
 - name: "Stellar Wave"
   color: "7B3FE4"

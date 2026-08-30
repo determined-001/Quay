@@ -2,21 +2,38 @@ version: 2
 updates:
   # Single root-level entry covers the whole pnpm workspace (apps/*, packages/*) -
   # Dependabot resolves the workspace from the root manifest + lockfile.
+  #
+  # Deliberately quiet: monthly, small PR cap, and version-bump PRs suppressed.
+  # `applies-to: security-updates` means Dependabot only opens a PR when an
+  # advisory is involved - which is the case CI actually cares about, since the
+  # `pnpm audit --audit-level=high` gate in ci.yml fails the build on any
+  # unallowlisted HIGH/CRITICAL. Routine "bump X from 1.2.3 to 1.2.4" noise is
+  # off; CVE fixes still arrive.
   - package-ecosystem: npm
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
-      npm-dependencies:
+      npm-security:
+        applies-to: security-updates
         patterns:
           - "*"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 3
+    # Suppress non-security version bumps entirely. Security updates ignore
+    # these rules by design, so CVE PRs still get through.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       github-actions:
         patterns:
           - "*"
+    open-pull-requests-limit: 2

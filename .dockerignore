@@ -7,3 +7,14 @@ apps/web
 **/*.db
 **/local.db
 .env
+.env.*
+**/test
+**/*.test.ts
+**/dist
+**/coverage
+scripts
+docs
+*.md
+**/*.md
+.github
+backups

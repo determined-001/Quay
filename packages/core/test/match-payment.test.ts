@@ -22,13 +22,23 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     txHash: null,
     payer: null,
     paidAmount: null,
+    overpaidAmount: null,
     offrampJobId: null,
     offrampTargetCurrency: null,
     offrampStatus: null,
     offrampIndicativeRate: null,
     offrampRate: null,
     offrampRateDelta: null,
+    offrampFeeAmount: null,
+    offrampFeeCurrency: null,
+    offrampFeeSource: null,
+    offrampNetTargetAmount: null,
+    attestationContractId: null,
+    attestationTxHash: null,
+    attestationLedger: null,
+    attestedAt: null,
     expiresAt: null,
+    isDemo: false,
     createdAt: 0,
     updatedAt: 0,
     ...over,
@@ -47,6 +57,7 @@ function payment(over: Partial<NormalizedPayment> = {}): NormalizedPayment {
     memoType: "text",
     toMuxedId: null,
     createdAt: "2026-01-01T00:00:00Z",
+    ledger: 1,
     ...over,
   };
 }
@@ -160,6 +171,67 @@ describe("matchPayment", () => {
       expect(r.kind).toBe("paid");
     });
   });
+
+  // Cumulative accounting (issue 1.4): matchPayment compares this payment's
+  // amount, added to whatever the link has already received (link.paidAmount),
+  // against the full requested amount — never a single payment in isolation.
+  describe("cumulative payments (top-ups, splits, overpay)", () => {
+    it("a first partial payment against a 25-unit link is underpaid with the correct outstanding", () => {
+      const l = link({ amount: "25", paidAmount: null });
+      const r = matchPayment(payment({ amount: "10" }), byRef(l));
+      expect(r.kind).toBe("underpaid");
+      if (r.kind === "underpaid") {
+        expect(r.receivedTotal).toBe("10");
+        expect(r.outstanding).toBe("15");
+      }
+    });
+
+    it("a second top-up that reaches the requested amount flips the link to paid", () => {
+      // Link already holds 10 (from a prior partial payment); a second leg of 15 completes it.
+      const l = link({ amount: "25", paidAmount: "10" });
+      const r = matchPayment(payment({ amount: "15" }), byRef(l));
+      expect(r.kind).toBe("paid");
+      if (r.kind === "paid") {
+        expect(r.receivedTotal).toBe("25");
+        expect(r.overpaid).toBe(false);
+        expect(r.overpaidAmount).toBe("0");
+      }
+    });
+
+    it("three-way split: two partials still underpaid, the third completes the link", () => {
+      const l0 = link({ amount: "30", paidAmount: null });
+      const afterFirst = matchPayment(payment({ amount: "10" }), byRef(l0));
+      expect(afterFirst.kind).toBe("underpaid");
+      if (afterFirst.kind !== "underpaid") throw new Error("expected underpaid");
+      expect(afterFirst.receivedTotal).toBe("10");
+
+      const l1 = link({ amount: "30", paidAmount: afterFirst.receivedTotal });
+      const afterSecond = matchPayment(payment({ amount: "10" }), byRef(l1));
+      expect(afterSecond.kind).toBe("underpaid");
+      if (afterSecond.kind !== "underpaid") throw new Error("expected underpaid");
+      expect(afterSecond.receivedTotal).toBe("20");
+
+      const l2 = link({ amount: "30", paidAmount: afterSecond.receivedTotal });
+      const afterThird = matchPayment(payment({ amount: "10" }), byRef(l2));
+      expect(afterThird.kind).toBe("paid");
+      if (afterThird.kind === "paid") {
+        expect(afterThird.receivedTotal).toBe("30");
+        expect(afterThird.overpaid).toBe(false);
+      }
+    });
+
+    it("overpayment on the final leg is reported as the surplus over the requested amount", () => {
+      // 25 requested, 10 already received, final leg of 20 overshoots by 5.
+      const l = link({ amount: "25", paidAmount: "10" });
+      const r = matchPayment(payment({ amount: "20" }), byRef(l));
+      expect(r.kind).toBe("paid");
+      if (r.kind === "paid") {
+        expect(r.receivedTotal).toBe("30");
+        expect(r.overpaid).toBe(true);
+        expect(r.overpaidAmount).toBe("5");
+      }
+    });
+  });
 });
 
 // ── Property-based tests ──────────────────────────────────────────────────────
@@ -217,6 +289,7 @@ function exactPaymentFor(
     memoType: "text",
     toMuxedId: null,
     createdAt: "2026-01-01T00:00:00Z",
+    ledger: 1,
   };
 }
 
@@ -245,13 +318,23 @@ describe("property: exact payment is always paid", () => {
             txHash: null,
             payer: null,
             paidAmount: null,
+            overpaidAmount: null,
             offrampJobId: null,
             offrampTargetCurrency: null,
             offrampStatus: null,
             offrampIndicativeRate: null,
             offrampRate: null,
             offrampRateDelta: null,
+            offrampFeeAmount: null,
+            offrampFeeCurrency: null,
+            offrampFeeSource: null,
+            offrampNetTargetAmount: null,
+            attestationContractId: null,
+            attestationTxHash: null,
+            attestationLedger: null,
+            attestedAt: null,
             expiresAt: null,
+            isDemo: false,
             createdAt: 0,
             updatedAt: 0,
           };
@@ -294,13 +377,23 @@ describe("property: destination mismatch is never paid", () => {
             txHash: null,
             payer: null,
             paidAmount: null,
+            overpaidAmount: null,
             offrampJobId: null,
             offrampTargetCurrency: null,
             offrampStatus: null,
             offrampIndicativeRate: null,
             offrampRate: null,
             offrampRateDelta: null,
+            offrampFeeAmount: null,
+            offrampFeeCurrency: null,
+            offrampFeeSource: null,
+            offrampNetTargetAmount: null,
+            attestationContractId: null,
+            attestationTxHash: null,
+            attestationLedger: null,
+            attestedAt: null,
             expiresAt: null,
+            isDemo: false,
             createdAt: 0,
             updatedAt: 0,
           };
@@ -316,6 +409,7 @@ describe("property: destination mismatch is never paid", () => {
             memoType: "text",
             toMuxedId: null,
             createdAt: "2026-01-01T00:00:00Z",
+            ledger: 1,
           };
 
           const lookup = (r: string) => (r === lnk.reference ? lnk : undefined);
@@ -356,13 +450,23 @@ describe("property: memo whitespace is not trimmed", () => {
             txHash: null,
             payer: null,
             paidAmount: null,
+            overpaidAmount: null,
             offrampJobId: null,
             offrampTargetCurrency: null,
             offrampStatus: null,
             offrampIndicativeRate: null,
             offrampRate: null,
             offrampRateDelta: null,
+            offrampFeeAmount: null,
+            offrampFeeCurrency: null,
+            offrampFeeSource: null,
+            offrampNetTargetAmount: null,
+            attestationContractId: null,
+            attestationTxHash: null,
+            attestationLedger: null,
+            attestedAt: null,
             expiresAt: null,
+            isDemo: false,
             createdAt: 0,
             updatedAt: 0,
           };
@@ -386,6 +490,7 @@ describe("property: memo whitespace is not trimmed", () => {
             memoType: "text",
             toMuxedId: null,
             createdAt: "2026-01-01T00:00:00Z",
+            ledger: 1,
           };
 
           const lookup = (r: string) => (r === lnk.reference ? lnk : undefined);

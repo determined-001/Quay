@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { refHashHex } from "@checkout/soroban";
 import type { Container } from "../services/container";
 
 export function publicRoutes(c: Container): Hono {
@@ -26,6 +27,20 @@ export function publicRoutes(c: Container): Hono {
       paidAmount: link.paidAmount,
       createdAt: link.createdAt,
       updatedAt: link.updatedAt,
+      // On-chain attestation (issue 9.2). Null until one exists — and the whole
+      // point of publishing it is that the holder of this receipt can check the
+      // claim against the registry without taking our word for any of it.
+      // `refHash` is what they look up; the reference itself is never a key.
+      attestation:
+        link.attestedAt !== null && link.attestationContractId !== null
+          ? {
+              contractId: link.attestationContractId,
+              refHash: refHashHex(link.reference),
+              txHash: link.attestationTxHash,
+              ledger: link.attestationLedger,
+              attestedAt: link.attestedAt,
+            }
+          : null,
     });
   });
 

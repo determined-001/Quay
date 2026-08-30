@@ -5,6 +5,7 @@ import { FakeRailPort, FakeWatcherPort, FakeOffRampPort, testStellarConfig, with
 import type { DrizzleLinkRepository, DrizzleSellerRepository, DrizzleWebhookRepository, DrizzleWatcherStateRepository } from "../../src/repos/index";
 import { DrizzleOffRampStateRepository } from "../../src/repos/index";
 import { NoKycRequired } from "@checkout/offramp";
+import { FakeTelemetryRepository } from "../fakes";
 
 // ---------------------------------------------------------------------------
 //  WatcherLoop tests
@@ -52,7 +53,9 @@ describe("WatcherLoop", () => {
       offrampState: new DrizzleOffRampStateRepository(repos.db),
       kyc: new NoKycRequired(),
       stellar: testStellarConfig,
+      telemetry: new FakeTelemetryRepository(),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
 
     logs = [];
@@ -386,7 +389,9 @@ describe("WatcherLoop — crash between markProcessed and setCursor", () => {
       offrampState: new DrizzleOffRampStateRepository(repos.db),
       kyc: new NoKycRequired(),
       stellar: testStellarConfig,
+      telemetry: new FakeTelemetryRepository(),
       correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
     });
 
     const ref = "crash_safe_1";

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { PaymentLink, Seller, SellerRepository, TokenRevocationRepository } from "@checkout/core";
+import { NOOP_LOGGER, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
 
-const owner: Seller = { id: "sel_owner", name: "Owner", wallet: "GOWNER", createdAt: Date.now() };
-const other: Seller = { id: "sel_other", name: "Other", wallet: "GOTHER", createdAt: Date.now() };
+const owner: Seller = { id: "sel_owner", name: "Owner", wallet: "GOWNER", payoutFields: null, createdAt: Date.now() };
+const other: Seller = { id: "sel_other", name: "Other", wallet: "GOTHER", payoutFields: null, createdAt: Date.now() };
 
 const ownedLink: PaymentLink = {
   id: "lnk_1",
@@ -20,13 +20,23 @@ const ownedLink: PaymentLink = {
   txHash: null,
   payer: null,
   paidAmount: null,
+  overpaidAmount: null,
   offrampJobId: null,
   offrampTargetCurrency: null,
   offrampStatus: null,
   offrampIndicativeRate: null,
   offrampRate: null,
   offrampRateDelta: null,
+  offrampFeeAmount: null,
+  offrampFeeCurrency: null,
+  offrampFeeSource: null,
+  offrampNetTargetAmount: null,
+  attestationContractId: null,
+  attestationTxHash: null,
+  attestationLedger: null,
+  attestedAt: null,
   expiresAt: null,
+  isDemo: false,
   createdAt: Date.now(),
   updatedAt: Date.now(),
 };
@@ -38,6 +48,7 @@ function fakeContainer(): Container {
     findById: async (id) => sellersById.get(id) ?? null,
     findByWallet: async () => null,
     createIfAbsent: async () => owner,
+    savePayoutFields: async () => {},
   };
   const revocations: TokenRevocationRepository = {
     revoke: async () => {},
@@ -53,15 +64,20 @@ function fakeContainer(): Container {
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
     } as unknown as Container["service"],
+    logger: NOOP_LOGGER,
     links: {} as Container["links"],
     sellers: sellers as unknown as Container["sellers"],
     webhooks: {} as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: owner.wallet },
     auth: { session, sellers, revocations } as unknown as Container["auth"],
+    apiKeys: {} as Container["apiKeys"],
     kyc: {} as Container["kyc"],
     db: {} as Container["db"],
+    telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     metricsToken: "test-metrics-token",
+    ready: async () => true,
+    attestation: { enabled: false, contractId: null },
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,
     getWatcherCircuitBreakerStatus: () => [],
@@ -148,5 +164,30 @@ describe("POST /links/:id/cancel — ownership", () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /links/:id/submit — public wallet relay", () => {
+  it("returns 400 for a malformed submit payload without invoking the service", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ signedXdr: 123 }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as Record<string, unknown>).error).toBe("invalid_body");
+  });
+
+  it("returns 400 for invalid JSON", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not json",
+    });
+
+    expect(res.status).toBe(400);
   });
 });

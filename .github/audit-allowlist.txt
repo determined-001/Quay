@@ -6,4 +6,34 @@
 # available, not reachable from our usage, accepted risk with an owner and
 # a re-review date) - never add an entry just to make CI green.
 #
-# Empty today - nothing has been reviewed and accepted yet.
+
+# ---------------------------------------------------------------------------
+# Reviewed 2026-08-08, when Stellar Wallets Kit was added for issue 5.1.
+#
+# Every advisory below is in a dependency of a wallet module this app does NOT
+# import. The kit declares all its integrations as hard dependencies, so Trezor
+# (-> @trezor/connect -> protobufjs) and the HOT wallet SDK (-> @solana/web3.js
+# -> jayson -> uuid, and -> @near-js/crypto -> secp256k1 -> elliptic) are
+# installed, but `apps/web/lib/wallet.ts` imports only the six browser-extension
+# modules by subpath, so none of this is bundled or executed.
+#
+# Verified, not assumed: `scripts/check-client-bundle.mjs` greps the built
+# client chunks for these packages and fails if any appears. It runs in CI after
+# the web build, so the moment someone imports modules/trezor these entries stop
+# being true AND the build goes red — rather than the allowlist quietly
+# continuing to vouch for them.
+#
+# Re-review: when Wallets Kit is next upgraded, or if the guard is removed.
+# ---------------------------------------------------------------------------
+1117571
+1118641
+1118928
+1118930
+1118932
+1123488
+GHSA-66ff-xgx4-vchm
+GHSA-685m-2w69-288q
+GHSA-75px-5xx7-5xc7
+GHSA-jvwf-75h9-cwgg
+GHSA-wcpc-wj8m-hjx6
+GHSA-xq3m-2v4x-88gg

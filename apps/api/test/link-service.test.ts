@@ -7,6 +7,7 @@ import {
   AlwaysAcceptedKyc,
   FakeLinkRepository,
   FakeOffRampStateRepository,
+  FakeTelemetryRepository,
   FakeWebhookRepository,
   ScriptedKyc,
   ScriptedOffRamp,
@@ -36,14 +37,17 @@ function makeService(opts: {
   offrampState: FakeOffRampStateRepository;
   webhooks?: FakeWebhookRepository;
   kyc?: KycPort;
+  telemetry?: FakeTelemetryRepository;
 }): LinkService {
   return new LinkService({
     links: opts.links,
     sellers: {
-      getDefault: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", createdAt: 0 }),
-      findById: async () => null,
+      getDefault: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 }),
+      findById: async (id) =>
+        id === "sel_1" ? { id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 } : null,
       findByWallet: async () => null,
-      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", createdAt: 0 }),
+      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 }),
+      savePayoutFields: async () => {},
     },
     webhooks: opts.webhooks ?? new FakeWebhookRepository(),
     rail: UNUSED_RAIL,
@@ -51,7 +55,9 @@ function makeService(opts: {
     offrampState: opts.offrampState,
     kyc: opts.kyc ?? new AlwaysAcceptedKyc(),
     stellar: STELLAR,
+    telemetry: opts.telemetry ?? new FakeTelemetryRepository(),
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 }
 
@@ -74,6 +80,38 @@ describe("LinkService.pollCashOuts", () => {
 
     expect(links.get("lnk_1")?.status).toBe("offramp_settled");
     expect(links.get("lnk_1")?.offrampStatus).toBe("settled");
+  });
+
+  it("writes a settled telemetry row whose effective_rate comes from the anchor-reported amount_out, not the quote", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({
+        status: "offramp_pending",
+        offrampJobId: "job_1",
+        offrampStatus: "pending",
+        paidAmount: "10",
+      }),
+    ]);
+    // The anchor quotes rate 1650 (implied target 16500) but reports settling at
+    // 16350 — a 150-unit fee. effective_rate must read 1635, NOT 1650, or the
+    // spread column silently reads zero forever.
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "settled",
+      targetCurrency: "NGN",
+      targetAmount: "16350",
+      rate: "1650",
+    });
+    const telemetry = new FakeTelemetryRepository();
+
+    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository(), telemetry }).pollCashOuts();
+
+    const settled = telemetry.rows.find((r) => r.id === "tel_job_1");
+    expect(settled?.status).toBe("settled");
+    expect(settled?.quotedRate).toBe("1650");
+    expect(settled?.effectiveRate).toBe("1635");
+    expect(settled?.feeAmount).toBe("150.000000");
   });
 
   it("moves the link to offramp_failed when status() throws a typed OffRampJobNotFoundError", async () => {
@@ -198,7 +236,7 @@ describe("LinkService.triggerCashOut — KYC gate", () => {
     const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 60_000 });
     const service = makeService({ links, offramp, offrampState, kyc: new AlwaysAcceptedKyc() });
 
-    const job = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    const { job } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
 
     expect(job.status).toBe("pending");
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
@@ -213,7 +251,7 @@ describe("LinkService + MockAnchorOffRamp — restart survives (integration)", (
     // "Pre-restart" process: trigger the cash-out.
     const preRestartOfframp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 0 });
     const preRestartService = makeService({ links, offramp: preRestartOfframp, offrampState });
-    const job = await preRestartService.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    const { job } = await preRestartService.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
 
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
     expect(links.get("lnk_1")?.offrampJobId).toBe(job.jobId);

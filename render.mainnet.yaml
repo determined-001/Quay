@@ -1,0 +1,118 @@
+# Render Blueprint — Quay on the Stellar PUBLIC network (mainnet).
+#
+# Separate from render.yaml on purpose. render.yaml deploys the testnet
+# service; applying this file creates a DIFFERENT service (quay-api-mainnet)
+# rather than repointing the existing one, so testnet stays available as a
+# staging environment and a bad mainnet config never takes the testnet deploy
+# down with it. Read docs/MAINNET.md before applying.
+#
+# REAL MONEY. Every `sync: false` value below must be set in the Render
+# dashboard before the first deploy. The public-network guardrails in
+# apps/api/src/env.ts throw at boot on anything missing or sandbox-pointed, so
+# a misconfigured service fails loudly instead of taking payments it cannot
+# settle. That is the intended behaviour — do not work around a boot failure by
+# relaxing a guard.
+#
+# Secrets to set in the dashboard:
+#   DATABASE_URL                    libsql://<db-name>-<org>.turso.io  (a real, backed-up DB)
+#   DATABASE_AUTH_TOKEN             from `turso db tokens create <db>`
+#   DEFAULT_SELLER_WALLET           G... wallet that receives funds
+#   DEFAULT_SELLER_SECRET           S... matching secret (SEP-10 signing)
+#   SERVER_SIGNING_SECRET           S... the platform's stable SEP-10 identity + attester
+#   JWT_SECRET                      64 hex chars — session signing
+#   KYC_ENCRYPTION_KEY              64 hex chars — REQUIRED, encrypts real seller PII
+#   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED
+#   METRICS_TOKEN                   64 hex chars — gates GET /metrics
+#   ANCHOR_URL                      https://<your production anchor>
+#   ANCHOR_HOME_DOMAIN              <your production anchor domain>
+#
+# Generate each 64-hex value with:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+#
+# SERVER_SIGNING_SECRET is also the on-chain attester, so its account MUST hold
+# XLM on pubnet to pay contract invocation fees. An unfunded attester fails
+# attestation only — settlement is proven by the classic ledger and never
+# blocks on it.
+
+services:
+  - type: web
+    name: quay-api-mainnet
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /ready
+    envVars:
+      - key: API_PORT
+        value: "8787"
+      - key: STELLAR_NETWORK
+        value: public
+
+      # Circle's USDC issuer on pubnet. VERIFY against Circle's own published
+      # address before taking a payment — minting an asset with the code
+      # "USDC" from a different issuer is trivial and it is worth nothing.
+      # https://developers.circle.com/stablecoins/stellar-usdc
+      - key: USDC_ISSUER_PUBLIC
+        value: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+
+      - key: WATCH_POLL_MS
+        value: "6000"
+
+      # "anchor" is the only value that boots on public. env.ts refuses mock
+      # (fakes settlement after 8s) and testanchor (SDF sandbox, settles
+      # nothing) outright — both would show sellers a completed cash-out that
+      # never happened.
+      - key: OFFRAMP
+        value: anchor
+      # No defaults: a default here would mean "the testnet sandbox".
+      - key: ANCHOR_URL
+        sync: false
+      - key: ANCHOR_HOME_DOMAIN
+        sync: false
+      # Set once you know the rail. Unset means "read /sep6/info and refuse if
+      # the anchor offers more than one withdrawal type".
+      # - key: OFFRAMP_TYPE
+      #   value: bank_account
+
+      # Real production origin. No localhost.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # HOME_DOMAIN is intentionally NOT declared: env.ts derives it from
+      # RENDER_EXTERNAL_HOSTNAME. Set it in the dashboard only if a custom
+      # domain or proxy sits in front of the API.
+
+      - key: DEFAULT_SELLER_WALLET
+        sync: false
+      - key: DEFAULT_SELLER_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_AUTH_TOKEN
+        sync: false
+      - key: KYC_ENCRYPTION_KEY
+        sync: false
+      - key: WEBHOOK_SECRET_ENCRYPTION_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: SERVER_SIGNING_SECRET
+        sync: false
+      - key: METRICS_TOKEN
+        sync: false
+
+      # On-chain attestation. Both are commented out because the contract id
+      # in render.yaml is a TESTNET deployment and will not resolve on pubnet —
+      # redeploy the contract to pubnet (contracts/README.md) and set both
+      # together, or leave both unset and receipts will honestly say they carry
+      # no attestation. env.ts deliberately does not default SOROBAN_RPC_URL on
+      # public, so an unset value can never silently mean "testnet".
+      # - key: ATTESTATION_CONTRACT_ID
+      #   value: <pubnet C... contract id>
+      # - key: SOROBAN_RPC_URL
+      #   value: https://soroban-rpc.mainnet.stellar.gateway.fm
+
+      # Shared rate-limit counters. The in-process fallback means N instances
+      # allow N times the configured limit; set this before scaling past one.
+      # - key: REDIS_URL
+      #   sync: false

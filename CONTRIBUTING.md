@@ -33,8 +33,9 @@ All issues carry labels from three required categories:
 - **`type:*`**: `type:bug`, `type:feature`, `type:docs`, `type:test`, `type:refactor`, `type:perf`, `type:security`, `type:dx`, `type:ops`
 - **`complexity:*`**: `complexity:trivial` (100 points), `complexity:medium` (150), `complexity:high` (200)
 
-The full set lives in [`.github/labels.yml`](.github/labels.yml) and is created
-by `.github/create-issues.js` — that script is the authoritative source.
+The full set lives in [`.github/labels.yml`](.github/labels.yml), which is the
+authoritative source. Labels are applied from it; keep it in step when adding a
+new area, type or complexity.
 
 ### SLAs & Codeowners
 - **Triage Cadence**: Every new issue is triaged and labeled within **48 hours** (see [TRIAGE.md](docs/TRIAGE.md)).

@@ -5,21 +5,25 @@
   "type": "module",
   "scripts": {
     "dev": "next dev -p 3000",
+    "prebuild": "pnpm --filter @checkout/widget build",
     "build": "next build",
     "start": "next start -p 3000",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
-    "next": "16.2.11",
-    "react": "19.2.7",
-    "react-dom": "19.2.7",
-    "qrcode.react": "4.2.0"
+    "@checkout/widget": "workspace:*",
+    "@creit.tech/stellar-wallets-kit": "^2.5.0",
+    "@stellar/stellar-sdk": "16.2.0",
+    "next": "16.3.0",
+    "qrcode.react": "4.2.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@types/node": "25.9.3",
-    "@types/react": "19.2.17",
-    "@types/react-dom": "19.2.3",
-    "typescript": "6.0.3"
+    "@types/node": "26.1.2",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "typescript": "7.0.2"
   }
 }

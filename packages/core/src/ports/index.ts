@@ -1,5 +1,9 @@
 import type { AssetRef, PaymentLink } from "../domain/payment-link";
 import type { NormalizedPayment } from "../matching/match-payment";
+import type { Logger } from "./logger";
+
+export type { Logger } from "./logger";
+export { NOOP_LOGGER } from "./logger";
 
 // ---------------------------------------------------------------------------
 // Settlement rail port
@@ -90,6 +94,20 @@ export interface WatcherPort {
 //   initiate() ~ SEP-24 / SEP-31 (start a withdrawal/payout to local rails)
 //   status()   ~ poll the transfer to settlement
 
+/** Describes a single field the anchor needs before initiating a payout. */
+export interface PayoutFieldDescriptor {
+  /** Machine-readable field name, e.g. "dest", "dest_extra". */
+  name: string;
+  /** Human-readable label from the anchor, e.g. "Bank Account Number". */
+  label: string;
+  /** Optional longer explanation shown beneath the input. */
+  description?: string;
+  /** When true, the field may be omitted. */
+  optional: boolean;
+  /** If present, the field is a select/radio rather than a free-text input. */
+  choices?: string[];
+}
+
 export type OffRampMode = "seller_initiated" | "inline";
 
 export interface OffRampQuote {
@@ -97,9 +115,28 @@ export interface OffRampQuote {
   sourceAsset: AssetRef;
   sourceAmount: string;
   targetCurrency: string; // ISO code, e.g. "NGN"
-  targetAmount: string; // what the seller will receive
+  targetAmount: string; // gross amount before fees
   rate: string; // sourceAsset -> targetCurrency
   expiresAt: number; // epoch ms — after this the quote is void
+  fee: { amount: string; currency: string; source: "anchor" | "estimated" };
+  netTargetAmount: string; // what the seller actually receives
+}
+
+/** Thrown when a quote's expiresAt has passed or is unparsable (NaN). */
+export class QuoteExpiredError extends Error {
+  constructor(readonly quoteId: string) {
+    super(`Quote ${quoteId} has expired`);
+    this.name = "QuoteExpiredError";
+  }
+}
+
+/**
+ * Returns true when a quote is expired or has an unparsable expiresAt (NaN).
+ * NaN comparisons always return false in JS, so we must guard explicitly.
+ */
+export function isQuoteExpired(quote: OffRampQuote, now: number = Date.now()): boolean {
+  if (Number.isNaN(quote.expiresAt)) return true;
+  return now >= quote.expiresAt;
 }
 
 /** Where the seller wants their local-currency payout to land. */
@@ -123,18 +160,23 @@ export interface OffRampJob {
   reason?: string; // set when failed
 }
 
+export type OffRampInitiation =
+  | { kind: "fields"; jobId: string }
+  | { kind: "interactive"; jobId: string; url: string };
+
 export interface OffRampPort {
   readonly mode: OffRampMode;
-  quote(input: {
-    linkId: string;
-    sourceAsset: AssetRef;
-    sourceAmount: string;
-    targetCurrency: string;
-  }): Promise<OffRampQuote>;
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampJob>;
+  quote(
+    input: { linkId: string; sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampQuote>;
+  initiate(
+    input: { linkId: string; quoteId: string; payout: SellerPayoutRef },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampInitiation>;
   /** Throws {@link OffRampJobNotFoundError} when `jobId` has no known state — a
    *  crash/redeploy wiped an in-memory-only implementation, or the id is bogus. */
-  status(jobId: string): Promise<OffRampJob>;
+  status(jobId: string, opts?: { logger?: Logger }): Promise<OffRampJob>;
   /**
    * Indicative prices for all available buy currencies — SEP-38 GET /prices.
    * Unauthenticated, no quote consumed. Used by the dashboard to show rates
@@ -145,6 +187,13 @@ export interface OffRampPort {
     sourceAsset: AssetRef;
     sourceAmount: string;
   }): Promise<IndicativePrice[]>;
+  /**
+   * Field descriptors the anchor requires before it will initiate a payout —
+   * SEP-6 GET /info for a real anchor, a fixed set for the mock. Drives the
+   * dynamic cash-out form (issue #32) so the dashboard never hardcodes bank
+   * fields.
+   */
+  offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]>;
 }
 
 /** One indicative price entry from SEP-38 GET /prices (issue 3.5). */
@@ -167,6 +216,25 @@ export class OffRampJobNotFoundError extends Error {
   }
 }
 
+/**
+ * Thrown by every method of a deliberately disabled off-ramp adapter
+ * (`OFFRAMP=none`), so routes can answer 501 rather than 500.
+ *
+ * Distinct from "the anchor is down", which is a 502 and is retried. This says
+ * the deployment has no cash-out leg at all: sellers are paid directly on-chain
+ * and move their own funds. Nothing about it is transient, so nothing should
+ * retry it.
+ */
+export class OffRampDisabledError extends Error {
+  constructor(operation: string) {
+    super(
+      `Off-ramp is disabled on this deployment (OFFRAMP=none); "${operation}" is unavailable. ` +
+        "Payments settle directly to the seller's wallet.",
+    );
+    this.name = "OffRampDisabledError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Off-ramp state persistence
 // ---------------------------------------------------------------------------
@@ -177,6 +245,10 @@ export class OffRampJobNotFoundError extends Error {
 export interface StoredOffRampQuote {
   quoteId: string;
   linkId: string;
+  /** SEP-6 withdraw type resolved at quote time. `initiate()` must reuse it —
+   *  quoting for one rail and withdrawing on another is how a seller ends up
+   *  paid at a rate that was never quoted for their actual payout method. */
+  withdrawType?: string;
   sellAsset: AssetRef;
   sellAmount: string;
   buyCurrency: string;
@@ -208,6 +280,57 @@ export interface OffRampStateRepository {
     jobId: string,
     patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
   ): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Off-ramp telemetry port
+// ---------------------------------------------------------------------------
+// Passive, append-only dataset of cash-out progress. No product surface
+// consumes it yet; it exists to accumulate the dataset — cheap to record now,
+// impossible to backfill later. Writes must never block the cash-out path.
+
+export type OffRampTelemetryStatus = "quoted" | "initiated" | "settled" | "failed";
+
+export interface OffRampTelemetryRow {
+  id: string;
+  anchorDomain: string;
+  corridor: string; // e.g. "USDC/NGN"
+  sellAsset: string;
+  sellAmount: string;
+  /** In-memory mock/testanchor rate at quote time, if available. */
+  indicativeRate: string | null;
+  /** The firm rate returned by quote(). */
+  quotedRate: string;
+  quotedAt: number;
+  initiatedAt: number | null;
+  settledAt: number | null;
+  /** Derived from the anchor-reported amount_out at settlement (NOT the quote). */
+  effectiveRate: string | null;
+  /** sell_amount minus the anchor-implied back-calculated sell equivalent. */
+  feeAmount: string | null;
+  status: OffRampTelemetryStatus;
+  failureReason: string | null;
+}
+
+export interface OffRampTelemetrySummary {
+  anchorDomain: string;
+  corridor: string;
+  count: number;
+  settledCount: number;
+  failedCount: number;
+  /** p50 settlement latency in ms (null when no settled rows). */
+  latencyP50Ms: number | null;
+  /** p95 settlement latency in ms (null when no settled rows). */
+  latencyP95Ms: number | null;
+  /** mean of (quotedRate - effectiveRate) / quotedRate, as a fraction (null when no data). */
+  meanSpread: number | null;
+}
+
+export interface OffRampTelemetryRepository {
+  upsert(row: OffRampTelemetryRow): Promise<void>;
+  summary(): Promise<OffRampTelemetrySummary[]>;
+  /** Anonymised dump — seller/link identities excluded — for CSV export. */
+  all(): Promise<OffRampTelemetryRow[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +395,94 @@ export interface KycRepository {
 }
 
 // ---------------------------------------------------------------------------
+// Attestation port
+// ---------------------------------------------------------------------------
+// Quay tells a seller their invoice was paid. Without this port that claim
+// lives only in Quay's own database, so a receipt is exactly as trustworthy as
+// whoever runs the API — an odd thing to ask of a checkout whose whole point is
+// that it never touches the money. An attester publishes the settlement fact
+// somewhere the operator cannot quietly rewrite, and a receipt becomes
+// verifiable without asking Quay anything.
+//
+// The port deals only in strings and numbers. The Soroban implementation lives
+// in `packages/soroban`; the domain never learns that a contract is involved,
+// let alone which chain hosts it.
+//
+// Attestation is never on the settlement path. A link becomes `paid` because a
+// payment landed on the classic ledger, and nothing here may change that — an
+// attester that is down, unfunded, or unconfigured degrades a receipt to "not
+// yet attested" and nothing more.
+
+/** What the attester recorded, and where a third party can go to see it. */
+export interface AttestationRef {
+  /** Registry the attestation was written to (a Soroban contract id today). */
+  contractId: string;
+  /**
+   * Hash of the transaction that WROTE the attestation — not the payment's own
+   * transaction. The payment hash is already on `PaymentLink.txHash`; these are
+   * two different facts on two different ledgers and conflating them makes a
+   * receipt unverifiable.
+   *
+   * Null when the attestation was found already present rather than written by
+   * this call: the registry stores the fact, not the transaction that carried
+   * it, so that hash is genuinely unavailable. `attestedAt` still comes from
+   * the registry, so the receipt remains verifiable.
+   */
+  txHash: string | null;
+  /**
+   * Ledger sequence the attestation was written in — null alongside a null
+   * `txHash`, for the same reason. Note this is NOT the ledger the payment
+   * settled in; that one is on the receipt the registry hands back.
+   */
+  ledger: number | null;
+  /** Epoch ms the attestation was recorded. */
+  attestedAt: number;
+}
+
+/** A settlement fact, as read back out of the registry by anyone. */
+export interface AttestationReceipt {
+  /** Classic-ledger transaction that delivered the payment. */
+  paymentTxHash: string;
+  amount: string;
+  assetCode: string;
+  /** Issuer address, or null for native. */
+  assetIssuer: string | null;
+  /** Classic ledger sequence the payment settled in. */
+  ledger: number;
+  /** Epoch ms, as recorded by the registry itself. */
+  attestedAt: number;
+  /** Who vouched for it. A verifier decides whether it trusts this identity,
+   *  exactly as it decides whether to trust an asset issuer. */
+  attester: string;
+}
+
+export interface AttestationPort {
+  /** The registry being written to — surfaced on receipts so a verifier knows
+   *  where to look, and so a later redeploy can't invalidate old receipts. */
+  readonly contractId: string;
+
+  /**
+   * Record that a payment settled against `reference`.
+   *
+   * Implementations must treat "already attested" as success, not failure: the
+   * sweep re-attempts links whose first attestation attempt failed, and a
+   * duplicate must not thrash. Any other failure throws — the caller is
+   * expected to swallow it and leave the link unattested for the next sweep.
+   */
+  attest(input: {
+    reference: string;
+    txHash: string;
+    amount: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    ledger: number;
+  }): Promise<AttestationRef>;
+
+  /** Read an attestation back. Null when the reference was never attested. */
+  verify(reference: string): Promise<AttestationReceipt | null>;
+}
+
+// ---------------------------------------------------------------------------
 // Repository ports
 // ---------------------------------------------------------------------------
 
@@ -285,6 +496,23 @@ export interface CreateLinkInput {
   amount: string;
   asset: AssetRef;
   expiresAt: number | null;
+  /** When true this row was created by the demo seed script. */
+  isDemo?: boolean;
+}
+
+/** One incoming payment recorded against a link — the authoritative ledger
+ *  row cumulative accounting sums over (issue 1.4). `txHash` is unique so a
+ *  reprocessed payment can never double-count. */
+export interface LinkPaymentRecord {
+  linkId: string;
+  txHash: string;
+  payer: string;
+  amount: string;
+  asset: AssetRef;
+  /** Ledger sequence the payment settled in — the attestation names it, and the
+   *  retry sweep has no other way to recover it after the watcher tick is gone. */
+  ledger: number;
+  createdAt: number;
 }
 
 export interface LinkRepository {
@@ -294,17 +522,40 @@ export interface LinkRepository {
   listBySeller(sellerId: string): Promise<PaymentLink[]>;
   /** All links currently in a given status (used by the cash-out poller). */
   listByStatus(status: PaymentLink["status"]): Promise<PaymentLink[]>;
+  /**
+   * Settled links that carry a payment but no attestation yet (issue 9.2),
+   * oldest first, capped at `limit`. Drives the retry sweep: the first
+   * attestation attempt happens inline on settlement and is allowed to fail,
+   * so this is the path by which a link written while the registry was
+   * unreachable eventually gets attested anyway.
+   */
+  listUnattested(limit: number): Promise<PaymentLink[]>;
   /** Distinct destination addresses that currently have at least one active link. */
   activeDestinations(): Promise<string[]>;
   /** Active (or underpaid) links whose value lands in `destination`. */
   openLinksForDestination(destination: string): Promise<PaymentLink[]>;
   save(link: PaymentLink): Promise<void>;
+  /** Append a payment to the link's ledger. A duplicate `txHash` is a no-op —
+   *  cumulative accounting must never double-count a reprocessed payment. */
+  recordPayment(payment: LinkPaymentRecord): Promise<void>;
+  /** Sum of every payment ever recorded for this link, as a decimal string
+   *  ("0" if none). The authoritative source `paidAmount` is cached from. */
+  sumPaymentsForLink(linkId: string): Promise<string>;
+  /** Ledger a recorded payment settled in; null if the tx isn't on the ledger
+   *  table, or predates the column. */
+  paymentLedger(txHash: string): Promise<number | null>;
 }
 
 export interface Seller {
   id: string;
   name: string;
   wallet: string;
+  /**
+   * The seller's last-used payout destination fields (e.g. bank account).
+   * Null until the seller completes their first cash-out. Treated as
+   * sensitive — never logged or included in webhook payloads.
+   */
+  payoutFields: Record<string, string> | null;
   createdAt: number;
 }
 
@@ -315,17 +566,40 @@ export interface SellerRepository {
   /** Wallet-native signup: SEP-10 proved control of `wallet`, so it IS the identity.
    *  Idempotent — returns the existing seller if one is already registered for it. */
   createIfAbsent(wallet: string): Promise<Seller>;
+  /** Persist the seller's last-used payout destination fields for reuse on the
+   *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
+  savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
 }
 
+/**
+ * A registered webhook endpoint.
+ *
+ * The signing secret is never stored in plaintext — only `secretEncrypted`
+ * (reversible, AES-256-GCM; the platform must be able to decrypt it to sign
+ * outgoing deliveries) plus `secretLast4` for display. API routes must never
+ * serialize `secretEncrypted` / `previousSecretEncrypted` in a response; the
+ * raw secret is only ever returned once, directly from `create`/`rotateSecret`,
+ * before it's encrypted for storage.
+ */
 export interface Webhook {
   id: string;
   sellerId: string;
   url: string;
-  secret: string;
+  secretEncrypted: string;
+  secretLast4: string;
+  /** Set during the 24h post-rotation overlap window; null otherwise. */
+  previousSecretEncrypted: string | null;
+  previousSecretLast4: string | null;
+  previousSecretExpiresAt: number | null;
+  deletedAt: number | null;
   createdAt: number;
 }
 
+/** Fields safe to return from any API route — never includes secret material. */
+export type PublicWebhook = Omit<Webhook, "secretEncrypted" | "previousSecretEncrypted">;
+
 export interface WebhookDelivery {
+  id: string;
   webhookId: string;
   linkId: string;
   event: string;
@@ -366,6 +640,7 @@ export interface WebhookQueueEntry {
 
 export interface WebhookRepository {
   create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
+  /** Active (non-deleted) webhooks for a seller. Used for both dispatch and listing. */
   listBySeller(sellerId: string): Promise<Webhook[]>;
   findWebhookById(id: string): Promise<Webhook | null>;
   recordDelivery(d: WebhookDelivery): Promise<void>;

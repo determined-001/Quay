@@ -21,6 +21,53 @@ Operational procedures for the Quay API (deploy target: Render, see
   Turso database. Time the real restore path (`pnpm db:restore`) against a
   representative data volume before quoting an RTO to anyone relying on it.
 
+## Required environment variables
+
+`.env.example` documents every variable this service reads. This table is the
+narrower question an operator actually asks at deploy time: **which ones will
+break production if they are missing?** Everything not listed here has a safe
+default.
+
+| Variable | Required when | What breaks without it |
+|---|---|---|
+| `DATABASE_URL` · `DATABASE_AUTH_TOKEN` | always (prod) | No persistence; falls back to a local SQLite file inside the container, which is destroyed on every deploy |
+| `KYC_ENCRYPTION_KEY` | `OFFRAMP=testanchor` | **Process will not boot.** `env.ts` resolves it with `req()` at module load and throws `Missing required env var: KYC_ENCRYPTION_KEY` |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | `NODE_ENV=production` | **Process will not boot** (`createContainer()` calls `assertKeyConfigured()`). Before that check existed, it fell back to a hardcoded public dev key and 500'd on the first webhook registration |
+| `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | Auto-generated per boot, so every restart and deploy logs every seller out |
+| `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | Auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
+| `HOME_DOMAIN` | any real deployment | Falls back to `localhost:8787`. SEP-10 challenges are issued for localhost and `stellar.toml` advertises `WEB_AUTH_ENDPOINT="https://localhost:8787/auth"` — **wallet login cannot work at all** |
+| `CORS_ORIGINS` | always | The browser refuses the dashboard's cross-origin calls |
+| `DEFAULT_SELLER_SECRET` | `OFFRAMP=testanchor` with `DEFAULT_SELLER_WALLET` set | SEP-10 cannot sign the anchor's auth challenge, so every cash-out fails |
+| `METRICS_TOKEN` | optional | Auto-generated per boot and printed once, so `/metrics` scraping breaks on each restart |
+| `REDIS_URL` | more than one instance | See the scaling note below |
+
+Generate each 32-byte hex key with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+`render.yaml` declares all of these; the `sync: false` entries must be filled in
+from the Render dashboard on first deploy. Adding a new `req()` call to
+`apps/api/src/env.ts` without adding the matching `render.yaml` entry is what
+caused the 2026-07-31 outage — see `docs/FIXLOG.md` `BUG-4.11`.
+
+### Scaling past one instance
+
+Three structures are per-process today, and each silently loses its guarantee
+if a second instance is started. The Render blueprint runs exactly one
+instance, which is what makes the current setup correct — treat this as a hard
+prerequisite, not a preference:
+
+- **Rate limiting** — `MemoryStore` unless `REDIS_URL` is set. Already has a
+  `RedisStore`; just configure it.
+- **SEP-10 challenge nonces** — `ChallengeService` holds used challenge hashes
+  in an in-process `Map`, so a restart or a second instance makes an
+  already-redeemed challenge redeemable again inside its 15-minute window.
+- **Idempotency in-flight guard** — `idempotency()` tracks concurrent requests
+  in a per-process `Map`. The persisted replay table still works; only the
+  concurrent-duplicate guard is lost, and it guards a money endpoint.
+
 ## Deploy
 
 Render deploys `apps/api` as a single always-on Docker web service (starter
@@ -130,6 +177,35 @@ corrupted data.
   Coordinate with whichever anchor integration is configured
   (`OFFRAMP=testanchor`) since it will have seen the old public key during
   its own KYC/auth flow.
+
+## Attestation registry unreachable
+
+`ATTESTATION_CONTRACT_ID` + `SOROBAN_RPC_URL` enable on-chain settlement
+attestation (issue 9.2, contract in `contracts/quay-attest`). When the Soroban
+RPC is down, the attester is unfunded, or the contract id is wrong:
+
+- **Nothing about settlement changes.** A link becomes `paid` because the
+  payment landed on the classic ledger. `attestSettlement`
+  (`apps/api/src/services/link-service.ts`) is fired without being awaited and
+  swallows every failure, so a dead RPC costs the watcher tick nothing.
+- Affected links keep `attested_at = NULL` and their receipts render without an
+  attestation block. That is the correct display — the fact genuinely is not in
+  the registry yet.
+- `startAttestationSweeper` retries them every `ATTESTATION_SWEEP_MS`
+  (default 60s, 20 links per pass, oldest first). No manual action is needed
+  once the RPC recovers; the backlog drains on its own.
+- Grep the logs for `attestation.failed` to see why. The two common causes are
+  an unfunded attester (the `SERVER_SIGNING_SECRET` identity pays invocation
+  fees) and an unreachable `SOROBAN_RPC_URL`.
+- A payment recorded before the `link_payments.ledger` column existed is
+  skipped permanently: the contract wants the exact settling ledger and the
+  registry is append-only, so writing a guessed one would be worse than leaving
+  the receipt unattested. Those links stay in `listUnattested` and are re-checked
+  cheaply each sweep without ever being written.
+- **Rotating `SERVER_SIGNING_SECRET` changes who attested.** Existing
+  attestations keep naming the old key, which is correct — they record who
+  vouched at the time. Fund the new identity before rotating, or attestation
+  silently stops working while settlement carries on fine.
 
 ## Anchor outage
 

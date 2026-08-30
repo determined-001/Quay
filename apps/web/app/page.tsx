@@ -1,4 +1,6 @@
 import Dashboard from "./components/Dashboard";
+import SessionGate from "./components/SessionGate";
+import WebhooksPanel from "./components/WebhooksPanel";
 
 export default function Page() {
   return (
@@ -10,7 +12,13 @@ export default function Page() {
           seller dashboard
         </span>
       </header>
-      <Dashboard />
+      {/* Everything below is seller-scoped and 401s without a session, so it is
+          mounted only once the wallet has signed a SEP-10 challenge. Rendering
+          it signed-out would just fire failing requests at the user. */}
+      <SessionGate>
+        <Dashboard />
+        <WebhooksPanel />
+      </SessionGate>
     </main>
   );
 }

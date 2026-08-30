@@ -1,4 +1,6 @@
 import { createHmac } from "node:crypto";
+import type { Logger } from "@checkout/core";
+import { NOOP_LOGGER } from "@checkout/core";
 import type { Webhook, WebhookRepository } from "@checkout/core";
 import { newId } from "./ids";
 
@@ -20,6 +22,10 @@ export interface WebhookEvent {
  * the exact headers (`X-Checkout-Signature`, `X-Checkout-Event`) and HMAC
  * scheme from the previous in-process sender are preserved.
  */
+function sign(secret: string, body: string): string {
+  return createHmac("sha256", secret).update(body).digest("hex");
+}
+
 export class WebhookSender {
   /** Rows enqueued but not yet confirmed delivered by the worker. Feeds the
    *  `webhook_deliveries_in_flight` gauge; approximate by design — it is a
@@ -79,5 +85,21 @@ export class WebhookSender {
       nextAttemptAt: Date.now(), // due immediately
       createdAt: Date.now(),
     });
+  }
+}
+
+/** Read and discard up to `cap` bytes from a ReadableStream. */
+async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<void> {
+  const reader = stream.getReader();
+  let read = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      read += value?.byteLength ?? 0;
+      if (read >= cap) break;
+    }
+  } finally {
+    reader.releaseLock();
   }
 }

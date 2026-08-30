@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { NOOP_LOGGER } from "@checkout/core";
 import type { Container } from "../src/services/container";
 import { metricsRoutes } from "../src/routes/metrics";
 
 function fakeContainer(): Container {
   return {
     service: { webhookQueueDepth: () => 2 } as unknown as Container["service"],
+    logger: NOOP_LOGGER,
     links: {
       activeDestinations: async () => ["GA...1", "GA...2"],
       listByStatus: async () => [{}, {}, {}],
@@ -13,11 +15,15 @@ function fakeContainer(): Container {
     webhooks: {} as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: "GSELLER" },
     metricsToken: "secret-token",
+    ready: async () => true,
+    attestation: { enabled: false, contractId: null },
     watcherLagSeconds: () => 1.5,
     circuitBreakerState: () => 0,
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     kyc: {} as Container["kyc"],
+    apiKeys: {} as Container["apiKeys"],
     db: {} as Container["db"],
+    telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
     auth: {} as Container["auth"],
     getWatcherCircuitBreakerStatus: () => [],
     getWatcherMetrics: () => ({

@@ -9,23 +9,28 @@ import {
   DrizzleWatcherStateRepository,
   DrizzleOffRampStateRepository,
   DrizzleTokenRevocationRepository,
+  DrizzleApiKeyRepository,
 } from "../src/repos/index";
 import { SessionIssuer } from "../src/services/session";
 import type { Container } from "../src/services/container";
 import { NoKycRequired } from "@checkout/offramp";
 import { LinkService } from "../src/services/link-service";
+import { NOOP_LOGGER } from "@checkout/core";
 import type {
   AssetRef,
   PaymentRequest,
+  PayoutFieldDescriptor,
   RailPort,
   WatcherPort,
   NormalizedPayment,
   OffRampPort,
   OffRampQuote,
   OffRampJob,
+  OffRampInitiation,
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import type { DB } from "../src/db/client";
+import { FakeTelemetryRepository } from "./fakes";
 
 // ---------------------------------------------------------------------------
 //  Test DB — in-memory libSQL
@@ -126,6 +131,7 @@ export class FakeWatcherPort implements WatcherPort {
       memoType: "text",
       toMuxedId: null,
       createdAt: new Date().toISOString(),
+      ledger: 1,
       ...over,
     };
   }
@@ -149,14 +155,17 @@ export class FakeOffRampPort implements OffRampPort {
     targetCurrency: string;
   }): Promise<OffRampQuote> {
     const rate = input.targetCurrency === "NGN" ? 1650 : 1;
+    const targetAmount = (Number(input.sourceAmount) * rate).toFixed(2);
     return {
       quoteId: `quote_${this.nextQuoteId++}`,
       sourceAsset: input.sourceAsset,
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
-      targetAmount: (Number(input.sourceAmount) * rate).toFixed(2),
+      targetAmount,
       rate: String(rate),
       expiresAt: Date.now() + 300_000,
+      fee: { amount: "0", currency: input.targetCurrency, source: "estimated" },
+      netTargetAmount: targetAmount,
     };
   }
 
@@ -164,15 +173,8 @@ export class FakeOffRampPort implements OffRampPort {
     linkId: string;
     quoteId: string;
     payout: { currency: string; fields: Record<string, string> };
-  }): Promise<OffRampJob> {
-    return {
-      jobId: `job_${this.nextJobId++}`,
-      linkId: input.linkId,
-      status: "pending",
-      targetCurrency: input.payout.currency,
-      targetAmount: "1000.00",
-      rate: "1650",
-    };
+  }): Promise<OffRampInitiation> {
+    return { kind: "fields", jobId: `job_${this.nextJobId++}` };
   }
 
   async status(_jobId: string): Promise<OffRampJob> {
@@ -184,6 +186,10 @@ export class FakeOffRampPort implements OffRampPort {
       targetAmount: "1000.00",
       rate: "1650",
     };
+  }
+
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 }
 
@@ -213,6 +219,7 @@ export interface TestContainer extends Container {
   offramp: FakeOffRampPort;
   db: DB;
   client: Client;
+  telemetry: FakeTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string };
   /** Mints a bearer token for a seller, so route tests can authenticate. */
   tokenFor(sellerId: string, wallet: string): Promise<string>;
@@ -228,6 +235,8 @@ export async function createTestContainer(): Promise<TestContainer> {
   const offramp = new FakeOffRampPort();
 
   const offrampState = new DrizzleOffRampStateRepository(repos.db);
+  const telemetry = new FakeTelemetryRepository();
+  const apiKeys = new DrizzleApiKeyRepository(repos.db);
 
   const service = new LinkService({
     links: repos.links,
@@ -238,7 +247,9 @@ export async function createTestContainer(): Promise<TestContainer> {
     offrampState,
     kyc: new NoKycRequired(),
     stellar: testStellarConfig,
+    telemetry,
     correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
   });
 
   const session = new SessionIssuer("test-session-secret");
@@ -246,9 +257,11 @@ export async function createTestContainer(): Promise<TestContainer> {
 
   return {
     service,
+    logger: NOOP_LOGGER,
     links: repos.links,
     sellers: repos.sellers,
     webhooks: repos.webhooks,
+    apiKeys,
     state: repos.state,
     rail,
     watcher,
@@ -256,9 +269,13 @@ export async function createTestContainer(): Promise<TestContainer> {
     db: repos.db,
     client: repos.client,
     kyc: new NoKycRequired() as unknown as Container["kyc"],
+    telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
+    webhookGuard: async () => ({ ok: true }) as const,
     metricsToken: "test-metrics-token",
+    ready: async () => true,
+    attestation: { enabled: false, contractId: null },
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,
     getWatcherCircuitBreakerStatus: () => [],

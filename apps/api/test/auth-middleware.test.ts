@@ -4,7 +4,7 @@ import type { Seller, SellerRepository, TokenRevocationRepository } from "@check
 import { SessionIssuer } from "../src/services/session";
 import { requireSeller, type AuthedVariables } from "../src/middleware/auth";
 
-const seller: Seller = { id: "sel_1", name: "Demo", wallet: "GWALLET", createdAt: Date.now() };
+const seller: Seller = { id: "sel_1", name: "Demo", wallet: "GWALLET", payoutFields: null, createdAt: Date.now() };
 
 function fakeSellers(knownSeller: Seller | null = seller): SellerRepository {
   return {
@@ -12,6 +12,7 @@ function fakeSellers(knownSeller: Seller | null = seller): SellerRepository {
     findById: async (id) => (knownSeller && knownSeller.id === id ? knownSeller : null),
     findByWallet: async () => knownSeller,
     createIfAbsent: async () => seller,
+    savePayoutFields: async () => {},
   };
 }
 

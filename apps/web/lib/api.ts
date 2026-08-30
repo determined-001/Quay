@@ -1,10 +1,23 @@
-import type { KycFieldSpec, KycStatus, PaymentLink, PaymentRequest } from "@checkout/core";
+import type { KycFieldSpec, KycStatus, PaymentLink, PaymentRequest, PayoutFieldDescriptor } from "@checkout/core";
 
-export type { PaymentLink, PaymentRequest };
+export type { PaymentLink, PaymentRequest, PayoutFieldDescriptor };
 
 export interface LinkWithRequest {
   link: PaymentLink;
   request: PaymentRequest;
+}
+
+/** Anchor field descriptors + the seller's previously-saved (masked) payout
+ *  fields for the cash-out form (issue #32). */
+export interface OfframpRequirements {
+  /** Anchor's field descriptors — drives the dynamic form. */
+  descriptors: PayoutFieldDescriptor[];
+  /**
+   * Previously-saved values, masked to last 4 chars server-side. Null on first
+   * cash-out. The form uses these to show "already on file" and skips fields
+   * the seller leaves blank (meaning "reuse saved value").
+   */
+  savedFields: Record<string, string> | null;
 }
 
 /** A webhook delivery record for timeline display. */
@@ -36,6 +49,19 @@ export interface PublicReceipt {
   paidAmount: string | null;
   createdAt: number;
   updatedAt: number;
+  /**
+   * On-chain settlement attestation, or null when this payment has not been
+   * attested. `refHash` is what the registry is keyed by — the reference itself
+   * is never written on-chain — so it is the value a holder looks up to check
+   * this receipt without trusting whoever served it.
+   */
+  attestation: {
+    contractId: string;
+    refHash: string;
+    txHash: string | null;
+    ledger: number | null;
+    attestedAt: number;
+  } | null;
 }
 
 export interface KycView {
@@ -80,6 +106,11 @@ export type ApiErrorCode =
   | "conflict"
   | "kyc_required" // seller's SEP-12 KYC isn't ACCEPTED yet — see `missingFields`
   | "destination_cannot_receive" // seller wallet can't receive the asset — see `details.trustlineUri`
+  | "payment_rejected" // wallet transaction was refused by Horizon; see `details.reason`
+  | "wallet_rejected" // buyer closed or rejected the wallet prompt
+  | "insufficient_balance"
+  | "missing_trustline"
+  | "wrong_network"
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
   | "server_error"; // 5xx or unexpected non-JSON response
 
@@ -112,6 +143,16 @@ export function describeError(err: CheckoutError): string {
       return "Identity verification is required before you can cash out. See the panel above.";
     case "destination_cannot_receive":
       return "Your wallet can't receive this asset yet. Add the trustline and try again.";
+    case "payment_rejected":
+      return "The network rejected this payment. Check your balance, trustline, and wallet network, then try again.";
+    case "insufficient_balance":
+      return "Your wallet does not have enough balance to pay this invoice.";
+    case "missing_trustline":
+      return "Your wallet needs a trustline for this asset before it can pay.";
+    case "wrong_network":
+      return "Your wallet is connected to the wrong Stellar network for this invoice.";
+    case "wallet_rejected":
+      return "The wallet request was cancelled.";
     case "unreachable":
       return "We can't reach the payment service right now. Check your connection and try again.";
     case "server_error":
@@ -126,7 +167,7 @@ export function describeError(err: CheckoutError): string {
 /**
  * Thin fetch wrapper.
  *
- * - 2xx → parse JSON and return `T`
+ * - 2xx → parse JSON and return `T` (204 → `undefined`, e.g. DELETE /webhooks/:id)
  * - 4xx/5xx → extract `{ error: string }` envelope and throw `CheckoutError`
  * - Network failure → throw `CheckoutError` with code `"unreachable"`
  */
@@ -159,24 +200,36 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
     const { error, missingFields: rawMissing, message, ...details } = body;
     const apiCode = typeof error === "string" ? error : undefined;
     const missingFields = Array.isArray(rawMissing) ? (rawMissing as string[]) : undefined;
+    const reason = typeof details.reason === "string" ? details.reason : undefined;
     const code: ApiErrorCode =
       res.status >= 500
         ? "server_error"
-        : res.status === 409
-          ? "conflict"
-          : apiCode === "not_found"
-            ? "not_found"
-            : apiCode === "invalid_body"
-              ? "invalid_body"
-              : apiCode === "kyc_required"
-                ? "kyc_required"
-                : apiCode === "destination_cannot_receive"
-                  ? "destination_cannot_receive"
-                  : "server_error";
+        : res.status === 409 && reason === "insufficient_balance"
+          ? "insufficient_balance"
+          : res.status === 409 && reason === "missing_trustline"
+            ? "missing_trustline"
+            : res.status === 409 && reason === "wrong_network"
+              ? "wrong_network"
+              : res.status === 409 && apiCode === "payment_rejected"
+                ? "payment_rejected"
+                : res.status === 409
+                  ? "conflict"
+                  : apiCode === "not_found"
+                    ? "not_found"
+                    : apiCode === "invalid_body"
+                      ? "invalid_body"
+                      : apiCode === "kyc_required"
+                        ? "kyc_required"
+                        : apiCode === "destination_cannot_receive"
+                          ? "destination_cannot_receive"
+                          : apiCode === "payment_rejected"
+                            ? "payment_rejected"
+                            : "server_error";
     const detail = typeof message === "string" ? message : (apiCode ?? res.statusText);
     throw new CheckoutError(code, res.status, detail, missingFields, details);
   }
 
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -210,9 +263,48 @@ export interface CreateLinkInput {
   expiresInMinutes?: number;
 }
 
+export interface WebhookDelivery {
+  id: string;
+  webhookId: string;
+  linkId: string;
+  event: string;
+  statusCode: number | null;
+  ok: boolean;
+  error: string | null;
+  createdAt: number;
+}
+
+export interface Webhook {
+  id: string;
+  url: string;
+  secretLast4: string;
+  previousSecretLast4: string | null;
+  previousSecretExpiresAt: number | null;
+  deletedAt: number | null;
+  createdAt: number;
+}
+
 export interface AuthChallenge {
   transaction: string;
   network_passphrase: string;
+}
+
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  lastUsedAt: number | null;
+  createdAt: number;
+  revokedAt: number | null;
+}
+
+export interface ApiKeyCreated {
+  id: string;
+  name: string;
+  key: string;
+  scopes: string[];
+  env: "live" | "test";
 }
 
 export type UsdcTrustlineStatus =
@@ -234,6 +326,15 @@ export const api = {
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
 
+  submitPayment: (id: string, signedXdr: string) =>
+    http<{ txHash: string }>(`/links/${id}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ signedXdr }),
+    }),
+
+  /** Anchor field descriptors + masked saved payout fields for the cash-out form (issue #32). */
+  getOfframpRequirements: (id: string) => http<OfframpRequirements>(`/links/${id}/offramp-requirements`),
+
   getDetail: (id: string) => http<LinkDetail>(`/links/${id}/detail`),
 
   getReceipt: (reference: string) => http<PublicReceipt>(`/r/${reference}`),
@@ -245,6 +346,17 @@ export const api = {
     ),
 
   health: () => http<HealthResponse>("/health"),
+
+  quoteCashOut: (id: string, targetCurrency: string) =>
+    http<{
+      quoteId: string;
+      sourceAmount: string;
+      targetCurrency: string;
+      targetAmount: string; // Gross
+      rate: string;
+      fee: { amount: string; currency: string; source: string };
+      netTargetAmount: string; // Net
+    }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
 
   cashOut: (
     id: string,
@@ -281,4 +393,39 @@ export const api = {
 
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),
+
+  listWebhooks: () => http<{ webhooks: Webhook[] }>("/webhooks"),
+
+  createWebhook: (url: string) =>
+    http<Webhook & { secret: string }>("/webhooks", { method: "POST", body: JSON.stringify({ url }) }),
+
+  deleteWebhook: (id: string) => http<void>(`/webhooks/${id}`, { method: "DELETE" }),
+
+  rotateWebhookSecret: (id: string) =>
+    http<Webhook & { secret: string }>(`/webhooks/${id}/rotate-secret`, { method: "POST" }),
+
+  listWebhookDeliveries: (id: string, opts: { limit?: number; cursor?: string | null } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    const qs = params.toString();
+    return http<{ deliveries: WebhookDelivery[]; nextCursor: string | null }>(
+      `/webhooks/${id}/deliveries${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  // ── API Keys (issue #40) ───────────────────────────────────────────────
+
+  listApiKeys: () =>
+    http<{
+      keys: ApiKeyInfo[];
+      availableScopes: string[];
+      defaultScopes: string[];
+    }>("/api-keys"),
+
+  createApiKey: (input: { name: string; env?: "live" | "test"; scopes?: string }) =>
+    http<ApiKeyCreated>("/api-keys", { method: "POST", body: JSON.stringify(input) }),
+
+  revokeApiKey: (id: string) =>
+    http<{ id: string; revokedAt: number }>(`/api-keys/${id}`, { method: "DELETE" }),
 };
