@@ -120,37 +120,21 @@ describe("POST /links", () => {
     expect((link.expiresAt as number)).toBeGreaterThan(Date.now());
   });
 
-  // The demo seed script (apps/api/scripts/demo-seed.ts) needs a stable id for
-  // the one link the /demo storefront page's widget button links to directly.
-  it("creates a link with a custom id when isDemo is set", async () => {
+  // A caller must never get to choose a link id. `demo_mug_123` was briefly
+  // going to be seedable this way; the /demo page reads the real id from
+  // GET /demo/link instead, so there is no reason to accept one — and a
+  // predictable id on a payment link is a bad thing to be able to request.
+  it("ignores a caller-supplied id — link ids are always server-generated lnk_…", async () => {
     const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Demo mug", amount: "25.00", isDemo: true, id: "demo_mug_123_test" }),
+      body: JSON.stringify({ title: "Guessable", amount: "10", isDemo: true, id: "guessable_id" }),
     });
     expect(res.status).toBe(201);
     const body = await res.json() as Record<string, unknown>;
-    expect((body.link as Record<string, unknown>).id).toBe("demo_mug_123_test");
-  });
-
-  it("rejects a custom id without isDemo — a real link must not get a predictable id", async () => {
-    const res = await req("/links", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Not demo", amount: "10", id: "guessable_id" }),
-    });
-    expect(res.status).toBe(400);
-    const body = await res.json() as Record<string, unknown>;
-    expect(body.error).toBe("invalid_body");
-  });
-
-  it("rejects an id with disallowed characters", async () => {
-    const res = await req("/links", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Bad id", amount: "10", isDemo: true, id: "Not Valid!" }),
-    });
-    expect(res.status).toBe(400);
+    const id = (body.link as Record<string, unknown>).id as string;
+    expect(id).not.toBe("guessable_id");
+    expect(id).toMatch(/^lnk_/);
   });
 });
 

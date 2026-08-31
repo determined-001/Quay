@@ -230,9 +230,9 @@ What it does:
    message — fund the printed buyer address yourself, or the payment step below fails with the
    real Horizon error instead of an obscure one.
 2. Authenticates as the demo seller (SEP-10 challenge → session token).
-3. Creates several payment links via `POST /links` (flagged as demo data), including one with
-   the fixed id `demo_mug_123` that the `/demo` storefront page's "Pay with Quay" button links
-   to directly.
+3. Creates several payment links via `POST /links` (flagged as demo data). The `/demo`
+   storefront page's "Pay with Quay" button reads the first of these from `GET /demo/link`,
+   so it points at a link that actually exists rather than a hardcoded id.
 4. Submits real Stellar payments from the buyer to the seller wallet using each link's memo so
    the on-chain watcher can match them.
 5. Waits for the watcher to mark the links **paid**, then triggers a cash-out on one so the

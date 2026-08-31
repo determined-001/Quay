@@ -83,12 +83,6 @@ const IS_TESTNET = NETWORK === "testnet";
 const FRIENDBOT = "https://friendbot.stellar.org";
 // The testanchor hosts a USDC dispenser for testnet.
 const USDC_FRIENDBOT = "https://testanchor.stellar.org/testnet/friendbot";
-// Fixed id the /demo storefront page's "Pay with Quay" button links to
-// (apps/web/app/demo/page.tsx, data-quay-link="demo_mug_123"). Real links
-// always get a random lnk_... id; the API only accepts a custom id when
-// isDemo is also set (packages/core/src/schemas.ts).
-const DEMO_MUG_LINK_ID = "demo_mug_123";
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -301,22 +295,6 @@ async function main(): Promise<void> {
       "  [warn] buyer has very little USDC. Paid links may fail.\n" +
       "  To fund manually, send USDC to:\n  " + buyer.publicKey(),
     );
-  }
-
-  // -- Seed the fixed-id link the /demo storefront page's widget button expects
-  console.log(`\n▶ Seeding "${DEMO_MUG_LINK_ID}" (the /demo storefront widget link)…`);
-  const existingMugLink = await fetch(`${API_URL}/links/${DEMO_MUG_LINK_ID}`).then((r) => (r.ok ? r.json() : null));
-  if (existingMugLink) {
-    console.log(`  already seeded (status=${(existingMugLink as LinkResponse).link.status}) — leaving it as-is.`);
-  } else {
-    await apiPost<LinkResponse>("/links", {
-      title: "Handcrafted Ceramic Mug",
-      amount: "25.00",
-      assetCode: "USDC",
-      isDemo: true,
-      id: DEMO_MUG_LINK_ID,
-    }, token);
-    console.log(`  ✓ created, left unpaid so a real visitor can pay it through the widget.`);
   }
 
   // -- Create payment links via the API ---------------------------------------

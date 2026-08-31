@@ -13,34 +13,18 @@ export const submitPaymentSchema = z.object({
 });
 export type SubmitPaymentBody = z.infer<typeof submitPaymentSchema>;
 
-export const createLinkSchema = z
-  .object({
-    title: z.string().trim().min(1).max(120),
-    amount: z
-      .string()
-      .trim()
-      .refine(isValidAmount, "amount must be a positive number with at most 7 decimals"),
-    assetCode: assetCodeSchema.default("USDC"),
-    // optional time-to-live in minutes; omitted => no expiry
-    expiresInMinutes: z.number().int().positive().max(60 * 24 * 30).optional(),
-    /** Internal flag set by the demo seed script. */
-    isDemo: z.boolean().optional(),
-    /**
-     * Stable id for demo seeding only (e.g. "demo_mug_123", which the demo
-     * storefront page links to directly). Real links always get a random
-     * `lnk_...` id — this is rejected unless isDemo is also set, so it can't
-     * be used to pick a predictable id for a real payment link.
-     */
-    id: z
-      .string()
-      .trim()
-      .regex(/^[a-z0-9_]{3,40}$/, "id must be lowercase alphanumeric/underscore, 3-40 chars")
-      .optional(),
-  })
-  .refine((v) => !v.id || v.isDemo, {
-    message: "id may only be set together with isDemo",
-    path: ["id"],
-  });
+export const createLinkSchema = z.object({
+  title: z.string().trim().min(1).max(120),
+  amount: z
+    .string()
+    .trim()
+    .refine(isValidAmount, "amount must be a positive number with at most 7 decimals"),
+  assetCode: assetCodeSchema.default("USDC"),
+  // optional time-to-live in minutes; omitted => no expiry
+  expiresInMinutes: z.number().int().positive().max(60 * 24 * 30).optional(),
+  /** Internal flag set by the demo seed script. */
+  isDemo: z.boolean().optional(),
+});
 export type CreateLinkBody = z.infer<typeof createLinkSchema>;
 
 export const registerWebhookSchema = z.object({
