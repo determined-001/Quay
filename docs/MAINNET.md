@@ -10,9 +10,10 @@ skip the verification at the end of each phase.
 
 **Read this first:** the public-network guardrails throw at boot rather than
 warn. A service that refuses to start is loud; one that quietly settles into a
-sandbox anchor is not. The guards are split across two files: the OFFRAMP,
-USDC issuer, and anchor-URL checks fire in `apps/api/src/env.ts` at module
-load (around lines 114–142); the `DEFAULT_SELLER_WALLET` (line 386),
+sandbox anchor is not. The guards are split across two files: the OFFRAMP and
+anchor-URL checks fire in `apps/api/src/env.ts` at module load (lines
+114–142), as does the USDC issuer check (line 189); the
+`DEFAULT_SELLER_WALLET` (line 386),
 `SERVER_SIGNING_SECRET` (line 489), and `JWT_SECRET` (line 512) checks fire in
 `apps/api/src/services/container.ts` inside `createContainer()`. If a guard
 fires, fix the configuration — never relax the guard to get a green deploy.
