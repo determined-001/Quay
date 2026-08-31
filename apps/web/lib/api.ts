@@ -365,7 +365,10 @@ export const api = {
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
   ) =>
-    http<{ job: { jobId: string; status: string; targetAmount: string; targetCurrency: string } }>(
+    http<{
+      job: { jobId: string; status: string; targetAmount: string; targetCurrency: string };
+      interactiveUrl?: string;
+    }>(
       `/links/${id}/cash-out`,
       { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
     ),
