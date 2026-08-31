@@ -103,6 +103,50 @@ describe("ChallengeService", () => {
     await expect(instanceB.verify(signedXdr)).rejects.toThrow(/already been used/);
   });
 
+  // The sequential test above proves the store is shared. This one proves the
+  // claim is atomic: both instances verify the same signature concurrently, and
+  // `fetchAccountSigners` awaits a real tick, so the two verify() calls are
+  // guaranteed to interleave between signature check and claim. Exactly one may
+  // win. A check-then-set store would let both through here.
+  it("lets exactly one of two concurrent redemptions of the same challenge win", async () => {
+    const serverKeypair = Keypair.random();
+    const sharedStore = new MemoryUsedChallengeStore();
+    const slowFetch: FetchAccountSigners = async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      return null;
+    };
+    const build = () =>
+      new ChallengeService({
+        serverKeypair,
+        homeDomain: HOME_DOMAIN,
+        webAuthDomain: WEB_AUTH_DOMAIN,
+        networkPassphrase: NETWORK_PASSPHRASE,
+        fetchAccountSigners: slowFetch,
+        usedChallengeStore: sharedStore,
+      });
+    const instanceA = build();
+    const instanceB = build();
+    const client = Keypair.random();
+
+    const { transaction, network_passphrase } = instanceA.build(client.publicKey());
+    const tx = TransactionBuilder.fromXDR(transaction, network_passphrase);
+    tx.sign(client);
+    const signedXdr = tx.toXDR();
+
+    const results = await Promise.allSettled([
+      instanceA.verify(signedXdr),
+      instanceB.verify(signedXdr),
+    ]);
+
+    const won = results.filter((r) => r.status === "fulfilled");
+    const lost = results.filter((r) => r.status === "rejected");
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(1);
+    expect((won[0] as PromiseFulfilledResult<string>).value).toBe(client.publicKey());
+    expect((lost[0] as PromiseRejectedResult).reason).toBeInstanceOf(AuthError);
+    expect(String((lost[0] as PromiseRejectedResult).reason)).toMatch(/already been used/);
+  });
+
   it("rejects a challenge signed by the wrong account", async () => {
     const service = makeService();
     const claimedAccount = Keypair.random();
