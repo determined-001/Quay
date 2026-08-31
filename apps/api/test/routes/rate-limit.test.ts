@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { authRoutes } from "../../src/routes/auth";
 import { publicRoutes } from "../../src/routes/public";
@@ -166,5 +167,58 @@ describe("GET /r/:reference rate limit", () => {
     expect(res.status).toBe(429);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("rate_limited");
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Wiring, not just behaviour.
+//
+//  The suites above build their own Hono apps, so they prove the `rateLimit`
+//  middleware works — they do not prove `apps/api/src/index.ts` actually
+//  applies it to these routes. Deleting either `app.use` line from index.ts
+//  leaves every test above green.
+//
+//  index.ts is a boot file: `main()` is not exported and it calls `serve()`,
+//  so there is no app to import and probe. Asserting against its source is
+//  the available way to pin the wiring, and it is the wiring that is the
+//  whole of issue #153.
+//
+//  Ordering matters as much as presence: Hono runs middleware in registration
+//  order, so a `use()` mounted after the `route()` it targets never runs.
+// ---------------------------------------------------------------------------
+
+describe("index.ts route wiring", () => {
+  const source = readFileSync(new URL("../../src/index.ts", import.meta.url), "utf8");
+
+  it("applies the strict limiter to /auth", () => {
+    expect(source).toMatch(/app\.use\("\/auth",\s*strictRateLimit\)/);
+  });
+
+  it("applies a receipt limiter to /r/*", () => {
+    expect(source).toMatch(/app\.use\("\/r\/\*",\s*receiptRateLimit\)/);
+  });
+
+  it("gives the receipt limiter a budget below the global cap", () => {
+    expect(source).toMatch(/max:\s*Math\.floor\(env\.rateLimitMax \/ 2\)/);
+  });
+
+  it("mounts both /r/* middlewares before the /r route, or they never run", () => {
+    const receiptLimiter = source.indexOf('app.use("/r/*", receiptRateLimit)');
+    const receiptCors = source.indexOf('app.use("/r/*", cors(');
+    const receiptRoute = source.indexOf('app.route("/r", publicRoutes(container))');
+
+    expect(receiptLimiter).toBeGreaterThan(-1);
+    expect(receiptCors).toBeGreaterThan(-1);
+    expect(receiptRoute).toBeGreaterThan(-1);
+    expect(receiptLimiter).toBeLessThan(receiptRoute);
+    expect(receiptCors).toBeLessThan(receiptRoute);
+  });
+
+  it("mounts the /auth limiter before the /auth route", () => {
+    const limiter = source.indexOf('app.use("/auth", strictRateLimit)');
+    const route = source.indexOf('app.route(\n    "/auth"');
+    expect(limiter).toBeGreaterThan(-1);
+    expect(route).toBeGreaterThan(-1);
+    expect(limiter).toBeLessThan(route);
   });
 });

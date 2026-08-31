@@ -121,7 +121,14 @@ async function main(): Promise<void> {
     store: rateLimitStore,
     trustProxyHops: env.trustProxyHops,
   });
+  // CORS for the public receipt endpoint (accessible from any origin). Both
+  // of these must be registered before `app.route("/r", ...)`: Hono runs
+  // middleware in registration order, so anything mounted after the route it
+  // targets never runs at all. The CORS line used to sit below, which is why
+  // /r/:reference was answering cross-origin reads with no
+  // Access-Control-Allow-Origin header.
   app.use("/r/*", receiptRateLimit);
+  app.use("/r/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"] }));
   app.route("/r", publicRoutes(container));
 
   // API-key management (issue #40). Requires a session or an API key that
@@ -137,8 +144,6 @@ async function main(): Promise<void> {
   app.use("/api-keys/*", strictRateLimit, apiKeyAuth);
   app.route("/api-keys", apiKeyRoutes(container));
 
-  // CORS for public receipt endpoint (accessible from any origin).
-  app.use("/r/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"] }));
   app.route("/metrics", metricsRoutes(container));
   // /auth is a sensitive route — every attempt triggers a Horizon account
   // lookup, making it both an authentication surface and an outbound-traffic
