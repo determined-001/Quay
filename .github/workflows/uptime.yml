@@ -26,6 +26,13 @@ jobs:
 
       - name: Run checks
         id: uptime
+        env:
+          # Mainnet is only checked once this is actually set — see
+          # docs/RUNBOOK.md "Uptime monitoring". No default: an unset value
+          # here must mean "not configured", never "check testnet again".
+          UPTIME_MAINNET_API_URL: ${{ vars.UPTIME_MAINNET_API_URL }}
+          UPTIME_MAINNET_WEB_URL: ${{ vars.UPTIME_MAINNET_WEB_URL }}
+          UPTIME_MAINNET_SYNTHETIC_CHECK: ${{ vars.UPTIME_MAINNET_SYNTHETIC_CHECK }}
         run: |
           node scripts/uptime-check.mjs | tee /tmp/uptime.log
           {

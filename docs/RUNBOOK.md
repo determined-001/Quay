@@ -33,8 +33,9 @@ default.
 | `DATABASE_URL` · `DATABASE_AUTH_TOKEN` | always (prod) | No persistence; falls back to a local SQLite file inside the container, which is destroyed on every deploy |
 | `KYC_ENCRYPTION_KEY` | `OFFRAMP=testanchor` | **Process will not boot.** `env.ts` resolves it with `req()` at module load and throws `Missing required env var: KYC_ENCRYPTION_KEY` |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | `NODE_ENV=production` | **Process will not boot** (`createContainer()` calls `assertKeyConfigured()`). Before that check existed, it fell back to a hardcoded public dev key and 500'd on the first webhook registration |
-| `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | Auto-generated per boot, so every restart and deploy logs every seller out |
-| `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | Auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
+| `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveJwtSecret()` in `apps/api/src/services/container.ts:512` throws). On testnet: auto-generated per boot, so every restart and deploy logs every seller out |
+| `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveServerSigningKeypair()` in `apps/api/src/services/container.ts:489` throws). On testnet: auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
+| `DEFAULT_SELLER_WALLET` | `STELLAR_NETWORK=public` | **Process will not boot on public network** (`resolveSellerKeypairOrWallet()` in `apps/api/src/services/container.ts:386` throws). On testnet: auto-generates a throwaway keypair and prints it (funds land in a key nobody kept across a restart) |
 | `HOME_DOMAIN` | any real deployment | Falls back to `localhost:8787`. SEP-10 challenges are issued for localhost and `stellar.toml` advertises `WEB_AUTH_ENDPOINT="https://localhost:8787/auth"` — **wallet login cannot work at all** |
 | `CORS_ORIGINS` | always | The browser refuses the dashboard's cross-origin calls |
 | `DEFAULT_SELLER_SECRET` | `OFFRAMP=testanchor` with `DEFAULT_SELLER_WALLET` set | SEP-10 cannot sign the anchor's auth challenge, so every cash-out fails |
@@ -50,7 +51,10 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 `render.yaml` declares all of these; the `sync: false` entries must be filled in
 from the Render dashboard on first deploy. Adding a new `req()` call to
 `apps/api/src/env.ts` without adding the matching `render.yaml` entry is what
-caused the 2026-07-31 outage — see `docs/FIXLOG.md` `BUG-4.11`.
+caused the 2026-07-31 outage — see `docs/FIXLOG.md` `BUG-4.11`. The same
+mistake is possible in `apps/api/src/services/container.ts`, where
+`DEFAULT_SELLER_WALLET` (line 386), `SERVER_SIGNING_SECRET` (line 489), and
+`JWT_SECRET` (line 512) are also enforced at boot on public network.
 
 ### Scaling past one instance
 
@@ -163,6 +167,40 @@ mainnet-only notes:
 - **`METRICS_TOKEN`** is `sync: false` on mainnet the same as testnet — rotate
   it the same way, but remember any external scraper reading the mainnet
   `/metrics` endpoint needs the new token too.
+
+## Uptime monitoring
+
+`scripts/uptime-check.mjs` (`.github/workflows/uptime.yml`) checks every
+configured environment on one schedule, each with its own history series and
+its own section in `docs/STATUS.md` — a healthy testnet can never stand in
+for an unmonitored mainnet (issue 8.8).
+
+**Testnet is always checked**, with the same defaults and unprefixed target
+ids (`api` / `web` / `synthetic`) this script has always used —
+`https://quay-api.onrender.com` / `https://quay-web.vercel.app`, overridable
+via `UPTIME_API_URL` / `UPTIME_WEB_URL`.
+
+**Mainnet is checked only once you configure it — there is no default of any
+kind.** Set these as repository **Variables** (Settings → Secrets and
+variables → Actions → Variables — they're plain hostnames, not secrets):
+
+| Variable | Required | What it does |
+|---|---|---|
+| `UPTIME_MAINNET_API_URL` | to watch mainnet at all | e.g. `https://quay-api-mainnet.onrender.com` (`render.mainnet.yaml`'s `quay-api-mainnet`). Unset means mainnet is skipped entirely, not silently checked against the testnet URL. |
+| `UPTIME_MAINNET_WEB_URL` | optional | Only set this if a dedicated mainnet web deployment exists. `render.mainnet.yaml` declares no web service today, so leave unset until one does. |
+| `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run, and unlike testnet, `POST /links` there has no scoped-credential story yet — see issue #163 (least-privilege API key for this check) before turning it on. |
+
+Once `UPTIME_MAINNET_API_URL` is set, the next run adds a `## Mainnet`
+section to `docs/STATUS.md` and starts filing incidents titled
+`🔴 Uptime: Mainnet — API is down` (the environment name is always in the
+title and body — see `renderStatusMd`/`buildTargets` in the script) instead of
+the ambiguous `🔴 Uptime: API is down` a pre-8.8 reader might mistake for
+testnet.
+
+**The scheduled run itself is still disabled** (`.github/workflows/uptime.yml`
+only has `workflow_dispatch`, no `schedule` — see `TODO.md` §5). Re-enabling
+it and setting the variables above are both owner actions: this doc only
+covers what to set once you do.
 
 ## Deploy
 
