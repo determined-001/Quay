@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, or } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -244,6 +244,23 @@ export class DrizzleLinkRepository implements LinkRepository {
     return rows.length;
   }
 
+  /**
+   * The oldest demo-flagged link, or null when the demo has not been seeded.
+   *
+   * Oldest rather than newest so the /demo page keeps pointing at the same
+   * link across re-seeds that only append — the seed script creates its
+   * headline "Handcrafted Ceramic Mug" row first.
+   */
+  async findDemo(): Promise<PaymentLink | null> {
+    const rows = await this.db
+      .select()
+      .from(links)
+      .where(eq(links.isDemo, true))
+      .orderBy(links.createdAt)
+      .limit(1);
+    return rows[0] ? rowToLink(rows[0]) : null;
+  }
+
   async recordPayment(payment: LinkPaymentRecord): Promise<void> {
     await this.db
       .insert(linkPayments)
@@ -251,6 +268,7 @@ export class DrizzleLinkRepository implements LinkRepository {
         id: newId("pmt"),
         linkId: payment.linkId,
         txHash: payment.txHash,
+        operationId: payment.operationId,
         payer: payment.payer,
         amount: payment.amount,
         assetCode: payment.asset.code,
@@ -258,7 +276,7 @@ export class DrizzleLinkRepository implements LinkRepository {
         ledger: payment.ledger,
         createdAt: payment.createdAt,
       })
-      .onConflictDoNothing({ target: linkPayments.txHash });
+      .onConflictDoNothing({ target: [linkPayments.txHash, linkPayments.operationId] });
   }
 
   async paymentLedger(txHash: string): Promise<number | null> {
@@ -534,20 +552,27 @@ export class DrizzleWatcherStateRepository implements WatcherStateRepository {
       });
   }
 
-  async isProcessed(txHash: string): Promise<boolean> {
+  async isProcessed(txHash: string, operationId: string): Promise<boolean> {
     const rows = await this.db
       .select({ txHash: processedTx.txHash })
       .from(processedTx)
-      .where(eq(processedTx.txHash, txHash))
+      .where(
+        and(
+          eq(processedTx.txHash, txHash),
+          // Exact operation already recorded, OR a pre-migration row marked
+          // the whole transaction (operation_id NULL) — see schema.ts.
+          or(eq(processedTx.operationId, operationId), isNull(processedTx.operationId)),
+        ),
+      )
       .limit(1);
     return rows.length > 0;
   }
 
-  async markProcessed(txHash: string, linkId: string | null): Promise<void> {
+  async markProcessed(txHash: string, operationId: string, linkId: string | null): Promise<void> {
     await this.db
       .insert(processedTx)
-      .values({ txHash, linkId, createdAt: Date.now() })
-      .onConflictDoNothing();
+      .values({ txHash, operationId, linkId, createdAt: Date.now() })
+      .onConflictDoNothing({ target: [processedTx.txHash, processedTx.operationId] });
   }
 }
 
