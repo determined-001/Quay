@@ -244,6 +244,23 @@ export class DrizzleLinkRepository implements LinkRepository {
     return rows.length;
   }
 
+  /**
+   * The oldest demo-flagged link, or null when the demo has not been seeded.
+   *
+   * Oldest rather than newest so the /demo page keeps pointing at the same
+   * link across re-seeds that only append — the seed script creates its
+   * headline "Handcrafted Ceramic Mug" row first.
+   */
+  async findDemo(): Promise<PaymentLink | null> {
+    const rows = await this.db
+      .select()
+      .from(links)
+      .where(eq(links.isDemo, true))
+      .orderBy(links.createdAt)
+      .limit(1);
+    return rows[0] ? rowToLink(rows[0]) : null;
+  }
+
   async recordPayment(payment: LinkPaymentRecord): Promise<void> {
     await this.db
       .insert(linkPayments)

@@ -8,10 +8,15 @@ therefore mostly configuration, one genuine code decision (which anchor), and a
 set of checks. It is written as a runbook: do the steps in order, and do not
 skip the verification at the end of each phase.
 
-**Read this first:** the public-network guardrails in `apps/api/src/env.ts`
-throw at boot rather than warn. A service that refuses to start is loud; one
-that quietly settles into a sandbox anchor is not. If a guard fires, fix the
-configuration — never relax the guard to get a green deploy.
+**Read this first:** the public-network guardrails throw at boot rather than
+warn. A service that refuses to start is loud; one that quietly settles into a
+sandbox anchor is not. The guards are split across two files: the OFFRAMP and
+anchor-URL checks fire in `apps/api/src/env.ts` at module load (lines
+114–142), as does the USDC issuer check (line 189); the
+`DEFAULT_SELLER_WALLET` (line 386),
+`SERVER_SIGNING_SECRET` (line 489), and `JWT_SECRET` (line 512) checks fire in
+`apps/api/src/services/container.ts` inside `createContainer()`. If a guard
+fires, fix the configuration — never relax the guard to get a green deploy.
 
 ---
 
@@ -30,7 +35,11 @@ configuration — never relax the guard to get a green deploy.
 | Missing `JWT_SECRET` | Every seller is logged out on each deploy. |
 | A blank or non-numeric numeric var | A blank value used to yield `0` — `TRUST_PROXY_HOPS=` silently collapsed every client into one rate-limit bucket. A typo yields `NaN`, and `setInterval(NaN)` is a tight loop against Horizon, not a slow poll. |
 
-These are covered by `apps/api/test/env-mainnet-guards.test.ts`.
+The OFFRAMP, USDC issuer, anchor-URL, and KYC key guards are covered by
+`apps/api/test/env-mainnet-guards.test.ts`. The `DEFAULT_SELLER_WALLET`,
+`SERVER_SIGNING_SECRET`, and `JWT_SECRET` guards live in
+`apps/api/src/services/container.ts` and are not yet covered by a dedicated
+test file.
 
 ---
 

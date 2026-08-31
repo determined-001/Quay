@@ -208,7 +208,7 @@ export function describeError(err: CheckoutError): string {
  * - 4xx/5xx → extract `{ error: string }` envelope and throw `CheckoutError`
  * - Network failure → throw `CheckoutError` with code `"unreachable"`
  */
-async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: string }): Promise<T> {
+async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: string; raw?: boolean }): Promise<T> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
@@ -267,6 +267,7 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
   }
 
   if (res.status === 204) return undefined as T;
+  if (init?.raw) return res.blob() as unknown as Promise<T>;
   return res.json() as Promise<T>;
 }
 
@@ -406,14 +407,15 @@ export const api = {
       { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
     ),
 
-  exportCsv: async (from?: string, to?: string): Promise<Blob> => {
+  exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     const qs = params.toString();
-    const res = await fetch(`${apiBase()}/links/export/csv${qs ? `?${qs}` : ""}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-    return res.blob();
+    return http<Blob>(`/links/export/csv${qs ? `?${qs}` : ""}`, {
+      raw: true,
+      headers: { accept: "text/csv" },
+    });
   },
   // Wallet-native login (SEP-10): getAuthChallenge() -> sign with the wallet ->
   // submitAuthChallenge() -> setSessionToken(token) on success.
