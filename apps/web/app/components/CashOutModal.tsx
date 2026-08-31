@@ -178,6 +178,9 @@ export default function CashOutModal({
     setErrorMsg(null);
     try {
       const result = await api.cashOut(linkId, targetCurrency, buildPayoutFields());
+      if (result.interactiveUrl) {
+        window.open(result.interactiveUrl, "_blank", "width=600,height=700");
+      }
       const j = result.job;
       const preview: QuotePreview = {
         jobId: j.jobId,
