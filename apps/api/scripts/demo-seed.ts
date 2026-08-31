@@ -207,7 +207,7 @@ interface LinkDef {
 }
 
 const LINK_DEFS: LinkDef[] = [
-  { title: "Demo — Invoice #1001 (ceramic mug ×2)", amount: "12.50", pay: true, cashOut: true },
+  { title: "Demo — Handcrafted Ceramic Mug",        amount: "25.00", pay: true, cashOut: true },
   { title: "Demo — SaaS subscription (monthly)",    amount: "49.00", pay: true },
   { title: "Demo — Freelance design retainer",      amount: "250.00", pay: false },
   { title: "Demo — E-book: Stellar for Developers", amount: "9.99",  pay: true },

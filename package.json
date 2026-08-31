@@ -16,6 +16,7 @@
     "docs:status-diagram": "node scripts/gen-status-diagram.mjs",
     "docs:check-status-diagram": "node scripts/gen-status-diagram.mjs --check",
     "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
+    "docs:check-env-docs": "node scripts/check-env-docs.mjs",
     "sweep": "node scripts/uptime-check.mjs",
     "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
     "demo:seed": "pnpm --filter @checkout/api exec tsx scripts/demo-seed.ts",
