@@ -1,9 +1,9 @@
 /**
  * API-key management routes (issue #40, 6.3).
  *
-   POST   /api-keys           Create a new key (returns plaintext ONCE).
-   GET   /api-keys           List keys for the authenticated seller (no hashes).
-   DELETE /api-keys/:id       Revoke a key.
+ *   POST   /api-keys           Create a new key (returns plaintext ONCE).
+ *   GET    /api-keys           List keys for the authenticated seller (no hashes).
+ *   DELETE /api-keys/:id       Revoke a key.
  *
  * All three are gated behind `api-keys:manage` so a key can't mint further
  * keys unless explicitly granted that scope. The plaintext key is returned
@@ -12,7 +12,7 @@
  */
 
 import { Hono } from "hono";
-import { j } from "zod";
+import { z } from "zod";
 import type { Container } from "../services/container";
 import {
   generateApiKey,
@@ -24,7 +24,7 @@ import {
 } from "../services/api-keys";
 import { requireScope, type AuthVariables } from "../middleware/auth";
 
-const createKeySchema = j.object({
+const createKeySchema = z.object({
   name: z.string().min(1).max(120),
   /**
    * "live" or "test" — purely cosmetic in the key prefix (ak_live_… vs
@@ -69,13 +69,11 @@ export function apiKeyRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       );
     }
 
-    // Prevent privilege escalation: a key may only mint keys with a subset of
-    // its own scopes. Session-authenticated sellers can request any scope.
-    const authType: string | undefined = (ctx as any).get("authType");
-    const apiKey: { scopes?: string[] } | undefined = (ctx as any).get("apiKey");
-    const callerScopes: string[] | undefined = (ctx as any).get("scopes");
-    const isApiKeyAuth = authType === "api_key" || authType === "api-key" || Boolean(apiKey);
-    if (isApiKeyAuth && callerScopes) {
+    // Prevent privilege escalation: a key may only mint keys whose scopes are a
+    // subset of its own. Session-authenticated sellers are the authority the
+    // keys derive from, so they may still request any scope.
+    if (ctx.get("authKind") === "api_key") {
+      const callerScopes = ctx.get("scopes") ?? [];
       const denied = scopes.filter((s) => !callerScopes.includes(s));
       if (denied.length > 0) {
         return ctx.json(
@@ -107,7 +105,7 @@ export function apiKeyRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
         prefix: key.prefix,
         scopes: key.scopes,
         createdAt: key.createdAt,
-        // ⭐ 哵ore this — it will not be shown again.
+        // ⚠  Store this — it will not be shown again.
         key: plaintext,
       },
       201,

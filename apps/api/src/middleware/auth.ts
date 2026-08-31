@@ -187,30 +187,6 @@ export function requireScope(scope: ApiKeyScope): MiddlewareHandler<{ Variables:
     if (!scopes || !scopes.includes(scope)) {
       return ctx.json({ error: "missing_scope", required: scope }, 403);
     }
-    // API-key callers must not mint keys with scopes they do not themselves hold.
-    // Session callers are the seller and remain able to request any scope.
-    const isKeyManagementWrite =
-      ctx.req.method === "POST" || ctx.req.method === "PUT" || ctx.req.method === "PATCH";
-    const isKeyManagementPath = /(^|\/)api-keys(\/|$)/.test(ctx.req.path);
-
-    if (ctx.get("authKind") === "api_key" && isKeyManagementWrite && isKeyManagementPath) {
-      const body: { scopes?: unknown } | null = await ctx.req.json().catch(() => null);
-      const requestedScopes = body?.scopes;
-      if (Array.isArray(requestedScopes)) {
-        const missing = (requestedScopes as unknown[]).filter(
-          (requestedScope): requestedScope is ApiKeyScope =>
-            typeof requestedScope === "string" &&
-            (ALL_SCOPES as readonly ApiKeyScope[]).includes(requestedScope as ApiKeyScope) &&
-            !scopes.includes(requestedScope as ApiKeyScope),
-        );
-        if (missing.length > 0) {
-          return ctx.json(
-            { error: "forbidden", message: "requested scopes exceed caller's scopes", scopes: missing },
-            403,
-          );
-        }
-      }
-    }
     return next();
   };
 }
