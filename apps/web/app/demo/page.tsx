@@ -1,11 +1,17 @@
 import Script from "next/script";
 import Link from "next/link";
+import { apiBase } from "../../lib/api";
 
+/**
+ * The seeded demo link's id, or null when `pnpm demo:seed` hasn't been run.
+ *
+ * The button used to hardcode `demo_mug_123`, an id the seed script never
+ * creates — so the widget 404'd for everyone. Reading it from the API means
+ * the button either works or says why it doesn't.
+ */
 async function getDemoLinkId(): Promise<string | null> {
   try {
-    const base =
-      process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8787";
-    const res = await fetch(`${base}/demo/link`, { cache: "no-store" });
+    const res = await fetch(`${apiBase()}/demo/link`, { cache: "no-store" });
     if (!res.ok) return null;
     const body = (await res.json()) as { linkId: string | null };
     return body.linkId ?? null;
