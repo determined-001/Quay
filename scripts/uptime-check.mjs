@@ -50,9 +50,9 @@ export function buildEnvironments(vars = process.env) {
       // public testnet deploy so `pnpm sweep` works with zero setup.
       apiUrl: envUrl(vars, "UPTIME_TESTNET_API_URL") ?? envUrl(vars, "UPTIME_API_URL") ?? "https://quay-api.onrender.com",
       webUrl: envUrl(vars, "UPTIME_TESTNET_WEB_URL") ?? envUrl(vars, "UPTIME_WEB_URL") ?? "https://quay-web.vercel.app",
-      // Leaves a tiny throwaway link behind on every successful run (title
-      // "uptime-check") — proves the public write path works. Known
-      // trade-off for a demo-scale DB; see checkSyntheticLink.
+      // Dedicated least-privilege key (links:read + links:write) for the
+      // synthetic write check — POST /links has required auth since 6.x.
+      apiKey: envUrl(vars, "UPTIME_API_KEY"),
       syntheticLink: true,
       prefixIds: false,
     },
@@ -61,11 +61,14 @@ export function buildEnvironments(vars = process.env) {
       label: "Mainnet",
       apiUrl: envUrl(vars, "UPTIME_MAINNET_API_URL"),
       webUrl: envUrl(vars, "UPTIME_MAINNET_WEB_URL"),
-      // Off unless explicitly opted into: this would leave a throwaway row in
-      // the REAL production database on every successful run, and — unlike
-      // testnet — POST /links there has no authorization story yet (issue
-      // #163 tracks a least-privilege API key for this). Don't hit live
-      // infrastructure with an unauthenticated write until that lands.
+      // Its own key, never testnet's — a testnet key cannot create links on
+      // mainnet, and sharing one would defeat the least-privilege point.
+      apiKey: envUrl(vars, "UPTIME_MAINNET_API_KEY"),
+      // Off unless explicitly opted into: this writes a throwaway row into the
+      // REAL production database on every successful run. Issue 8.9 gave the
+      // check a scoped key and cleanup, so it is now safe to enable — but it
+      // stays opt-in because "safe to run" is not the same as "should run
+      // against production without the operator deciding to".
       syntheticLink: envUrl(vars, "UPTIME_MAINNET_SYNTHETIC_CHECK") === "1",
       prefixIds: true,
     },
@@ -104,7 +107,7 @@ export function buildTargets(environments) {
         kind: "Create-link (synthetic)",
         label: `${env.label} — Create-link (synthetic)`,
         env,
-        check: () => checkSyntheticLink(env.apiUrl),
+        check: () => checkSyntheticLink(env.apiUrl, env.apiKey),
       });
     }
   }
@@ -116,17 +119,55 @@ async function checkGet(url) {
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
 }
 
-// Leaves a tiny throwaway link behind on every successful run (title
-// "uptime-check", filterable/prunable later) — the point is proving the public
-// write path works, not cleanliness. Known trade-off for a demo-scale DB.
-async function checkSyntheticLink(apiUrl) {
-  const res = await fetchWithTimeout(`${apiUrl}/links`, {
+/**
+ * Synthetic create-link check: proves the authenticated public write path
+ * works end to end (issue 8.9).
+ *
+ * `POST /links` has required a seller session or a scoped API key since 6.x,
+ * so this check 401'd on every run for reasons that had nothing to do with
+ * availability — a permanent false negative sitting next to two real checks.
+ * It now sends a dedicated least-privilege key (`links:read` + `links:write`).
+ *
+ * The created link is cancelled immediately afterwards so synthetic rows stop
+ * accumulating. Cleanup failure is logged, not fatal: the write path — the
+ * thing being measured — already succeeded by that point, and failing the
+ * probe over cleanup would report an outage that isn't one.
+ */
+export async function checkSyntheticLink(apiUrl, apiKey, fetchImpl = fetchWithTimeout) {
+  const headers = { "content-type": "application/json" };
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+
+  const createRes = await fetchImpl(`${apiUrl}/links`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ title: "uptime-check", amount: "0.0000001", assetCode: "XLM" }),
   });
-  if (res.status !== 201) {
-    throw new Error(`POST ${apiUrl}/links -> HTTP ${res.status} (expected 201)`);
+
+  if (createRes.status === 401 && !apiKey) {
+    throw new Error(
+      `POST ${apiUrl}/links -> HTTP 401 and no API key is configured. ` +
+        "Add a least-privilege API key (links:read + links:write) as the UPTIME_API_KEY repo secret " +
+        "(UPTIME_MAINNET_API_KEY for mainnet).",
+    );
+  }
+
+  if (createRes.status !== 201) {
+    throw new Error(`POST ${apiUrl}/links -> HTTP ${createRes.status} (expected 201)`);
+  }
+
+  try {
+    const body = await createRes.json();
+    const linkId = body?.link?.id;
+    if (!linkId) return;
+    const cancelRes = await fetchImpl(`${apiUrl}/links/${linkId}/cancel`, {
+      method: "POST",
+      headers,
+    });
+    if (!cancelRes.ok) {
+      console.warn(`[uptime] could not cancel synthetic link ${linkId} (HTTP ${cancelRes.status})`);
+    }
+  } catch (err) {
+    console.warn(`[uptime] synthetic link cleanup failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -206,6 +247,11 @@ export function renderStatusMd(state, environments) {
   const targets = buildTargets(environments);
   const lines = [
     "# Status",
+    "",
+    // Issue 8.9: regeneration stopped when the schedule was disabled, so this
+    // page kept showing an old green. A visible timestamp makes a stale page
+    // read as stale rather than as healthy.
+    `> **Last regenerated:** ${new Date().toISOString()}`,
     "",
     "Generated by `.github/workflows/uptime.yml` (every 5 minutes) — do not edit by hand.",
     "",

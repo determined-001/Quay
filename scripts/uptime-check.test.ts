@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeEnvironments, buildEnvironments, buildTargets, recordResult, renderStatusMd, uptimePct } from "./uptime-check.mjs";
+import { activeEnvironments, buildEnvironments, buildTargets, checkSyntheticLink, recordResult, renderStatusMd, uptimePct } from "./uptime-check.mjs";
 
 describe("buildEnvironments", () => {
   it("testnet always defaults to the public testnet deploy, unprefixed", () => {
@@ -135,5 +135,130 @@ describe("renderStatusMd", () => {
     expect(md.indexOf("### API", testnetIdx)).toBeLessThan(mainnetIdx);
     expect(md).toContain("🔴 down");
     expect(md).toContain("connection refused");
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Synthetic create-link check (issue 8.9)
+//
+//  POST /links has required a seller session or a scoped API key since 6.x, so
+//  this check 401'd on every run — a permanent false negative sitting beside
+//  two real checks. These exercise the function the CLI actually calls, with
+//  fetch injected, rather than a parallel copy that could drift from it.
+// ---------------------------------------------------------------------------
+
+// Placeholder credentials. Deliberately not shaped like a real key (which is
+// `ak_live_` + 32 base62 chars) so a secret scanner has nothing to match on.
+const FAKE_KEY = "not-a-real-key";
+const FAKE_REVOKED_KEY = "not-a-real-revoked-key";
+const FAKE_MAINNET_KEY = "not-a-real-mainnet-key";
+
+function jsonResponse(status: number, body?: unknown) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body ?? {},
+  } as unknown as Response;
+}
+
+describe("checkSyntheticLink", () => {
+  const API = "https://api.example.com";
+
+  it("sends the key as a bearer token and cancels the link it created", async () => {
+    const calls: Array<[string, any]> = [];
+    const fakeFetch = async (url: string, opts: any) => {
+      calls.push([url, opts]);
+      return calls.length === 1
+        ? jsonResponse(201, { link: { id: "lnk_uptime_1" } })
+        : jsonResponse(200, { link: { id: "lnk_uptime_1", status: "cancelled" } });
+    };
+
+    await checkSyntheticLink(API, FAKE_KEY, fakeFetch);
+
+    expect(calls).toHaveLength(2);
+    const [createUrl, createOpts] = calls[0]!;
+    expect(createUrl).toBe(`${API}/links`);
+    expect(createOpts.headers.authorization).toBe(`Bearer ${FAKE_KEY}`);
+    expect(JSON.parse(createOpts.body)).toEqual({
+      title: "uptime-check",
+      amount: "0.0000001",
+      assetCode: "XLM",
+    });
+
+    // Cleanup: the throwaway row must not accumulate.
+    const [cancelUrl, cancelOpts] = calls[1]!;
+    expect(cancelUrl).toBe(`${API}/links/lnk_uptime_1/cancel`);
+    expect(cancelOpts.headers.authorization).toBe(`Bearer ${FAKE_KEY}`);
+  });
+
+  it("sends no Authorization header when no key is configured", async () => {
+    const calls: Array<[string, any]> = [];
+    const fakeFetch = async (url: string, opts: any) => {
+      calls.push([url, opts]);
+      return jsonResponse(401);
+    };
+
+    await expect(checkSyntheticLink(API, null, fakeFetch)).rejects.toThrow(/no API key is configured/);
+    expect(calls[0]![1].headers.authorization).toBeUndefined();
+  });
+
+  it("names the missing secret on a 401, instead of reporting a bare HTTP 401", async () => {
+    const fakeFetch = async () => jsonResponse(401);
+    await expect(checkSyntheticLink(API, null, fakeFetch)).rejects.toThrow(/UPTIME_API_KEY/);
+  });
+
+  it("still reports a genuine 401 as a failure when a key IS configured", async () => {
+    // A configured-but-rejected key is a real problem — a revoked or
+    // wrong-scope key must not be reported as a missing-secret misconfiguration.
+    const fakeFetch = async () => jsonResponse(401);
+    await expect(checkSyntheticLink(API, FAKE_REVOKED_KEY, fakeFetch)).rejects.toThrow(/expected 201/);
+  });
+
+  it("fails when the write path is genuinely broken", async () => {
+    const fakeFetch = async () => jsonResponse(500);
+    await expect(checkSyntheticLink(API, FAKE_KEY, fakeFetch)).rejects.toThrow(/HTTP 500 \(expected 201\)/);
+  });
+
+  it("does not fail the probe when only cleanup fails", async () => {
+    // The write path — the thing being measured — already succeeded. Reporting
+    // an outage because cancellation 500'd would be a false positive.
+    let n = 0;
+    const fakeFetch = async () => {
+      n += 1;
+      return n === 1 ? jsonResponse(201, { link: { id: "lnk_1" } }) : jsonResponse(500);
+    };
+    await expect(checkSyntheticLink(API, FAKE_KEY, fakeFetch)).resolves.toBeUndefined();
+  });
+
+  it("tolerates a 201 body with no link id", async () => {
+    let n = 0;
+    const fakeFetch = async () => {
+      n += 1;
+      return n === 1 ? jsonResponse(201, {}) : jsonResponse(200);
+    };
+    await expect(checkSyntheticLink(API, FAKE_KEY, fakeFetch)).resolves.toBeUndefined();
+    expect(n).toBe(1); // no cancel attempted
+  });
+});
+
+describe("uptime API keys", () => {
+  it("reads a per-environment key, never sharing testnet's with mainnet", () => {
+    const [testnet, mainnet] = buildEnvironments({
+      UPTIME_API_KEY: FAKE_KEY,
+      UPTIME_MAINNET_API_KEY: FAKE_MAINNET_KEY,
+    });
+    expect(testnet.apiKey).toBe(FAKE_KEY);
+    expect(mainnet.apiKey).toBe(FAKE_MAINNET_KEY);
+
+    const [onlyTestnetKey] = buildEnvironments({ UPTIME_API_KEY: FAKE_KEY });
+    expect(onlyTestnetKey.apiKey).toBe(FAKE_KEY);
+    expect(buildEnvironments({ UPTIME_API_KEY: FAKE_KEY })[1]!.apiKey).toBeFalsy();
+  });
+});
+
+describe("renderStatusMd staleness", () => {
+  it("stamps when it was last regenerated, so a stale page reads as stale", () => {
+    const md = renderStatusMd({ targets: {} }, buildEnvironments({}));
+    expect(md).toMatch(/> \*\*Last regenerated:\*\* \d{4}-\d{2}-\d{2}T[\d:.]+Z/);
   });
 });
