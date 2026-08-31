@@ -266,3 +266,54 @@ describe("LinkService + MockAnchorOffRamp — restart survives (integration)", (
     expect(links.get("lnk_1")?.offrampStatus).toBe("settled");
   });
 });
+
+describe("LinkService.triggerCashOut — discriminated union return", () => {
+  it("moves link to offramp_pending for fields initiation arm", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new MockAnchorOffRamp({ state: offrampState });
+    const service = makeService({ links, offramp, offrampState });
+
+    const { job, initiation } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+
+    expect(initiation.kind).toBe("fields");
+    if (initiation.kind === "fields") {
+      expect(initiation.jobId).toBe(job.jobId);
+    }
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("moves link to offramp_pending for interactive initiation arm", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async (input) => ({
+      quoteId: "q_1",
+      sourceAsset: input.sourceAsset,
+      sourceAmount: input.sourceAmount,
+      targetCurrency: input.targetCurrency,
+      targetAmount: "1650.00",
+      rate: "1650",
+      expiresAt: Date.now() + 60_000,
+      fee: { amount: "16.50", currency: input.targetCurrency, source: "anchor" },
+      netTargetAmount: "1633.50",
+    });
+    offramp.initiateImpl = async () => ({
+      kind: "interactive",
+      jobId: "job_interactive_123",
+      url: "https://anchor.example.com/interactive?id=job_interactive_123",
+    });
+
+    const service = makeService({ links, offramp, offrampState });
+    const { job, initiation } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+
+    expect(initiation.kind).toBe("interactive");
+    if (initiation.kind === "interactive") {
+      expect(initiation.url).toBe("https://anchor.example.com/interactive?id=job_interactive_123");
+      expect(initiation.jobId).toBe("job_interactive_123");
+    }
+    expect(job.jobId).toBe("job_interactive_123");
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    expect(links.get("lnk_1")?.offrampJobId).toBe("job_interactive_123");
+  });
+});
