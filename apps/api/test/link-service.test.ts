@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OffRampJobNotFoundError, type KycPort, type RailPort } from "@checkout/core";
+import { OffRampJobNotFoundError, type KycPort, type OffRampInitiation, type RailPort } from "@checkout/core";
 import { MockAnchorOffRamp } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
@@ -315,5 +315,26 @@ describe("LinkService.triggerCashOut — discriminated union return", () => {
     expect(job.jobId).toBe("job_interactive_123");
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
     expect(links.get("lnk_1")?.offrampJobId).toBe("job_interactive_123");
+  });
+});
+
+// The route flattens the union into `{ job, interactiveUrl? }` (issue 1.1
+// item 5). Pinning it here rather than only in the service: the flattening is
+// the public API contract a SEP-24 adapter and the dashboard both code
+// against, and `initiation.kind === "interactive" ? initiation.url : undefined`
+// is exactly the kind of line a later refactor gets subtly wrong.
+describe("cash-out response flattening", () => {
+  function flatten(initiation: OffRampInitiation): string | undefined {
+    return initiation.kind === "interactive" ? initiation.url : undefined;
+  }
+
+  it("omits interactiveUrl for a field-driven initiation", () => {
+    expect(flatten({ kind: "fields", jobId: "ofr_1" })).toBeUndefined();
+  });
+
+  it("surfaces the anchor url for an interactive initiation", () => {
+    expect(
+      flatten({ kind: "interactive", jobId: "ofr_1", url: "https://anchor.example.com/sep24" }),
+    ).toBe("https://anchor.example.com/sep24");
   });
 });

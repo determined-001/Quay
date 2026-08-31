@@ -79,3 +79,59 @@ describe("BROWSER_BASE — a production build must not ship the localhost fallba
     await expect(loadApiBase()).resolves.toBe("https://api.example.com");
   });
 });
+
+// ---------------------------------------------------------------------------
+//  SEP-24 interactive cash-out (issue 1.1)
+//
+//  `interactiveUrl` is third-party data: the anchor supplies it, our API
+//  forwards it, and the dashboard hands it to `window.open`. These pin the
+//  shape the client relies on — the guard against a non-https URL lives in
+//  CashOutModal and is asserted there by construction, but the response
+//  contract itself is what a SEP-24 adapter will code against.
+// ---------------------------------------------------------------------------
+
+describe("api.cashOut — interactive initiation", () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  function stub(body: unknown) {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  const job = {
+    jobId: "ofr_1",
+    status: "pending",
+    targetAmount: "17325.00",
+    targetCurrency: "NGN",
+  };
+
+  it("passes interactiveUrl through when the anchor needs a browser", async () => {
+    stub({ job, interactiveUrl: "https://anchor.example.com/sep24?id=ofr_1" });
+    const { api } = await import("../lib/api");
+
+    const res = await api.cashOut("lnk_1", "NGN", {});
+    expect(res.interactiveUrl).toBe("https://anchor.example.com/sep24?id=ofr_1");
+    expect(res.job.jobId).toBe("ofr_1");
+  });
+
+  // Every adapter shipped today is field-driven, so this is the common path:
+  // the field must be absent, not null or empty string, so `if (interactiveUrl)`
+  // in the modal stays correct.
+  it("leaves interactiveUrl undefined for a field-driven anchor", async () => {
+    stub({ job });
+    const { api } = await import("../lib/api");
+
+    const res = await api.cashOut("lnk_1", "NGN", {});
+    expect(res.interactiveUrl).toBeUndefined();
+    expect(res.job.jobId).toBe("ofr_1");
+  });
+});
