@@ -170,6 +170,13 @@ is worth nothing. The issuer is the only thing that distinguishes real USDC.
 
 ## Phase 3 — Configure and deploy
 
+`render.mainnet.yaml` ships the payments-only (`OFFRAMP=none`) configuration
+described in Phase 0 — apply it as-is for that path. The anchor variables,
+`KYC_ENCRYPTION_KEY` and `DEFAULT_SELLER_SECRET` sit commented out in one block
+in that file; uncomment all of them together, and set `OFFRAMP=anchor`, only
+after Phase 1 has an anchor that actually agreed to onboard you.
+
+
 Start from the templates rather than editing the testnet ones:
 
 - `.env.public.example` — every variable, annotated, for local or non-Render use
@@ -248,8 +255,28 @@ Set both variables together. `env.ts` deliberately does not default
 
 ## Phase 5 — Verify before announcing
 
-Work down this list against the deployed mainnet service. Stop at the first
-failure.
+Run the preflight first. It checks what the boot guards structurally cannot:
+they run inside the process and can only see configuration, while these are
+facts about the outside world — whether the seller account exists on pubnet,
+whether it carries a Circle USDC trustline (without one the account cannot
+receive USDC at all, and the payment fails rather than arriving unmatched),
+whether the service answering on that URL is really the mainnet one.
+
+```bash
+# Static checks only — run it wherever the mainnet env is exported.
+pnpm preflight:mainnet
+
+# Also probe the deployed service and the seller account on pubnet Horizon.
+pnpm preflight:mainnet --api https://<your-mainnet-api>
+```
+
+It exits non-zero only on blocking findings; warnings (no attestation
+configured, no `REDIS_URL`) are printed but do not fail the run. Read the
+warnings anyway — `REDIS_URL` is the one that decides whether you may run more
+than one instance.
+
+Then work down this list against the deployed mainnet service. Stop at the
+first failure.
 
 ```bash
 API=https://<your-mainnet-api>
@@ -275,6 +302,8 @@ Then, by hand:
 - [ ] A **small real payment** — a few USDC — moves a link to `paid`.
 - [ ] A **small real cash-out** through the anchor reaches `settled` and the
       money actually arrives. Do this before anyone else uses the service.
+      *(Not applicable under `OFFRAMP=none` — there is no cash-out leg; the
+      cash-out routes answer 501 and the dashboard hides the button.)*
 - [ ] Webhook deliveries verify against the stored signing secret.
 - [ ] `GET /metrics` requires `METRICS_TOKEN` and is not publicly readable.
 
