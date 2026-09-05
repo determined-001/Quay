@@ -14,6 +14,12 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # This probe watches testanchor.stellar.org, which is the sandbox the
+    # TESTNET deploy cashes out through. A payments-only mainnet (OFFRAMP=none)
+    # has no anchor at all, so the probe would file nightly issues about a
+    # dependency the product no longer has. Set the repo variable
+    # ANCHOR_PROBE_DISABLED=1 to turn it off — see docs/RUNBOOK.md.
+    if: vars.ANCHOR_PROBE_DISABLED != '1'
 
     steps:
       - uses: actions/checkout@v7

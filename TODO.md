@@ -80,8 +80,12 @@ Remaining for this path:
 
 - [ ] Set `OFFRAMP=none` and `NEXT_PUBLIC_OFFRAMP_MODE=none` in the mainnet
       deployment, and leave `DEFAULT_SELLER_SECRET` unset.
-- [ ] Add an `OFFRAMP=none` variant to `render.mainnet.yaml`, or note in the
-      dashboard which variables to omit.
+      *(`render.mainnet.yaml` now declares `OFFRAMP=none` itself; the
+      `NEXT_PUBLIC_*` pair is set on the Vercel web deployment, not there.)*
+- [x] ~~Add an `OFFRAMP=none` variant to `render.mainnet.yaml`~~ — done. The
+      blueprint ships payments-only; the anchor variables, `KYC_ENCRYPTION_KEY`
+      and `DEFAULT_SELLER_SECRET` are one commented block to uncomment together
+      if cash-out is ever enabled.
 - [ ] Decide how the dashboard should explain that sellers cash out themselves —
       right now the button simply is not there, with no copy replacing it.
 
@@ -203,11 +207,11 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
 - [ ] **`REDIS_URL` unset.** Rate-limit counters live in an in-process `Map`, so
       N instances allow N times the configured limit. Set before scaling past
       one instance.
-- [ ] **`.github/workflows/anchor-probe.yml` probes `testanchor.stellar.org`**
-      and auto-files a GitHub issue when that sandbox is down. On a mainnet
-      project it watches the wrong host — repoint it at your anchor or disable
-      it. (It is also a second source of automated repo noise, alongside the
-      Dependabot PRs.)
+- [x] ~~**`.github/workflows/anchor-probe.yml` probes `testanchor.stellar.org`**~~
+      — an off switch now exists: set the repo variable
+      `ANCHOR_PROBE_DISABLED=1` (docs/RUNBOOK.md). Still the right call to set
+      it once mainnet is payments-only, since the probe then watches a
+      dependency the product no longer has. Flipping the variable is yours.
 - [ ] **`AnchorOffRamp` (SEP-24, `packages/offramp/src/anchor.ts`) must stay
       unexported** until its quotes and jobs are persisted through
       `OffRampStateRepository`. It keeps them in in-process `Map`s, so a restart
@@ -217,8 +221,11 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
       substring that pubnet does not contain, send leg hardcoded to XLM
       regardless of the asset withdrawn, and a fabricated placeholder job that
       could re-send a payment); the state-durability blocker remains.
-- [ ] **`db-backup.yml` points at the testnet database.** Repoint before relying
-      on it for mainnet.
+- [ ] **`db-backup.yml` has no database to back up yet.** (Corrected 2026-09-05:
+      it does not point at testnet — it reads `PROD_DATABASE_URL` /
+      `BACKUP_ENCRYPTION_KEY` from repo secrets and self-skips with a warning
+      while they are unset.) Set those secrets to the mainnet Turso database
+      when it exists; nothing in the workflow needs changing.
 - [x] ~~**Dependabot PR #148**~~ — closed 2026-08-22. The repo has no open
       Dependabot PRs; the monthly security-only config is doing its job.
 
@@ -253,11 +260,15 @@ a paid account, or your judgement about real money.
 - [ ] **A least-privilege API key for the synthetic uptime check** (#163), stored
       as a repo secret. The check has been failing since seller auth landed and
       cannot be fixed without a credential you issue.
-- [ ] **Mainnet monitoring targets** (#162). The code change is delegated; the
-      URLs and secrets for `quay-api-mainnet`, and re-enabling the schedule in
-      `.github/workflows/uptime.yml` (disabled in `a0f06d1`), are yours.
-- [ ] **Repoint `anchor-probe.yml` and `db-backup.yml`** at mainnet
-      infrastructure — see §4. Both still watch testnet.
+- [ ] **Mainnet monitoring targets** (#162). The schedule is back on and now
+      publishes to a dedicated `status` branch instead of committing to `main`
+      every five minutes — which is why it was disabled in `a0f06d1` — so the
+      README badges are live again. What is left is yours: set
+      `UPTIME_MAINNET_API_URL` (and optionally `UPTIME_MAINNET_WEB_URL`) as repo
+      variables once `quay-api-mainnet` exists.
+- [ ] **Set `ANCHOR_PROBE_DISABLED=1` and the `PROD_*` backup secrets** once the
+      mainnet service exists — see §4. Both are now variable/secret flips, not
+      code changes.
 
 **Repo settings**
 
@@ -286,6 +297,14 @@ a paid account, or your judgement about real money.
 ---
 
 ## 6. Verification before announcing
+
+Run `pnpm preflight:mainnet --api https://<mainnet-api>` first
+(`scripts/mainnet-preflight.mjs`). It checks what the boot guards cannot see
+from inside the process: that the seller account exists on pubnet and is
+funded, that it carries a trustline to *Circle's* USDC issuer specifically,
+that the deployed service really reports `network: public`, that `/ready` is
+green so the settlement watcher is actually running, and that the database is
+not the `file:` fallback. Blocking findings exit non-zero.
 
 The full list is in `docs/MAINNET.md` (Phase 5). The two that matter most:
 
