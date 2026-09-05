@@ -160,11 +160,4 @@ describe("mainnet guardrails in env.ts", () => {
     const err = await loadEnv();
     expect(err?.message).toMatch(/WATCH_POLL_MS must be a number, got "6 seconds"/);
   });
-
-  it("leaves SOROBAN_RPC_URL undefined on public network rather than defaulting to testnet", async () => {
-    setPublicBase({ SOROBAN_RPC_URL: "" });
-    vi.resetModules();
-    const { env } = await import("../src/env");
-    expect(env.sorobanRpcUrl).toBeUndefined();
-  });
 });

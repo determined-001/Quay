@@ -23,7 +23,6 @@ import {
   type OffRampQuote,
   type OffRampPort,
   type OffRampStateRepository,
-  type AttestationPort,
   type PaymentLink,
   type PaymentRequest,
   type PayoutFieldDescriptor,
@@ -263,8 +262,6 @@ export class LinkService {
   private static readonly POLL_BACKOFF_BASE_MS = 2_000;
   private static readonly POLL_BACKOFF_CAP_MS = 60_000;
   private readonly consecutivePollErrorsByLinkId = new Map<string, number>();
-  /** In-flight attestation tasks, so tests and shutdown can join them. */
-  private readonly attestationsInFlight = new Set<Promise<boolean>>();
 
   constructor(
     private readonly deps: {
@@ -275,12 +272,6 @@ export class LinkService {
       offramp: OffRampPort;
       offrampState: OffRampStateRepository;
       kyc: KycPort;
-      /**
-       * Writes settlement facts to an on-chain registry (issue 9.2). Optional:
-       * unconfigured, receipts simply carry no attestation. Never on the
-       * settlement path — see `attestSettlement`.
-       */
-      attestation?: AttestationPort;
       stellar: StellarConfig;
       /**
        * The operator's own Stellar wallet, as configured for this deployment.
@@ -315,113 +306,6 @@ export class LinkService {
    *  is what the `webhook_deliveries_in_flight` gauge was always meant to mean. */
   webhookQueueDepth(): Promise<number> {
     return this.deps.webhooks.countPending();
-  }
-
-  /**
-   * Resolves once every attestation started so far has settled, successfully or
-   * otherwise. Attestation is fire-and-forget by design, so this exists for the
-   * two callers that genuinely need to join it: tests, and shutdown. Nothing on
-   * a request path may await this.
-   */
-  async whenAttestationsSettled(): Promise<void> {
-    await Promise.allSettled([...this.attestationsInFlight]);
-  }
-
-  /**
-   * Write one settlement fact to the attestation registry and persist the
-   * reference on the link. Resolves `false` — never rejects — when there is no
-   * attester configured, the link is already attested, or the registry could
-   * not be reached. The link stays exactly as settlement left it and the sweep
-   * tries again later.
-   */
-  private attestSettlement(
-    linkId: string,
-    txHash: string,
-    amount: string,
-    asset: AssetRef,
-    ledger: number,
-    log: Logger,
-  ): Promise<boolean> {
-    const attestation = this.deps.attestation;
-    if (!attestation) return Promise.resolve(false);
-
-    const task = (async (): Promise<boolean> => {
-      try {
-        const link = await this.deps.links.findById(linkId);
-        if (!link || link.attestedAt !== null) return false;
-
-        const ref = await attestation.attest({
-          reference: link.reference,
-          txHash,
-          amount,
-          assetCode: asset.code,
-          assetIssuer: asset.issuer,
-          ledger,
-        });
-
-        // Re-read rather than saving the object we started from. Confirming a
-        // Soroban transaction takes seconds, and `save()` writes every column —
-        // so persisting the stale copy would quietly roll back a cash-out the
-        // seller triggered while we were waiting.
-        const fresh = await this.deps.links.findById(linkId);
-        if (!fresh) return false;
-        fresh.attestationContractId = ref.contractId;
-        fresh.attestationTxHash = ref.txHash;
-        fresh.attestationLedger = ref.ledger;
-        fresh.attestedAt = ref.attestedAt;
-        await this.deps.links.save(fresh);
-
-        log.info(
-          {
-            event: "attestation.recorded",
-            linkId,
-            reference: fresh.reference,
-            contractId: ref.contractId,
-            attestationTxHash: ref.txHash,
-            attestationLedger: ref.ledger,
-          },
-          "settlement attested on-chain",
-        );
-        return true;
-      } catch (err) {
-        log.warn(
-          { event: "attestation.failed", linkId, error: err instanceof Error ? err.message : String(err) },
-          "attestation failed — link stays settled but unattested",
-        );
-        return false;
-      }
-    })();
-
-    this.attestationsInFlight.add(task);
-    void task.finally(() => this.attestationsInFlight.delete(task));
-    return task;
-  }
-
-  /**
-   * Retry attestation for settled links that don't have one yet — the path by
-   * which a payment that settled while the registry was unreachable eventually
-   * gets attested anyway. Sequential on purpose: a sick RPC should be probed
-   * once per sweep, not `limit` times at once.
-   *
-   * Returns how many links became attested this pass.
-   */
-  async sweepUnattested(limit = 20, opts: ServiceCallOptions = {}): Promise<number> {
-    if (!this.deps.attestation) return 0;
-    const log = opts.logger ?? this.deps.logger!;
-    const stale = await this.deps.links.listUnattested(limit);
-    let attested = 0;
-    for (const link of stale) {
-      if (!link.txHash) continue;
-      const ledger = await this.deps.links.paymentLedger(link.txHash);
-      // A payment recorded before the ledger column existed can't be attested:
-      // the contract wants the exact ledger and guessing one would put a false
-      // fact into an append-only registry. Leave it unattested and honest.
-      if (ledger === null || ledger === 0) continue;
-      if (await this.attestSettlement(link.id, link.txHash, link.paidAmount ?? link.amount, link.asset, ledger, log)) {
-        attested++;
-      }
-    }
-    return attested;
   }
 
   private buildRequest(link: PaymentLink): PaymentRequest {
@@ -675,11 +559,6 @@ export class LinkService {
       const paidAt = Date.parse(payment.createdAt);
       if (!Number.isNaN(paidAt)) metrics.paymentToPaidLatencySeconds.observe((Date.now() - paidAt) / 1000);
       await this.fireWebhook(link, "link.paid", { overpaid: outcome.overpaid, overpaidAmount: link.overpaidAmount });
-      // Deliberately not awaited. The link is already `paid` and persisted; a
-      // Soroban RPC that is slow, down, or holding an unfunded attester must
-      // cost the watcher tick nothing. Whatever this misses, `sweepUnattested`
-      // picks up later.
-      void this.attestSettlement(link.id, payment.txHash, cumulative, link.asset, payment.ledger, log);
       return true;
     }
 

@@ -56,10 +56,6 @@ export function makeLink(over: Partial<PaymentLink> = {}): PaymentLink {
     offrampFeeCurrency: null,
     offrampFeeSource: null,
     offrampNetTargetAmount: null,
-    attestationContractId: null,
-    attestationTxHash: null,
-    attestationLedger: null,
-    attestedAt: null,
     expiresAt: null,
     isDemo: false,
     createdAt: 0,
@@ -88,10 +84,6 @@ export class FakeLinkRepository implements LinkRepository {
       offrampFeeCurrency: null,
       offrampFeeSource: null,
       offrampNetTargetAmount: null,
-      attestationContractId: null,
-      attestationTxHash: null,
-      attestationLedger: null,
-      attestedAt: null,
       status: "active",
       txHash: null,
       payer: null,
@@ -155,17 +147,6 @@ export class FakeLinkRepository implements LinkRepository {
     return this.payments.find((p) => p.txHash === txHash)?.ledger ?? null;
   }
 
-  async listUnattested(limit: number): Promise<PaymentLink[]> {
-    return [...this.byId.values()]
-      .filter(
-        (l) =>
-          l.txHash !== null &&
-          l.attestedAt === null &&
-          ["paid", "offramp_pending", "offramp_settled", "offramp_failed"].includes(l.status),
-      )
-      .sort((a, b) => a.createdAt - b.createdAt)
-      .slice(0, limit);
-  }
 
   get(id: string): PaymentLink | undefined {
     return this.byId.get(id);

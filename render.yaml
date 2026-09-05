@@ -12,11 +12,6 @@
 #   JWT_SECRET                      session signing secret
 #   SERVER_SIGNING_SECRET           S... the platform's own stable SEP-10 identity
 #
-# SERVER_SIGNING_SECRET is also the on-chain attester (issue 9.2), so its
-# account MUST be funded on testnet to pay contract invocation fees. An
-# unfunded attester fails attestation only — settlement is proven by the
-# classic ledger and never blocks on it.
-#
 # Generate each 64-hex value with:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
@@ -77,14 +72,3 @@ services:
       # changes on every restart and any wallet that cached it breaks.
       - key: SERVER_SIGNING_SECRET
         sync: false
-      # On-chain settlement attestation (issue 9.2). WITHOUT THIS the API boots
-      # green, takes payments, and attests nothing — `createAttestation` returns
-      # undefined and every receipt renders without the block. That failure is
-      # invisible from the outside, which is exactly why it is declared here
-      # rather than left to the dashboard: the contract being deployed and the
-      # product actually calling it are two different claims.
-      # Contract id is public (see contracts/README.md), so it is not a secret.
-      - key: ATTESTATION_CONTRACT_ID
-        value: CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3
-      - key: SOROBAN_RPC_URL
-        value: https://soroban-testnet.stellar.org

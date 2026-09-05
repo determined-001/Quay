@@ -83,8 +83,8 @@ permanent, not an outage) on `/:id/cash-out`, `/:id/cash-out/quote` and
 `/:id/offramp-requirements`; and the cash-out poller and anchor probe never
 start.
 
-**If you are shipping payments-only, skip to Phase 2.** Phase 1 and Phase 4
-apply only when you add the off-ramp.
+**If you are shipping payments-only, skip to Phase 2.** Phase 1 applies only
+when you add the off-ramp.
 
 ---
 
@@ -153,8 +153,9 @@ There is no friendbot on pubnet. Both accounts must be funded with real XLM.
    reserve, then add a **USDC trustline** to Circle's issuer. Until the
    trustline exists, the account cannot receive USDC at all and the checkout
    preflight will reject links.
-2. **Signing identity** (`SERVER_SIGNING_SECRET`) — only needs XLM if you enable
-   Soroban attestation (Phase 4). It pays contract invocation fees.
+2. **Signing identity** (`SERVER_SIGNING_SECRET`) — needs no funding. It signs
+   SEP-10 challenges offline and is published as `SIGNING_KEY` in
+   `/.well-known/stellar.toml`; the account never has to exist on-chain.
 
 ### Verify the USDC issuer
 
@@ -228,32 +229,7 @@ And set `CORS_ORIGINS` on the API to the real web origin. No localhost.
 
 ---
 
-## Phase 4 — Soroban attestation (optional)
-
-The contract id in `render.yaml`
-(`CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3`) is a **testnet**
-deployment and will not resolve on pubnet.
-
-Either leave `ATTESTATION_CONTRACT_ID` and `SOROBAN_RPC_URL` both unset —
-receipts then honestly state they carry no attestation, and settlement is
-unaffected, being proven by the classic ledger either way — or redeploy:
-
-```bash
-cd contracts
-stellar keys generate quay-deployer --network public   # then fund it with real XLM
-stellar contract build
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/quay_attest.wasm \
-  --source quay-deployer --network public
-```
-
-Set both variables together. `env.ts` deliberately does not default
-`SOROBAN_RPC_URL` on public, so an unset value can never silently mean
-"testnet".
-
----
-
-## Phase 5 — Verify before announcing
+## Phase 4 — Verify before announcing
 
 Run the preflight first. It checks what the boot guards structurally cannot:
 they run inside the process and can only see configuration, while these are
@@ -270,10 +246,9 @@ pnpm preflight:mainnet
 pnpm preflight:mainnet --api https://<your-mainnet-api>
 ```
 
-It exits non-zero only on blocking findings; warnings (no attestation
-configured, no `REDIS_URL`) are printed but do not fail the run. Read the
-warnings anyway — `REDIS_URL` is the one that decides whether you may run more
-than one instance.
+It exits non-zero only on blocking findings; warnings are printed but do not
+fail the run. Read them anyway — `REDIS_URL` is the one that decides whether you
+may run more than one instance.
 
 Then work down this list against the deployed mainnet service. Stop at the
 first failure.

@@ -395,94 +395,6 @@ export interface KycRepository {
 }
 
 // ---------------------------------------------------------------------------
-// Attestation port
-// ---------------------------------------------------------------------------
-// Quay tells a seller their invoice was paid. Without this port that claim
-// lives only in Quay's own database, so a receipt is exactly as trustworthy as
-// whoever runs the API — an odd thing to ask of a checkout whose whole point is
-// that it never touches the money. An attester publishes the settlement fact
-// somewhere the operator cannot quietly rewrite, and a receipt becomes
-// verifiable without asking Quay anything.
-//
-// The port deals only in strings and numbers. The Soroban implementation lives
-// in `packages/soroban`; the domain never learns that a contract is involved,
-// let alone which chain hosts it.
-//
-// Attestation is never on the settlement path. A link becomes `paid` because a
-// payment landed on the classic ledger, and nothing here may change that — an
-// attester that is down, unfunded, or unconfigured degrades a receipt to "not
-// yet attested" and nothing more.
-
-/** What the attester recorded, and where a third party can go to see it. */
-export interface AttestationRef {
-  /** Registry the attestation was written to (a Soroban contract id today). */
-  contractId: string;
-  /**
-   * Hash of the transaction that WROTE the attestation — not the payment's own
-   * transaction. The payment hash is already on `PaymentLink.txHash`; these are
-   * two different facts on two different ledgers and conflating them makes a
-   * receipt unverifiable.
-   *
-   * Null when the attestation was found already present rather than written by
-   * this call: the registry stores the fact, not the transaction that carried
-   * it, so that hash is genuinely unavailable. `attestedAt` still comes from
-   * the registry, so the receipt remains verifiable.
-   */
-  txHash: string | null;
-  /**
-   * Ledger sequence the attestation was written in — null alongside a null
-   * `txHash`, for the same reason. Note this is NOT the ledger the payment
-   * settled in; that one is on the receipt the registry hands back.
-   */
-  ledger: number | null;
-  /** Epoch ms the attestation was recorded. */
-  attestedAt: number;
-}
-
-/** A settlement fact, as read back out of the registry by anyone. */
-export interface AttestationReceipt {
-  /** Classic-ledger transaction that delivered the payment. */
-  paymentTxHash: string;
-  amount: string;
-  assetCode: string;
-  /** Issuer address, or null for native. */
-  assetIssuer: string | null;
-  /** Classic ledger sequence the payment settled in. */
-  ledger: number;
-  /** Epoch ms, as recorded by the registry itself. */
-  attestedAt: number;
-  /** Who vouched for it. A verifier decides whether it trusts this identity,
-   *  exactly as it decides whether to trust an asset issuer. */
-  attester: string;
-}
-
-export interface AttestationPort {
-  /** The registry being written to — surfaced on receipts so a verifier knows
-   *  where to look, and so a later redeploy can't invalidate old receipts. */
-  readonly contractId: string;
-
-  /**
-   * Record that a payment settled against `reference`.
-   *
-   * Implementations must treat "already attested" as success, not failure: the
-   * sweep re-attempts links whose first attestation attempt failed, and a
-   * duplicate must not thrash. Any other failure throws — the caller is
-   * expected to swallow it and leave the link unattested for the next sweep.
-   */
-  attest(input: {
-    reference: string;
-    txHash: string;
-    amount: string;
-    assetCode: string;
-    assetIssuer: string | null;
-    ledger: number;
-  }): Promise<AttestationRef>;
-
-  /** Read an attestation back. Null when the reference was never attested. */
-  verify(reference: string): Promise<AttestationReceipt | null>;
-}
-
-// ---------------------------------------------------------------------------
 // Repository ports
 // ---------------------------------------------------------------------------
 
@@ -514,8 +426,7 @@ export interface LinkPaymentRecord {
   payer: string;
   amount: string;
   asset: AssetRef;
-  /** Ledger sequence the payment settled in — the attestation names it, and the
-   *  retry sweep has no other way to recover it after the watcher tick is gone. */
+  /** Ledger sequence the payment settled in. */
   ledger: number;
   createdAt: number;
 }
@@ -527,14 +438,6 @@ export interface LinkRepository {
   listBySeller(sellerId: string): Promise<PaymentLink[]>;
   /** All links currently in a given status (used by the cash-out poller). */
   listByStatus(status: PaymentLink["status"]): Promise<PaymentLink[]>;
-  /**
-   * Settled links that carry a payment but no attestation yet (issue 9.2),
-   * oldest first, capped at `limit`. Drives the retry sweep: the first
-   * attestation attempt happens inline on settlement and is allowed to fail,
-   * so this is the path by which a link written while the registry was
-   * unreachable eventually gets attested anyway.
-   */
-  listUnattested(limit: number): Promise<PaymentLink[]>;
   /** Distinct destination addresses that currently have at least one active link. */
   activeDestinations(): Promise<string[]>;
   /** Active (or underpaid) links whose value lands in `destination`. */

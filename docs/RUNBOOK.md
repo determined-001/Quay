@@ -118,7 +118,7 @@ both services from the same commit. What differs:
   anchor URL, and more — the full table is in `docs/MAINNET.md`). A mainnet
   deploy that fails to go `/ready` is very often a guardrail doing exactly its
   job, not a code regression — read the boot error before assuming otherwise.
-- Run `docs/MAINNET.md` Phase 5's verification checklist after **every**
+- Run `docs/MAINNET.md` Phase 4's verification checklist after **every**
   mainnet deploy, not just the first — it is cheap, and it catches a wrong
   `SIGNING_KEY` or a rejected wallet signature before a real customer does.
 
@@ -331,35 +331,6 @@ corrupted data.
   Coordinate with whichever anchor integration is configured
   (`OFFRAMP=testanchor`) since it will have seen the old public key during
   its own KYC/auth flow.
-
-## Attestation registry unreachable
-
-`ATTESTATION_CONTRACT_ID` + `SOROBAN_RPC_URL` enable on-chain settlement
-attestation (issue 9.2, contract in `contracts/quay-attest`). When the Soroban
-RPC is down, the attester is unfunded, or the contract id is wrong:
-
-- **Nothing about settlement changes.** A link becomes `paid` because the
-  payment landed on the classic ledger. `attestSettlement`
-  (`apps/api/src/services/link-service.ts`) is fired without being awaited and
-  swallows every failure, so a dead RPC costs the watcher tick nothing.
-- Affected links keep `attested_at = NULL` and their receipts render without an
-  attestation block. That is the correct display — the fact genuinely is not in
-  the registry yet.
-- `startAttestationSweeper` retries them every `ATTESTATION_SWEEP_MS`
-  (default 60s, 20 links per pass, oldest first). No manual action is needed
-  once the RPC recovers; the backlog drains on its own.
-- Grep the logs for `attestation.failed` to see why. The two common causes are
-  an unfunded attester (the `SERVER_SIGNING_SECRET` identity pays invocation
-  fees) and an unreachable `SOROBAN_RPC_URL`.
-- A payment recorded before the `link_payments.ledger` column existed is
-  skipped permanently: the contract wants the exact settling ledger and the
-  registry is append-only, so writing a guessed one would be worse than leaving
-  the receipt unattested. Those links stay in `listUnattested` and are re-checked
-  cheaply each sweep without ever being written.
-- **Rotating `SERVER_SIGNING_SECRET` changes who attested.** Existing
-  attestations keep naming the old key, which is correct — they record who
-  vouched at the time. Fund the new identity before rotating, or attestation
-  silently stops working while settlement carries on fine.
 
 ## Anchor outage
 

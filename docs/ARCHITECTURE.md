@@ -16,7 +16,6 @@ graph LR
     core["@checkout/core<br/>(domain — no chain SDK)"]
     stellar["@checkout/stellar<br/>(RailPort + WatcherPort)"]
     offramp["@checkout/offramp<br/>(OffRampPort)"]
-    soroban["@checkout/soroban<br/>(AttestationPort)"]
   end
   subgraph apps
     api["@checkout/api<br/>(Hono + Drizzle + worker)"]
@@ -25,11 +24,9 @@ graph LR
 
   stellar --> core
   offramp --> core
-  soroban --> core
   api --> core
   api --> stellar
   api --> offramp
-  api --> soroban
   web --> core
 
   style core fill:#2d6a4f,color:#fff
@@ -40,7 +37,7 @@ graph LR
   as `BigInt`, never floats), the pure payment matcher (`matching/match-payment.ts`), the
   SEP-7 URI builder (`sep7/build-uri.ts`), zod request schemas (`schemas.ts`), and —
   critically — the **port interfaces** (`ports/index.ts`): `RailPort`, `WatcherPort`,
-  `OffRampPort`, `AttestationPort`, plus the repository ports (`LinkRepository`,
+  `OffRampPort`, plus the repository ports (`LinkRepository`,
   `SellerRepository`, `WebhookRepository`, `WatcherStateRepository`).
 - **`packages/stellar`** — implements `RailPort` (`StellarRail`, builds SEP-7 pay URIs)
   and `WatcherPort` (`HorizonWatcher`, polls Horizon for payments and normalizes them).
@@ -48,10 +45,6 @@ graph LR
   fake FX rate, no money moves — the default) and `TestAnchorOffRamp` (real SEP-10 → SEP-38
   → SEP-6 against `testanchor.stellar.org`). `sep10.ts` is the *client*-side reference this
   doc's SEP-10 diagram mirrors on the server side, if/when 6.1 (wallet-native login) lands.
-- **`packages/soroban`** — implements `AttestationPort` (`SorobanAttestation`), which
-  writes settlement facts to the `quay-attest` contract (`contracts/quay-attest`) so a
-  receipt can be checked without trusting whoever runs the API. It is the one adapter the
-  product works fine without: unconfigured, receipts simply carry no attestation.
 - **`apps/api`** — the composition root. `services/container.ts` wires one `RailPort` +
   one `WatcherPort` + one `OffRampPort` + the Drizzle repositories into `LinkService` and
   `WatcherLoop`, then Hono routes call `LinkService`. This is the *only* place all three
@@ -83,7 +76,6 @@ a PR that violates the boundary fails the build, not just code review.
 | `RailPort` | `buildRequest()`, `isValidDestination()` | `StellarRail` (`packages/stellar`) | How a payer is asked to pay — SEP-7 URI today, could be an EVM calldata blob or a Lightning invoice for a different chain. |
 | `WatcherPort` | `latestCursor()`, `fetchSince()` | `HorizonWatcher` (`packages/stellar`) | How incoming payments are observed — polling Horizon today; a streaming implementation (Horizon SSE, or a different chain's event log) satisfies the same interface with no change to `WatcherLoop`. |
 | `OffRampPort` | `quote()`, `initiate()`, `status()` | `MockAnchorOffRamp` (offline demo) or `TestAnchorOffRamp` (real SEP-10→38→6) (`packages/offramp`) | How a seller's stablecoin becomes local currency — the actual anchor protocol conversation. Also wrapped by `CircuitBreakerOffRamp` (`apps/api/src/services/circuit-breaker.ts`) so a down anchor can't be hammered by every cash-out poll. |
-| `AttestationPort` | `attest()`, `verify()` | `SorobanAttestation` (`packages/soroban`) → `contracts/quay-attest` | Where a settlement fact is published so it survives independently of this database — a Soroban registry today, but nothing in the domain says "contract" or "Stellar". Alone among the ports it is **optional**: it is never on the settlement path, so an absent or failing implementation costs a receipt its attestation and nothing else. |
 
 All four are consumed only by `apps/api` (`LinkService`, `WatcherLoop`, `startCashOutPoller`)
 — `packages/core`'s domain logic (the matcher, the status machine) takes their *output*

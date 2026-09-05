@@ -17,7 +17,7 @@ export interface NormalizedPayment {
   // sent to an M-address. Null for ordinary G-address payments.
   toMuxedId: string | null;
   createdAt: string;
-  /** Ledger sequence the payment settled in. Carried so an attestation can name
+  /** Ledger sequence the payment settled in. Carried so a settled payment can name
    *  the exact ledger without a second Horizon round-trip. */
   ledger: number;
 }

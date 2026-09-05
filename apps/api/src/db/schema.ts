@@ -44,17 +44,6 @@ export const links = sqliteTable("links", {
   offrampFeeCurrency: text("offramp_fee_currency"),
   offrampFeeSource: text("offramp_fee_source"), // "anchor" | "estimated"
   offrampNetTargetAmount: text("offramp_net_target_amount"),
-  /**
-   * On-chain settlement attestation (issue 9.2). All four stay null until the
-   * attester writes the receipt to the registry — settlement never waits on
-   * this. The contract id is stored per row, not read from config at render
-   * time, so redeploying the registry can't repoint historical receipts at a
-   * contract that never held them.
-   */
-  attestationContractId: text("attestation_contract_id"),
-  attestationTxHash: text("attestation_tx_hash"),
-  attestationLedger: integer("attestation_ledger"),
-  attestedAt: integer("attested_at"),
   expiresAt: integer("expires_at"),
   /** Set to 1 for rows created by the demo seed script. Shown as a badge in the
    *  dashboard and cleaned up by `pnpm demo:reset` / POST /demo/reset. */
@@ -79,8 +68,8 @@ export const linkPayments = sqliteTable("link_payments", {
   amount: text("amount").notNull(),
   assetCode: text("asset_code").notNull(),
   assetIssuer: text("asset_issuer"), // null = native XLM
-  /** Ledger the payment settled in. Nullable: rows written before issue 9.2
-   *  have no value, and an attestation for those is simply skipped. */
+  /** Ledger the payment settled in. Nullable: rows written before the column
+   *  existed have no value. */
   ledger: integer("ledger"),
   createdAt: integer("created_at").notNull(),
 });

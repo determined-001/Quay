@@ -56,7 +56,6 @@ const OPEN_STATUSES = ["active", "underpaid"];
 // A payment that settled is worth attesting regardless of what the seller did
 // with the proceeds afterwards, so the off-ramp states stay in scope — the
 // attestation is about the buyer's payment, not the cash-out.
-const ATTESTABLE_STATUSES = ["paid", "offramp_pending", "offramp_settled", "offramp_failed"];
 
 function assetFromRow(row: LinkRow): AssetRef {
   return { code: row.assetCode, issuer: row.assetIssuer ?? null };
@@ -87,10 +86,6 @@ function rowToLink(row: LinkRow): PaymentLink {
     offrampFeeCurrency: row.offrampFeeCurrency ?? null,
     offrampFeeSource: row.offrampFeeSource ?? null,
     offrampNetTargetAmount: row.offrampNetTargetAmount ?? null,
-    attestationContractId: row.attestationContractId ?? null,
-    attestationTxHash: row.attestationTxHash ?? null,
-    attestationLedger: row.attestationLedger ?? null,
-    attestedAt: row.attestedAt ?? null,
     expiresAt: row.expiresAt ?? null,
     isDemo: row.isDemo ?? false,
     createdAt: row.createdAt,
@@ -128,10 +123,6 @@ export class DrizzleLinkRepository implements LinkRepository {
       offrampFeeCurrency: null,
       offrampFeeSource: null,
       offrampNetTargetAmount: null,
-      attestationContractId: null,
-      attestationTxHash: null,
-      attestationLedger: null,
-      attestedAt: null,
       expiresAt: input.expiresAt,
       isDemo: input.isDemo ?? false,
       createdAt: now,
@@ -158,25 +149,6 @@ export class DrizzleLinkRepository implements LinkRepository {
 
   async listByStatus(status: PaymentLink["status"]): Promise<PaymentLink[]> {
     const rows = await this.db.select().from(links).where(eq(links.status, status));
-    return rows.map(rowToLink);
-  }
-
-  async listUnattested(limit: number): Promise<PaymentLink[]> {
-    const rows = await this.db
-      .select()
-      .from(links)
-      .where(
-        and(
-          inArray(links.status, ATTESTABLE_STATUSES),
-          isNotNull(links.txHash),
-          // `attested_at` is the "is it in the registry" flag, not
-          // `attestation_tx_hash` — an attestation we found already present
-          // has no transaction hash of ours, and must not re-sweep forever.
-          isNull(links.attestedAt),
-        ),
-      )
-      .orderBy(links.createdAt)
-      .limit(limit);
     return rows.map(rowToLink);
   }
 
@@ -215,10 +187,6 @@ export class DrizzleLinkRepository implements LinkRepository {
         offrampFeeCurrency: link.offrampFeeCurrency,
         offrampFeeSource: link.offrampFeeSource,
         offrampNetTargetAmount: link.offrampNetTargetAmount,
-        attestationContractId: link.attestationContractId,
-        attestationTxHash: link.attestationTxHash,
-        attestationLedger: link.attestationLedger,
-        attestedAt: link.attestedAt,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));

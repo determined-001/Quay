@@ -75,12 +75,6 @@ async function main(): Promise<void> {
       // can tell "the anchor is down" apart from "the API is down" without
       // tailing logs.
       anchor: container.service.healthSnapshot(),
-      // On-chain settlement attestation (issue 9.2). Published here because
-      // "the contract is deployed" and "the running product actually calls it"
-      // are different claims, and only the second one is worth anything to
-      // someone deciding whether to trust a receipt. `enabled: false` is the
-      // honest answer when it is off, not an omission.
-      attestation: container.attestation,
     });
   });
 

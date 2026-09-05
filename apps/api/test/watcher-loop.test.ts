@@ -127,11 +127,6 @@ function makeFakeLinkRepo(initial: PaymentLink[]): LinkRepository {
       async paymentLedger(txHash: string): Promise<number | null> {
       return payments.find((p) => p.txHash === txHash)?.ledger ?? null;
     },
-    async listUnattested(limit: number): Promise<PaymentLink[]> {
-      return [...byId.values()]
-        .filter((l) => l.txHash !== null && l.attestedAt === null && l.status !== "active")
-        .slice(0, limit);
-    },
   };
 }
 
@@ -251,10 +246,6 @@ function makeTestLink(overrides: Partial<PaymentLink> = {}): PaymentLink {
     offrampFeeCurrency: null,
     offrampFeeSource: null,
     offrampNetTargetAmount: null,
-    attestationContractId: null,
-    attestationTxHash: null,
-    attestationLedger: null,
-    attestedAt: null,
     expiresAt: null,
     isDemo: false,
     createdAt: Date.now(),

@@ -24,7 +24,6 @@ COPY apps/api/package.json apps/api/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/stellar/package.json packages/stellar/package.json
 COPY packages/offramp/package.json packages/offramp/package.json
-COPY packages/soroban/package.json packages/soroban/package.json
 
 RUN pnpm install --frozen-lockfile --filter @checkout/api...
 
@@ -44,7 +43,6 @@ WORKDIR /app
 COPY packages/core packages/core
 COPY packages/stellar packages/stellar
 COPY packages/offramp packages/offramp
-COPY packages/soroban packages/soroban
 COPY apps/api apps/api
 
 WORKDIR /app/apps/api
@@ -69,7 +67,6 @@ COPY apps/api/package.json apps/api/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/stellar/package.json packages/stellar/package.json
 COPY packages/offramp/package.json packages/offramp/package.json
-COPY packages/soroban/package.json packages/soroban/package.json
 
 # pnpm's content-addressable store hardlinks into node_modules, but both live in
 # this layer, so the store is pure duplicated weight in the shipped image. It has

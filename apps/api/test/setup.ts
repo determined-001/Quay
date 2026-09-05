@@ -286,7 +286,6 @@ export async function createTestContainer(): Promise<TestContainer> {
     webhookGuard: async () => ({ ok: true }) as const,
     metricsToken: "test-metrics-token",
     ready: async () => true,
-    attestation: { enabled: false, contractId: null },
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,
     getWatcherCircuitBreakerStatus: () => [],

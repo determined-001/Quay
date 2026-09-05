@@ -37,7 +37,6 @@ function fakeContainer(
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     metricsToken: "test-metrics-token",
     ready: async () => true,
-    attestation: { enabled: false, contractId: null },
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     watcherLagSeconds: () => 0,
     circuitBreakerState: () => 0,

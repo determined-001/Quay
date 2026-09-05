@@ -49,19 +49,6 @@ export interface PublicReceipt {
   paidAmount: string | null;
   createdAt: number;
   updatedAt: number;
-  /**
-   * On-chain settlement attestation, or null when this payment has not been
-   * attested. `refHash` is what the registry is keyed by — the reference itself
-   * is never written on-chain — so it is the value a holder looks up to check
-   * this receipt without trusting whoever served it.
-   */
-  attestation: {
-    contractId: string;
-    refHash: string;
-    txHash: string | null;
-    ledger: number | null;
-    attestedAt: number;
-  } | null;
 }
 
 export interface KycView {

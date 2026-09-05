@@ -40,7 +40,6 @@ const mockLinks: LinkRepository = {
   recordPayment: vi.fn(),
   sumPaymentsForLink: vi.fn(),
   paymentLedger: vi.fn(),
-  listUnattested: vi.fn(),
 };
 
 const mockState: WatcherStateRepository = {
