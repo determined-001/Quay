@@ -208,6 +208,27 @@ export function describeError(err: CheckoutError): string {
  * - 4xx/5xx → extract `{ error: string }` envelope and throw `CheckoutError`
  * - Network failure → throw `CheckoutError` with code `"unreachable"`
  */
+/**
+ * Offset between this browser's clock and the API's, in ms, learned from the
+ * `Date` header of every response.
+ *
+ * A checkout countdown driven by `Date.now()` is wrong by however far the
+ * buyer's clock is off — and phones are routinely minutes out. Since `expiresAt`
+ * is a server timestamp, comparing it to a skewed local clock can show time
+ * remaining on a link the server already considers expired, or the reverse.
+ */
+let serverSkewMs = 0;
+
+/** `Date.now()` corrected onto the server's clock. */
+export function serverNow(): number {
+  return Date.now() + serverSkewMs;
+}
+
+/** Exposed for tests; the header path is the real one. */
+export function setServerSkewForTest(ms: number): void {
+  serverSkewMs = ms;
+}
+
 async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: string; raw?: boolean }): Promise<T> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -226,6 +247,15 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
     });
   } catch {
     throw new CheckoutError("unreachable", 0, "Network request failed");
+  }
+
+  // Learn the clock offset from any response, including error ones — the
+  // header is just as good there, and a failing poll is exactly when a stale
+  // countdown would mislead.
+  const dateHeader = res.headers.get("date");
+  if (dateHeader) {
+    const serverMs = Date.parse(dateHeader);
+    if (!Number.isNaN(serverMs)) serverSkewMs = serverMs - Date.now();
   }
 
   if (!res.ok) {

@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { api, type LinkWithRequest, type PaymentLink } from "../../lib/api";
+import { api, serverNow, type LinkWithRequest, type PaymentLink } from "../../lib/api";
 
 const WalletPayButton = dynamic(() => import("./WalletPayButton"), {
   ssr: false,
@@ -28,6 +28,9 @@ const TERMINAL = new Set([
 const SETTLED = new Set(["paid", "offramp_pending", "offramp_settled", "offramp_failed"]);
 
 const BASE_INTERVAL_MS = 4_000;
+/** Below this, the countdown turns into a warning — a buyer mid-transfer needs
+ *  to know the window is closing, not discover it after signing. */
+const EXPIRY_WARNING_MS = 2 * 60_000;
 const BACKOFF_MULTIPLIER = 2;
 const MAX_FAILURES_BEFORE_BACKOFF = 3;
 
@@ -48,6 +51,32 @@ function terminalCopy(status: string): { heading: string; detail: string } {
     default:
       return { heading: "Unavailable", detail: "This link is no longer active." };
   }
+}
+
+/** "9:41", or "0:07". Always mm:ss so the width does not jump every tick. */
+function formatRemaining(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+/** The countdown strip shown above the QR while a link is still payable. */
+function ExpiryCountdown({ msRemaining }: { msRemaining: number }) {
+  const urgent = msRemaining <= EXPIRY_WARNING_MS;
+  return (
+    <div
+      className={urgent ? "status-rail status-rail--warn" : "status-rail"}
+      // Announce only in the last two minutes: a screen reader repeating the
+      // seconds for a ten-minute window would be unusable.
+      aria-live={urgent ? "polite" : "off"}
+      style={{ marginBottom: 12 }}
+    >
+      {urgent ? "⚠ " : "⏳ "}
+      Expires in <strong style={{ marginLeft: 4 }}>{formatRemaining(msRemaining)}</strong>
+      {urgent ? " — finish your transfer soon" : ""}
+    </div>
+  );
 }
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -76,8 +105,33 @@ export default function CheckoutClient({
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const pollingRef = useRef(false);
 
-  const isTerminal = TERMINAL.has(link.status);
+  // ── Expiry countdown ─────────────────────────────────────────────────────
+
+  // Ticks once a second so the countdown moves; the value itself is derived
+  // from serverNow() rather than stored, so a clock correction from any
+  // response is picked up on the next tick.
+  const [, forceTick] = useState(0);
+  const expiresAt = link.expiresAt ?? null;
+
+  const msRemaining = expiresAt === null ? null : expiresAt - serverNow();
+  /**
+   * Expired by the server's clock, whatever the stored status says.
+   *
+   * The sweep that flips `active` to `expired` runs on the watcher tick, so
+   * there is a window where a link is past its deadline and still stored as
+   * active. Rendering a payable QR in that window invites a payment the seller
+   * has already stopped expecting, so the deadline wins over the status.
+   */
+  const expiredByClock = msRemaining !== null && msRemaining <= 0;
+
+  const isTerminal = TERMINAL.has(link.status) || expiredByClock;
   const isSettled = SETTLED.has(link.status);
+
+  useEffect(() => {
+    if (expiresAt === null || isSettled || TERMINAL.has(link.status)) return;
+    const id = setInterval(() => forceTick((n) => n + 1), 1_000);
+    return () => clearInterval(id);
+  }, [expiresAt, isSettled, link.status]);
   const connectionLost = consecutiveFails >= MAX_FAILURES_BEFORE_BACKOFF;
 
   // ── Poll ──────────────────────────────────────────────────────────────────
@@ -216,12 +270,12 @@ export default function CheckoutClient({
 
   // ── RENDER: Other terminal (expired / cancelled) ─────────────────────────
 
-  if (link.status === "expired" || link.status === "cancelled") {
-    const copy = terminalCopy(link.status);
+  if (link.status === "expired" || link.status === "cancelled" || expiredByClock) {
+    const copy = terminalCopy(link.status === "cancelled" ? "cancelled" : "expired");
     return (
       <div className={embed ? "checkout checkout--embed" : "checkout"}>
         <div className="error-icon" aria-hidden>
-          {link.status === "expired" ? "⏰" : "✕"}
+          {link.status === "cancelled" ? "✕" : "⏰"}
         </div>
         <div className="error-heading">{copy.heading}</div>
         <p className="muted" style={{ marginTop: 8 }}>
@@ -266,6 +320,8 @@ export default function CheckoutClient({
         {link.amount}
         <span className="asset">{link.asset.code}</span>
       </div>
+
+      {msRemaining !== null && <ExpiryCountdown msRemaining={msRemaining} />}
 
       <div className="qr-wrap">
         <QRCodeSVG value={request.uri} size={embed ? 140 : 180} fgColor="#0b0f14" bgColor="#ffffff" level="M" />

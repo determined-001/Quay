@@ -177,6 +177,10 @@ a { color: inherit; }
 .wallet-pay { margin: 12px 0 0; }
 .wallet-pay + .btn { margin-top: 12px; }
 .status-rail { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 20px; font-size: 13px; color: var(--muted); }
+/* Expiry countdown. The warning variant is deliberately amber rather than the
+   error red used for terminal states: the link is still payable here, and a
+   buyer mid-transfer should read "hurry", not "too late". */
+.status-rail--warn { color: #d29922; font-weight: 600; }
 .spinner { width: 13px; height: 13px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .settled { color: var(--accent); font-weight: 600; font-size: 18px; }
