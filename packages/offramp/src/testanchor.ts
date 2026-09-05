@@ -16,6 +16,7 @@ import {
 } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { Sep10Client } from "./sep10";
+import { fetchStellarToml, listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
 import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6Withdraw } from "./sep6";
 
@@ -49,6 +50,18 @@ import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6
 // fields from whatever happened to be in a cash-out request.
 
 const DEFAULT_BASE_URL = "https://testanchor.stellar.org";
+
+/** The paths this adapter hardcoded before SEP-1 discovery existed. Used only
+ *  when the TOML cannot be read, and only relative to the configured origin. */
+function fallbackEndpoints(origin: string) {
+  return {
+    webAuthEndpoint: `${origin}/auth`,
+    transferServer: `${origin}/sep6`,
+    transferServerSep24: `${origin}/sep24`,
+    anchorQuoteServer: `${origin}/sep38`,
+    kycServer: `${origin}/sep12`,
+  };
+}
 const DEFAULT_HOME_DOMAIN = "testanchor.stellar.org";
 
 export interface TestAnchorOptions {
@@ -64,6 +77,12 @@ export interface TestAnchorOptions {
    * Maps to the OFFRAMP_TYPE env var.
    */
   preferredWithdrawType?: string;
+  /**
+   * Our network's passphrase. When set, SEP-1 discovery refuses an anchor whose
+   * TOML declares a different one — a mainnet deployment pointed at a testnet
+   * anchor by a typo fails loudly instead of quoting against the wrong chain.
+   */
+  expectedNetworkPassphrase?: string;
   /** Optional logger; if absent, all anchor.* events are dropped (NOOP_LOGGER). */
   logger?: Logger;
 }
@@ -77,8 +96,13 @@ function mapSep6Status(status: string): OffRampJobStatus {
 export class TestAnchorOffRamp implements OffRampPort {
   readonly mode: OffRampMode = "seller_initiated";
 
-  private readonly baseUrl: string;
-  private readonly auth: Sep10Client;
+  /** Fallback origin, used only when SEP-1 discovery fails. */
+  private readonly fallbackBaseUrl: string;
+  private readonly homeDomain: string;
+  private readonly sellerKeypair: Keypair;
+  private readonly expectedNetworkPassphrase: string | undefined;
+  private discoveryPromise: Promise<Sep1DiscoveryInfo> | null = null;
+  private authClient: Sep10Client | null = null;
   private readonly state: OffRampStateRepository;
   private readonly logger: Logger;
   /** Operator's chosen SEP-6 withdraw type; undefined means "infer, and refuse
@@ -94,15 +118,67 @@ export class TestAnchorOffRamp implements OffRampPort {
   private readonly anchorName: string;
 
   constructor(opts: TestAnchorOptions) {
-    this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
-    this.anchorName = opts.homeDomain ?? DEFAULT_HOME_DOMAIN;
+    this.fallbackBaseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    this.homeDomain = opts.homeDomain ?? DEFAULT_HOME_DOMAIN;
+    this.anchorName = this.homeDomain;
+    this.sellerKeypair = opts.sellerKeypair;
+    this.expectedNetworkPassphrase = opts.expectedNetworkPassphrase;
     this.state = opts.state;
     this.preferredWithdrawType = opts.preferredWithdrawType;
     this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.anchor", anchor: this.anchorName });
-    this.auth = new Sep10Client(opts.sellerKeypair, {
-      baseUrl: this.baseUrl,
-      homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
-    }, this.logger);
+  }
+
+  /**
+   * SEP-1 discovery for this anchor, resolved once and cached (the cache lives
+   * in sep1.ts and expires after five minutes).
+   *
+   * Every endpoint below comes from here rather than from a hardcoded path, so
+   * `homeDomain` is the only configuration a new anchor needs (issue #14).
+   * `baseUrl` survives as the origin the guessed paths hang off when discovery
+   * itself fails.
+   */
+  private async discover(): Promise<Sep1DiscoveryInfo> {
+    if (!this.discoveryPromise) {
+      this.discoveryPromise = fetchStellarToml(this.homeDomain, {
+        expectedNetworkPassphrase: this.expectedNetworkPassphrase,
+        logger: this.logger,
+      }).then((info) =>
+        info.fallback
+          ? { ...info, ...fallbackEndpoints(this.fallbackBaseUrl), homeDomain: this.homeDomain }
+          : info,
+      );
+      // A rejected discovery must not be cached as the answer forever.
+      this.discoveryPromise.catch(() => {
+        this.discoveryPromise = null;
+      });
+    }
+    return this.discoveryPromise;
+  }
+
+  /** SEP-10 client, built from the discovered auth endpoint and signing key. */
+  private async auth10(): Promise<Sep10Client> {
+    const d = await this.discover();
+    if (!this.authClient) {
+      this.authClient = new Sep10Client(
+        this.sellerKeypair,
+        { baseUrl: d.webAuthEndpoint, homeDomain: this.homeDomain, signingKey: d.signingKey },
+        this.logger,
+      );
+    }
+    return this.authClient;
+  }
+
+  /**
+   * Guard that the anchor actually lists the asset we are about to withdraw.
+   * An anchor that declares no [[CURRENCIES]] is not asserting anything, so
+   * that case passes.
+   */
+  private assertListed(d: Sep1DiscoveryInfo, assetCode: string): void {
+    if (listsCurrency(d, assetCode)) return;
+    throw new Error(
+      `Anchor ${this.homeDomain} does not list ${assetCode} in its stellar.toml CURRENCIES ` +
+        `(lists: ${d.currencies.join(", ") || "none"})`,
+    );
   }
 
   /**
@@ -113,7 +189,8 @@ export class TestAnchorOffRamp implements OffRampPort {
     sourceAsset: AssetRef;
     sourceAmount: string;
   }): Promise<IndicativePrice[]> {
-    const entries = await getSep38Prices(this.baseUrl, {
+    const d = await this.discover();
+    const entries = await getSep38Prices(d.anchorQuoteServer, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
     });
@@ -131,8 +208,10 @@ export class TestAnchorOffRamp implements OffRampPort {
    * render the form (issue #32).
    */
   async offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]> {
-    const jwt = await this.auth.token().catch(() => undefined);
-    const fields = await getSep6WithdrawInfo(this.baseUrl, assetCode, jwt);
+    const jwt = await (await this.auth10()).token().catch(() => undefined);
+    const d = await this.discover();
+    this.assertListed(d, assetCode);
+    const fields = await getSep6WithdrawInfo(d.transferServer, assetCode, jwt);
     return fields.map((f) => ({
       name: f.name,
       label: f.description, // SEP-6 uses "description" as the human label
@@ -154,15 +233,17 @@ export class TestAnchorOffRamp implements OffRampPort {
 
     // Validate amount against /sep6/info and discover the withdrawal type.
     // Sep6ValidationError propagates as-is so callers can surface anchor limits.
+    const d = await this.discover();
+    this.assertListed(d, input.sourceAsset.code);
     const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
-      this.baseUrl,
+      d.transferServer,
       input.sourceAsset.code,
       input.sourceAmount,
       this.preferredWithdrawType,
     );
 
-    const jwt = await this.auth.token({ logger: log });
-    const q = await getSep38Quote(this.baseUrl, jwt, {
+    const jwt = await (await this.auth10()).token({ logger: log });
+    const q = await getSep38Quote(d.anchorQuoteServer, jwt, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
@@ -212,20 +293,21 @@ export class TestAnchorOffRamp implements OffRampPort {
     const q = await this.state.getQuote(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
 
-    const jwt = await this.auth.token({ logger: baseLog });
+    const jwt = await (await this.auth10()).token({ logger: baseLog });
+    const dsc = await this.discover();
 
     // A quote stored before `withdrawType` existed has none. Re-resolve from
     // /info rather than defaulting to "bank_account" — assuming the rail is
     // exactly what this PR exists to stop doing.
     const withdrawType =
       q.withdrawType ??
-      (await resolveWithdrawType(this.baseUrl, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
+      (await resolveWithdrawType(dsc.transferServer, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
         .type;
 
-    const withdraw = await startSep6Withdraw(this.baseUrl, jwt, {
+    const withdraw = await startSep6Withdraw(dsc.transferServer, jwt, {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,
-      account: this.auth.publicKey,
+      account: (await this.auth10()).publicKey,
       // The type discovered from /sep6/info at quote time — never assumed.
       type: withdrawType,
       dest: input.payout.fields.dest,
@@ -260,8 +342,8 @@ export class TestAnchorOffRamp implements OffRampPort {
 
     const baseLog = (opts.logger ?? this.logger);
     const child = baseLog.child({ jobId, linkId: job.linkId });
-    const jwt = await this.auth.token({ logger: baseLog });
-    const tx = await getSep6Transaction(this.baseUrl, jwt, jobId, baseLog);
+    const jwt = await (await this.auth10()).token({ logger: baseLog });
+    const tx = await getSep6Transaction((await this.discover()).transferServer, jwt, jobId, baseLog);
     const status = mapSep6Status(tx.status);
     const targetAmount = tx.amountOut ?? job.targetAmount;
     const reason = status === "failed" ? (tx.message ?? `${this.anchorName}: withdrawal failed`) : null;

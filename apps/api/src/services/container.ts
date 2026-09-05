@@ -132,7 +132,7 @@ export async function createContainer(): Promise<Container> {
     env.watchMode === "stream"
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : pollingWatcher;
-  const offramp = new CircuitBreakerOffRamp(createOffRamp(seller.keypair, offrampStateRepo, logger));
+  const offramp = new CircuitBreakerOffRamp(createOffRamp(seller.keypair, offrampStateRepo, logger, stellar.networkPassphrase));
   const kyc = createKyc(seller.keypair, db);
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
@@ -443,6 +443,7 @@ function createOffRamp(
   sellerKeypair: Keypair | null,
   state: OffRampStateRepository,
   logger: Logger,
+  networkPassphrase: string,
 ): OffRampPort {
   if (env.offramp === "none") {
     // No cash-out leg. Every method throws OffRampDisabledError, which the
@@ -466,6 +467,9 @@ function createOffRamp(
     baseUrl: env.anchorUrl,
     homeDomain: env.anchorHomeDomain,
     preferredWithdrawType: env.offrampType,
+    // SEP-1 discovery refuses an anchor declaring a different network, so a
+    // mainnet deployment cannot quote against a testnet anchor by mistake.
+    expectedNetworkPassphrase: networkPassphrase,
     logger,
   });
 }

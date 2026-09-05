@@ -1,5 +1,6 @@
 import type { AssetRef, Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
+import { endpointUrl } from "./sep1";
 
 export interface Sep38QuoteResult {
   id: string;
@@ -37,7 +38,7 @@ export async function getSep38Prices(
   baseUrl: string,
   input: { sellAsset: AssetRef; sellAmount: string },
 ): Promise<Sep38PriceEntry[]> {
-  const url = new URL("/sep38/prices", baseUrl);
+  const url = endpointUrl(baseUrl, "prices");
   url.searchParams.set("sell_asset", assetIdentifier(input.sellAsset));
   url.searchParams.set("sell_amount", input.sellAmount);
   // context=sep6 matches how we use the firm quote endpoint — keeps the anchor
@@ -97,7 +98,7 @@ export async function getSep38Quote(
     },
     "fetching SEP-38 quote",
   );
-  const res = await fetch(new URL("/sep38/quote", baseUrl), {
+  const res = await fetch(endpointUrl(baseUrl, "quote"), {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({
