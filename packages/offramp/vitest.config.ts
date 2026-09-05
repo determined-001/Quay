@@ -1,2 +1,8 @@
 import { defineConfig } from "vitest/config";
-export default defineConfig({ test: { include: ["test/**/*.test.ts"] } });
+import { coverage } from "../../vitest.coverage";
+export default defineConfig({
+  test: {
+    coverage: coverage({ lines: 38, statements: 38, functions: 38, branches: 44 }),
+    include: ["test/**/*.test.ts"],
+  },
+});

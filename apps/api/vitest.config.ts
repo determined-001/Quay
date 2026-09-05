@@ -1,6 +1,8 @@
 import { defineConfig } from "vitest/config";
+import { coverage } from "../../vitest.coverage";
 export default defineConfig({
   test: {
+    coverage: coverage({ lines: 75, statements: 73, functions: 72, branches: 66 }),
     include: ["src/**/*.test.ts", "test/**/*.test.ts"],
     // `src/env.ts` calls loadEnvFiles() at import time, walking up to the
     // nearest .env — so without this the suite runs against whatever the

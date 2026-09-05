@@ -10,7 +10,8 @@
     "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --sourcemap --banner:js=\"import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\" --external:hono --external:@hono/node-server --external:drizzle-orm --external:@libsql/client --external:zod --external:@stellar/stellar-sdk",
     "db:push": "drizzle-kit push",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
@@ -30,6 +31,7 @@
     "drizzle-kit": "0.31.10",
     "esbuild": "0.28.1",
     "tsx": "4.23.9",
-    "vitest": "4.1.10"
+    "vitest": "4.1.10",
+    "@vitest/coverage-v8": "4.1.10"
   }
 }

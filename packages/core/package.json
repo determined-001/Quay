@@ -2,17 +2,21 @@
   "name": "@checkout/core",
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "main": "./src/index.ts",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "zod": "4.4.3"
   },
   "devDependencies": {
     "vitest": "4.1.10",
-    "fast-check": "^4.1.1"
+    "fast-check": "^4.1.1",
+    "@vitest/coverage-v8": "4.1.10"
   }
 }

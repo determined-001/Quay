@@ -20,7 +20,8 @@
     "sweep": "node scripts/uptime-check.mjs",
     "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
     "demo:seed": "pnpm --filter @checkout/api exec tsx scripts/demo-seed.ts",
-    "demo:reset": "pnpm --filter @checkout/api exec tsx scripts/demo-reset.ts"
+    "demo:reset": "pnpm --filter @checkout/api exec tsx scripts/demo-reset.ts",
+    "test:coverage": "turbo run test:coverage"
   },
   "dependencies": {
     "@libsql/client": "0.17.4"
