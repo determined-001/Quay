@@ -43,7 +43,7 @@ describe("buildAuthMiddleware — composed API-key + session auth", () => {
   ): Promise<string> {
     const { plaintext, prefix } = generateApiKey(opts.env ?? "live");
     const hash = await hashApiKey(plaintext);
-    const seller = await container.sellers.getDefault();
+    const seller = container.seller;
     await container.apiKeys.create({
       sellerId: opts.sellerId ?? seller.id,
       name: "test key",
@@ -58,7 +58,7 @@ describe("buildAuthMiddleware — composed API-key + session auth", () => {
     const container = await createTestContainer();
     const app = buildApp(container);
     const raw = await mintKey(container, ["links:read"]);
-    const seller = await container.sellers.getDefault();
+    const seller = container.seller;
 
     const res = await app.request("/whoami", { headers: { authorization: `Bearer ${raw}` } });
     expect(res.status).toBe(200);
@@ -85,7 +85,7 @@ describe("buildAuthMiddleware — composed API-key + session auth", () => {
     const container = await createTestContainer();
     const app = buildApp(container);
     const raw = await mintKey(container, ["links:read"]);
-    const keys = await container.apiKeys.listBySeller((await container.sellers.getDefault()).id);
+    const keys = await container.apiKeys.listBySeller((container.seller).id);
     expect(keys.length).toBeGreaterThan(0);
     await container.apiKeys.revoke(keys[0]!.id);
 
@@ -108,7 +108,7 @@ describe("buildAuthMiddleware — composed API-key + session auth", () => {
   it("authenticates a session JWT and grants ALL_SCOPES", async () => {
     const container = await createTestContainer();
     const app = buildApp(container);
-    const seller = await container.sellers.getDefault();
+    const seller = container.seller;
     const token = await container.tokenFor(seller.id, seller.wallet);
 
     const res = await app.request("/whoami", { headers: { authorization: `Bearer ${token}` } });
@@ -155,7 +155,7 @@ describe("buildAuthMiddleware — composed API-key + session auth", () => {
   it("requireScope: session has every scope, so no 403", async () => {
     const container = await createTestContainer();
     const app = buildApp(container);
-    const seller = await container.sellers.getDefault();
+    const seller = container.seller;
     const token = await container.tokenFor(seller.id, seller.wallet);
 
     const res = await app.request("/write", { headers: { authorization: `Bearer ${token}` } });
@@ -276,7 +276,7 @@ describe("buildAuthMiddleware — composed API-key + session auth", () => {
       const container = await createTestContainer();
       const keyFor = apiKeyRateLimitKey(container.apiKeys);
       const raw = await mintKey(container, ["links:write"]);
-      const seller = await container.sellers.getDefault();
+      const seller = container.seller;
       const [minted] = await container.apiKeys.listBySeller(seller.id);
       await container.apiKeys.revoke(minted!.id);
 

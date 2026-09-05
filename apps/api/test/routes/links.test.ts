@@ -27,7 +27,7 @@ beforeAll(async () => {
   app = new Hono();
   app.use("*", rateLimit({ windowMs: 60_000, max: 0 }));
   app.route("/links", linkRoutes(container, async (_c, next) => next()));
-  const seller = await container.sellers.getDefault();
+  const seller = container.seller;
   authToken = await container.tokenFor(seller.id, seller.wallet);
 });
 
@@ -429,5 +429,85 @@ describe("404 handling", () => {
   it("returns 404 for unknown routes", async () => {
     const res = await req("/nonexistent");
     expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Cross-tenant isolation (issue #41)
+//
+//  "Seller A cannot see, cancel or cash out any object belonging to seller B."
+//  Every scoped route answers 404 rather than 403 — confirming existence to a
+//  stranger is itself a leak.
+// ---------------------------------------------------------------------------
+
+describe("cross-tenant isolation", () => {
+  const OTHER_WALLET = "GDUY7J7A33TQWOSOQGDO776GGLM3UQERL4J3SPT56F6YS4ID7MLDERI4";
+  let intruderToken = "";
+  let victimLinkId = "";
+
+  /** Same request helper, but authenticated as the *other* seller. */
+  async function asIntruder(path: string, init: RequestInit = {}): Promise<Response> {
+    return app.request(path, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${intruderToken}` },
+    });
+  }
+
+  beforeAll(async () => {
+    const intruder = await container.sellers.createIfAbsent(OTHER_WALLET);
+    intruderToken = await container.tokenFor(intruder.id, intruder.wallet);
+
+    const created = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Victim's item", amount: "42", assetCode: "USDC" }),
+    });
+    expect(created.status).toBe(201);
+    victimLinkId = ((await created.json()) as { link: { id: string } }).link.id;
+  });
+
+  it("does not list another seller's links", async () => {
+    const res = await asIntruder("/links");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { links: Array<{ id: string }> };
+    expect(body.links.map((l) => l.id)).not.toContain(victimLinkId);
+  });
+
+  it.each([
+    ["detail", `/detail`],
+    ["off-ramp preview", `/offramp-preview`],
+    ["off-ramp requirements", `/offramp-requirements`],
+    ["cash-out quote", `/cash-out/quote?targetCurrency=USD`],
+  ])("returns 404 on GET %s for another seller's link", async (_name, suffix) => {
+    const res = await asIntruder(`/links/${victimLinkId}${suffix}`);
+    expect(res.status).toBe(404);
+  });
+
+  it("cannot cancel another seller's link", async () => {
+    const res = await asIntruder(`/links/${victimLinkId}/cancel`, { method: "POST" });
+    expect(res.status).toBe(404);
+
+    // And the link is untouched.
+    const still = await container.links.findById(victimLinkId);
+    expect(still?.status).toBe("active");
+  });
+
+  it("cannot cash out another seller's link", async () => {
+    const res = await asIntruder(`/links/${victimLinkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(404);
+
+    const still = await container.links.findById(victimLinkId);
+    expect(still?.offrampJobId).toBeNull();
+  });
+
+  it("keeps the public checkout read minimal — no seller identity in it", async () => {
+    const res = await app.request(`/links/${victimLinkId}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.sellerId).toBeUndefined();
   });
 });

@@ -41,7 +41,6 @@ function fakeLinks(): LinkRepository {
 
 function fakeSellers(): SellerRepository {
   return {
-    getDefault: vi.fn(async () => seller),
     findById: vi.fn(async () => seller),
     findByWallet: vi.fn(async () => seller),
     createIfAbsent: vi.fn(async () => seller),
@@ -105,6 +104,9 @@ function makeService(links: LinkRepository, rail: RailPort): LinkService {
     offrampState: new FakeOffRampStateRepository(),
     kyc: new AlwaysAcceptedKyc(),
     stellar,
+    // The health preflight checks the wallet this instance is configured with,
+    // not a seller row — see checkSellerUsdcTrustline.
+    operatorWallet: seller.wallet,
     telemetry: new FakeTelemetryRepository(),
     correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
@@ -163,7 +165,7 @@ describe("LinkService.createLink — trustline preflight", () => {
 });
 
 describe("LinkService.checkSellerUsdcTrustline", () => {
-  it("returns ok:true when the seller's wallet can receive USDC", async () => {
+  it("returns ok:true when the operator wallet can receive USDC", async () => {
     const rail = fakeRail(vi.fn(async () => {}));
     const service = makeService(fakeLinks(), rail);
 
@@ -183,6 +185,28 @@ describe("LinkService.checkSellerUsdcTrustline", () => {
       reason: "trustline_not_authorized",
       message: "frozen by issuer",
       trustlineUri: undefined,
+    });
+  });
+
+  it("reports not_configured rather than throwing when no operator wallet is set", async () => {
+    const service = new LinkService({
+      links: fakeLinks(),
+      sellers: fakeSellers(),
+      webhooks: fakeWebhooks(),
+      rail: fakeRail(vi.fn(async () => {})),
+      offramp: fakeOfframp(),
+      offrampState: new FakeOffRampStateRepository(),
+      kyc: new AlwaysAcceptedKyc(),
+      stellar,
+      telemetry: new FakeTelemetryRepository(),
+      correlation: "memo",
+      webhookGuard: async () => ({ ok: true }) as const,
+    });
+
+    await expect(service.checkSellerUsdcTrustline()).resolves.toEqual({
+      ok: false,
+      reason: "not_configured",
+      message: "no operator wallet configured for this instance",
     });
   });
 });

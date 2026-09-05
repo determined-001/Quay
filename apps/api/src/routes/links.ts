@@ -139,7 +139,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       const owned = await c.service.getLink(ctx.req.param("id"));
       if (!owned) return ctx.json({ error: "not_found" }, 404);
       if (owned.link.sellerId !== ctx.get("seller").id) {
-        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+        // 404, not 403: telling a stranger "this exists but is not yours" confirms
+        // the id and leaks the link's existence (issue #41).
+        return ctx.json({ error: "not_found" }, 404);
       }
       const result = await c.service.getOfframpPreview(ctx.req.param("id"), currency);
       if (result === null) {
@@ -172,7 +174,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       const owned = await c.service.getLink(ctx.req.param("id"));
       if (!owned) return ctx.json({ error: "not_found" }, 404);
       if (owned.link.sellerId !== ctx.get("seller").id) {
-        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+        // 404, not 403: telling a stranger "this exists but is not yours" confirms
+        // the id and leaks the link's existence (issue #41).
+        return ctx.json({ error: "not_found" }, 404);
       }
       const result = await c.service.getOfframpRequirements(ctx.req.param("id"));
       return ctx.json(result);
@@ -194,7 +198,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       const existing = await c.service.getLink(linkId);
       if (!existing) return ctx.json({ error: "not_found" }, 404);
       if (existing.link.sellerId !== ctx.get("seller").id) {
-        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+        // 404, not 403: telling a stranger "this exists but is not yours" confirms
+        // the id and leaks the link's existence (issue #41).
+        return ctx.json({ error: "not_found" }, 404);
       }
       const quote = await c.service.quoteCashOut(linkId, targetCurrency, { logger: getLogger(ctx) });
       return ctx.json(quote);
@@ -247,7 +253,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       if (!existing) return ctx.json({ error: "not_found" }, 404);
       if (existing.link.sellerId !== ctx.get("seller").id) {
         log.warn({ event: "cashout.request.rejected", linkId }, "cash-out rejected: not the link's seller");
-        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+        // 404, not 403: telling a stranger "this exists but is not yours" confirms
+        // the id and leaks the link's existence (issue #41).
+        return ctx.json({ error: "not_found" }, 404);
       }
       const { job, initiation } = await c.service.triggerCashOut(linkId, parsed.data, { logger: log });
       log.info({ event: "cashout.request.ok", linkId, jobId: job.jobId }, "cash-out request succeeded");
@@ -273,7 +281,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     const result = await c.service.getLink(ctx.req.param("id"));
     if (!result) return ctx.json({ error: "not_found" }, 404);
     if (result.link.sellerId !== ctx.get("seller").id) {
-      return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+      // 404, not 403: telling a stranger "this exists but is not yours" confirms
+      // the id and leaks the link's existence (issue #41).
+      return ctx.json({ error: "not_found" }, 404);
     }
     const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
     return ctx.json({ link: result.link, request: result.request, deliveries });
@@ -291,7 +301,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       const existing = await c.service.getLink(ctx.req.param("id"));
       if (!existing) return ctx.json({ error: "not_found" }, 404);
       if (existing.link.sellerId !== ctx.get("seller").id) {
-        return ctx.json({ error: "forbidden", message: "this link belongs to a different seller" }, 403);
+        // 404, not 403: telling a stranger "this exists but is not yours" confirms
+        // the id and leaks the link's existence (issue #41).
+        return ctx.json({ error: "not_found" }, 404);
       }
       const link = await c.service.cancelLink(ctx.req.param("id"));
       return ctx.json({ link });

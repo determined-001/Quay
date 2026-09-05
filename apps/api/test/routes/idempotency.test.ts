@@ -16,7 +16,7 @@ beforeAll(async () => {
   container = await createTestContainer();
   app = new Hono();
   app.route("/links", linkRoutes(container, async (_c, next) => next()));
-  const seller = await container.sellers.getDefault();
+  const seller = container.seller;
   token = await container.tokenFor(seller.id, seller.wallet);
 });
 
@@ -54,9 +54,9 @@ describe("Idempotency-Key on POST /links", () => {
 
   it("does not create a second link when replayed", async () => {
     await post(LINK, "key-once-1");
-    const before = (await container.links.listBySeller((await container.sellers.getDefault()).id)).length;
+    const before = (await container.links.listBySeller((container.seller).id)).length;
     await post(LINK, "key-once-1");
-    const after = (await container.links.listBySeller((await container.sellers.getDefault()).id)).length;
+    const after = (await container.links.listBySeller((container.seller).id)).length;
     expect(after).toBe(before);
   });
 

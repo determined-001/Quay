@@ -28,7 +28,7 @@ afterAll(() => {
 });
 
 async function paidLink(over: Record<string, unknown> = {}) {
-  const seller = await container.sellers.getDefault();
+  const seller = container.seller;
   const link = await container.links.create({
     id: `lnk_${Math.random().toString(36).slice(2, 10)}`,
     reference: `pl_${Math.random().toString(36).slice(2, 10)}`,
@@ -108,7 +108,7 @@ describe("GET /r/:reference attestation block", () => {
   });
 
   it("404s an unpaid link — an unpaid link is not a receipt to attest", async () => {
-    const seller = await container.sellers.getDefault();
+    const seller = container.seller;
     const link = await container.links.create({
       id: "lnk_unpaid_receipt",
       reference: "pl_unpaid_receipt",

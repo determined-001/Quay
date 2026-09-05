@@ -157,6 +157,7 @@ export async function createContainer(): Promise<Container> {
     kyc,
     attestation,
     stellar,
+    operatorWallet: sellerWallet,
     telemetry: telemetryRepo,
     health: anchorHealth,
     correlation: env.correlation,

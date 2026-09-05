@@ -11,7 +11,6 @@ function fakeContainer(
   findDemo: () => Promise<{ id: string } | null> = async () => null,
 ): Container {
   const sellers: SellerRepository = {
-    getDefault: async () => seller,
     findById: async (id) => (id === seller.id ? seller : null),
     findByWallet: async () => null,
     createIfAbsent: async () => seller,

@@ -363,9 +363,6 @@ class FakeLinkRepoForAnchor implements LinkRepository {
 
 class FakeSellerRepoForAnchor {
   constructor(private readonly s: Seller) {}
-  async getDefault(): Promise<Seller> {
-    return this.s;
-  }
   async findById(id: string): Promise<Seller | null> {
     return id === this.s.id ? this.s : null;
   }

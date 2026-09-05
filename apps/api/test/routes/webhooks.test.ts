@@ -27,7 +27,7 @@ beforeAll(async () => {
   app = new Hono();
   app.use("*", rateLimit({ windowMs: 60_000, max: 0 }));
   app.route("/webhooks", webhookRoutes(container));
-  const seller = await container.sellers.getDefault();
+  const seller = container.seller;
   authToken = await container.tokenFor(seller.id, seller.wallet);
 });
 
@@ -93,7 +93,7 @@ describe("GET /webhooks", () => {
 
     // `fresh` has its own in-memory DB, so the outer token's sellerId doesn't
     // resolve against it — mint one from this container's own seller.
-    const freshSeller = await fresh.sellers.getDefault();
+    const freshSeller = fresh.seller;
     const freshToken = await fresh.tokenFor(freshSeller.id, freshSeller.wallet);
 
     const res = await freshApp.request("/webhooks", { headers: { authorization: `Bearer ${freshToken}` } });
@@ -129,7 +129,7 @@ describe("GET /webhooks", () => {
 
 describe("POST /webhooks/deliveries/:id/replay", () => {
   it("re-queues a dead-lettered entry for the seller that owns it", async () => {
-    const seller = await container.sellers.getDefault();
+    const seller = container.seller;
     const hook = await container.webhooks.create({
       sellerId: seller.id,
       url: "https://example.com/replay-me",

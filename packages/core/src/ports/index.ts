@@ -567,7 +567,11 @@ export interface Seller {
 }
 
 export interface SellerRepository {
-  getDefault(): Promise<Seller>;
+  /**
+   * There is deliberately no getDefault(). A seller comes from the
+   * authenticated context or the request fails (issue #41): a global "the
+   * seller" is what let one tenant read and act on another tenant's objects.
+   */
   findById(id: string): Promise<Seller | null>;
   findByWallet(wallet: string): Promise<Seller | null>;
   /** Wallet-native signup: SEP-10 proved control of `wallet`, so it IS the identity.
