@@ -47,7 +47,6 @@ const stellar: StellarConfig = {
 
 const seller: Seller = { id: "sel_1", name: "S", wallet: DEST, payoutFields: null, createdAt: 0 };
 const sellers: SellerRepository = {
-  async getDefault() { return seller; },
   async findById() { return seller; },
   async findByWallet() { return seller; },
   async createIfAbsent() { return seller; },

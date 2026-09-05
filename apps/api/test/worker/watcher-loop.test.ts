@@ -6,7 +6,7 @@ import type { DrizzleLinkRepository, DrizzleSellerRepository, DrizzleWebhookRepo
 import { DrizzleOffRampStateRepository } from "../../src/repos/index";
 import { NoKycRequired } from "@checkout/offramp";
 import { FakeTelemetryRepository } from "../fakes";
-import type { NormalizedPayment, WatcherPort } from "@checkout/core";
+import type { NormalizedPayment, Seller, WatcherPort } from "@checkout/core";
 
 // ---------------------------------------------------------------------------
 //  WatcherLoop tests
@@ -27,6 +27,7 @@ const ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 describe("WatcherLoop", () => {
   let linksRepo: DrizzleLinkRepository;
   let sellersRepo: DrizzleSellerRepository;
+  let seededSeller: Seller;
   let webhooksRepo: DrizzleWebhookRepository;
   let stateRepo: DrizzleWatcherStateRepository;
   let service: LinkService;
@@ -38,6 +39,7 @@ describe("WatcherLoop", () => {
     const repos = await withTestDb();
     linksRepo = repos.links;
     sellersRepo = repos.sellers;
+    seededSeller = repos.seller;
     webhooksRepo = repos.webhooks;
     stateRepo = repos.state;
 
@@ -76,7 +78,7 @@ describe("WatcherLoop", () => {
   });
 
   async function createActiveLink(ref: string, amount = "10"): Promise<string> {
-    const seller = await sellersRepo.getDefault();
+    const seller = seededSeller;
     const link = await linksRepo.create({
       id: `lnk_${ref}`,
       reference: ref,
@@ -396,7 +398,7 @@ describe("WatcherLoop — crash between markProcessed and setCursor", () => {
     });
 
     const ref = "crash_safe_1";
-    const seller = await repos.sellers.getDefault();
+    const seller = repos.seller;
     await repos.links.create({
       id: `lnk_${ref}`,
       reference: ref,
@@ -511,7 +513,7 @@ describe("WatcherLoop — operation-level dedup (issue 4.11)", () => {
     });
 
     const ref = "split_ref_1";
-    const seller = await repos.sellers.getDefault();
+    const seller = repos.seller;
     await repos.links.create({
       id: `lnk_${ref}`,
       reference: ref,
@@ -577,7 +579,7 @@ describe("WatcherLoop — operation-level dedup (issue 4.11)", () => {
       webhookGuard: async () => ({ ok: true }) as const,
     });
 
-    const seller = await repos.sellers.getDefault();
+    const seller = repos.seller;
     const DEST_B = "GDESTBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
     await repos.links.create({

@@ -18,6 +18,7 @@ import { LinkService } from "../src/services/link-service";
 import { NOOP_LOGGER } from "@checkout/core";
 import type {
   AssetRef,
+  Seller,
   PaymentRequest,
   PayoutFieldDescriptor,
   RailPort,
@@ -43,6 +44,10 @@ export function createTestDb(): { db: DB; client: Client } {
   return { db, client };
 }
 
+/** Wallet the seeded test seller owns. Tests that need a *second* tenant should
+ *  create one with `sellers.createIfAbsent(<another wallet>)`. */
+export const TEST_SELLER_WALLET = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+
 export async function withTestDb(): Promise<{
   db: DB;
   client: Client;
@@ -50,6 +55,7 @@ export async function withTestDb(): Promise<{
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
   state: DrizzleWatcherStateRepository;
+  seller: Seller;
 }> {
   const { db, client } = createTestDb();
   await bootstrap(client);
@@ -57,8 +63,10 @@ export async function withTestDb(): Promise<{
   const sellers = new DrizzleSellerRepository(db);
   const webhooks = new DrizzleWebhookRepository(db);
   const state = new DrizzleWatcherStateRepository(db);
-  await sellers.ensureDefault("GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", "Test Seller");
-  return { db, client, links, sellers, webhooks, state };
+  // Returned explicitly: there is no sellers.getDefault() to look it up with,
+  // by design (issue #41).
+  const seller = await sellers.ensureDefault(TEST_SELLER_WALLET, "Test Seller");
+  return { db, client, links, sellers, webhooks, state, seller };
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +218,8 @@ export const testStellarConfig: StellarConfig = {
 
 export interface TestContainer extends Container {
   service: LinkService;
+  /** The seeded seller. Route tests authenticate as this one. */
+  seller: Seller;
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
@@ -257,6 +267,7 @@ export async function createTestContainer(): Promise<TestContainer> {
 
   return {
     service,
+    seller: repos.seller,
     logger: NOOP_LOGGER,
     links: repos.links,
     sellers: repos.sellers,

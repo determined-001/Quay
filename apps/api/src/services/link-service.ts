@@ -282,6 +282,13 @@ export class LinkService {
        */
       attestation?: AttestationPort;
       stellar: StellarConfig;
+      /**
+       * The operator's own Stellar wallet, as configured for this deployment.
+       * Used only by the /health trustline preflight, which is a statement about
+       * this instance's configuration — not about any tenant. Defaults to the
+       * network's account-less state so test fixtures need not supply one.
+       */
+      operatorWallet?: string;
       telemetry: OffRampTelemetryRepository;
       /**
        * Optional anchor health probe. When omitted we default to a no-op
@@ -491,15 +498,26 @@ export class LinkService {
     return { link, request: this.buildRequest(link) };
   }
 
-  /** Re-checks the seller's own USDC trustline (bypassing the preflight cache is
-   *  unnecessary — a 60s-stale "ok" or "revoked" is fine for a health check). */
+  /**
+   * Re-checks the operator wallet's USDC trustline (bypassing the preflight
+   * cache is unnecessary — a 60s-stale "ok" or "revoked" is fine for a health
+   * check).
+   *
+   * This checks the wallet this deployment is configured with, which is the
+   * same one `/health` reports as `sellerWallet`. It deliberately does not read
+   * a seller from the database: with more than one tenant there is no single
+   * "the seller" to check, and health is a property of the instance.
+   */
   async checkSellerUsdcTrustline(): Promise<
     { ok: true } | { ok: false; reason: string; message: string; trustlineUri?: string }
   > {
-    const seller = await this.deps.sellers.getDefault();
+    const wallet = this.deps.operatorWallet;
+    if (!wallet) {
+      return { ok: false, reason: "not_configured", message: "no operator wallet configured for this instance" };
+    }
     const asset = resolveAsset("USDC", this.deps.stellar);
     try {
-      await this.deps.rail.assertCanReceive(seller.wallet, asset);
+      await this.deps.rail.assertCanReceive(wallet, asset);
       return { ok: true };
     } catch (err) {
       if (err instanceof CannotReceiveError) {
@@ -874,11 +892,15 @@ export class LinkService {
    * whether to log. `now` is injected so tests can drive the clock.
    */
   async sweepExpired(now: number): Promise<number> {
-    const seller = await this.deps.sellers.getDefault();
-    const all = await this.deps.links.listBySeller(seller.id);
+    // Every open link in the deployment, not one seller's. This used to read
+    // sellers.getDefault() and sweep only that tenant, which meant a second
+    // seller's links never expired at all — they stayed payable forever.
+    const all = [
+      ...(await this.deps.links.listByStatus("active")),
+      ...(await this.deps.links.listByStatus("underpaid")),
+    ];
     let moved = 0;
     for (const link of all) {
-      if (link.status !== "active" && link.status !== "underpaid") continue;
       if (link.expiresAt === null || link.expiresAt >= now) continue;
       if (!canTransition(link.status, "expired")) continue; // defense in depth
       link.status = "expired";

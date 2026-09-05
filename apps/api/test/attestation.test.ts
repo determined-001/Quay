@@ -42,9 +42,6 @@ const seller: Seller = {
 };
 
 const sellers: SellerRepository = {
-  async getDefault() {
-    return seller;
-  },
   async findById() {
     return seller;
   },

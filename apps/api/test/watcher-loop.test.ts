@@ -183,9 +183,6 @@ function makeNoopWebhookRepo(): WebhookRepository {
 
 function makeUnusedSellerRepo(): SellerRepository {
   return {
-    async getDefault(): Promise<never> {
-      throw new Error("not used in this test");
-    },
     async findByWallet(): Promise<null> {
     return null;
   },

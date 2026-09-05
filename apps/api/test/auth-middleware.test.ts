@@ -8,7 +8,6 @@ const seller: Seller = { id: "sel_1", name: "Demo", wallet: "GWALLET", payoutFie
 
 function fakeSellers(knownSeller: Seller | null = seller): SellerRepository {
   return {
-    getDefault: async () => seller,
     findById: async (id) => (knownSeller && knownSeller.id === id ? knownSeller : null),
     findByWallet: async () => knownSeller,
     createIfAbsent: async () => seller,

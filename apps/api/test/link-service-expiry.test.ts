@@ -116,8 +116,8 @@ class FakeLinkRepo implements LinkRepository {
   async listBySeller(sellerId: string): Promise<PaymentLink[]> {
     return [...this.byId.values()].filter((l) => l.sellerId === sellerId);
   }
-  async listByStatus(_status: PaymentLink["status"]): Promise<PaymentLink[]> {
-    return [...this.byId.values()];
+  async listByStatus(status: PaymentLink["status"]): Promise<PaymentLink[]> {
+    return [...this.byId.values()].filter((l) => l.status === status);
   }
   async activeDestinations(): Promise<string[]> {
     const set = new Set<string>();
@@ -158,9 +158,6 @@ class FakeLinkRepo implements LinkRepository {
 
 class FakeSellerRepo {
   constructor(private readonly seller: Seller) {}
-  async getDefault(): Promise<Seller> {
-    return this.seller;
-  }
   async findById(id: string): Promise<Seller | null> {
     return id === this.seller.id ? this.seller : null;
   }
@@ -466,6 +463,22 @@ describe("LinkService.sweepExpired", () => {
     expect((await f.repo.findById("lnk_b"))!.status).toBe("active");
     expect((await f.repo.findById("lnk_c"))!.status).toBe("expired");
     expect(events().filter((e) => e.event === "link.expired")).toHaveLength(2);
+  });
+
+  // Regression for issue #41: the sweep used to resolve sellers.getDefault()
+  // and list only that tenant's links, so a second seller's links never
+  // expired — they stayed active and payable forever.
+  it("expires links belonging to every seller, not just one", async () => {
+    const past = 1_700_000_000_000;
+    const now = past + 60_000;
+    await f.repo.save(link({ id: "lnk_tenant_a", sellerId: "s_1", expiresAt: past - 1 }));
+    await f.repo.save(link({ id: "lnk_tenant_b", sellerId: "s_2", reference: "ref_2", expiresAt: past - 1 }));
+
+    const moved = await f.service.sweepExpired(now);
+
+    expect(moved).toBe(2);
+    expect((await f.repo.findById("lnk_tenant_a"))!.status).toBe("expired");
+    expect((await f.repo.findById("lnk_tenant_b"))!.status).toBe("expired");
   });
 
   it("skips links that have no TTL", async () => {

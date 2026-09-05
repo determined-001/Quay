@@ -33,7 +33,7 @@ beforeAll(async () => {
     }),
   );
   app.route("/api-keys", apiKeyRoutes(container));
-  const seller = await container.sellers.getDefault();
+  const seller = container.seller;
   sellerId = seller.id;
   authToken = await container.tokenFor(seller.id, seller.wallet);
 });

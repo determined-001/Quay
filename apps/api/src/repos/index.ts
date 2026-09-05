@@ -337,12 +337,6 @@ export class DrizzleSellerRepository implements SellerRepository {
     return rowToSeller(seller);
   }
 
-  async getDefault(): Promise<Seller> {
-    const rows = await this.db.select().from(sellers).limit(1);
-    if (!rows[0]) throw new Error("No default seller seeded");
-    return rowToSeller(rows[0]);
-  }
-
   async findById(id: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
     return rows[0] ? rowToSeller(rows[0]) : null;

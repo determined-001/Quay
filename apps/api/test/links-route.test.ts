@@ -44,7 +44,6 @@ const ownedLink: PaymentLink = {
 function fakeContainer(): Container {
   const sellersById = new Map([[owner.id, owner], [other.id, other]]);
   const sellers: SellerRepository = {
-    getDefault: async () => owner,
     findById: async (id) => sellersById.get(id) ?? null,
     findByWallet: async () => null,
     createIfAbsent: async () => owner,
@@ -141,7 +140,8 @@ describe("POST /links/:id/cancel — ownership", () => {
     expect(res.status).toBe(401);
   });
 
-  it("rejects with 403 when a different seller tries to cancel the link", async () => {
+  // 404 rather than 403 since issue #41: a 403 would confirm the link exists.
+  it("rejects with 404 when a different seller tries to cancel the link", async () => {
     const container = fakeContainer();
     const app = linkRoutes(container, async (_c, next) => next());
     const token = await tokenFor(container.auth.session, other.id);
@@ -150,8 +150,8 @@ describe("POST /links/:id/cancel — ownership", () => {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(res.status).toBe(403);
-    expect(((await res.json()) as Record<string, unknown>).error).toBe("forbidden");
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as Record<string, unknown>).error).toBe("not_found");
   });
 
   it("cancels the link for its owner", async () => {

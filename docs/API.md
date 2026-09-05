@@ -26,11 +26,17 @@ Every route marked **Requires auth** below needs `Authorization: Bearer <token>`
   that's missing, malformed, tampered, expired, or revoked (`POST /auth/logout`
   put its `jti` on the revocation list). The response body always has this
   shape: `{ "error": "unauthorized", "message": "<why>" }`.
-- **403 `forbidden`** — you *are* authenticated, just not as the seller who
-  owns the resource (e.g. someone else's link). `{ "error": "forbidden", "message": "<why>" }`.
+- **403 `forbidden`** — you *are* authenticated, but the credential itself does
+  not carry the required scope (e.g. an API key without `links:write`).
+  `{ "error": "forbidden", "message": "<why>" }`.
+- **404 `not_found`** — the object does not exist **or does not belong to you**.
+  These are deliberately the same answer: a 403 on someone else's link would
+  confirm that the id is real, which is a leak in itself. Do not read a 404 as
+  proof that an id is unused.
 
 These are deliberately different failure modes: 401 means "prove who you are
-again"; 403 means "you did, and the answer is still no."
+again"; 403 means "you did, and this credential still is not allowed to do
+that"; 404 means "nothing here that is yours."
 
 ## Conventions
 
@@ -470,7 +476,7 @@ settled.
 
 ## `POST /links/:id/cash-out`
 
-**Requires auth** (403 if the link belongs to a different seller). Seller-initiated off-ramp of a **paid** link to local currency. Runs
+**Requires auth** (404 if the link belongs to a different seller — see the error table above). Seller-initiated off-ramp of a **paid** link to local currency. Runs
 `quote → initiate` against the off-ramp adapter and moves the link to
 `offramp_pending`; a background poller advances it to `offramp_settled` /
 `offramp_failed`.

@@ -52,7 +52,7 @@ describe("kycRoutes — authentication and scoping", () => {
     const app = kycRoutes(withKyc);
 
     const { plaintext, prefix } = generateApiKey("test");
-    const seller = await container.sellers.getDefault();
+    const seller = container.seller;
     await container.apiKeys.create({
       sellerId: seller.id,
       name: "kyc test key",
