@@ -41,6 +41,14 @@ jobs:
         env:
           RUN_LIVE_ANCHOR_TESTS: "1"
           SELLER_SECRET_KEY: ${{ secrets.TEST_ANCHOR_SELLER_SECRET }}
+          # testanchor.stellar.org listed a single USDC withdraw type when this
+          # probe was written and now lists two ('cash' and 'bank_account'), so
+          # resolveWithdrawType (packages/offramp/src/sep6.ts) stops
+          # auto-selecting and throws "set OFFRAMP_TYPE to choose one" — the
+          # cause of four of the five failures behind issue #117. Naming the
+          # type here also makes the probe test the rail a real deployment
+          # would use, rather than whichever one happened to be the only one.
+          OFFRAMP_TYPE: bank_account
         run: |
           pnpm --filter @checkout/offramp test --reporter=verbose 2>&1 | tee probe-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
