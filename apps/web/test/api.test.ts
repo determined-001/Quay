@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api, apiBase, setSessionToken } from "../lib/api";
+import { api, apiBase, serverNow, setServerSkewForTest, setSessionToken } from "../lib/api";
 
 /**
  * Regression for issue 5.8: `exportCsv` used to call `fetch()` directly, so it
@@ -64,5 +64,56 @@ describe("api.exportCsv", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await expect(api.exportCsv()).rejects.toMatchObject({ code: "not_found", status: 404 });
+  });
+});
+
+/**
+ * Issue #35: the checkout countdown is measured against the server's clock,
+ * learned from the `Date` header, because a buyer's device can be minutes out
+ * and `expiresAt` is a server timestamp.
+ */
+describe("server clock skew", () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    setServerSkewForTest(0);
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function stubWithDate(dateHeader: string) {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ link: {}, request: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json", date: dateHeader },
+        }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  it("learns the offset from the Date header", async () => {
+    const localNow = new Date("2026-09-05T12:00:00.000Z").getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(localNow);
+    // The server is 90 seconds ahead of this browser.
+    stubWithDate(new Date(localNow + 90_000).toUTCString());
+
+    await api.getLink("lnk_1");
+
+    expect(serverNow() - localNow).toBeGreaterThanOrEqual(89_000);
+    expect(serverNow() - localNow).toBeLessThanOrEqual(91_000);
+  });
+
+  it("ignores an unparsable Date header rather than corrupting the clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T12:00:00.000Z").getTime());
+    stubWithDate("not a date");
+
+    await api.getLink("lnk_1");
+
+    expect(serverNow()).toBe(Date.now());
   });
 });
