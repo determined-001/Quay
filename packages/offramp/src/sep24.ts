@@ -1,13 +1,10 @@
 import type { Keypair } from "@stellar/stellar-sdk";
 import type { AssetRef } from "@checkout/core";
 import { Sep10Client } from "./sep10";
+import { endpointUrl, fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
 
-export interface Sep1DiscoveryInfo {
-  webAuthEndpoint: string;
-  transferServerSep24: string;
-  anchorQuoteServer: string;
-  homeDomain: string;
-}
+export type { Sep1DiscoveryInfo };
+export { endpointUrl };
 
 export interface Sep24WithdrawInteractiveInput {
   assetCode: string;
@@ -37,71 +34,8 @@ export interface Sep24Transaction {
   moreInfoUrl?: string;
 }
 
-/**
- * Join a SEP endpoint path onto a transfer-server base URL.
- *
- * `new URL("/transaction", base)` is an *absolute* path: it replaces the base's
- * own path, so a TOML that advertises `https://anchor.example/sep24` silently
- * becomes `https://anchor.example/transaction`. testanchor.stellar.org does
- * exactly this, and answered every SEP-24 call with
- * `404 No static resource transactions/withdraw/interactive.` until this joined
- * the path onto the base instead of over it.
- */
-export function endpointUrl(base: string, path: string): URL {
-  return new URL(`${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`);
-}
-
 function assetIdentifier(asset: AssetRef): string {
   return asset.issuer === null ? "stellar:native" : `stellar:${asset.code}:${asset.issuer}`;
-}
-
-/** Fetch and parse SEP-1 stellar.toml for discovery endpoints. */
-export async function fetchStellarToml(homeDomain: string): Promise<Sep1DiscoveryInfo> {
-  const url = `https://${homeDomain}/.well-known/stellar.toml`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`stellar.toml fetch returned ${res.status}`);
-    }
-    const text = await res.text();
-    return parseStellarToml(text, homeDomain);
-  } catch {
-    // Fallback to domain root default paths if discovery fails
-    return {
-      webAuthEndpoint: `https://${homeDomain}/auth`,
-      transferServerSep24: `https://${homeDomain}/sep24`,
-      anchorQuoteServer: `https://${homeDomain}/sep38`,
-      homeDomain,
-    };
-  }
-}
-
-export function parseStellarToml(tomlText: string, homeDomain: string): Sep1DiscoveryInfo {
-  let webAuthEndpoint = `https://${homeDomain}/auth`;
-  let transferServerSep24 = `https://${homeDomain}/sep24`;
-  let anchorQuoteServer = `https://${homeDomain}/sep38`;
-
-  for (const line of tomlText.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let val = trimmed.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-
-    if (key === "WEB_AUTH_ENDPOINT" || key === "WEB_AUTH_URL") {
-      webAuthEndpoint = val;
-    } else if (key === "TRANSFER_SERVER_SEP24" || key === "TRANSFER_SERVER") {
-      transferServerSep24 = val;
-    } else if (key === "ANCHOR_QUOTE_SERVER") {
-      anchorQuoteServer = val;
-    }
-  }
-
-  return { webAuthEndpoint, transferServerSep24, anchorQuoteServer, homeDomain };
 }
 
 export class Sep24Client {
@@ -126,6 +60,7 @@ export class Sep24Client {
       this.authClient = new Sep10Client(this.sellerKeypair, {
         baseUrl: discovery.webAuthEndpoint,
         homeDomain: this.homeDomain,
+        signingKey: discovery.signingKey,
       });
     }
     return this.authClient.token();

@@ -1,7 +1,7 @@
 import { Keypair, Networks } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import { AnchorOffRamp, mapSep24Status } from "../src/anchor";
-import { parseStellarToml } from "../src/sep24";
+import { parseStellarToml } from "../src/sep1";
 
 const USDC_TESTNET_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 

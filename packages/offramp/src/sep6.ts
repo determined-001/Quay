@@ -1,5 +1,6 @@
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
+import { endpointUrl } from "./sep1";
 
 export interface Sep6WithdrawResult {
   id: string;
@@ -27,7 +28,7 @@ export async function getSep6WithdrawInfo(
   assetCode: string,
   jwt?: string,
 ): Promise<Sep6FieldInfo[]> {
-  const url = new URL("/sep6/info", baseUrl);
+  const url = endpointUrl(baseUrl, "info");
   const headers: Record<string, string> = {};
   if (jwt) headers["authorization"] = `Bearer ${jwt}`;
 
@@ -119,7 +120,7 @@ export async function getSep6Info(baseUrl: string, logger?: Logger): Promise<Sep
   if (cached && Date.now() - cached.at < INFO_TTL_MS) return cached.info;
 
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep6", baseUrl });
-  const res = await fetch(new URL("/sep6/info", baseUrl));
+  const res = await fetch(endpointUrl(baseUrl, "info"));
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.info.fail", statusCode: res.status }, "SEP-6 /info failed");
     throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
@@ -283,7 +284,7 @@ export async function startSep6Withdraw(
   logger?: Logger,
 ): Promise<Sep6WithdrawResult> {
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep6", baseUrl });
-  const url = new URL("/sep6/withdraw", baseUrl);
+  const url = endpointUrl(baseUrl, "withdraw");
   url.searchParams.set("asset_code", input.assetCode);
   url.searchParams.set("amount", input.amount);
   url.searchParams.set("account", input.account);
@@ -323,7 +324,7 @@ export async function getSep6Transaction(
   logger?: Logger,
 ): Promise<Sep6TransactionResult> {
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep6", baseUrl, transactionId: id });
-  const url = new URL("/sep6/transaction", baseUrl);
+  const url = endpointUrl(baseUrl, "transaction");
   url.searchParams.set("id", id);
 
   const t0 = Date.now();

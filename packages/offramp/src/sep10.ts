@@ -1,10 +1,25 @@
-import { Keypair, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Keypair, Transaction, TransactionBuilder, WebAuth } from "@stellar/stellar-sdk";
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 
 export interface Sep10Options {
   baseUrl: string;
   homeDomain: string;
+  /**
+   * The anchor's SEP-1 `SIGNING_KEY`. The challenge is verified against it
+   * before we sign — see `fetchToken`. Optional only so existing callers keep
+   * compiling; leaving it unset downgrades to a warning-logged unverified sign,
+   * which is what this class used to do unconditionally.
+   */
+  signingKey?: string | null;
+}
+
+/** The challenge was not a well-formed SEP-10 challenge from the expected anchor. */
+export class Sep10ChallengeRejectedError extends Error {
+  constructor(reason: string) {
+    super(`SEP-10 challenge rejected before signing: ${reason}`);
+    this.name = "Sep10ChallengeRejectedError";
+  }
 }
 
 interface CachedToken {
@@ -72,6 +87,40 @@ export class Sep10Client {
     if (!(tx instanceof Transaction)) {
       throw new Error("SEP-10 challenge was not a signable Transaction");
     }
+
+    // Verify BEFORE signing. Until this existed we signed whatever XDR the
+    // server returned with the seller's key — the whole attack surface of
+    // SEP-10 (issue #14). readChallengeTx checks the things that make a
+    // challenge a challenge rather than a payment: the server account is the
+    // source, the sequence number is 0, the timebounds are current, the first
+    // operation is the expected manage_data for our home domain, and the
+    // transaction carries the server's signature.
+    const signingKey = this.opts.signingKey;
+    if (signingKey) {
+      try {
+        WebAuth.readChallengeTx(
+          transaction,
+          signingKey,
+          network_passphrase,
+          this.opts.homeDomain,
+          new URL(this.opts.baseUrl).host,
+        );
+      } catch (err) {
+        child.warn(
+          { event: "anchor.sep10.challenge.rejected", reason: err instanceof Error ? err.message : String(err) },
+          "SEP-10 challenge failed verification; refusing to sign",
+        );
+        throw new Sep10ChallengeRejectedError(err instanceof Error ? err.message : String(err));
+      }
+    } else {
+      // Reachable only when SEP-1 discovery failed or the anchor omits
+      // SIGNING_KEY. Loud on purpose: it is a real downgrade, not a detail.
+      child.warn(
+        { event: "anchor.sep10.challenge.unverified" },
+        "no anchor SIGNING_KEY available — signing a SEP-10 challenge without verifying who issued it",
+      );
+    }
+
     tx.sign(this.keypair);
 
     const t1 = Date.now();
