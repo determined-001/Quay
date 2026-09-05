@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -18,6 +18,7 @@ import type {
   StoredOffRampQuote,
   Webhook,
   WebhookDelivery,
+  WebhookQueueEntry,
   WebhookRepository,
   WatcherStateRepository,
   OffRampTelemetryRepository,
@@ -33,6 +34,7 @@ import {
   sellers,
   webhooks,
   webhookDeliveries,
+  webhookQueue,
   watcherCursors,
   processedTx,
   offrampQuotes,
@@ -431,6 +433,16 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     return rows[0] ? rowToWebhook(rows[0]) : null;
   }
 
+  /**
+   * Unscoped lookup. Only the delivery worker uses this: it drains the queue
+   * outside any request, so there is no seller in scope to check against.
+   * Routes must keep using `getById`, which enforces ownership.
+   */
+  async findWebhookById(id: string): Promise<Webhook | null> {
+    const rows = await this.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
+    return rows[0] ? rowToWebhook(rows[0]) : null;
+  }
+
   async rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null> {
     const existing = await this.getById(id, sellerId);
     if (!existing) return null;
@@ -464,11 +476,130 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       webhookId: d.webhookId,
       linkId: d.linkId,
       event: d.event,
+      attempt: d.attempt,
+      queueEntryId: d.queueEntryId,
       statusCode: d.statusCode,
       ok: d.ok,
       error: d.error,
       createdAt: Date.now(),
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Queue operations
+  // ---------------------------------------------------------------------------
+
+  async enqueue(
+    entry: Omit<WebhookQueueEntry, "attempts" | "status" | "lastStatusCode" | "lastError" | "updatedAt">,
+  ): Promise<WebhookQueueEntry> {
+    const now = Date.now();
+    const row = {
+      id: entry.id,
+      webhookId: entry.webhookId,
+      linkId: entry.linkId,
+      event: entry.event,
+      payload: entry.payload,
+      attempts: 0,
+      nextAttemptAt: entry.nextAttemptAt,
+      status: "pending" as const,
+      lastStatusCode: null,
+      lastError: null,
+      createdAt: entry.createdAt,
+      updatedAt: now,
+    };
+    await this.db.insert(webhookQueue).values(row);
+    return row;
+  }
+
+  /**
+   * Claim up to `limit` pending rows whose next_attempt_at <= now.
+   *
+   * SQLite is single-writer, so the read-then-update within a single synchronous
+   * call is safe against concurrent processes sharing the same file. For a
+   * multi-process / Turso setup the `status = 'claimed'` write acts as an
+   * optimistic lock: if two workers race, only one's UPDATE will match the row
+   * (the other will find status ≠ 'pending' on the next SELECT and skip it).
+   */
+  async claimDue(now: number, limit: number): Promise<WebhookQueueEntry[]> {
+    // 1. Find candidates.
+    const candidates = await this.db
+      .select()
+      .from(webhookQueue)
+      .where(
+        and(
+          eq(webhookQueue.status, "pending"),
+          lte(webhookQueue.nextAttemptAt, now),
+        ),
+      )
+      .limit(limit);
+
+    if (candidates.length === 0) return [];
+
+    const ids = candidates.map((r) => r.id);
+
+    // 2. Atomically transition pending → claimed and take the affected rows
+    //    straight off the UPDATE via RETURNING.
+    //
+    //    RETURNING is what makes this safe across instances: it yields exactly
+    //    the rows *this* statement transitioned. Re-SELECTing status='claimed'
+    //    afterwards would also match rows a concurrent worker had just claimed
+    //    between our UPDATE and our SELECT, and both workers would deliver the
+    //    same webhook.
+    const claimed = await this.db
+      .update(webhookQueue)
+      .set({ status: "claimed", updatedAt: Date.now() })
+      .where(
+        and(
+          inArray(webhookQueue.id, ids),
+          eq(webhookQueue.status, "pending"),
+        ),
+      )
+      .returning();
+
+    return claimed.map(rowToQueueEntry);
+  }
+
+  async updateQueueEntry(
+    id: string,
+    patch: Pick<WebhookQueueEntry, "status" | "attempts" | "nextAttemptAt" | "lastStatusCode" | "lastError">,
+  ): Promise<void> {
+    await this.db
+      .update(webhookQueue)
+      .set({
+        status: patch.status,
+        attempts: patch.attempts,
+        nextAttemptAt: patch.nextAttemptAt,
+        lastStatusCode: patch.lastStatusCode,
+        lastError: patch.lastError,
+        updatedAt: Date.now(),
+      })
+      .where(eq(webhookQueue.id, id));
+  }
+
+  async reclaimStale(claimedBefore: number): Promise<number> {
+    const released = await this.db
+      .update(webhookQueue)
+      .set({ status: "pending", updatedAt: Date.now() })
+      .where(and(eq(webhookQueue.status, "claimed"), lt(webhookQueue.updatedAt, claimedBefore)))
+      .returning();
+    return released.length;
+  }
+
+  async countPending(): Promise<number> {
+    const rows = await this.db
+      .select({ id: webhookQueue.id })
+      .from(webhookQueue)
+      .where(inArray(webhookQueue.status, ["pending", "claimed"]));
+    return rows.length;
+  }
+
+  async findQueueEntry(id: string): Promise<WebhookQueueEntry | null> {
+    const rows = await this.db
+      .select()
+      .from(webhookQueue)
+      .where(eq(webhookQueue.id, id))
+      .limit(1);
+    return rows[0] ? rowToQueueEntry(rows[0]) : null;
   }
 
   async listDeliveries(
@@ -512,12 +643,33 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       webhookId: r.webhookId,
       linkId: r.linkId,
       event: r.event,
+      attempt: r.attempt,
+      queueEntryId: r.queueEntryId,
       statusCode: r.statusCode,
       ok: r.ok,
       error: r.error,
       createdAt: r.createdAt,
     }));
   }
+}
+
+type QueueRow = typeof webhookQueue.$inferSelect;
+
+function rowToQueueEntry(row: QueueRow): WebhookQueueEntry {
+  return {
+    id: row.id,
+    webhookId: row.webhookId,
+    linkId: row.linkId,
+    event: row.event,
+    payload: row.payload,
+    attempts: row.attempts,
+    nextAttemptAt: row.nextAttemptAt,
+    status: row.status as WebhookQueueEntry["status"],
+    lastStatusCode: row.lastStatusCode,
+    lastError: row.lastError,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 function encodeDeliveryCursor(createdAt: number): string {

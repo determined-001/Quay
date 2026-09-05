@@ -610,10 +610,39 @@ export interface WebhookDelivery {
   webhookId: string;
   linkId: string;
   event: string;
+  /** Which attempt number (1-based). */
+  attempt: number;
+  /** ID of the queue entry this delivery belongs to. Null for rows written
+   *  before the durable queue existed. */
+  queueEntryId: string | null;
   statusCode: number | null;
   ok: boolean;
   error: string | null;
   createdAt: number;
+}
+
+/** Lifecycle status of a queue entry. */
+export type WebhookQueueStatus = "pending" | "claimed" | "delivered" | "dead";
+
+/**
+ * One row in webhook_queue — the durable representation of a pending delivery.
+ * Immutable fields are set at enqueue time; mutable fields are updated by the
+ * worker after each attempt.
+ */
+export interface WebhookQueueEntry {
+  id: string;
+  webhookId: string;
+  linkId: string;
+  event: string;
+  /** The signed JSON body, serialised once at enqueue time. */
+  payload: string;
+  attempts: number;
+  nextAttemptAt: number; // epoch ms
+  status: WebhookQueueStatus;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface WebhookRepository {
@@ -622,6 +651,11 @@ export interface WebhookRepository {
   listBySeller(sellerId: string): Promise<Webhook[]>;
   /** Scoped to the owning seller to prevent cross-tenant access (IDOR). */
   getById(id: string, sellerId: string, opts?: { includeDeleted?: boolean }): Promise<Webhook | null>;
+  /**
+   * Unscoped lookup by id. Only for the delivery worker, which runs outside any
+   * request and therefore has no seller context; never reachable from a route.
+   */
+  findWebhookById(id: string): Promise<Webhook | null>;
   /**
    * Rotates the signing secret. The previous secret remains valid for
    * `overlapMs` so in-flight receivers can be redeployed without dropping
@@ -636,6 +670,32 @@ export interface WebhookRepository {
     sellerId: string,
     opts: { limit: number; cursor?: string | null },
   ): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }>;
+
+  // --- Queue operations ---
+  /** Insert a new pending queue entry. */
+  enqueue(entry: Omit<WebhookQueueEntry, "attempts" | "status" | "lastStatusCode" | "lastError" | "updatedAt">): Promise<WebhookQueueEntry>;
+  /**
+   * Atomically claim up to `limit` rows that are due for delivery.
+   * "Due" means status = 'pending' AND next_attempt_at <= now.
+   * Returns only the rows successfully claimed by this process (status → 'claimed').
+   */
+  claimDue(now: number, limit: number): Promise<WebhookQueueEntry[]>;
+  /** Persist the result of one delivery attempt onto the queue entry. */
+  updateQueueEntry(
+    id: string,
+    patch: Pick<WebhookQueueEntry, "status" | "attempts" | "nextAttemptAt" | "lastStatusCode" | "lastError">,
+  ): Promise<void>;
+  /** Look up a single queue entry by id (for replay). */
+  findQueueEntry(id: string): Promise<WebhookQueueEntry | null>;
+  /**
+   * Return rows stuck in 'claimed' since before `claimedBefore` to 'pending'.
+   * A worker that dies mid-delivery leaves its claim behind; without this the
+   * row is never due again and the event is silently lost — the exact failure
+   * the durable queue exists to prevent. Returns how many rows were released.
+   */
+  reclaimStale(claimedBefore: number): Promise<number>;
+  /** Rows still awaiting delivery (pending or claimed). Feeds the queue-depth gauge. */
+  countPending(): Promise<number>;
   listDeliveriesByLinkId(linkId: string): Promise<WebhookDelivery[]>;
 }
 

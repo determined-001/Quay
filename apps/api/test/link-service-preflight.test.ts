@@ -57,6 +57,15 @@ function fakeWebhooks(): WebhookRepository {
     rotateSecret: vi.fn(async () => null),
     softDelete: vi.fn(async () => false),
     listDeliveries: vi.fn(async () => ({ deliveries: [], nextCursor: null })),
+    reclaimStale: vi.fn(async () => 0),
+    countPending: vi.fn(async () => 0),
+    findWebhookById: async () => null,
+    enqueue: async (e: { id: string; webhookId: string; linkId: string; event: string; payload: string; nextAttemptAt: number; createdAt: number }) => ({
+    ...e, attempts: 0, status: "pending" as const, lastStatusCode: null, lastError: null, updatedAt: e.createdAt,
+  }),
+    claimDue: async () => [],
+    updateQueueEntry: async () => {},
+    findQueueEntry: async () => null,
     listDeliveriesByLinkId: vi.fn(async () => []),
     recordDelivery: vi.fn(async () => {}),
   };

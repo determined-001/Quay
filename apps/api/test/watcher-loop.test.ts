@@ -143,17 +143,36 @@ function makeNoopWebhookRepo(): WebhookRepository {
     async listBySeller() {
       return [];
     },
-    async getById(): Promise<null> {
+    async getById() {
       return null;
     },
-    async rotateSecret(): Promise<null> {
+    async rotateSecret() {
       return null;
     },
-    async softDelete(): Promise<boolean> {
+    async softDelete() {
       return false;
     },
-    async listDeliveries(): Promise<{ deliveries: never[]; nextCursor: null }> {
+    async listDeliveries() {
       return { deliveries: [], nextCursor: null };
+    },
+    async reclaimStale() {
+      return 0;
+    },
+    async countPending() {
+      return 0;
+    },
+    async findWebhookById(): Promise<null> {
+      return null;
+    },
+    enqueue: async (e: { id: string; webhookId: string; linkId: string; event: string; payload: string; nextAttemptAt: number; createdAt: number }) => ({
+      ...e, attempts: 0, status: "pending" as const, lastStatusCode: null, lastError: null, updatedAt: e.createdAt,
+    }),
+    async claimDue(): Promise<never[]> {
+      return [];
+    },
+    async updateQueueEntry(): Promise<void> {},
+    async findQueueEntry(): Promise<null> {
+      return null;
     },
     async listDeliveriesByLinkId(): Promise<never[]> {
     return [];

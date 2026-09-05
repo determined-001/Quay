@@ -40,6 +40,8 @@ import { horizonSignerFetcher } from "./horizon-signers";
 import { SessionIssuer } from "./session";
 import type { StellarTomlConfig } from "../routes/well-known";
 import { CircuitBreakerOffRamp } from "./circuit-breaker";
+import { WebhookWorker } from "../worker/webhook-worker";
+import { WebhookSender } from "./webhook-sender";
 import { assertKeyConfigured } from "./secret-crypto";
 
 export interface Container {
@@ -182,6 +184,13 @@ export async function createContainer(): Promise<Container> {
     log: (m) => console.log(`[watcher] ${m}`),
   });
 
+  // The worker's own sender: it performs a single hardened attempt per tick and
+  // leaves retry scheduling to the queue, so its maxAttempts is deliberately 1.
+  const webhookWorker = new WebhookWorker(
+    webhooksRepo,
+    new WebhookSender(webhooksRepo, { maxAttempts: 1, logger }),
+    { log: (m) => console.log(`[webhook] ${m}`) },
+  );
   const metricsToken = resolveMetricsToken();
   const challenge = new ChallengeService({
     serverKeypair,
@@ -226,6 +235,7 @@ export async function createContainer(): Promise<Container> {
     start() {
       logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
       loop.start();
+      webhookWorker.start();
       // With no off-ramp there is nothing to advance: no link can reach
       // offramp_pending, so the poller would query an always-empty set on
       // every tick forever. The anchor probe is likewise pointless with no
@@ -246,6 +256,7 @@ export async function createContainer(): Promise<Container> {
     },
     async stop() {
       await loop.stop();
+      webhookWorker.stop();
       stopPoller?.();
       stopRevocationSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();

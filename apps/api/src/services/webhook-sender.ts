@@ -3,6 +3,7 @@ import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import type { Webhook, WebhookRepository } from "@checkout/core";
 import { decryptSecret } from "./secret-crypto";
+import { newId } from "./ids";
 import { metrics } from "../metrics";
 import { guardWebhookUrl } from "./ssrf-guard";
 
@@ -13,6 +14,15 @@ const HOST_ALLOWLIST = process.env.WEBHOOK_HOST_ALLOWLIST
 export interface WebhookEvent {
   event: string; // e.g. "link.paid"
   data: Record<string, unknown>;
+}
+
+/** Result of a single delivery attempt. */
+export interface DeliveryOutcome {
+  ok: boolean;
+  statusCode: number | null;
+  error: string | null;
+  /** True when retrying cannot help: 4xx (not 429), a 3xx, or a guard rejection. */
+  permanent: boolean;
 }
 
 export interface WebhookSenderOptions {
@@ -58,8 +68,15 @@ export interface WebhookSenderOptions {
  *   - Response bodies are read up to maxResponseBytes and then discarded to
  *     prevent memory exhaustion.
  *
- * NOTE: retries are in-process — a crash mid-backoff loses pending retries.
- * A durable queue is the production answer; this hardens the common transient case.
+ * Production dispatch is durable: `enqueue` writes one `webhook_queue` row per
+ * hook and returns, and WebhookWorker drains the queue with its own backoff, so
+ * a crash mid-backoff no longer loses pending retries (issue #22). `deliverOnce`
+ * is the single hardened attempt both paths share.
+ *
+ * `dispatch` is the older in-process path: one call delivers and retries inline.
+ * Nothing in production calls it any more — the queue does — but it remains the
+ * documented way to send an event synchronously, and every attempt-level rule
+ * above is asserted against it.
  */
 function sign(secret: string, body: string): string {
   return createHmac("sha256", secret).update(body).digest("hex");
@@ -98,22 +115,43 @@ export class WebhookSender {
     await Promise.all(hooks.map((hook) => this.deliver(baseLog, hook, linkId, event.event, body)));
   }
 
-  private async deliver(
-    baseLog: Logger,
-    hook: Webhook,
-    linkId: string,
-    event: string,
-    body: string,
-  ): Promise<void> {
-    const child = baseLog.child({
-      linkId,
-      webhookId: hook.id,
-      eventType: event,
-      // We log the URL host only — the path might carry signed data the receiver
-      // treats as sensitive, and we already record the link + event for grep.
-      url: safeHost(hook.url),
-    });
+  /**
+   * Durable dispatch: freeze the body, write one queue row per hook, return.
+   *
+   * This never performs I/O against the receiver, so it cannot block the state
+   * transition that produced the event. WebhookWorker picks the rows up and owns
+   * every attempt from there.
+   */
+  async enqueue(hooks: Webhook[], linkId: string, event: WebhookEvent): Promise<void> {
+    // The body is frozen here and re-sent verbatim on every attempt, so the
+    // signed bytes — `sentAt` included — never change between retries.
+    const body = JSON.stringify({ ...event, id: linkId, sentAt: new Date().toISOString() });
+    const now = Date.now();
 
+    await Promise.all(
+      hooks.map((hook) =>
+        this.repo.enqueue({
+          id: newId("wqe"),
+          webhookId: hook.id,
+          linkId,
+          event: event.event,
+          payload: body,
+          nextAttemptAt: now, // due immediately
+          createdAt: now,
+        }),
+      ),
+    );
+  }
+
+  /**
+   * One delivery attempt, with every protection the in-process sender had:
+   * delivery-time SSRF re-check, rotation-overlap dual signature, no redirect
+   * following, and a capped response read.
+   *
+   * Records nothing — the caller owns the bookkeeping, because the queue worker
+   * and `dispatch` record different things (every attempt vs. the final outcome).
+   */
+  async deliverOnce(hook: Webhook, event: string, body: string): Promise<DeliveryOutcome> {
     // Re-check the URL at delivery time: a hostname that resolved to a public
     // address at registration may resolve to an internal one now. This narrows
     // the DNS-rebinding window but does not close it — the fetch below still
@@ -121,16 +159,12 @@ export class WebhookSender {
     // address we checked. See the follow-up noted on PR #108.
     const guard = await this.guard(hook.url);
     if (!guard.ok) {
-      child.warn({ event: "webhook.failed", reason: guard.reason }, "SSRF guard rejected URL at delivery");
-      await this.repo.recordDelivery({
-        webhookId: hook.id,
-        linkId,
-        event,
-        statusCode: null,
+      return {
         ok: false,
+        statusCode: null,
         error: `SSRF guard rejected URL at delivery: ${guard.reason}`,
-      });
-      return;
+        permanent: true,
+      };
     }
 
     const signature = sign(decryptSecret(hook.secretEncrypted), body);
@@ -148,56 +182,95 @@ export class WebhookSender {
       ? `sha256=${signature},sha256=${sign(decryptSecret(hook.previousSecretEncrypted!), body)}`
       : `sha256=${signature}`;
 
+    try {
+      const res = await fetch(hook.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-checkout-signature": signatureHeader,
+          "x-checkout-event": event,
+        },
+        body,
+        signal: AbortSignal.timeout(this.timeoutMs),
+        // Never follow redirects: a 3xx is the classic way to walk an
+        // allowed public host round to an internal one, and the guard is
+        // not re-applied to redirect targets (issue #23 item 3).
+        redirect: "manual",
+      });
+
+      // `redirect: "manual"` surfaces 3xx as an ordinary response rather
+      // than following it. Treat it as a failed attempt, not a success.
+      if (res.status >= 300 && res.status < 400) {
+        metrics.webhookAttemptsTotal.inc({ result: "error" });
+        await this.drainCapped(res);
+        // A receiver redirecting us is a config error, not transient.
+        return { ok: false, statusCode: res.status, error: `HTTP ${res.status} (redirect not followed)`, permanent: true };
+      }
+
+      await this.drainCapped(res);
+
+      if (res.ok) {
+        metrics.webhookAttemptsTotal.inc({ result: "ok" });
+        return { ok: true, statusCode: res.status, error: null, permanent: false };
+      }
+
+      metrics.webhookAttemptsTotal.inc({ result: "error" });
+      // 4xx (except 429) is a client error the receiver won't fix on retry.
+      const permanent = res.status < 500 && res.status !== 429;
+      return { ok: false, statusCode: res.status, error: `HTTP ${res.status}`, permanent };
+    } catch (err) {
+      metrics.webhookAttemptsTotal.inc({ result: "error" });
+      return { ok: false, statusCode: null, error: err instanceof Error ? err.message : String(err), permanent: false };
+    }
+  }
+
+  private async deliver(
+    baseLog: Logger,
+    hook: Webhook,
+    linkId: string,
+    event: string,
+    body: string,
+  ): Promise<void> {
+    const child = baseLog.child({
+      linkId,
+      webhookId: hook.id,
+      eventType: event,
+      // We log the URL host only — the path might carry signed data the receiver
+      // treats as sensitive, and we already record the link + event for grep.
+      url: safeHost(hook.url),
+    });
+
     let statusCode: number | null = null;
     let error: string | null = null;
 
     this.inFlight += 1;
     try {
       for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
-        try {
-          const res = await fetch(hook.url, {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "x-checkout-signature": signatureHeader,
-              "x-checkout-event": event,
-            },
-            body,
-            signal: AbortSignal.timeout(this.timeoutMs),
-            // Never follow redirects: a 3xx is the classic way to walk an
-            // allowed public host round to an internal one, and the guard is
-            // not re-applied to redirect targets (issue #23 item 3).
-            redirect: "manual",
+        const outcome = await this.deliverOnce(hook, event, body);
+        statusCode = outcome.statusCode;
+        error = outcome.error;
+
+        if (outcome.ok) {
+          child.info({ event: "webhook.attempt", attempt, statusCode, delivered: true }, "webhook delivered");
+          await this.repo.recordDelivery({
+            webhookId: hook.id,
+            linkId,
+            event,
+            attempt,
+            queueEntryId: null,
+            statusCode,
+            ok: true,
+            error: null,
           });
+          return;
+        }
 
-          // `redirect: "manual"` surfaces 3xx as an ordinary response rather
-          // than following it. Treat it as a failed attempt, not a success.
-          if (res.status >= 300 && res.status < 400) {
-            metrics.webhookAttemptsTotal.inc({ result: "error" });
-            statusCode = res.status;
-            error = `HTTP ${res.status} (redirect not followed)`;
-            await this.drainCapped(res);
-            break; // a receiver redirecting us is a config error, not transient
+        if (outcome.permanent) {
+          if (statusCode === null) {
+            // Only the SSRF guard fails permanently without a status code.
+            child.warn({ event: "webhook.failed", reason: error }, "SSRF guard rejected URL at delivery");
           }
-
-          await this.drainCapped(res);
-
-          if (res.ok) {
-            metrics.webhookAttemptsTotal.inc({ result: "ok" });
-            child.info({ event: "webhook.attempt", attempt, statusCode: res.status, delivered: true }, "webhook delivered");
-            await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode: res.status, ok: true, error: null });
-            return;
-          }
-
-          metrics.webhookAttemptsTotal.inc({ result: "error" });
-          statusCode = res.status;
-          error = `HTTP ${res.status}`;
-          // 4xx (except 429) is a client error the receiver won't fix on retry.
-          if (res.status < 500 && res.status !== 429) break;
-        } catch (err) {
-          metrics.webhookAttemptsTotal.inc({ result: "error" });
-          statusCode = null;
-          error = err instanceof Error ? err.message : String(err);
+          break;
         }
 
         const willRetry = attempt < this.maxAttempts;
@@ -209,7 +282,16 @@ export class WebhookSender {
       }
 
       child.warn({ event: "webhook.failed", statusCode, error }, "webhook delivery exhausted all attempts");
-      await this.repo.recordDelivery({ webhookId: hook.id, linkId, event, statusCode, ok: false, error });
+      await this.repo.recordDelivery({
+        webhookId: hook.id,
+        linkId,
+        event,
+        attempt: this.maxAttempts,
+        queueEntryId: null,
+        statusCode,
+        ok: false,
+        error,
+      });
     } finally {
       this.inFlight -= 1;
     }
@@ -260,18 +342,3 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Read and discard up to `cap` bytes from a ReadableStream. */
-async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<void> {
-  const reader = stream.getReader();
-  let read = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      read += value?.byteLength ?? 0;
-      if (read >= cap) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
