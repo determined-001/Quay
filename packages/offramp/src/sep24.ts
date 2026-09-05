@@ -37,6 +37,20 @@ export interface Sep24Transaction {
   moreInfoUrl?: string;
 }
 
+/**
+ * Join a SEP endpoint path onto a transfer-server base URL.
+ *
+ * `new URL("/transaction", base)` is an *absolute* path: it replaces the base's
+ * own path, so a TOML that advertises `https://anchor.example/sep24` silently
+ * becomes `https://anchor.example/transaction`. testanchor.stellar.org does
+ * exactly this, and answered every SEP-24 call with
+ * `404 No static resource transactions/withdraw/interactive.` until this joined
+ * the path onto the base instead of over it.
+ */
+export function endpointUrl(base: string, path: string): URL {
+  return new URL(`${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`);
+}
+
 function assetIdentifier(asset: AssetRef): string {
   return asset.issuer === null ? "stellar:native" : `stellar:${asset.code}:${asset.issuer}`;
 }
@@ -121,7 +135,7 @@ export class Sep24Client {
     const discovery = await this.getDiscoveryInfo();
     const token = await this.getAuthToken();
 
-    const endpoint = new URL("/transactions/withdraw/interactive", discovery.transferServerSep24);
+    const endpoint = endpointUrl(discovery.transferServerSep24, "transactions/withdraw/interactive");
 
     const bodyData: Record<string, string> = {
       asset_code: input.assetCode,
@@ -160,7 +174,7 @@ export class Sep24Client {
     const discovery = await this.getDiscoveryInfo();
     const token = await this.getAuthToken();
 
-    const url = new URL("/transaction", discovery.transferServerSep24);
+    const url = endpointUrl(discovery.transferServerSep24, "transaction");
     url.searchParams.set("id", id);
 
     const res = await fetch(url.toString(), {
