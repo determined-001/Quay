@@ -8,7 +8,8 @@
   "main": "./src/index.ts",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
@@ -16,6 +17,7 @@
     "pino": "^10.3.1"
   },
   "devDependencies": {
-    "vitest": "4.1.10"
+    "vitest": "4.1.10",
+    "@vitest/coverage-v8": "4.1.10"
   }
 }

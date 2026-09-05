@@ -1,6 +1,8 @@
 import { defineConfig } from "vitest/config";
+import { coverage } from "../../vitest.coverage";
 export default defineConfig({
   test: {
+    coverage: coverage({ lines: 79, statements: 79, functions: 65, branches: 96 }),
     include: ["test/**/*.test.ts"],
     // The fast-check property suites run hundreds of cases each. In isolation
     // the slowest lands around 1.7s, but under `turbo run test` all six package

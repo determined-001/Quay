@@ -201,11 +201,21 @@ dashboard flips the link to **paid**; hit **Cash out to NGN** to exercise the of
 Useful scripts (from the repo root):
 
 ```bash
-pnpm typecheck   # all packages
-pnpm test        # core unit tests
-pnpm build       # builds the web app
-pnpm sweep       # pre-entry ritual: uptime + synthetic checks against the live demo
+pnpm typecheck      # all packages
+pnpm test           # core unit tests
+pnpm test:coverage  # the same tests, with the CI coverage gate applied
+pnpm build          # builds the web app
+pnpm sweep          # pre-entry ritual: uptime + synthetic checks against the live demo
 ```
+
+**Coverage gating.** `pnpm test:coverage` fails if any package drops below the
+floor in its `vitest.config.ts`, and CI runs it on every push. Those floors are
+a *ratchet*: each was set to that package's measured coverage when gating landed
+(`packages/offramp` at 38%, for instance, is a statement of fact, not of
+approval). Raise a floor when you raise the coverage; never lower one to make a
+build pass — that is the single move the gate exists to prevent. The run also
+uploads an HTML report as a CI artifact and prints a per-package table to the
+job summary.
 
 ### Demo seed (pre-populated dashboard)
 
