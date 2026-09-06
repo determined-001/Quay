@@ -1,9 +1,11 @@
 name: uptime
 
 on:
-  # Scheduled pinger disabled — re-enable by uncommenting the schedule block.
-  # schedule:
-  #   - cron: "*/5 * * * *"
+  schedule:
+    # Every 5 minutes. The cadence is also load-bearing beyond monitoring: a
+    # Render instance spins down after 15 minutes idle, and a spun-down
+    # instance is not running the settlement watcher.
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -45,13 +47,32 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Commit updated status
+      # Status lands on its own `status` branch, never on main.
+      #
+      # The scheduled pinger was disabled in a0f06d1 because a commit every 5
+      # minutes buried the actual history of this repo — 470 of its commits are
+      # this bot. Parking the output on a branch keeps the check running and
+      # main readable, and it sidesteps main's branch protection, which a bot
+      # push cannot satisfy anyway. The README badges read from `status`.
+      - name: Publish updated status to the status branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          tmp="$(mktemp -d)"
+          cp docs/uptime-state.json docs/STATUS.md docs/uptime-badge-*.json "$tmp/"
+
+          git fetch origin status --depth=1 || true
+          if git rev-parse --verify origin/status >/dev/null 2>&1; then
+            git checkout -B status origin/status
+          else
+            git checkout -B status
+          fi
+
+          cp "$tmp"/uptime-state.json "$tmp"/STATUS.md "$tmp"/uptime-badge-*.json docs/
           git add docs/uptime-state.json docs/STATUS.md docs/uptime-badge-*.json
           git diff --cached --quiet || git commit -m "chore(uptime): update status [skip ci]"
-          git push
+          git push origin status
 
       - name: Alert on state changes
         if: steps.uptime.outputs.events != ''

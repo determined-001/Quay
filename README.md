@@ -11,10 +11,14 @@ testnet wallet with the shown memo, and watch it flip to **paid**. Cash-out runs
 a real SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org` (USD quotes;
 testnet only, no real money moves).
 
-[![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/main/docs/uptime-badge-api.json)](docs/STATUS.md)
-[![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/main/docs/uptime-badge-web.json)](docs/STATUS.md)
-[![Synthetic check](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/main/docs/uptime-badge-synthetic.json)](docs/STATUS.md)
-Checked every 5 minutes — see [`docs/STATUS.md`](docs/STATUS.md) for the last 90 days.
+[![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-api.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
+[![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-web.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
+[![Synthetic check](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-synthetic.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
+Checked every 5 minutes by [`.github/workflows/uptime.yml`](.github/workflows/uptime.yml), which
+publishes to the [`status`](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
+branch rather than committing to `main` every 5 minutes. The badges above and
+the 90-day history read from there; the copy of `docs/STATUS.md` on `main` is a
+snapshot and will lag.
 
 The loop, end to end:
 

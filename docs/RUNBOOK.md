@@ -197,10 +197,25 @@ title and body — see `renderStatusMd`/`buildTargets` in the script) instead of
 the ambiguous `🔴 Uptime: API is down` a pre-8.8 reader might mistake for
 testnet.
 
-**The scheduled run itself is still disabled** (`.github/workflows/uptime.yml`
-only has `workflow_dispatch`, no `schedule` — see `TODO.md` §5). Re-enabling
-it and setting the variables above are both owner actions: this doc only
-covers what to set once you do.
+**Where the output lives.** The scheduled run is on (`*/5`), but it does not
+commit to `main`. It writes `docs/uptime-state.json`, `docs/STATUS.md` and the
+badge JSON to a dedicated **`status` branch**, and the README badges read from
+there. The pinger was originally disabled in `a0f06d1` because a commit every
+five minutes buried the repo's real history — 470 commits are that bot — and a
+bot push cannot satisfy main's branch protection anyway. The copy of
+`docs/STATUS.md` on `main` is a snapshot and will lag; the live one is on
+`status`.
+
+The 5-minute cadence is also load-bearing beyond monitoring: a Render instance
+spins down after 15 minutes idle, and a spun-down instance is not running the
+settlement watcher.
+
+**Turning the anchor probe off.** `.github/workflows/anchor-probe.yml` runs a
+nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org`
+and files an issue when it fails. That is the testnet deploy's sandbox; a
+payments-only mainnet has no anchor, so the probe would file nightly issues
+about a dependency the product no longer has. Set the repository variable
+`ANCHOR_PROBE_DISABLED=1` to skip it.
 
 ## Deploy
 
