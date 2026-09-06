@@ -26,6 +26,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     sellers: c.sellers,
     revocations: c.auth.revocations,
     apiKeyRepo: c.apiKeys,
+    allowedOrigins: c.auth.allowedOrigins,
   });
 
   // Idempotency is mounted after `auth` so it can scope stored responses to the

@@ -222,6 +222,11 @@ export const env = {
   // When set, rate-limit counters are shared across instances via Redis instead
   // of an in-process Map.
   redisUrl: process.env.REDIS_URL || undefined,
+  // Explicit operator acknowledgement that this deployment runs exactly ONE
+  // instance. Required on the public network when REDIS_URL is unset, because
+  // both the rate limiter and the SEP-10 single-use challenge claim are
+  // per-process without it — see the guard in services/container.ts.
+  singleInstance: (process.env.SINGLE_INSTANCE ?? "false") === "true",
   // Seller wallet that receives funds. If unset on testnet, the app generates a
   // throwaway keypair on first boot and prints it. Required on public network.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,

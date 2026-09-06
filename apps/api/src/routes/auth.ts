@@ -16,6 +16,8 @@ export function authRoutes(deps: {
   revocations: TokenRevocationRepository;
   /** Set to false in non-HTTPS local dev so the cookie is actually sent (default true). */
   secureCookie?: boolean;
+  /** CSRF allowlist for cookie-authenticated state changes (POST /logout). */
+  allowedOrigins?: string[];
 }): Hono<{ Variables: AuthedVariables }> {
   const app = new Hono<{ Variables: AuthedVariables }>();
   const secure = deps.secureCookie ?? true;
@@ -57,10 +59,21 @@ export function authRoutes(deps: {
     const seller = await deps.sellers.createIfAbsent(account);
     const { token, expiresAt } = await deps.session.issue({ sub: account, sellerId: seller.id });
 
+    // SameSite: the dashboard and this API are on different registrable
+    // domains in production (quay-web.vercel.app vs quay-api.onrender.com), so
+    // a cross-site fetch is exactly what every dashboard request is. "Lax"
+    // never attaches the cookie to those, which silently defeated the reason
+    // this cookie exists — the in-memory bearer token dies on reload and this
+    // is what was supposed to survive it. "None" is required to send it at all,
+    // and browsers only accept "None" alongside Secure. Locally everything is
+    // http://localhost, where Secure is off and same-site anyway, so "Lax"
+    // stays correct there. The CSRF exposure "None" would otherwise open is
+    // closed in requireSeller: a cookie-only state change must carry an Origin
+    // header we published.
     setCookie(ctx, SESSION_COOKIE, token, {
       httpOnly: true,
       secure,
-      sameSite: "Lax",
+      sameSite: secure ? "None" : "Lax",
       path: "/",
       maxAge: Math.max(0, expiresAt - Math.floor(Date.now() / 1000)),
     });

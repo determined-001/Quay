@@ -60,10 +60,20 @@ export function apiKeyRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
     try {
       scopes = parseScopes(parsed.data.scopes);
     } catch (err) {
+      // Deliberately not `err.message`. Every other route on this API answers
+      // with a typed HttpError/AuthError whose text was written to be read by
+      // a caller; this was the one place a raw Error — whose message is built
+      // from request input, and which a future dependency could throw with
+      // something else entirely — was echoed straight back. Name the valid
+      // scopes instead: more useful to a caller, and it says nothing about us.
+      ctx.get("logger")?.warn(
+        { event: "apikey.scopes.invalid", error: err instanceof Error ? err.message : String(err) },
+        "rejected an API key request with unparseable scopes",
+      );
       return ctx.json(
         {
           error: "invalid_body",
-          issues: [{ message: err instanceof Error ? err.message : String(err) }],
+          issues: [{ message: `scopes must be a subset of: ${ALL_SCOPES.join(", ")}` }],
         },
         400,
       );

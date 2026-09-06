@@ -40,6 +40,7 @@ export function demoRoutes(container: Container): Hono<{ Variables: AuthedVariab
     session: container.auth.session,
     sellers: container.sellers,
     revocations: container.auth.revocations,
+    allowedOrigins: container.auth.allowedOrigins,
   });
 
   /**

@@ -8,32 +8,21 @@
 #
 
 # ---------------------------------------------------------------------------
-# Reviewed 2026-08-08, when Stellar Wallets Kit was added for issue 5.1.
+# Empty as of 2026-09-06 — and that is the intended state.
 #
-# Every advisory below is in a dependency of a wallet module this app does NOT
-# import. The kit declares all its integrations as hard dependencies, so Trezor
-# (-> @trezor/connect -> protobufjs) and the HOT wallet SDK (-> @solana/web3.js
-# -> jayson -> uuid, and -> @near-js/crypto -> secp256k1 -> elliptic) are
-# installed, but `apps/web/lib/wallet.ts` imports only the six browser-extension
-# modules by subpath, so none of this is bundled or executed.
+# This file previously carried twelve entries: the protobufjs advisories
+# (including GHSA-xq3m-2v4x-88gg, arbitrary code execution) plus elliptic,
+# secp256k1 and uuid, all reached through wallet modules Stellar Wallets Kit
+# declares as hard dependencies but this app never imports. The reasoning was
+# sound and `scripts/check-client-bundle.mjs` enforced it, but "unreachable"
+# is a weaker guarantee than "not present", and an allowlist that keeps
+# growing is one nobody reads by the time it matters.
 #
-# Verified, not assumed: `scripts/check-client-bundle.mjs` greps the built
-# client chunks for these packages and fails if any appears. It runs in CI after
-# the web build, so the moment someone imports modules/trezor these entries stop
-# being true AND the build goes red — rather than the allowlist quietly
-# continuing to vouch for them.
+# The protobufjs entries were retired by the `protobufjs: ^7.6.1` override in
+# package.json — the same technique that removed toml in #184. It dedupes the
+# tree onto a patched 7.6.6 rather than arguing the vulnerable copy is
+# harmless. `pnpm audit --audit-level=high` is clean with no entries here.
 #
-# Re-review: when Wallets Kit is next upgraded, or if the guard is removed.
+# Add an entry only when there is genuinely no fix, and give it a re-review
+# date. Prefer an override; prefer removing the dependency more.
 # ---------------------------------------------------------------------------
-1117571
-1118641
-1118928
-1118930
-1118932
-1123488
-GHSA-66ff-xgx4-vchm
-GHSA-685m-2w69-288q
-GHSA-75px-5xx7-5xc7
-GHSA-jvwf-75h9-cwgg
-GHSA-wcpc-wj8m-hjx6
-GHSA-xq3m-2v4x-88gg

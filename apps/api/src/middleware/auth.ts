@@ -31,18 +31,50 @@ export interface AuthedVariables extends RequestContextVariables {
  * a resource that isn't theirs (see `links.ts`'s ownership check) — a
  * different failure mode from "who even are you."
  */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
 export function requireSeller(deps: {
   session: SessionIssuer;
   sellers: SellerRepository;
   revocations: TokenRevocationRepository;
+  /** Origins allowed to drive a state change using the session COOKIE. Same
+   *  list as CORS_ORIGINS; see the cross-site note below. */
+  allowedOrigins?: string[];
 }): MiddlewareHandler<{ Variables: AuthedVariables }> {
   return async (ctx: Context<{ Variables: AuthedVariables }>, next: Next) => {
     const header = ctx.req.header("authorization");
     const bearer = header?.match(/^Bearer\s+(.+)$/i)?.[1];
-    const token = bearer ?? getCookie(ctx, SESSION_COOKIE);
+    const cookie = getCookie(ctx, SESSION_COOKIE);
+    const token = bearer ?? cookie;
 
     if (!token) {
       return ctx.json({ error: "unauthorized", message: "missing session token" }, 401);
+    }
+
+    // CSRF. A bearer token is only ever attached by code that chose to attach
+    // it, so it carries its own proof of intent. A cookie is attached by the
+    // browser on the site's behalf, which is precisely the CSRF primitive — and
+    // this cookie is SameSite=None in production, because the dashboard and the
+    // API are on different registrable domains and SameSite=Lax would never
+    // send it at all (that is not a hypothetical: it is why a reload used to
+    // log you out). SameSite therefore cannot be the defense, so the defense is
+    // Origin: browsers set it on every cross-origin request including form
+    // posts, and page JavaScript cannot forge it. A cookie-only request that
+    // changes state must come from an origin we published.
+    if (!bearer && !SAFE_METHODS.has(ctx.req.method.toUpperCase())) {
+      const origin = ctx.req.header("origin");
+      const allowed = deps.allowedOrigins ?? [];
+      if (!origin || !allowed.includes(origin)) {
+        return ctx.json(
+          {
+            error: "forbidden",
+            message:
+              "cookie-authenticated state change requires an Origin header from an allowed origin; " +
+              "send the session as `Authorization: Bearer` instead",
+          },
+          403,
+        );
+      }
     }
 
     let payload;
@@ -93,6 +125,9 @@ export interface AuthDeps {
   sellers: SellerRepository;
   revocations: TokenRevocationRepository;
   apiKeyRepo: DrizzleApiKeyRepository;
+  /** Origins allowed to drive a state change on the session COOKIE alone —
+   *  the CSRF check in `requireSeller`. Same list as CORS_ORIGINS. */
+  allowedOrigins?: string[];
 }
 
 /** Return true when the token is one of ours (`ak_live_…` / `ak_test_…`). */
