@@ -89,7 +89,37 @@ Remaining for this path:
 - [ ] Decide how the dashboard should explain that sellers cash out themselves —
       right now the button simply is not there, with no copy replacing it.
 
-## 3. Buyer-side on-ramp checkout — design note, not yet scoped
+## 3. Next stage — muxed correlation (#197)
+
+First mainnet payment settled 2026-09-06 (`3e8dfd1…`, memo `pl_7j1wukfijsm1`,
+2 XLM, buyer wallet straight to merchant wallet). The loop is proven on real
+money.
+
+The failure it exposed: a buyer who omits or mangles the memo gets
+`{ kind: "no_memo" }` / `unknown_reference`. The money still arrives — it went
+buyer-to-merchant directly and Quay never held it — but the link stays `active`
+forever, with no reconcile path in the product.
+
+`CORRELATION=muxed` removes the memo from the equation entirely: SEP-23 puts the
+id inside the destination address, and it is already implemented and wired.
+Not a blind flag flip, though — some older wallets and exchanges reject `M...`
+destinations, and a buyer who cannot pay at all is worse off than one whose
+payment lands unattributed.
+
+- [ ] Set `CORRELATION=muxed` on the testnet service and pay a link from
+      Freighter, Lobstr, xBull, and one exchange withdrawal. Record what
+      accepts `M...`. This is the first real use of the dev/main split.
+- [ ] Decide from that evidence: muxed default, memo default with muxed opt-in,
+      or per-link choice.
+- [ ] Separately: a buyer can always pay the bare `G...` by hand, so the
+      unmatched state survives any scheme. Decide whether the seller should be
+      shown payments Quay could not attribute.
+
+- [ ] **USDC is still untested on mainnet.** The first payment was native XLM,
+      which needs no trustline. USDC exercises `resolveAsset` with an issuer and
+      the `assertCanReceive` preflight, neither of which has run in production.
+
+## 4. Buyer-side on-ramp checkout — design note, not yet scoped
 
 The strategic direction as of 2026-08-23. Nothing here is built.
 
@@ -194,7 +224,7 @@ classic payments by memo — cannot see at all.
 
 Worth a testnet spike while audits run. Not worth stopping shipping for.
 
-## 4. Known gaps — not blockers, each has a real production cost
+## 5. Known gaps — not blockers, each has a real production cost
 
 - [ ] **`TestAnchorOffRamp` requires SEP-38, which the most plausible real
       anchor does not implement.** `testanchor.ts:165` calls `getSep38Quote`
@@ -231,7 +261,7 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
 
 ---
 
-## 5. Mainnet-readiness audit (2026-08-25) — what stays with you
+## 6. Mainnet-readiness audit (2026-08-25) — what stays with you
 
 The audit's twenty findings were triaged on 2026-08-26. Fifteen are ordinary
 engineering and are now filed as contributor issues — **#152–#166**, in
@@ -267,7 +297,7 @@ a paid account, or your judgement about real money.
       `UPTIME_MAINNET_API_URL` (and optionally `UPTIME_MAINNET_WEB_URL`) as repo
       variables once `quay-api-mainnet` exists.
 - [ ] **Set `ANCHOR_PROBE_DISABLED=1` and the `PROD_*` backup secrets** once the
-      mainnet service exists — see §4. Both are now variable/secret flips, not
+      mainnet service exists — see §5. Both are now variable/secret flips, not
       code changes.
 
 **Repo settings**
@@ -296,7 +326,7 @@ a paid account, or your judgement about real money.
 
 ---
 
-## 6. Verification before announcing
+## 7. Verification before announcing
 
 Run `pnpm preflight:mainnet --api https://<mainnet-api>` first
 (`scripts/mainnet-preflight.mjs`). It checks what the boot guards cannot see
