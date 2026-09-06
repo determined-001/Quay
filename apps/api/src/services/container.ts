@@ -34,6 +34,7 @@ import {
 } from "../worker/watcher-loop";
 import { ChallengeService } from "./challenge";
 import { RedisUsedChallengeStore } from "./redis-used-challenge-store";
+import { resolveSellerKeypairOrWallet } from "./seller-wallet";
 import { horizonSignerFetcher } from "./horizon-signers";
 import { SessionIssuer } from "./session";
 import type { StellarTomlConfig } from "../routes/well-known";
@@ -52,7 +53,7 @@ export interface Container {
   db: DB;
   kyc: KycPort;
   telemetry: OffRampTelemetryRepository;
-  config: { network: string; horizonUrl: string; sellerWallet: string };
+  config: { network: string; horizonUrl: string; sellerWallet: string | null };
   horizonStatus(): HorizonStatus;
   /** Optional SSRF guard override for webhook URLs. Tests inject a permissive
    *  one so route tests do not depend on live DNS. */
@@ -117,9 +118,21 @@ export async function createContainer(): Promise<Container> {
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
 
+  // Optional. Quay is multi-tenant: a seller signs in with their own wallet
+  // over SEP-10, that address becomes their identity AND their payout
+  // destination, and `POST /links` sets `destination: seller.wallet` from the
+  // authenticated seller — never from configuration. So there is no wallet
+  // this deployment needs to own, and requiring one implied a custody
+  // relationship that does not exist.
+  //
+  // What it still buys, when set, is a convenience: `/health` can report
+  // whether ONE known wallet holds a USDC trustline, and testnet gets a
+  // throwaway seller so `pnpm dev` works with no configuration. Neither is a
+  // correctness guarantee — that lives in `assertCanReceive`, which runs per
+  // seller on every single link creation and 422s with a trustline URI.
   const seller = resolveSellerKeypairOrWallet(logger);
   const sellerWallet = seller.publicKey;
-  await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
+  if (sellerWallet) await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
 
   const rail = new StellarRail(stellar);
   // Polling watcher gets the retry / fallback / degraded-tracking wrapper
@@ -156,7 +169,7 @@ export async function createContainer(): Promise<Container> {
     offrampState: offrampStateRepo,
     kyc,
     stellar,
-    operatorWallet: sellerWallet,
+    operatorWallet: sellerWallet ?? undefined,
     telemetry: telemetryRepo,
     health: anchorHealth,
     correlation: env.correlation,
@@ -291,7 +304,7 @@ export async function createContainer(): Promise<Container> {
  * the surface minimal and don't pollute env.ts which lives outside the
  * scope of issue 3.7).
  */
-function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string): AnchorHealth {
+function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string | null): AnchorHealth {
   const enabled = offrampKind === "testanchor" || offrampKind === "anchor";
   // For OFFRAMP=anchor env.ts already required both of these, so the ??
   // fallbacks only ever apply to the testanchor sandbox preset.
@@ -345,71 +358,6 @@ export function assertSharedStateOrSingleInstance(
   );
 }
 
-/**
- * Resolves the seller's public key, plus its Keypair when we actually hold the
- * secret in-memory (auto-generated testnet keypair, or DEFAULT_SELLER_SECRET
- * explicitly supplied). The Keypair is only needed to sign the SEP-10 auth
- * challenge for `OFFRAMP=testanchor` — never persisted beyond this process.
- *
- * The one human-facing line of output (the testnet convenience banner with
- * the secret) is guarded by `LOG_LEVEL=debug|trace` so an ordinary run never
- * echoes the seller key. When plaintext output is wanted, set LOG_LEVEL=debug.
- */
-function resolveSellerKeypairOrWallet(logger: Logger): { keypair: Keypair | null; publicKey: string } {
-  if (env.defaultSellerWallet) {
-    if (!StrKey.isValidEd25519PublicKey(env.defaultSellerWallet)) {
-      throw new Error("DEFAULT_SELLER_WALLET is not a valid Stellar G-address");
-    }
-    if (!env.defaultSellerSecret) {
-      logger.info(
-        { event: "seller.configured", wallet: env.defaultSellerWallet, hasSecret: false, network: env.network },
-        "seller wallet configured (no secret loaded)",
-      );
-      return { keypair: null, publicKey: env.defaultSellerWallet };
-    }
-    const kp = Keypair.fromSecret(env.defaultSellerSecret);
-    if (kp.publicKey() !== env.defaultSellerWallet) {
-      throw new Error("DEFAULT_SELLER_SECRET does not match DEFAULT_SELLER_WALLET");
-    }
-    logger.info(
-      { event: "seller.configured", wallet: kp.publicKey(), hasSecret: true, network: env.network },
-      "seller wallet configured (secret loaded)",
-    );
-    return { keypair: kp, publicKey: kp.publicKey() };
-  }
-  if (env.network === "public") {
-    throw new Error("Set DEFAULT_SELLER_WALLET to your wallet address before running on public network");
-  }
-  // Testnet convenience: generate a throwaway account and tell the operator how to fund it.
-  // The plaintext secret banner is opt-in (LOG_LEVEL=debug|trace) so an ordinary
-  // pino runtime never echoes a secret.
-  const kp = Keypair.random();
-  const pub = kp.publicKey();
-  logger.warn(
-    {
-      event: "seller.generated",
-      publicKey: pub,
-      fund: `https://friendbot.stellar.org/?addr=${pub}`,
-      network: env.network,
-    },
-    "no DEFAULT_SELLER_WALLET set — generated throwaway testnet seller",
-  );
-  if (process.env.LOG_LEVEL === "debug" || process.env.LOG_LEVEL === "trace") {
-    process.stdout.write(
-      [
-        "",
-        "──────────────────────────────────────────────────────────────────",
-        " Testnet seller key (LOG_LEVEL=debug printed this once):",
-        ` Public key (receives funds): ${pub}`,
-        ` Secret key (import into a wallet to move funds): ${kp.secret()}`,
-        " Set DEFAULT_SELLER_WALLET/DEFAULT_SELLER_SECRET in .env to reuse.",
-        "──────────────────────────────────────────────────────────────────",
-        "",
-      ].join("\n") + "\n",
-    );
-  }
-  return { keypair: kp, publicKey: pub };
-}
 
 /**
  * Both `testanchor` and `anchor` are the same SEP-6 adapter; they differ only

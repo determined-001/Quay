@@ -16,7 +16,6 @@
 # Secrets to set in the dashboard:
 #   DATABASE_URL                    libsql://<db-name>-<org>.turso.io  (a real, backed-up DB)
 #   DATABASE_AUTH_TOKEN             from `turso db tokens create <db>`
-#   DEFAULT_SELLER_WALLET           G... wallet that receives funds
 #   SERVER_SIGNING_SECRET           S... the platform's stable SEP-10 identity
 #   JWT_SECRET                      64 hex chars — session signing
 #   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED
@@ -110,8 +109,14 @@ services:
       # RENDER_EXTERNAL_HOSTNAME. Set it in the dashboard only if a custom
       # domain or proxy sits in front of the API.
 
-      - key: DEFAULT_SELLER_WALLET
-        sync: false
+      # Optional, and usually left unset. Quay is multi-tenant: a seller signs
+      # in with their own wallet over SEP-10 and every link they create is paid
+      # straight to that address, so this deployment needs no wallet of its own.
+      # Setting one only makes /health report whether that one wallet holds a
+      # USDC trustline; per-seller trustlines are checked on every link
+      # creation regardless.
+      # - key: DEFAULT_SELLER_WALLET
+      #   sync: false
       # A real, backed-up database. The fallback is file:./local.db, which is
       # lost on every redeploy — taking the payment ledger with it.
       - key: DATABASE_URL

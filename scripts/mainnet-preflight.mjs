@@ -131,13 +131,24 @@ export function checkOfframp(env) {
 
 export function checkSellerWallet(env) {
   const wallet = env.DEFAULT_SELLER_WALLET;
+  const secretRequired = (env.OFFRAMP ?? "mock") === "anchor";
+
+  // Optional, and that is the point. Quay is multi-tenant: a seller signs in
+  // with their own wallet over SEP-10 and every link they create is paid to
+  // that address. This deployment does not need a wallet of its own, and
+  // demanding one implied a custody relationship it does not have.
   if (!wallet) {
-    return fail("seller-wallet", "DEFAULT_SELLER_WALLET is unset. On pubnet an auto-generated wallet means funds land in a key nobody kept.");
+    if (secretRequired && !env.DEFAULT_SELLER_SECRET) {
+      return fail("seller-wallet", "OFFRAMP=anchor needs DEFAULT_SELLER_SECRET to sign SEP-10 auth for the anchor.");
+    }
+    return warn(
+      "seller-wallet",
+      "No DEFAULT_SELLER_WALLET — sellers supply their own wallet at SEP-10 login, which is the multi-tenant path. /health will report usdcTrustline as not_configured; trustlines are still checked per seller on every link creation. Set one only if you want that health signal for your own wallet.",
+    );
   }
   if (!STELLAR_PUBLIC_KEY.test(wallet)) {
     return fail("seller-wallet", `DEFAULT_SELLER_WALLET "${wallet}" is not a valid Stellar public key.`);
   }
-  const secretRequired = (env.OFFRAMP ?? "mock") === "anchor";
   if (secretRequired && !env.DEFAULT_SELLER_SECRET) {
     return fail("seller-wallet", "OFFRAMP=anchor needs DEFAULT_SELLER_SECRET to sign SEP-10 auth for the anchor.");
   }
