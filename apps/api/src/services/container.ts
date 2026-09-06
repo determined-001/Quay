@@ -34,7 +34,7 @@ import {
 } from "../worker/watcher-loop";
 import { ChallengeService } from "./challenge";
 import { RedisUsedChallengeStore } from "./redis-used-challenge-store";
-import { resolveSellerKeypairOrWallet } from "./seller-wallet";
+import { keypairFromSecret, resolveSellerKeypairOrWallet } from "./seller-wallet";
 import { horizonSignerFetcher } from "./horizon-signers";
 import { SessionIssuer } from "./session";
 import type { StellarTomlConfig } from "../routes/well-known";
@@ -431,7 +431,7 @@ function createKyc(sellerKeypair: Keypair | null, db: DB): KycPort {
  * keypair otherwise, same convenience as `resolveSellerKeypairOrWallet`.
  */
 function resolveServerSigningKeypair(): Keypair {
-  if (env.serverSigningSecret) return Keypair.fromSecret(env.serverSigningSecret);
+  if (env.serverSigningSecret) return keypairFromSecret(env.serverSigningSecret, "SERVER_SIGNING_SECRET");
   if (env.network === "public") {
     throw new Error("Set SERVER_SIGNING_SECRET before running on public network (SEP-10 needs a stable signing key)");
   }

@@ -3,6 +3,7 @@ import {
   CIRCLE_USDC_ISSUER_PUBNET,
   checkDatabase,
   checkScaling,
+  checkSecrets,
   checkOfframp,
   checkSellerWallet,
   checkUsdcIssuer,
@@ -28,7 +29,7 @@ const GOOD = {
   NEXT_PUBLIC_OFFRAMP_MODE: "none",
   NEXT_PUBLIC_STELLAR_NETWORK: "public",
   DEFAULT_SELLER_WALLET: WALLET,
-  SERVER_SIGNING_SECRET: "S".repeat(56),
+  SERVER_SIGNING_SECRET: "S" + "A".repeat(55),
   JWT_SECRET: "a".repeat(64),
   WEBHOOK_SECRET_ENCRYPTION_KEY: "b".repeat(64),
   METRICS_TOKEN: "c".repeat(64),
@@ -210,5 +211,54 @@ describe("checkScaling", () => {
   it("warns, but does not block, on an explicit single-instance deploy", () => {
     const res = checkScaling({ SINGLE_INSTANCE: "true" });
     expect(res.level).toBe("warning");
+  });
+});
+
+describe("checkSecrets — SERVER_SIGNING_SECRET shape", () => {
+  const find = (env: Record<string, string>) =>
+    checkSecrets(env).find((r) => r.id === "secret:SERVER_SIGNING_SECRET")!;
+
+  it("blocks a 64-hex value and says which variables that shape belongs to", () => {
+    const res = find({ ...GOOD, SERVER_SIGNING_SECRET: "a".repeat(64) });
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/JWT_SECRET \/ METRICS_TOKEN \/ WEBHOOK_SECRET_ENCRYPTION_KEY/);
+  });
+
+  it("accepts a well-formed seed", () => {
+    expect(find({ ...GOOD, SERVER_SIGNING_SECRET: "S" + "A".repeat(55) }).ok).toBe(true);
+  });
+
+  it("warns on a valid seed wrapped in whitespace, which the API refuses to boot on", () => {
+    const res = find({ ...GOOD, SERVER_SIGNING_SECRET: "S" + "A".repeat(55) + "\n" });
+    expect(res.level).toBe("warning");
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Both of these were real false alarms against a healthy mainnet deployment.
+//  A preflight that reports FAILED on a working system is worse than no
+//  preflight: the next red run gets skimmed.
+// ---------------------------------------------------------------------------
+
+describe("evaluateHealth — multi-tenant trustline", () => {
+  it("treats not_configured as correct, not as a trustline failure", () => {
+    const res = evaluateHealth({
+      ok: true,
+      network: "public",
+      usdcTrustline: { ok: false, reason: "not_configured" },
+    });
+    expect(blocking(res)).toEqual([]);
+    expect(res.find((r) => r.id === "live:trustline")?.ok).toBe(true);
+  });
+
+  it("still blocks when the configured wallet genuinely cannot receive USDC", () => {
+    const res = evaluateHealth({
+      ok: true,
+      network: "public",
+      usdcTrustline: { ok: false, reason: "no_trustline" },
+    });
+    const trustline = res.find((r) => r.id === "live:trustline")!;
+    expect(trustline.ok).toBe(false);
+    expect(trustline.detail).toMatch(/no_trustline/);
   });
 });

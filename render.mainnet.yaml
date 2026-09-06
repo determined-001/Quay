@@ -51,6 +51,18 @@ services:
   - type: web
     name: quay-api-mainnet
     runtime: docker
+    # Free, deliberately, and this is a real trade rather than a default.
+    #
+    # A free instance spins down after 15 minutes idle, and the settlement
+    # watcher runs inside this process — so a sleeping instance is not watching
+    # the ledger. Two things make that survivable: the watcher resumes from its
+    # persisted cursor and backfills whatever it missed, so a payment is marked
+    # paid LATE rather than lost; and .github/workflows/uptime.yml pings every
+    # 5 minutes, under the idle timeout, which in practice keeps it awake.
+    #
+    # "In practice" is the weak word. GitHub's cron is not punctual and can be
+    # delayed under load. Before customers other than you depend on this, move
+    # to `starter` — $7/mo removes the whole category.
     plan: free
     # REAL MONEY DEPLOYS FROM HERE. `main` is protected (PR required, linear
     # history), so nothing reaches the public network without passing CI and a

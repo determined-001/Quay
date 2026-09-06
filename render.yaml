@@ -19,6 +19,8 @@ services:
   - type: web
     name: quay-api
     runtime: docker
+    # Free is right for staging: this service settles play money, and a
+    # spun-down testnet instance costs a slow first request, nothing more.
     plan: free
     # Staging deploys from `dev`. Mainnet (render.mainnet.yaml) deploys from
     # `main`, so `main` is only ever what is already live on the public network

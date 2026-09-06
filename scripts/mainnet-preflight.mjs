@@ -46,6 +46,7 @@ const DEPLOY_TIMEOUT_MS = 60000;
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const STELLAR_PUBLIC_KEY = /^G[A-Z2-7]{55}$/;
+const STELLAR_SECRET_SEED = /^S[A-Z2-7]{55}$/;
 
 /** A check result. `level` decides whether a failure blocks the deploy. */
 function pass(id, detail) {
@@ -166,8 +167,23 @@ export function checkSecrets(env) {
   const results = [];
   if (!env.SERVER_SIGNING_SECRET) {
     results.push(fail("secret:SERVER_SIGNING_SECRET", "Unset — a per-boot SEP-10 identity changes the advertised SIGNING_KEY on every restart, breaking every wallet that cached it."));
+  } else if (!STELLAR_SECRET_SEED.test(env.SERVER_SIGNING_SECRET.trim())) {
+    // Shape, not just presence. This is a Stellar secret seed, while three of
+    // the four values `pnpm secrets:mainnet` prints are 64 hex characters —
+    // pasting the wrong line is the failure this catches, and catching it here
+    // beats catching it as a crashed deploy.
+    const looksHex = /^[0-9a-f]{64}$/i.test(env.SERVER_SIGNING_SECRET.trim());
+    results.push(
+      fail(
+        "secret:SERVER_SIGNING_SECRET",
+        `Not a Stellar secret seed. Expected "S" plus 55 characters (56 total), got ${env.SERVER_SIGNING_SECRET.trim().length}` +
+          (looksHex ? " that look like a 64-hex value — that is JWT_SECRET / METRICS_TOKEN / WEBHOOK_SECRET_ENCRYPTION_KEY's shape, not this one's." : "."),
+      ),
+    );
+  } else if (env.SERVER_SIGNING_SECRET.trim() !== env.SERVER_SIGNING_SECRET) {
+    results.push(warn("secret:SERVER_SIGNING_SECRET", "Valid seed, but with surrounding whitespace — it was probably pasted with a newline. The API refuses to boot on this."));
   } else {
-    results.push(pass("secret:SERVER_SIGNING_SECRET", "set"));
+    results.push(pass("secret:SERVER_SIGNING_SECRET", "set, valid Stellar seed"));
   }
   if (!env.JWT_SECRET) {
     results.push(fail("secret:JWT_SECRET", "Unset — every seller is logged out on each deploy."));
@@ -306,7 +322,20 @@ export function evaluateHealth(health) {
     results.push(pass("live:health", "deployed API reports network=public"));
   }
   if (health.usdcTrustline && health.usdcTrustline.ok === false) {
-    results.push(fail("live:trustline", "The deployed API reports its seller wallet has no usable USDC trustline."));
+    // `not_configured` is the correct answer for a multi-tenant deployment, not
+    // a fault: there is no operator wallet to check because the service owns no
+    // wallet. Every seller's trustline is checked at link creation instead.
+    // Treating this as a failure made a healthy mainnet deploy report FAILED.
+    if (health.usdcTrustline.reason === "not_configured") {
+      results.push(pass("live:trustline", "no operator wallet configured — trustlines are checked per seller at link creation"));
+    } else {
+      results.push(
+        fail(
+          "live:trustline",
+          `The deployed API reports its configured wallet cannot receive USDC (${health.usdcTrustline.reason ?? "unknown reason"}). Add a USDC trustline to that account.`,
+        ),
+      );
+    }
   }
   if (health.horizon?.degraded) {
     results.push(warn("live:horizon", "The deployed API reports Horizon as degraded."));
@@ -402,12 +431,43 @@ async function main() {
   const apiIndex = argv.indexOf("--api");
   const apiUrl = apiIndex !== -1 ? argv[apiIndex + 1] : undefined;
 
-  const results = runStaticChecks(processEnv);
-  results.push(...(await probeAccount(processEnv.DEFAULT_SELLER_WALLET)));
+  // Which configuration is this run actually looking at?
+  //
+  // The static checks read THIS process's environment. That is the right
+  // source when you export the mainnet config locally and check it before
+  // deploying. It is the wrong source — and actively misleading — when the
+  // config lives in the Render dashboard, which is where render.mainnet.yaml
+  // tells you to put every `sync: false` value. In that case the local shell
+  // has none of it, every check fails, and a perfectly healthy deployment gets
+  // reported as FAILED. A tool that cries wolf about a working system is worse
+  // than no tool: it trains you to skim past the one line that matters.
+  //
+  // So: if a deployment was named and this shell has no mainnet config, the
+  // deployment is the subject and the local environment is not evidence.
+  const localConfigPresent = Boolean(processEnv.STELLAR_NETWORK || processEnv.DATABASE_URL);
+  const results = [];
+
+  if (!apiUrl || localConfigPresent) {
+    results.push(...runStaticChecks(processEnv));
+    results.push(...(await probeAccount(processEnv.DEFAULT_SELLER_WALLET)));
+  } else {
+    results.push(
+      skip(
+        "local-config",
+        "No mainnet configuration in this shell, so the static checks are skipped — they would only describe your laptop. Values set in the Render dashboard cannot be read from here; the checks below probe the running service instead.",
+      ),
+    );
+  }
+
   results.push(...(await probeDeploy(apiUrl)));
 
   console.log("Quay mainnet preflight");
   console.log("");
+  if (apiUrl && !localConfigPresent) {
+    console.log(`  Subject: the deployment at ${apiUrl}`);
+    console.log("  To check configuration too, export it here and re-run (see docs/MAINNET.md).");
+    console.log("");
+  }
   console.log(formatReport(results));
   exit(exitCodeFor(results));
 }
