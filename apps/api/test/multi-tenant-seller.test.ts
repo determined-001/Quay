@@ -86,3 +86,54 @@ describe("seller wallet resolution", () => {
     expect(resolve().keypair).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+//  A malformed secret used to crash with `invalid encoded string` thrown from
+//  inside the SDK's base32 decoder — no variable name, no expected shape, no
+//  fix, just a stack trace pointing at strkey.js. That happened on a real
+//  mainnet deploy and cost a debugging round trip.
+//
+//  The mistake is specific enough to name: `pnpm secrets:mainnet` prints four
+//  values, three of which are 64 hex characters and one of which is a Stellar
+//  seed. Pasting the wrong line is the obvious failure, so the error says so.
+// ---------------------------------------------------------------------------
+
+describe("keypairFromSecret", () => {
+  async function fresh() {
+    vi.resetModules();
+    return (await import("../src/services/seller-wallet")).keypairFromSecret;
+  }
+
+  it("names the variable rather than blaming strkey.js", async () => {
+    const keypairFromSecret = await fresh();
+    expect(() => keypairFromSecret("nonsense", "SERVER_SIGNING_SECRET")).toThrow(/SERVER_SIGNING_SECRET/);
+  });
+
+  it("recognises a 64-hex value as the wrong line pasted into the wrong variable", async () => {
+    const keypairFromSecret = await fresh();
+    expect(() => keypairFromSecret("a".repeat(64), "SERVER_SIGNING_SECRET")).toThrow(
+      /wrong line pasted into the wrong variable/,
+    );
+  });
+
+  it("states the expected shape and the actual length", async () => {
+    const keypairFromSecret = await fresh();
+    expect(() => keypairFromSecret("SHORT", "SERVER_SIGNING_SECRET")).toThrow(
+      /Expected "S" followed by 55 characters \(56 total\), got 5 character\(s\)/,
+    );
+  });
+
+  it("calls out whitespace separately — a valid seed with a trailing newline is its own mistake", async () => {
+    const keypairFromSecret = await fresh();
+    const { Keypair } = await import("@stellar/stellar-sdk");
+    const valid = Keypair.random().secret();
+    expect(() => keypairFromSecret(`${valid}\n`, "SERVER_SIGNING_SECRET")).toThrow(/whitespace/);
+  });
+
+  it("accepts a real seed and returns the matching keypair", async () => {
+    const keypairFromSecret = await fresh();
+    const { Keypair } = await import("@stellar/stellar-sdk");
+    const kp = Keypair.random();
+    expect(keypairFromSecret(kp.secret(), "SERVER_SIGNING_SECRET").publicKey()).toBe(kp.publicKey());
+  });
+});

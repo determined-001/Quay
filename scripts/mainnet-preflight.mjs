@@ -46,6 +46,7 @@ const DEPLOY_TIMEOUT_MS = 60000;
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const STELLAR_PUBLIC_KEY = /^G[A-Z2-7]{55}$/;
+const STELLAR_SECRET_SEED = /^S[A-Z2-7]{55}$/;
 
 /** A check result. `level` decides whether a failure blocks the deploy. */
 function pass(id, detail) {
@@ -166,8 +167,23 @@ export function checkSecrets(env) {
   const results = [];
   if (!env.SERVER_SIGNING_SECRET) {
     results.push(fail("secret:SERVER_SIGNING_SECRET", "Unset — a per-boot SEP-10 identity changes the advertised SIGNING_KEY on every restart, breaking every wallet that cached it."));
+  } else if (!STELLAR_SECRET_SEED.test(env.SERVER_SIGNING_SECRET.trim())) {
+    // Shape, not just presence. This is a Stellar secret seed, while three of
+    // the four values `pnpm secrets:mainnet` prints are 64 hex characters —
+    // pasting the wrong line is the failure this catches, and catching it here
+    // beats catching it as a crashed deploy.
+    const looksHex = /^[0-9a-f]{64}$/i.test(env.SERVER_SIGNING_SECRET.trim());
+    results.push(
+      fail(
+        "secret:SERVER_SIGNING_SECRET",
+        `Not a Stellar secret seed. Expected "S" plus 55 characters (56 total), got ${env.SERVER_SIGNING_SECRET.trim().length}` +
+          (looksHex ? " that look like a 64-hex value — that is JWT_SECRET / METRICS_TOKEN / WEBHOOK_SECRET_ENCRYPTION_KEY's shape, not this one's." : "."),
+      ),
+    );
+  } else if (env.SERVER_SIGNING_SECRET.trim() !== env.SERVER_SIGNING_SECRET) {
+    results.push(warn("secret:SERVER_SIGNING_SECRET", "Valid seed, but with surrounding whitespace — it was probably pasted with a newline. The API refuses to boot on this."));
   } else {
-    results.push(pass("secret:SERVER_SIGNING_SECRET", "set"));
+    results.push(pass("secret:SERVER_SIGNING_SECRET", "set, valid Stellar seed"));
   }
   if (!env.JWT_SECRET) {
     results.push(fail("secret:JWT_SECRET", "Unset — every seller is logged out on each deploy."));
