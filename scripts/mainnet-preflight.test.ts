@@ -233,3 +233,32 @@ describe("checkSecrets — SERVER_SIGNING_SECRET shape", () => {
     expect(res.level).toBe("warning");
   });
 });
+
+// ---------------------------------------------------------------------------
+//  Both of these were real false alarms against a healthy mainnet deployment.
+//  A preflight that reports FAILED on a working system is worse than no
+//  preflight: the next red run gets skimmed.
+// ---------------------------------------------------------------------------
+
+describe("evaluateHealth — multi-tenant trustline", () => {
+  it("treats not_configured as correct, not as a trustline failure", () => {
+    const res = evaluateHealth({
+      ok: true,
+      network: "public",
+      usdcTrustline: { ok: false, reason: "not_configured" },
+    });
+    expect(blocking(res)).toEqual([]);
+    expect(res.find((r) => r.id === "live:trustline")?.ok).toBe(true);
+  });
+
+  it("still blocks when the configured wallet genuinely cannot receive USDC", () => {
+    const res = evaluateHealth({
+      ok: true,
+      network: "public",
+      usdcTrustline: { ok: false, reason: "no_trustline" },
+    });
+    const trustline = res.find((r) => r.id === "live:trustline")!;
+    expect(trustline.ok).toBe(false);
+    expect(trustline.detail).toMatch(/no_trustline/);
+  });
+});

@@ -247,12 +247,22 @@ receive USDC at all, and the payment fails rather than arriving unmatched),
 whether the service answering on that URL is really the mainnet one.
 
 ```bash
-# Static checks only — run it wherever the mainnet env is exported.
+# Check a configuration, before deploying it. Run this where the mainnet env
+# is actually exported — the static checks read this shell.
 pnpm preflight:mainnet
 
-# Also probe the deployed service and the seller account on pubnet Horizon.
+# Check a running deployment. If this shell has no mainnet config (the normal
+# case, because render.mainnet.yaml puts every `sync: false` value in the
+# Render dashboard), the static checks are skipped rather than reporting your
+# laptop's empty environment as eleven mainnet failures.
 pnpm preflight:mainnet --api https://<your-mainnet-api>
 ```
+
+The two modes answer different questions — *is this configuration right?* and
+*is the thing that is running right?* — and only the first can see values held
+in a dashboard. What a live probe cannot see, it does not guess about:
+`DATABASE_URL`, the secrets, and `OFFRAMP` are never exposed over HTTP, so
+verify those in the Render dashboard yourself.
 
 It exits non-zero only on blocking findings; warnings are printed but do not
 fail the run. Read them anyway — `REDIS_URL` is the one that decides whether you
