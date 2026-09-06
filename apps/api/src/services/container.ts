@@ -69,6 +69,9 @@ export interface Container {
     stellarToml: StellarTomlConfig;
     revocations: DrizzleTokenRevocationRepository;
     secureCookie: boolean;
+    /** CORS_ORIGINS, reused as the CSRF allowlist for cookie-authenticated
+     *  state changes (middleware/auth.ts). */
+    allowedOrigins: string[];
   };
   start(): void;
   stop(): void;
@@ -85,6 +88,8 @@ export async function createContainer(): Promise<Container> {
   // (LinkService, off-ramp adapters, webhook sender) inherit requestId
   // without us needing any ambient / AsyncLocalStorage plumbing.
   const logger = createLogger({ level: env.logLevel, base: { network: env.network } });
+
+  assertSharedStateOrSingleInstance(env, logger);
 
   // Resolve the webhook-secret encryption key NOW rather than lazily on the
   // first encrypt/decrypt. `secret-crypto.ts` throws when the key is missing in
@@ -224,7 +229,14 @@ export async function createContainer(): Promise<Container> {
     metricsToken,
     watcherLagSeconds: () => loop.getLagSeconds(),
     circuitBreakerState: () => offramp.getStateNumeric(),
-    auth: { challenge, session, stellarToml, revocations: revocationsRepo, secureCookie: env.cookieSecure },
+    auth: {
+      challenge,
+      session,
+      stellarToml,
+      revocations: revocationsRepo,
+      secureCookie: env.cookieSecure,
+      allowedOrigins: env.corsOrigins,
+    },
     start() {
       logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
       loop.start();
@@ -297,6 +309,40 @@ function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string): Anch
     failureThreshold: Number.isFinite(failureThreshold) && failureThreshold > 0 ? failureThreshold : 3,
     cooldownMs: Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : 30_000,
   });
+}
+
+/**
+ * Shared state, or a signed statement that there is only one process to share
+ * it with.
+ *
+ * Without `REDIS_URL` the rate-limit counters and the SEP-10 single-use
+ * challenge claim both live in an in-process `Map`. A second instance therefore
+ * doubles every rate limit and makes one signed challenge redeemable once per
+ * instance — a replay window that widens with each replica. Neither failure is
+ * visible from outside the process, and scaling up is a dashboard slider that
+ * touches no code, so the deploy that breaks this is the one nobody reviews.
+ *
+ * Refusing to boot turns it into a decision. `SINGLE_INSTANCE=true` is how an
+ * operator states the decision they actually made.
+ */
+export function assertSharedStateOrSingleInstance(
+  cfg: { network: string; redisUrl?: string; singleInstance: boolean },
+  logger?: Logger,
+): void {
+  if (cfg.network !== "public" || cfg.redisUrl) return;
+  if (!cfg.singleInstance) {
+    throw new Error(
+      "REDIS_URL is not set on the public network. Rate-limit counters and SEP-10 " +
+        "challenge single-use claims are per-process without it, so N instances allow " +
+        "N times every limit and N redemptions of one signed challenge. Either set " +
+        "REDIS_URL, or set SINGLE_INSTANCE=true to state that this deployment runs " +
+        "exactly one instance — and do not scale it up until REDIS_URL is set.",
+    );
+  }
+  logger?.warn(
+    { event: "scaling.single_instance" },
+    "SINGLE_INSTANCE=true with no REDIS_URL — this deployment must stay at one instance",
+  );
 }
 
 /**

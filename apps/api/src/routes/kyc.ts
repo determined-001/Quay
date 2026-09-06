@@ -48,6 +48,7 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       sellers: c.sellers,
       revocations: c.auth.revocations,
       apiKeyRepo: c.apiKeys,
+      allowedOrigins: c.auth.allowedOrigins,
     }),
     requireScope("offramp:initiate"),
   );

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CIRCLE_USDC_ISSUER_PUBNET,
   checkDatabase,
+  checkScaling,
   checkOfframp,
   checkSellerWallet,
   checkUsdcIssuer,
@@ -19,6 +20,7 @@ const WALLET = "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY";
 /** A configuration that passes every blocking check, to vary one field at a time. */
 const GOOD = {
   STELLAR_NETWORK: "public",
+  SINGLE_INSTANCE: "true",
   DATABASE_URL: "libsql://quay-prod.turso.io",
   DATABASE_AUTH_TOKEN: "tok",
   USDC_ISSUER_PUBLIC: CIRCLE_USDC_ISSUER_PUBNET,
@@ -185,5 +187,23 @@ describe("probes", () => {
           : { status: 503, body: null },
     });
     expect(res.find((r) => r.id === "live:ready")?.ok).toBe(false);
+  });
+});
+
+describe("checkScaling", () => {
+  it("blocks the config the API itself refuses to boot on", () => {
+    const res = checkScaling({});
+    expect(res.ok).toBe(false);
+    expect(res.level).toBe("blocking");
+    expect(res.detail).toMatch(/refuse to boot/);
+  });
+
+  it("passes outright when Redis is configured", () => {
+    expect(checkScaling({ REDIS_URL: "redis://x" }).ok).toBe(true);
+  });
+
+  it("warns, but does not block, on an explicit single-instance deploy", () => {
+    const res = checkScaling({ SINGLE_INSTANCE: "true" });
+    expect(res.level).toBe("warning");
   });
 });

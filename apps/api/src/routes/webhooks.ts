@@ -35,6 +35,7 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthVariables }> 
       sellers: c.sellers,
       revocations: c.auth.revocations,
       apiKeyRepo: c.apiKeys,
+      allowedOrigins: c.auth.allowedOrigins,
     }),
     requireScope("webhooks:manage"),
   );

@@ -41,6 +41,7 @@ default.
 | `DEFAULT_SELLER_SECRET` | `OFFRAMP=testanchor` with `DEFAULT_SELLER_WALLET` set | SEP-10 cannot sign the anchor's auth challenge, so every cash-out fails |
 | `METRICS_TOKEN` | optional | Auto-generated per boot and printed once, so `/metrics` scraping breaks on each restart |
 | `REDIS_URL` | more than one instance | See the scaling note below |
+| `SINGLE_INSTANCE` | public network with no `REDIS_URL` | `true` asserts this deploy runs one instance. Boot fails without either. |
 
 Generate each 32-byte hex key with:
 
@@ -61,7 +62,15 @@ mistake is possible in `apps/api/src/services/container.ts`, where
 Three structures are per-process today, and each silently loses its guarantee
 if a second instance is started. The Render blueprint runs exactly one
 instance, which is what makes the current setup correct — treat this as a hard
-prerequisite, not a preference:
+prerequisite, not a preference.
+
+**This is now enforced at boot.** On the public network with no `REDIS_URL`,
+`createContainer()` throws unless `SINGLE_INSTANCE=true` is set. Setting that
+variable is a statement about your deployment, not a way to quiet a warning: if
+you later scale the service up, set `REDIS_URL` in the same change. The two
+failures it prevents — N× every rate limit, and one signed SEP-10 challenge
+redeemable once per instance — are both invisible from outside the process,
+which is why the guard is loud instead of a log line.
 
 - **Rate limiting** — `MemoryStore` unless `REDIS_URL` is set. Already has a
   `RedisStore`; just configure it.

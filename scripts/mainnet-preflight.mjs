@@ -202,10 +202,21 @@ export function checkWebEnv(env) {
 }
 
 export function checkScaling(env) {
-  if (!env.REDIS_URL) {
-    return warn("redis", "REDIS_URL unset — rate-limit counters and SEP-10 challenge nonces live in an in-process Map. Safe on exactly one instance; N instances allow N× the limit and N redemptions of one signature. Do not scale out without it.");
+  if (env.REDIS_URL) {
+    return pass("redis", "REDIS_URL set — rate limits and challenge nonces are shared");
   }
-  return pass("redis", "REDIS_URL set — rate limits and challenge nonces are shared");
+  // The API refuses to boot in this state, so catching it here turns a failed
+  // deploy into a failed preflight — the same finding, ten minutes earlier.
+  if (env.SINGLE_INSTANCE !== "true") {
+    return fail(
+      "redis",
+      "REDIS_URL is unset and SINGLE_INSTANCE is not \"true\" — the API will refuse to boot. Rate-limit counters and SEP-10 challenge single-use claims are per-process without Redis, so N instances allow N× every limit and N redemptions of one signed challenge. Set REDIS_URL, or set SINGLE_INSTANCE=true if this deployment really does run one instance.",
+    );
+  }
+  return warn(
+    "redis",
+    "Running on SINGLE_INSTANCE=true with no REDIS_URL. Correct for one instance, and only for one: scaling this service up without setting REDIS_URL silently multiplies every rate limit and makes one signed SEP-10 challenge redeemable once per instance.",
+  );
 }
 
 /** Every static check, in report order. */

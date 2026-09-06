@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { bodyLimit } from "hono/body-limit";
 import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
@@ -29,6 +30,20 @@ async function main(): Promise<void> {
   // MUST be installed before rate-limit (and everything else) so a 429 still
   // carries a requestId, and every route handler can call getLogger(ctx).
   app.use("*", requestContext(logger));
+  // Every request body this API accepts is small JSON — a link, a webhook
+  // registration, a signed SEP-10 challenge. `ctx.req.json()` buffers the whole
+  // body into memory before any zod schema gets to reject it, so without a cap
+  // the rate limiter is the only thing between a large POST and the heap. That
+  // matters more here than in a typical API: the settlement watcher runs in
+  // this same process, so an OOM does not merely return 502 for a minute — it
+  // stops payments being marked paid until the instance comes back.
+  app.use(
+    "*",
+    bodyLimit({
+      maxSize: 64 * 1024,
+      onError: (ctx) => ctx.json({ error: "payload_too_large" }, 413),
+    }),
+  );
   app.use(
     "*",
     cors({
@@ -133,6 +148,7 @@ async function main(): Promise<void> {
     sellers: container.sellers,
     revocations: container.auth.revocations,
     apiKeyRepo: container.apiKeys,
+    allowedOrigins: container.auth.allowedOrigins,
   });
   app.use("/api-keys", strictRateLimit, apiKeyAuth);
   app.use("/api-keys/*", strictRateLimit, apiKeyAuth);
@@ -152,6 +168,7 @@ async function main(): Promise<void> {
       sellers: container.sellers,
       revocations: container.auth.revocations,
       secureCookie: container.auth.secureCookie,
+      allowedOrigins: container.auth.allowedOrigins,
     }),
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));

@@ -127,6 +127,14 @@ services:
       - key: METRICS_TOKEN
         sync: false
 
+      # This blueprint declares a single instance, and the API now refuses to
+      # boot on pubnet without either REDIS_URL or this acknowledgement —
+      # because "how many instances are running" is otherwise a dashboard
+      # setting that silently changes two security properties. If you scale
+      # this service up, set REDIS_URL in the same change and remove this.
+      - key: SINGLE_INSTANCE
+        value: "true"
+
       # Shared rate-limit counters. The in-process fallback means N instances
       # allow N times the configured limit; set this before scaling past one.
       # - key: REDIS_URL
