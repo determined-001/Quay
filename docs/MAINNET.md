@@ -177,7 +177,10 @@ is worth nothing. The issuer is the only thing that distinguishes real USDC.
 ## Phase 3 — Configure and deploy
 
 `render.mainnet.yaml` ships the payments-only (`OFFRAMP=none`) configuration
-described in Phase 0 — apply it as-is for that path. The anchor variables,
+described in Phase 0 — apply it as-is for that path. It creates a **second**
+service, `quay-api-mainnet`, deploying from `main`, while the existing
+`quay-api` stays on testnet deploying from `dev`. Two services, two databases,
+two branches — see docs/RUNBOOK.md "Promotion: dev to main". The anchor variables,
 `KYC_ENCRYPTION_KEY` and `DEFAULT_SELLER_SECRET` sit commented out in one block
 in that file; uncomment all of them together, and set `OFFRAMP=anchor`, only
 after Phase 1 has an anchor that actually agreed to onboard you.

@@ -52,6 +52,11 @@ services:
     name: quay-api-mainnet
     runtime: docker
     plan: starter
+    # REAL MONEY DEPLOYS FROM HERE. `main` is protected (PR required, linear
+    # history), so nothing reaches the public network without passing CI and a
+    # merge — and by then it has already run on the testnet service, which
+    # deploys from `dev`.
+    branch: main
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
     healthCheckPath: /ready
