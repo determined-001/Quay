@@ -5,11 +5,20 @@
 
 Stellar Checkout is the open-source, non-custodial merchant checkout for the Stellar anchor network — the inbound counterpart to the Stellar Disbursement Platform.
 
-**Live demo (Stellar testnet):** [dashboard](https://quay-web.vercel.app) ·
-[API](https://quay-api.onrender.com/health) — create a link, pay it from any
-testnet wallet with the shown memo, and watch it flip to **paid**. Cash-out runs
-a real SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org` (USD quotes;
-testnet only, no real money moves).
+**Live on Stellar mainnet** since 2026-09-06, payments-only. The first real
+payment settled in ledger 64303816
+([`3e8dfd1…`](https://stellar.expert/explorer/public/tx/3e8dfd13b18005971cba45a4565e16ea927ee9294f01b11a6e064801883edbef)):
+buyer wallet straight to merchant wallet, correlated by the link reference
+carried in the transaction memo. Nothing was custodied in between, which is
+checkable from that link without asking this service anything.
+
+Cash-out to local currency is **not** enabled on mainnet (`OFFRAMP=none`) —
+sellers move their own funds. The off-ramp exists and runs a real
+SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org` on the **testnet**
+deployment ([dashboard](https://quay-web.vercel.app) ·
+[API](https://quay-api.onrender.com/health)), which is where to try it: create a
+link, pay it from any testnet wallet with the shown memo, watch it flip to
+**paid**. No real money moves there.
 
 [![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-api.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
 [![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-web.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
@@ -132,6 +141,8 @@ function verifyWebhookSignature(rawBody, signatureHeader, secret) {
 
 ---
 
+Where this is going, and the argument for it, is in [`ROADMAP.md`](ROADMAP.md).
+
 ## Why it's shaped this way
 
 The link + checkout + on-chain payment is the easy, commodity part. The **off-ramp is the
@@ -194,9 +205,15 @@ pnpm --filter @checkout/api dev
 pnpm --filter @checkout/web dev
 ```
 
-On first boot with no `DEFAULT_SELLER_WALLET` set, the API generates a **throwaway testnet
-keypair**, prints it, and gives you a Friendbot link to fund it. Set `DEFAULT_SELLER_WALLET`
-in `.env` to a wallet you control to reuse a stable address across restarts.
+On first boot **on testnet** with no `DEFAULT_SELLER_WALLET` set, the API generates a
+**throwaway keypair**, prints it, and gives you a Friendbot link to fund it — so `pnpm dev`
+needs no configuration. Set `DEFAULT_SELLER_WALLET` in `.env` to reuse a stable address
+across restarts.
+
+The variable is optional everywhere and names nobody's funds: Quay is multi-tenant, so a
+seller signs in with their own wallet over SEP-10 and every link they create is paid straight
+to that address. Setting it only gives `/health` one wallet whose USDC trustline it can
+report.
 
 Then: open the dashboard, create a link, open its checkout page, and pay the displayed amount
 of USDC **with the shown memo** from any Stellar testnet wallet. Within a poll interval the
@@ -307,13 +324,12 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 | SEP-7 payment-request URIs | **Real**, spec-correct (native vs issued asset, memo ≤28 bytes, %20 encoding, network passphrase). |
 | Horizon payment watching + memo matching | **Real** logic against the Stellar SDK v16 API. Polling (restart-safe), idempotent via persisted cursor + processed-tx ledger. One Horizon request per page (`join=transactions` for the memo lookup, not one-plus-N), and a transaction-fetch failure retries the tick rather than silently parking a matchable payment as `no_memo`. Every Horizon call retries transient failures (3 attempts, exponential backoff + full jitter, honors `Retry-After` on 429) and can fail over to `HORIZON_URL_FALLBACK`; sustained failure shows up in `GET /health` instead of silently going idle. |
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
-| Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. Encrypted backups (`pnpm db:backup`) and a tested restore path (`pnpm db:restore`) exist — see [the runbook](docs/RUNBOOK.md) for the honest RPO/RTO (nightly backups ⇒ up to 24h RPO, not continuous protection). |
+| Persistence | **Real**, libSQL/SQLite — zero-config locally (`file:./local.db`), and the same `DATABASE_URL` points at Turso in production. Note this is libSQL specifically, not "any SQL": the schema is `drizzle-orm/sqlite-core` and the client is `@libsql/client`, so a `postgres://` URL does not work without porting the schema, the bootstrap DDL and the backup scripts. Tables self-initialize on boot. Encrypted backups (`pnpm db:backup`) and a tested restore path (`pnpm db:restore`) exist — see [the runbook](docs/RUNBOOK.md) for the honest RPO/RTO (nightly backups ⇒ up to 24h RPO, not continuous protection). |
 | Account/trustline preflight | **Real.** `POST /links` checks the seller's wallet actually exists and (for USDC) has an authorized, under-limit trustline before the link goes live — `422 destination_cannot_receive` otherwise, with a SEP-7 deep link to add the trustline. Re-checked in `GET /health` so a revoked trustline shows up in ops, not as a dead checkout page. |
-| Persistence | **Real**, libSQL/SQLite for zero-config local dev (swap the `DATABASE_URL` for Turso/Postgres). Tables self-initialize on boot. |
 | Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
 | Metrics | **Real.** `GET /metrics` (Prometheus text format, `METRICS_TOKEN`-gated) — payment/webhook/anchor counters, watcher-lag and latency histograms, a circuit breaker around the off-ramp adapter. See [`docs/API.md`](docs/API.md#get-metrics) and [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json). |
 | Embeddable widget (`/widget.js`) | **Real**, lightweight embeddable script rendering modal checkout. |
-| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; `requireSeller` middleware gates every `/links` and `/webhooks` route (401 unauthenticated, 403 wrong seller), `POST /auth/logout` revokes a token by `jti`. **No web UI exists yet to actually log in** (needs a wallet-connect button — separate issue) — the demo dashboard needs that wired up before it can create/list links post-upgrade. See [`docs/API.md`](docs/API.md#authentication). |
+| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; `requireSeller` middleware gates every `/links` and `/webhooks` route (401 unauthenticated, 403 wrong seller), `POST /auth/logout` revokes a token by `jti`. Wallet-connect is wired in the dashboard and is how a seller signs in: the address they authenticate with becomes both their identity and their payout destination, so `POST /links` sets `destination` from the authenticated seller rather than from configuration. See [`docs/API.md`](docs/API.md#authentication). |
 
 ---
 
@@ -343,6 +359,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 
 ## Docs & contributing
 
+- **[Roadmap](ROADMAP.md)** — where this is going and why: the off-ramp as the actual product, who the buyer really is, and the parts that are built but undersold.
 - **[Architecture](docs/ARCHITECTURE.md)** — package graph, the three ports, sequence diagrams for each flow, the status machine, and how to add a new chain/anchor/rail.
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.

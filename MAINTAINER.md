@@ -1,5 +1,36 @@
 # Maintainer TODO
 
+> **Superseded on the strategy, kept for the engineering. Read this first.**
+>
+> Everything below was planned around Drips wave-7 entry and a per-project
+> payout ladder — band C ≈ $36, B ≈ $100, A ≈ $200 — with the work sequenced to
+> move Quay up it. **Both premises turned out to be false.**
+>
+> The payout is **per-maintainer and pooled, not per-project**: one amount
+> covering everything a person maintains. Quay and Orbital together returned
+> **$29 total** — less than one C-band project earned alone at wave 6 — and
+> another maintainer's three repos returned the same $29. Repo count did not
+> add and quality did not add. By the time that was known, Quay had a deployed
+> and invoked Soroban contract, six SEP flows, a live product and 600+ tests,
+> and none of it moved the number.
+>
+> So the ladder below never described reality, and closing the "depth + surface
+> loop" bought nothing measurable. Treat every band reference here as
+> historical. The engineering items are still sound and several have shipped;
+> the *reasoning about why they matter* is not.
+>
+> For direction, read **`ROADMAP.md`**, which argues from users rather than from
+> a grant rubric. The short version: the off-ramp is the product, and the FX
+> quote against one real anchor is the thing standing between this and something
+> a merchant would pay for.
+>
+> The dates below are also stale — wave 7 was July; it is now September, and
+> Quay has been live on mainnet since 2026-09-06.
+
+---
+
+## Historical plan (as written, July 2026)
+
 Working plan around the Drips wave 7 entry (≈ **Jul 21–27, 2026**). Everything
 band-moving must land **before** entry — work shipped inside the wave window doesn't
 count until the following wave. Target: close the depth + surface loop
