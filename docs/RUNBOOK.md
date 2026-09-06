@@ -81,6 +81,40 @@ which is why the guard is loud instead of a log line.
   in a per-process `Map`. The persisted replay table still works; only the
   concurrent-duplicate guard is lost, and it guards a money endpoint.
 
+## Promotion: dev to main
+
+Two services, two branches, one direction of travel.
+
+| | Branch | Service | Network | Database |
+|---|---|---|---|---|
+| **Staging** | `dev` | `quay-api` | testnet | the original Turso database |
+| **Production** | `main` | `quay-api-mainnet` | public | a separate Turso database |
+
+Both are declared in the blueprints (`branch:` on each service), so this is not
+a convention someone has to remember — it is what Render reads.
+
+**The flow.** Work lands on `dev`, which auto-deploys to the testnet service.
+Exercise it there against play money. When it holds up, open a PR from `dev` to
+`main`; CI runs, and the merge deploys to mainnet.
+
+**Why this direction and not the reverse.** `main` is branch-protected (PR
+required, linear history), so it can only ever contain code that passed CI and
+a review gate. Pointing mainnet at `main` therefore means the public network
+runs nothing that has not already been merged deliberately — and, because `dev`
+deploys first, nothing that has not already run somewhere real.
+
+**What this costs.** A mainnet fix is never a one-line push. It is a commit on
+`dev`, a deploy, a check, a PR, a merge. That is the intended friction: the
+alternative is a service that moves real money accepting changes nobody looked
+at twice. For a genuine emergency, `main` still allows an admin bypass — use it
+knowing you have skipped the testnet run, and open the `dev` PR afterwards so
+the branches do not diverge.
+
+**Keeping them in step.** After a hotfix or an out-of-band merge to `main`,
+merge `main` back into `dev` before doing anything else. Divergence between the
+two is how a change that was tested on testnet gets deployed to mainnet without
+the fix that was applied directly to production.
+
 ## Mainnet: a second, separate service
 
 Everything below this point was originally written against the single testnet
@@ -195,9 +229,14 @@ variables → Actions → Variables — they're plain hostnames, not secrets):
 
 | Variable | Required | What it does |
 |---|---|---|
-| `UPTIME_MAINNET_API_URL` | to watch mainnet at all | e.g. `https://quay-api-mainnet.onrender.com` (`render.mainnet.yaml`'s `quay-api-mainnet`). Unset means mainnet is skipped entirely, not silently checked against the testnet URL. |
+| `UPTIME_MAINNET_API_URL` | **set this once `quay-api-mainnet` exists** | e.g. `https://quay-api-mainnet.onrender.com` (`render.mainnet.yaml`'s `quay-api-mainnet`). Unset means mainnet is skipped entirely, not silently checked against the testnet URL. |
 | `UPTIME_MAINNET_WEB_URL` | optional | Only set this if a dedicated mainnet web deployment exists. `render.mainnet.yaml` declares no web service today, so leave unset until one does. |
 | `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run, and unlike testnet, `POST /links` there has no scoped-credential story yet — see issue #163 (least-privilege API key for this check) before turning it on. |
+
+Both environments are watched at once, on the same schedule, with separate
+history series — a green testnet can never stand in for an unmonitored mainnet.
+Testnet keeps the unprefixed target ids (`api` / `web` / `synthetic`); mainnet's
+are prefixed (`mainnet-api` / `mainnet-web` / `mainnet-synthetic`).
 
 Once `UPTIME_MAINNET_API_URL` is set, the next run adds a `## Mainnet`
 section to `docs/STATUS.md` and starts filing incidents titled

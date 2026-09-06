@@ -20,6 +20,11 @@ services:
     name: quay-api
     runtime: docker
     plan: starter
+    # Staging deploys from `dev`. Mainnet (render.mainnet.yaml) deploys from
+    # `main`, so `main` is only ever what is already live on the public network
+    # and every mainnet change has been exercised on testnet first. See
+    # docs/RUNBOOK.md "Promotion: dev to main".
+    branch: dev
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
     # /ready checks the database is actually reachable (readiness), not just
