@@ -19,7 +19,7 @@ services:
   - type: web
     name: quay-api
     runtime: docker
-    plan: starter
+    plan: free
     # Staging deploys from `dev`. Mainnet (render.mainnet.yaml) deploys from
     # `main`, so `main` is only ever what is already live on the public network
     # and every mainnet change has been exercised on testnet first. See
