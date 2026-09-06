@@ -92,8 +92,13 @@ describe("checkOfframp", () => {
 });
 
 describe("checkSellerWallet", () => {
-  it("rejects a missing or malformed wallet", () => {
-    expect(checkSellerWallet({}).ok).toBe(false);
+  it("does not block when there is no wallet — multi-tenant is the normal path", () => {
+    const res = checkSellerWallet({ OFFRAMP: "none" });
+    expect(res.level).toBe("warning");
+    expect(res.detail).toMatch(/sellers supply their own wallet/);
+  });
+
+  it("still rejects a malformed wallet when one is given", () => {
     expect(checkSellerWallet({ DEFAULT_SELLER_WALLET: "not-a-key" }).ok).toBe(false);
   });
 

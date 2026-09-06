@@ -13,7 +13,6 @@ warn. A service that refuses to start is loud; one that quietly settles into a
 sandbox anchor is not. The guards are split across two files: the OFFRAMP and
 anchor-URL checks fire in `apps/api/src/env.ts` at module load (lines
 114–142), as does the USDC issuer check (line 189); the
-`DEFAULT_SELLER_WALLET` (line 386),
 `SERVER_SIGNING_SECRET` (line 489), and `JWT_SECRET` (line 512) checks fire in
 `apps/api/src/services/container.ts` inside `createContainer()`. If a guard
 fires, fix the configuration — never relax the guard to get a green deploy.
@@ -30,13 +29,12 @@ fires, fix the configuration — never relax the guard to get a green deploy.
 | `ANCHOR_URL` over plain HTTP | SEP-10 auth tokens and SEP-12 KYC fields cross this connection. |
 | Missing `USDC_ISSUER_PUBLIC` | Without an issuer the watcher cannot tell real USDC from an impostor asset. |
 | Missing `KYC_ENCRYPTION_KEY` (`OFFRAMP=anchor`) | Seller SEP-12 PII would be stored unencrypted. Not required under `OFFRAMP=none`, which collects none. |
-| Missing `DEFAULT_SELLER_WALLET` | Auto-generating a throwaway wallet on pubnet means funds land in a key nobody kept. |
 | Missing `SERVER_SIGNING_SECRET` | A per-boot SEP-10 identity changes the advertised `SIGNING_KEY` on every restart, breaking every wallet that cached it. |
 | Missing `JWT_SECRET` | Every seller is logged out on each deploy. |
 | A blank or non-numeric numeric var | A blank value used to yield `0` — `TRUST_PROXY_HOPS=` silently collapsed every client into one rate-limit bucket. A typo yields `NaN`, and `setInterval(NaN)` is a tight loop against Horizon, not a slow poll. |
 
 The OFFRAMP, USDC issuer, anchor-URL, and KYC key guards are covered by
-`apps/api/test/env-mainnet-guards.test.ts`. The `DEFAULT_SELLER_WALLET`,
+`apps/api/test/env-mainnet-guards.test.ts`. The
 `SERVER_SIGNING_SECRET`, and `JWT_SECRET` guards live in
 `apps/api/src/services/container.ts` and are not yet covered by a dedicated
 test file.
@@ -149,10 +147,17 @@ supply those by hand.
 
 There is no friendbot on pubnet. Both accounts must be funded with real XLM.
 
-1. **Seller wallet** (`DEFAULT_SELLER_WALLET`) — send XLM to cover the base
-   reserve, then add a **USDC trustline** to Circle's issuer. Until the
-   trustline exists, the account cannot receive USDC at all and the checkout
-   preflight will reject links.
+1. **Every seller's own wallet** — each merchant signs in with their wallet
+   over SEP-10, and their links are paid straight to it. Each of those accounts
+   needs XLM for the base reserve and a **USDC trustline** to Circle's issuer.
+   Until the trustline exists that account cannot receive USDC at all, and
+   `POST /links` rejects with 422 `destination_cannot_receive` plus a
+   `trustlineUri` the seller can open — so this fails early and legibly rather
+   than losing a payment. That includes your own wallet, if you are also a
+   merchant on your own deployment.
+
+   `DEFAULT_SELLER_WALLET` is optional and names no one's funds: set it only if
+   you want `/health` to report the trustline status of one specific wallet.
 2. **Signing identity** (`SERVER_SIGNING_SECRET`) — needs no funding. It signs
    SEP-10 challenges offline and is published as `SIGNING_KEY` in
    `/.well-known/stellar.toml`; the account never has to exist on-chain.
