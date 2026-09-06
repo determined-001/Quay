@@ -16,7 +16,6 @@
   "dependencies": {
     "@checkout/core": "workspace:*",
     "@checkout/offramp": "workspace:*",
-    "@checkout/soroban": "workspace:*",
     "@checkout/stellar": "workspace:*",
     "@hono/node-server": "2.1.0",
     "@libsql/client": "0.17.4",

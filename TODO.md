@@ -306,7 +306,7 @@ that the deployed service really reports `network: public`, that `/ready` is
 green so the settlement watcher is actually running, and that the database is
 not the `file:` fallback. Blocking findings exit non-zero.
 
-The full list is in `docs/MAINNET.md` (Phase 5). The two that matter most:
+The full list is in `docs/MAINNET.md` (Phase 4). The two that matter most:
 
 - [ ] A **small real payment** moves a link to `paid`.
 - [ ] If the off-ramp is enabled: a **small real cash-out** reaches `settled`

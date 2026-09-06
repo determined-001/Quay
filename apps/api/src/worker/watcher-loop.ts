@@ -500,29 +500,6 @@ export function startCashOutPoller(service: LinkService, intervalMs: number, log
 }
 
 /**
- * Periodically retry attestation for settled links that don't have one.
- *
- * Deliberately its own timer rather than a rider on the cash-out poller: that
- * one runs every few seconds because a seller is waiting on it, whereas an
- * unattested receipt is a slow-moving backlog and hammering a Soroban RPC at
- * watcher cadence would be pure waste. `sweepUnattested` never rejects, so the
- * catch here is defensive only.
- */
-export function startAttestationSweeper(
-  service: LinkService,
-  intervalMs: number,
-  logger?: Logger,
-): () => void {
-  const log = (logger ?? NOOP_LOGGER).child({ component: "attestation-sweeper" });
-  const timer = setInterval(() => {
-    void service.sweepUnattested(20, { logger: log }).catch((err) => {
-      log.error({ event: "attestation.sweep.error", error: stringifyErr(err) }, "attestation sweep error");
-    });
-  }, intervalMs);
-  return () => clearInterval(timer);
-}
-
-/**
  * Periodically run the anchor health probe. First probe runs immediately so
  * the breaker state is correct on first request rather than after one interval
  * has elapsed. Probe failures never throw; AnchorHealth records every outcome.

@@ -43,9 +43,6 @@ importers:
       '@checkout/offramp':
         specifier: workspace:*
         version: link:../../packages/offramp
-      '@checkout/soroban':
-        specifier: workspace:*
-        version: link:../../packages/soroban
       '@checkout/stellar':
         specifier: workspace:*
         version: link:../../packages/stellar
@@ -163,22 +160,6 @@ importers:
       pino:
         specifier: ^10.3.1
         version: 10.3.1
-    devDependencies:
-      '@vitest/coverage-v8':
-        specifier: 4.1.10
-        version: 4.1.10(vitest@4.1.10)
-      vitest:
-        specifier: 4.1.10
-        version: 4.1.10(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(happy-dom@20.11.1(bufferutil@4.1.0)(utf-8-validate@6.0.6))(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(tsx@4.23.9))
-
-  packages/soroban:
-    dependencies:
-      '@checkout/core':
-        specifier: workspace:*
-        version: link:../core
-      '@stellar/stellar-sdk':
-        specifier: 16.2.0
-        version: 16.2.0
     devDependencies:
       '@vitest/coverage-v8':
         specifier: 4.1.10

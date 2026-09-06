@@ -25,12 +25,10 @@ import {
   DrizzleApiKeyRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
-import { SorobanAttestation } from "@checkout/soroban";
 import {
   WatcherLoop,
   startCashOutPoller,
   startAnchorProbeTimer,
-  startAttestationSweeper,
   type AccountCircuitBreakerStatus,
   type WatcherMetrics,
 } from "../worker/watcher-loop";
@@ -63,7 +61,6 @@ export interface Container {
   /** Whether settlements are being attested on-chain, and to which registry.
    *  Surfaced on /health so "the contract is deployed" and "the product calls
    *  it" can be told apart from outside, without an account or a log tail. */
-  attestation: { enabled: boolean; contractId: string | null };
   watcherLagSeconds(): number;
   circuitBreakerState(): number;
   auth: {
@@ -141,11 +138,9 @@ export async function createContainer(): Promise<Container> {
   // anchor.
   const anchorHealth = buildAnchorHealth(env.offramp, sellerWallet);
 
-  // Resolved before the service because the attester IS the SEP-10 signing
-  // identity: the key a wallet already authenticated against is the one that
-  // vouches for receipts, so a verifier has exactly one identity to trust.
+  // The platform's stable SEP-10 identity: the key wallets authenticate
+  // against and the SIGNING_KEY advertised in stellar.toml.
   const serverKeypair = resolveServerSigningKeypair();
-  const attestation = createAttestation(serverKeypair, stellar.networkPassphrase, logger);
 
   const service = new LinkService({
     links: linksRepo,
@@ -155,7 +150,6 @@ export async function createContainer(): Promise<Container> {
     offramp,
     offrampState: offrampStateRepo,
     kyc,
-    attestation,
     stellar,
     operatorWallet: sellerWallet,
     telemetry: telemetryRepo,
@@ -214,7 +208,6 @@ export async function createContainer(): Promise<Container> {
   let stopPoller: (() => void) | null = null;
   let stopRevocationSweep: (() => void) | null = null;
   let stopProbe: (() => void) | null = null;
-  let stopAttestationSweep: (() => void) | null = null;
 
   return {
     service,
@@ -229,7 +222,6 @@ export async function createContainer(): Promise<Container> {
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     horizonStatus: () => pollingWatcher.getStatus(),
     metricsToken,
-    attestation: { enabled: attestation !== undefined, contractId: attestation?.contractId ?? null },
     watcherLagSeconds: () => loop.getLagSeconds(),
     circuitBreakerState: () => offramp.getStateNumeric(),
     auth: { challenge, session, stellarToml, revocations: revocationsRepo, secureCookie: env.cookieSecure },
@@ -246,9 +238,6 @@ export async function createContainer(): Promise<Container> {
         stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
         stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
       }
-      if (attestation) {
-        stopAttestationSweep = startAttestationSweeper(service, env.attestationSweepMs, logger);
-      }
       const sweepTimer = setInterval(
         () => void revocationsRepo.sweepExpired(Math.floor(Date.now() / 1000)),
         60 * 60 * 1000, // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
@@ -262,14 +251,8 @@ export async function createContainer(): Promise<Container> {
       stopRevocationSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();
       stopProbe?.();
-      stopAttestationSweep?.();
       stopPoller = null;
       stopProbe = null;
-      stopAttestationSweep = null;
-      // Attestations are fire-and-forget, but killing the DB client out from
-      // under one in flight turns a clean "not attested yet" into a crash in
-      // the logs. Join them first; each already has its own error handling.
-      await service.whenAttestationsSettled();
       await client.close();
       console.log("[api] all services stopped");
     },
@@ -313,56 +296,6 @@ function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string): Anch
     probeAccount: enabled ? probeAccount : null,
     failureThreshold: Number.isFinite(failureThreshold) && failureThreshold > 0 ? failureThreshold : 3,
     cooldownMs: Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : 30_000,
-  });
-}
-
-/**
- * Builds the on-chain attestation adapter, or returns undefined when the
- * registry isn't configured (issue 9.2).
- *
- * Unconfigured is a supported state, not a degraded one: settlement is proven
- * by the classic ledger either way, and a receipt without an attestation simply
- * doesn't claim to have one. That is why this returns undefined rather than
- * throwing — a missing contract id must never keep the API from booting and
- * taking payments.
- */
-function createAttestation(
-  attester: Keypair,
-  networkPassphrase: string,
-  logger: Logger,
-): SorobanAttestation | undefined {
-  if (!env.attestationContractId) {
-    // Say so. A silent undefined here means the deployed API takes payments and
-    // attests nothing, and the only outward sign is a receipt quietly missing a
-    // block nobody was watching for.
-    logger.warn(
-      { event: "attestation.disabled", reason: "no_contract_id" },
-      "ATTESTATION_CONTRACT_ID is not set — settlements will not be attested on-chain",
-    );
-    return undefined;
-  }
-  if (!env.sorobanRpcUrl) {
-    logger.warn(
-      { event: "attestation.disabled", reason: "no_rpc_url" },
-      "ATTESTATION_CONTRACT_ID is set but SOROBAN_RPC_URL is not — attestation disabled",
-    );
-    return undefined;
-  }
-  logger.info(
-    {
-      event: "attestation.configured",
-      contractId: env.attestationContractId,
-      rpcUrl: env.sorobanRpcUrl,
-      attester: attester.publicKey(),
-    },
-    "on-chain settlement attestation enabled",
-  );
-  return new SorobanAttestation({
-    contractId: env.attestationContractId,
-    rpcUrl: env.sorobanRpcUrl,
-    networkPassphrase,
-    attester,
-    logger,
   });
 }
 

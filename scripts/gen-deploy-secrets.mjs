@@ -74,7 +74,7 @@ const signerSecret = ensure(
     signerPublic = kp.publicKey();
     return kp.secret();
   },
-  "SEP-10 signing identity AND the on-chain attester",
+  "SEP-10 signing identity",
 );
 
 // Write ---------------------------------------------------------------------
@@ -103,18 +103,6 @@ if (added.size > 0) {
   chmodSync(ENV_PATH, 0o600);
 }
 
-// Fund the attester ----------------------------------------------------------
-
-if (signerSecret && network !== "public") {
-  process.stdout.write(`funding ${signerPublic} on ${network}… `);
-  try {
-    const res = await fetch(`https://friendbot.stellar.org/?addr=${signerPublic}`);
-    console.log(res.ok ? "funded" : `friendbot returned ${res.status} — fund it manually`);
-  } catch (err) {
-    console.log(`failed (${err.message}) — fund it manually before deploying`);
-  }
-}
-
 // Report ---------------------------------------------------------------------
 
 console.log("");
@@ -125,8 +113,8 @@ for (const r of results) {
 
 if (signerPublic) {
   console.log(`\n  SERVER_SIGNING_SECRET public key: ${signerPublic}`);
-  console.log("  This account pays attestation invocation fees. It must stay funded,");
-  console.log("  or settlements succeed while receipts silently carry no attestation.");
+  console.log("  This is the SIGNING_KEY wallets see in /.well-known/stellar.toml.");
+  console.log("  Rotating it logs out every wallet that cached the old one.");
 }
 
 if (added.size === 0) {

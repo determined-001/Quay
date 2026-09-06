@@ -17,7 +17,7 @@
 #   DATABASE_URL                    libsql://<db-name>-<org>.turso.io  (a real, backed-up DB)
 #   DATABASE_AUTH_TOKEN             from `turso db tokens create <db>`
 #   DEFAULT_SELLER_WALLET           G... wallet that receives funds
-#   SERVER_SIGNING_SECRET           S... the platform's stable SEP-10 identity + attester
+#   SERVER_SIGNING_SECRET           S... the platform's stable SEP-10 identity
 #   JWT_SECRET                      64 hex chars — session signing
 #   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED
 #   METRICS_TOKEN                   64 hex chars — gates GET /metrics
@@ -47,11 +47,6 @@
 #
 # Generate each 64-hex value with:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-#
-# SERVER_SIGNING_SECRET is also the on-chain attester, so its account MUST hold
-# XLM on pubnet to pay contract invocation fees. An unfunded attester fails
-# attestation only — settlement is proven by the classic ledger and never
-# blocks on it.
 
 services:
   - type: web
@@ -131,17 +126,6 @@ services:
         sync: false
       - key: METRICS_TOKEN
         sync: false
-
-      # On-chain attestation. Both are commented out because the contract id
-      # in render.yaml is a TESTNET deployment and will not resolve on pubnet —
-      # redeploy the contract to pubnet (contracts/README.md) and set both
-      # together, or leave both unset and receipts will honestly say they carry
-      # no attestation. env.ts deliberately does not default SOROBAN_RPC_URL on
-      # public, so an unset value can never silently mean "testnet".
-      # - key: ATTESTATION_CONTRACT_ID
-      #   value: <pubnet C... contract id>
-      # - key: SOROBAN_RPC_URL
-      #   value: https://soroban-rpc.mainnet.stellar.gateway.fm
 
       # Shared rate-limit counters. The in-process fallback means N instances
       # allow N times the configured limit; set this before scaling past one.

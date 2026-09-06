@@ -46,7 +46,6 @@ const DEPLOY_TIMEOUT_MS = 60000;
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const STELLAR_PUBLIC_KEY = /^G[A-Z2-7]{55}$/;
-const STELLAR_CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 
 /** A check result. `level` decides whether a failure blocks the deploy. */
 function pass(id, detail) {
@@ -178,27 +177,6 @@ export function checkSecrets(env) {
   return results;
 }
 
-export function checkAttestation(env) {
-  const contractId = env.ATTESTATION_CONTRACT_ID;
-  const rpc = env.SOROBAN_RPC_URL;
-  if (!contractId && !rpc) {
-    return warn("attestation", "ATTESTATION_CONTRACT_ID unset — settlements will not be attested on-chain and receipts will honestly carry no attestation block. Not a money risk; deploy contracts/quay-attest to pubnet to enable.");
-  }
-  if (contractId && !rpc) {
-    return fail("attestation", "ATTESTATION_CONTRACT_ID is set but SOROBAN_RPC_URL is not — attestation is silently disabled.");
-  }
-  if (!contractId && rpc) {
-    return warn("attestation", "SOROBAN_RPC_URL is set with no ATTESTATION_CONTRACT_ID — nothing will be attested.");
-  }
-  if (!STELLAR_CONTRACT_ID.test(contractId)) {
-    return fail("attestation", `ATTESTATION_CONTRACT_ID "${contractId}" is not a valid contract id.`);
-  }
-  if (/testnet|futurenet/i.test(rpc)) {
-    return fail("attestation", `SOROBAN_RPC_URL "${rpc}" points at a test network while STELLAR_NETWORK=public. Receipts would be attested somewhere nobody verifies.`);
-  }
-  return pass("attestation", `attesting to ${contractId.slice(0, 6)}…${contractId.slice(-4)} via ${rpc}`);
-}
-
 export function checkWebEnv(env) {
   const results = [];
   if (env.NEXT_PUBLIC_STELLAR_NETWORK !== "public") {
@@ -239,7 +217,6 @@ export function runStaticChecks(env) {
     checkOfframp(env),
     checkSellerWallet(env),
     ...checkSecrets(env),
-    checkAttestation(env),
     ...checkWebEnv(env),
     checkScaling(env),
   ];
@@ -311,9 +288,6 @@ export function evaluateHealth(health) {
   }
   if (health.horizon?.degraded) {
     results.push(warn("live:horizon", "The deployed API reports Horizon as degraded."));
-  }
-  if (health.attestation && health.attestation.enabled === false) {
-    results.push(warn("live:attestation", "Attestation is disabled on the deployed API — receipts will carry no on-chain proof."));
   }
   return results;
 }

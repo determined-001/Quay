@@ -5,7 +5,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 //
 //  `HOME_DOMAIN` unset produced `WEB_AUTH_ENDPOINT="https://localhost:8787/auth"`
 //  in the stellar.toml of a live deploy. Every health check was green — the API
-//  answered, the watcher ran, attestation worked — while wallet-native SEP-10
+//  answered, the watcher ran — while wallet-native SEP-10
 //  login was impossible for anyone, because every wallet reading the TOML was
 //  pointed at their own machine.
 //

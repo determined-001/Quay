@@ -66,10 +66,6 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
     offrampFeeCurrency: null,
     offrampFeeSource: null,
     offrampNetTargetAmount: null,
-    attestationContractId: null,
-    attestationTxHash: null,
-    attestationLedger: null,
-    attestedAt: null,
     expiresAt: null,
     isDemo: false,
     createdAt: 1_700_000_000_000,
@@ -304,10 +300,6 @@ class FakeLinkRepoForAnchor implements LinkRepository {
       offrampFeeCurrency: null,
       offrampFeeSource: null,
       offrampNetTargetAmount: null,
-      attestationContractId: null,
-      attestationTxHash: null,
-      attestationLedger: null,
-      attestedAt: null,
       expiresAt: input.expiresAt,
       isDemo: input.isDemo ?? false,
       createdAt: Date.now(),
@@ -353,11 +345,6 @@ class FakeLinkRepoForAnchor implements LinkRepository {
   }
   async paymentLedger(txHash: string): Promise<number | null> {
     return this.payments.find((p) => p.txHash === txHash)?.ledger ?? null;
-  }
-  async listUnattested(limit: number): Promise<PaymentLink[]> {
-    return [...this.byId.values()]
-      .filter((l) => l.txHash !== null && l.attestedAt === null && l.status !== "active")
-      .slice(0, limit);
   }
 }
 

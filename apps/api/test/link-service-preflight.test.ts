@@ -35,7 +35,6 @@ function fakeLinks(): LinkRepository {
     recordPayment: vi.fn(async () => {}),
     sumPaymentsForLink: vi.fn(async () => "0"),
     paymentLedger: vi.fn(async () => null),
-    listUnattested: vi.fn(async () => []),
   };
 }
 

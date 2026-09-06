@@ -1,18 +1,15 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Hono } from "hono";
-import { createHash } from "node:crypto";
 import { publicRoutes } from "../../src/routes/public";
 import { createTestContainer, type TestContainer } from "../setup";
 
 // ---------------------------------------------------------------------------
 //  GET /r/:reference — the public receipt.
 //
-//  The attestation block is the part that makes a receipt checkable by someone
-//  who does not trust whoever is running this API, so what it contains (and
-//  when it is absent) is the contract worth pinning.
+//  A receipt is served to anyone holding the link, so what it must NOT carry
+//  matters as much as what it does: the seller's identity and the off-ramp
+//  economics stay off it.
 // ---------------------------------------------------------------------------
-
-const CONTRACT = "CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3";
 
 let container: TestContainer;
 let app: Hono;
@@ -45,60 +42,9 @@ async function paidLink(over: Record<string, unknown> = {}) {
   return link;
 }
 
-describe("GET /r/:reference attestation block", () => {
-  it("is null on a settled link that has not been attested", async () => {
-    const link = await paidLink();
-    const res = await app.request(`/r/${link.reference}`);
-
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body.status).toBe("paid");
-    // Explicitly null rather than absent: a receipt that simply omits the field
-    // is indistinguishable from an older API that never had one.
-    expect(body).toHaveProperty("attestation", null);
-  });
-
-  it("carries the contract, refHash, transaction and ledger once attested", async () => {
-    const link = await paidLink({
-      attestationContractId: CONTRACT,
-      attestationTxHash: "soroban_tx_1",
-      attestationLedger: 9001,
-      attestedAt: 1_700_000_500_000,
-    });
-
-    const res = await app.request(`/r/${link.reference}`);
-    const body = (await res.json()) as { attestation: Record<string, unknown> };
-
-    expect(body.attestation).toEqual({
-      contractId: CONTRACT,
-      // The registry is keyed by the hash, never the reference itself, so this
-      // is the value a holder actually looks up. Computed independently here:
-      // if the two ever diverge, every published receipt becomes unverifiable.
-      refHash: createHash("sha256").update(link.reference, "utf8").digest("hex"),
-      txHash: "soroban_tx_1",
-      ledger: 9001,
-      attestedAt: 1_700_000_500_000,
-    });
-  });
-
-  it("still publishes the attestation when the writing transaction is unknown", async () => {
-    // Found already present in the registry: the fact is verifiable, our
-    // transaction hash is not ours to name.
-    const link = await paidLink({
-      attestationContractId: CONTRACT,
-      attestationTxHash: null,
-      attestationLedger: 9001,
-      attestedAt: 1_700_000_500_000,
-    });
-
-    const res = await app.request(`/r/${link.reference}`);
-    const body = (await res.json()) as { attestation: Record<string, unknown> };
-
-    expect(body.attestation).toMatchObject({ contractId: CONTRACT, txHash: null });
-  });
-
+describe("GET /r/:reference", () => {
   it("does not leak the seller or off-ramp economics onto a public receipt", async () => {
-    const link = await paidLink({ attestationContractId: CONTRACT, attestedAt: 1 });
+    const link = await paidLink();
     const res = await app.request(`/r/${link.reference}`);
     const body = (await res.json()) as Record<string, unknown>;
 
@@ -107,7 +53,7 @@ describe("GET /r/:reference attestation block", () => {
     }
   });
 
-  it("404s an unpaid link — an unpaid link is not a receipt to attest", async () => {
+  it("404s an unpaid link — an unpaid link is not a receipt", async () => {
     const seller = container.seller;
     const link = await container.links.create({
       id: "lnk_unpaid_receipt",

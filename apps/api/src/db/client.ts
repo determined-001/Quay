@@ -27,8 +27,6 @@ const BOOTSTRAP_SQL = [
      offramp_indicative_rate TEXT, offramp_rate TEXT, offramp_rate_delta TEXT,
      offramp_fee_amount TEXT, offramp_fee_currency TEXT, offramp_fee_source TEXT,
      offramp_net_target_amount TEXT, is_demo INTEGER NOT NULL DEFAULT 0,
-     attestation_contract_id TEXT, attestation_tx_hash TEXT,
-     attestation_ledger INTEGER, attested_at INTEGER,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   // Cumulative payment ledger (issue 1.4) — one row per payment ever recorded
@@ -168,13 +166,6 @@ const ADDITIVE_MIGRATIONS = [
   //      default — so this is treated as sensitive end-to-end: masked to the
   //      last 4 chars in every API response and never logged or webhook'd.
   `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
-  // 9.2: on-chain settlement attestation. Nullable and additive — an old binary
-  // talking to this schema simply never reads them, which is the rollback case
-  // docs/RUNBOOK.md calls out as safe.
-  `ALTER TABLE links ADD COLUMN attestation_contract_id TEXT`,
-  `ALTER TABLE links ADD COLUMN attestation_tx_hash TEXT`,
-  `ALTER TABLE links ADD COLUMN attestation_ledger INTEGER`,
-  `ALTER TABLE links ADD COLUMN attested_at INTEGER`,
   `ALTER TABLE link_payments ADD COLUMN ledger INTEGER`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
   // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   CIRCLE_USDC_ISSUER_PUBNET,
-  checkAttestation,
   checkDatabase,
   checkOfframp,
   checkSellerWallet,
@@ -100,25 +99,6 @@ describe("checkSellerWallet", () => {
     const res = checkSellerWallet({ ...GOOD, DEFAULT_SELLER_SECRET: "S".repeat(56) });
     expect(res.ok).toBe(false);
     expect(res.level).toBe("warning");
-  });
-});
-
-describe("checkAttestation", () => {
-  it("treats no attestation as a warning, not a blocker — settlement is proven by the classic ledger", () => {
-    expect(checkAttestation({}).level).toBe("warning");
-  });
-
-  it("blocks a contract id with no RPC, which silently disables attestation", () => {
-    expect(checkAttestation({ ATTESTATION_CONTRACT_ID: "C" + "A".repeat(55) }).ok).toBe(false);
-  });
-
-  it("blocks a testnet RPC on a pubnet deploy", () => {
-    const res = checkAttestation({
-      ATTESTATION_CONTRACT_ID: "C" + "A".repeat(55),
-      SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
-    });
-    expect(res.ok).toBe(false);
-    expect(res.detail).toContain("test network");
   });
 });
 
