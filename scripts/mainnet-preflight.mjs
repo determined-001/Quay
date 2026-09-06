@@ -322,7 +322,20 @@ export function evaluateHealth(health) {
     results.push(pass("live:health", "deployed API reports network=public"));
   }
   if (health.usdcTrustline && health.usdcTrustline.ok === false) {
-    results.push(fail("live:trustline", "The deployed API reports its seller wallet has no usable USDC trustline."));
+    // `not_configured` is the correct answer for a multi-tenant deployment, not
+    // a fault: there is no operator wallet to check because the service owns no
+    // wallet. Every seller's trustline is checked at link creation instead.
+    // Treating this as a failure made a healthy mainnet deploy report FAILED.
+    if (health.usdcTrustline.reason === "not_configured") {
+      results.push(pass("live:trustline", "no operator wallet configured — trustlines are checked per seller at link creation"));
+    } else {
+      results.push(
+        fail(
+          "live:trustline",
+          `The deployed API reports its configured wallet cannot receive USDC (${health.usdcTrustline.reason ?? "unknown reason"}). Add a USDC trustline to that account.`,
+        ),
+      );
+    }
   }
   if (health.horizon?.degraded) {
     results.push(warn("live:horizon", "The deployed API reports Horizon as degraded."));
@@ -418,12 +431,43 @@ async function main() {
   const apiIndex = argv.indexOf("--api");
   const apiUrl = apiIndex !== -1 ? argv[apiIndex + 1] : undefined;
 
-  const results = runStaticChecks(processEnv);
-  results.push(...(await probeAccount(processEnv.DEFAULT_SELLER_WALLET)));
+  // Which configuration is this run actually looking at?
+  //
+  // The static checks read THIS process's environment. That is the right
+  // source when you export the mainnet config locally and check it before
+  // deploying. It is the wrong source — and actively misleading — when the
+  // config lives in the Render dashboard, which is where render.mainnet.yaml
+  // tells you to put every `sync: false` value. In that case the local shell
+  // has none of it, every check fails, and a perfectly healthy deployment gets
+  // reported as FAILED. A tool that cries wolf about a working system is worse
+  // than no tool: it trains you to skim past the one line that matters.
+  //
+  // So: if a deployment was named and this shell has no mainnet config, the
+  // deployment is the subject and the local environment is not evidence.
+  const localConfigPresent = Boolean(processEnv.STELLAR_NETWORK || processEnv.DATABASE_URL);
+  const results = [];
+
+  if (!apiUrl || localConfigPresent) {
+    results.push(...runStaticChecks(processEnv));
+    results.push(...(await probeAccount(processEnv.DEFAULT_SELLER_WALLET)));
+  } else {
+    results.push(
+      skip(
+        "local-config",
+        "No mainnet configuration in this shell, so the static checks are skipped — they would only describe your laptop. Values set in the Render dashboard cannot be read from here; the checks below probe the running service instead.",
+      ),
+    );
+  }
+
   results.push(...(await probeDeploy(apiUrl)));
 
   console.log("Quay mainnet preflight");
   console.log("");
+  if (apiUrl && !localConfigPresent) {
+    console.log(`  Subject: the deployment at ${apiUrl}`);
+    console.log("  To check configuration too, export it here and re-run (see docs/MAINNET.md).");
+    console.log("");
+  }
   console.log(formatReport(results));
   exit(exitCodeFor(results));
 }
