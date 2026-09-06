@@ -245,8 +245,15 @@ title and body — see `renderStatusMd`/`buildTargets` in the script) instead of
 the ambiguous `🔴 Uptime: API is down` a pre-8.8 reader might mistake for
 testnet.
 
-**Where the output lives.** The scheduled run is on (`*/5`), but it does not
-commit to `main`. It writes `docs/uptime-state.json`, `docs/STATUS.md` and the
+**Cadence, honestly.** The cron asks for `*/5`. GitHub does not deliver that:
+scheduled workflows on a free public repo are best-effort and coalesced under
+load, and the measured gaps were ~30-42 minutes at best (2026-08-18) and ~3
+hours (2026-09-06). Treat this as "checked periodically", not "checked every 5
+minutes" — and specifically do NOT rely on it to keep a free Render instance
+awake, because every observed gap exceeds the 15-minute idle timeout.
+
+**Where the output lives.** The scheduled run is on, but it does not commit to
+`main`. It writes `docs/uptime-state.json`, `docs/STATUS.md` and the
 badge JSON to a dedicated **`status` branch**, and the README badges read from
 there. The pinger was originally disabled in `a0f06d1` because a commit every
 five minutes buried the repo's real history — 470 commits are that bot — and a
@@ -254,9 +261,11 @@ bot push cannot satisfy main's branch protection anyway. The copy of
 `docs/STATUS.md` on `main` is a snapshot and will lag; the live one is on
 `status`.
 
-The 5-minute cadence is also load-bearing beyond monitoring: a Render instance
-spins down after 15 minutes idle, and a spun-down instance is not running the
-settlement watcher.
+A spun-down Render instance is not running the settlement watcher, and this
+workflow does not prevent that — see the cadence note above. What limits the
+damage is that the watcher resumes from its persisted cursor: a payment is
+marked paid late, not lost. Buying `starter` is what actually removes the
+problem.
 
 **Turning the anchor probe off.** `.github/workflows/anchor-probe.yml` runs a
 nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org`

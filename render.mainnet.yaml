@@ -55,14 +55,22 @@ services:
     #
     # A free instance spins down after 15 minutes idle, and the settlement
     # watcher runs inside this process — so a sleeping instance is not watching
-    # the ledger. Two things make that survivable: the watcher resumes from its
-    # persisted cursor and backfills whatever it missed, so a payment is marked
-    # paid LATE rather than lost; and .github/workflows/uptime.yml pings every
-    # 5 minutes, under the idle timeout, which in practice keeps it awake.
+    # the ledger.
     #
-    # "In practice" is the weak word. GitHub's cron is not punctual and can be
-    # delayed under load. Before customers other than you depend on this, move
-    # to `starter` — $7/mo removes the whole category.
+    # An earlier version of this comment claimed the uptime workflow keeps the
+    # instance awake by pinging every 5 minutes. Measured, that is false. The
+    # `*/5` cron in .github/workflows/uptime.yml is what we ask for, not what
+    # GitHub runs: observed gaps were ~30-42 minutes at best (2026-08-18) and
+    # ~3 hours on 2026-09-06. Both are longer than the 15-minute idle timeout,
+    # so this instance sleeps.
+    #
+    # What actually holds: the watcher resumes from its persisted cursor and
+    # backfills, so a payment is marked paid LATE, never lost. What does not
+    # hold is the buyer's experience — a cold start is 30-60s on a checkout
+    # page, which is where someone decides whether to trust this.
+    #
+    # Free is fine while the operator is the only user. Move to `starter`
+    # before anyone else pays through it: $7/mo removes the whole category.
     plan: free
     # REAL MONEY DEPLOYS FROM HERE. `main` is protected (PR required, linear
     # history), so nothing reaches the public network without passing CI and a

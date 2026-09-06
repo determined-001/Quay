@@ -2,9 +2,15 @@ name: uptime
 
 on:
   schedule:
-    # Every 5 minutes. The cadence is also load-bearing beyond monitoring: a
-    # Render instance spins down after 15 minutes idle, and a spun-down
-    # instance is not running the settlement watcher.
+    # Requested every 5 minutes. NOT what GitHub delivers: scheduled workflows
+    # on a free public repo are best-effort and heavily coalesced under load.
+    # Measured gaps were ~30-42 minutes at best (2026-08-18) and ~3 hours
+    # (2026-09-06). Keep the ask at */5 — a lower ceiling only makes it worse —
+    # but do not build anything on the assumption that it runs at that rate.
+    #
+    # In particular this does NOT keep a free Render instance awake: every
+    # observed gap exceeds the 15-minute idle timeout. That claim was made and
+    # was wrong.
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
