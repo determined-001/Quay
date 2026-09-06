@@ -23,7 +23,9 @@ link, pay it from any testnet wallet with the shown memo, watch it flip to
 [![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-api.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
 [![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-web.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
 [![Synthetic check](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-synthetic.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
-Checked every 5 minutes by [`.github/workflows/uptime.yml`](.github/workflows/uptime.yml), which
+Checked by [`.github/workflows/uptime.yml`](.github/workflows/uptime.yml) — which
+asks for every 5 minutes and, being a scheduled workflow on a free public repo,
+actually gets somewhere between 30 minutes and 3 hours. It
 publishes to the [`status`](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
 branch rather than committing to `main` every 5 minutes. The badges above and
 the 90-day history read from there; the copy of `docs/STATUS.md` on `main` is a
