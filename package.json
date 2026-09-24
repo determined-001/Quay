@@ -39,7 +39,7 @@
       "axios": ">=1.18.0",
       "nanoid": "^3.3.18",
       "postcss": ">=8.5.18",
-      "sharp": ">=0.35.0",
+      "sharp": ">=0.35.4",
       "@stellar/stellar-sdk@14.2.0": "16.2.0",
       "protobufjs": "^7.6.1"
     }
