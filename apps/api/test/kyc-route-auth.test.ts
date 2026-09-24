@@ -3,7 +3,7 @@ import { kycRoutes } from "../src/routes/kyc";
 import { generateApiKey, hashApiKey, type ApiKeyScope } from "../src/services/api-keys";
 import { createTestContainer, type TestContainer } from "./setup";
 import type { Container } from "../src/services/container";
-import type { AnchorCustomer, KycRecord } from "@checkout/core";
+import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord } from "@checkout/core";
 
 /**
  * Regression, BUG-6.6.
@@ -127,6 +127,37 @@ describe("kycRoutes — authentication and scoping", () => {
     expect(res.status).toBe(200);
     expect(submitted).toEqual([{ first_name: "Ada" }]);
     expect(seen).toEqual([{ sellerId: seller.id, account: seller.wallet }]);
+    container.client.close();
+  });
+
+  it("answers 403 anchor_auth_required when the seller has not signed in to the anchor", async () => {
+    const container = await createTestContainer();
+    const signedOut = {
+      async status() {
+        throw new AnchorAuthRequiredError("anchor.example");
+      },
+      async submit() {
+        throw new AnchorAuthRequiredError("anchor.example");
+      },
+    };
+    const app = kycRoutes({ ...container, kyc: signedOut } as unknown as Container);
+    const { plaintext, prefix } = generateApiKey("test");
+    await container.apiKeys.create({
+      sellerId: container.seller.id,
+      name: "kyc test key",
+      prefix,
+      hash: await hashApiKey(plaintext),
+      scopes: ["offramp:initiate"],
+    });
+    const headers = { authorization: `Bearer ${plaintext}`, "content-type": "application/json" };
+
+    const read = await app.request("/", { headers });
+    expect(read.status).toBe(403);
+    expect(await read.json()).toEqual({ error: "anchor_auth_required" });
+
+    const write = await app.request("/", { method: "PUT", headers, body: JSON.stringify({ first_name: "Ada" }) });
+    expect(write.status).toBe(403);
+    expect(await write.json()).toEqual({ error: "anchor_auth_required" });
     container.client.close();
   });
 });
