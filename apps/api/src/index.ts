@@ -12,6 +12,7 @@ import { metricsRoutes } from "./routes/metrics";
 import { authRoutes } from "./routes/auth";
 import { wellKnownRoutes } from "./routes/well-known";
 import { kycRoutes } from "./routes/kyc";
+import { anchorAuthRoutes } from "./routes/anchor-auth";
 import { demoRoutes } from "./routes/demo";
 import { telemetryRoutes } from "./routes/telemetry";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
@@ -173,6 +174,7 @@ async function main(): Promise<void> {
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
   app.route("/seller/kyc", kycRoutes(container));
+  app.route("/seller/anchor-auth", anchorAuthRoutes(container));
   app.route("/demo", demoRoutes(container));
   // Operator-only off-ramp telemetry (issue #20, 3.8). The routes gate
   // themselves on TELEMETRY_TOKEN (404 when unset), so mounting them

@@ -1,4 +1,5 @@
 import type { KycFieldSpec, KycStatus } from "@checkout/core";
+import { endpointUrl } from "./sep1";
 
 // SEP-12: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
 //
@@ -49,13 +50,14 @@ function toKycStatus(status: string): KycStatus {
 }
 
 /** Discovers required fields and current status for a customer, identified by
- *  the anchor-assigned `customerId` once one exists, else by `account`. */
+ *  the anchor-assigned `customerId` once one exists, else by `account`.
+ *  `kycServer` is the SEP-1 `KYC_SERVER`; paths are joined onto it, not over it. */
 export async function getSep12Customer(
-  baseUrl: string,
+  kycServer: string,
   jwt: string,
   params: { account: string; customerId?: string | null },
 ): Promise<Sep12CustomerResult> {
-  const url = new URL("/sep12/customer", baseUrl);
+  const url = endpointUrl(kycServer, "customer");
   if (params.customerId) {
     url.searchParams.set("id", params.customerId);
   } else {
@@ -81,11 +83,11 @@ export async function getSep12Customer(
 
 /** Submits exactly the fields given — no defaults, no fabricated identity. */
 export async function putSep12Customer(
-  baseUrl: string,
+  kycServer: string,
   jwt: string,
   params: { account: string; customerId?: string | null; fields: Record<string, string> },
 ): Promise<{ customerId: string }> {
-  const res = await fetch(new URL("/sep12/customer", baseUrl), {
+  const res = await fetch(endpointUrl(kycServer, "customer"), {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({

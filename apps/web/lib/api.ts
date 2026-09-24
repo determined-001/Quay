@@ -1,4 +1,11 @@
-import type { KycFieldSpec, KycStatus, PaymentLink, PaymentRequest, PayoutFieldDescriptor } from "@checkout/core";
+import type {
+  KycFieldSpec,
+  KycStatus,
+  PaymentLink,
+  PaymentRequest,
+  PayoutFieldDescriptor,
+  WithdrawTransfer,
+} from "@checkout/core";
 
 export type { PaymentLink, PaymentRequest, PayoutFieldDescriptor };
 
@@ -49,6 +56,14 @@ export interface PublicReceipt {
   paidAmount: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface AnchorAuthView {
+  /** False when the deployment has no real anchor (mock / none). */
+  required: boolean;
+  connected: boolean;
+  anchor: string | null;
+  expiresAt: number | null;
 }
 
 export interface KycView {
@@ -129,6 +144,7 @@ export type ApiErrorCode =
   | "invalid_body"
   | "conflict"
   | "kyc_required" // seller's SEP-12 KYC isn't ACCEPTED yet — see `missingFields`
+  | "anchor_auth_required" // seller hasn't signed in to the anchor with their wallet (or it expired)
   | "destination_cannot_receive" // seller wallet can't receive the asset — see `details.trustlineUri`
   | "payment_rejected" // wallet transaction was refused by Horizon; see `details.reason`
   | "wallet_rejected" // buyer closed or rejected the wallet prompt
@@ -165,6 +181,8 @@ export function describeError(err: CheckoutError): string {
       return "This action cannot be completed right now. The link may be in an unexpected state. Try refreshing.";
     case "kyc_required":
       return "Identity verification is required before you can cash out. See the panel above.";
+    case "anchor_auth_required":
+      return "Sign in to the anchor with your wallet first. See the identity verification panel.";
     case "destination_cannot_receive":
       return "Your wallet can't receive this asset yet. Add the trustline and try again.";
     case "payment_rejected":
@@ -274,6 +292,8 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
                       ? "invalid_body"
                       : apiCode === "kyc_required"
                         ? "kyc_required"
+                        : apiCode === "anchor_auth_required"
+                          ? "anchor_auth_required"
                         : apiCode === "destination_cannot_receive"
                           ? "destination_cannot_receive"
                           : apiCode === "payment_rejected"
@@ -422,6 +442,8 @@ export const api = {
     http<{
       job: { jobId: string; status: string; targetAmount: string; targetCurrency: string };
       interactiveUrl?: string;
+      /** The anchor's deposit instructions — the seller's wallet signs and sends this. */
+      transfer?: WithdrawTransfer;
     }>(
       `/links/${id}/cash-out`,
       { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
@@ -449,6 +471,19 @@ export const api = {
 
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: () => http<KycView>("/seller/kyc"),
+
+  // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
+  // sign with the wallet -> completeAnchorAuth(). Quay never signs it.
+  getAnchorAuth: () => http<AnchorAuthView>("/seller/anchor-auth"),
+
+  getAnchorChallenge: () =>
+    http<{ transaction: string; networkPassphrase: string }>("/seller/anchor-auth/challenge", { method: "POST" }),
+
+  completeAnchorAuth: (transaction: string) =>
+    http<{ connected: true; anchor: string; expiresAt: number }>("/seller/anchor-auth", {
+      method: "POST",
+      body: JSON.stringify({ transaction }),
+    }),
 
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),

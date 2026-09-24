@@ -3,7 +3,7 @@ import { kycRoutes } from "../src/routes/kyc";
 import { generateApiKey, hashApiKey, type ApiKeyScope } from "../src/services/api-keys";
 import { createTestContainer, type TestContainer } from "./setup";
 import type { Container } from "../src/services/container";
-import type { KycRecord } from "@checkout/core";
+import type { AnchorCustomer, KycRecord } from "@checkout/core";
 
 /**
  * Regression, BUG-6.6.
@@ -19,6 +19,7 @@ import type { KycRecord } from "@checkout/core";
 describe("kycRoutes — authentication and scoping", () => {
   const record: KycRecord = {
     sellerId: "sel_x",
+    account: null,
     customerId: "cus_1",
     status: "ACCEPTED",
     requiredFields: [],
@@ -32,17 +33,17 @@ describe("kycRoutes — authentication and scoping", () => {
   async function harness(scopes: ApiKeyScope[]) {
     const container = await createTestContainer();
     const submitted: Record<string, string>[] = [];
-    const seenSellerIds: string[] = [];
+    const seen: AnchorCustomer[] = [];
 
     const withKyc = {
       ...container,
       kyc: {
-        async status(sellerId: string) {
-          seenSellerIds.push(sellerId);
+        async status(customer: AnchorCustomer) {
+          seen.push(customer);
           return record;
         },
-        async submit(sellerId: string, fields: Record<string, string>) {
-          seenSellerIds.push(sellerId);
+        async submit(customer: AnchorCustomer, fields: Record<string, string>) {
+          seen.push(customer);
           submitted.push(fields);
           return record;
         },
@@ -61,7 +62,7 @@ describe("kycRoutes — authentication and scoping", () => {
       scopes,
     });
 
-    return { app, container: container as TestContainer, key: plaintext, seller, submitted, seenSellerIds };
+    return { app, container: container as TestContainer, key: plaintext, seller, submitted, seen };
   }
 
   it("refuses an unauthenticated read of the seller's identity", async () => {
@@ -104,18 +105,18 @@ describe("kycRoutes — authentication and scoping", () => {
   });
 
   it("serves the authenticated seller, resolved from the token rather than getDefault()", async () => {
-    const { app, container, key, seller, seenSellerIds } = await harness(["offramp:initiate"]);
+    const { app, container, key, seller, seen } = await harness(["offramp:initiate"]);
 
     const res = await app.request("/", { headers: { authorization: `Bearer ${key}` } });
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: "ACCEPTED" });
-    expect(seenSellerIds).toEqual([seller.id]);
+    expect(seen).toEqual([{ sellerId: seller.id, account: seller.wallet }]);
     container.client.close();
   });
 
   it("submits identity for the authenticated seller", async () => {
-    const { app, container, key, seller, submitted, seenSellerIds } = await harness(["offramp:initiate"]);
+    const { app, container, key, seller, submitted, seen } = await harness(["offramp:initiate"]);
 
     const res = await app.request("/", {
       method: "PUT",
@@ -125,7 +126,7 @@ describe("kycRoutes — authentication and scoping", () => {
 
     expect(res.status).toBe(200);
     expect(submitted).toEqual([{ first_name: "Ada" }]);
-    expect(seenSellerIds).toEqual([seller.id]);
+    expect(seen).toEqual([{ sellerId: seller.id, account: seller.wallet }]);
     container.client.close();
   });
 });

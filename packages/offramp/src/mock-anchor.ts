@@ -1,4 +1,5 @@
 import {
+  type AnchorCustomer,
   OffRampJobNotFoundError,
   type AssetRef,
   type Logger,
@@ -171,7 +172,7 @@ export class MockAnchorOffRamp implements OffRampPort {
   }
 
   async initiate(
-    input: { linkId: string; quoteId: string; payout: SellerPayoutRef },
+    input: { linkId: string; quoteId: string; payout: SellerPayoutRef; customer?: AnchorCustomer },
     opts: { logger?: Logger } = {},
   ): Promise<OffRampInitiation> {
     const log = opts.logger ?? this.logger;
@@ -189,6 +190,8 @@ export class MockAnchorOffRamp implements OffRampPort {
       jobId,
       linkId: input.linkId,
       anchor: ANCHOR_NAME,
+      sellerId: input.customer?.sellerId ?? null,
+      account: input.customer?.account ?? null,
       targetCurrency: q.buyCurrency,
       targetAmount,
       rate: q.price,

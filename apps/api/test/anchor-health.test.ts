@@ -3,6 +3,7 @@ import {
   fromStroops,
   toStroops,
   type KycPort,
+  type AnchorCustomer,
   type KycRecord,
   type LinkPaymentRecord,
   type LinkRepository,
@@ -466,15 +467,16 @@ class FakeOffRampStateForAnchor implements OffRampStateRepository {
 
 /** Always ACCEPTED — these anchor-health tests aren't exercising the KYC gate. */
 class FakeKycAlwaysAcceptedForAnchor implements KycPort {
-  async status(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async status(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
-  async submit(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
-  private accepted(sellerId: string): KycRecord {
+  private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      account,
       customerId: null,
       status: "ACCEPTED",
       requiredFields: [],

@@ -20,6 +20,7 @@ function fakeContainer(): Container {
     circuitBreakerState: () => 0,
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     kyc: {} as Container["kyc"],
+    anchorAuth: null,
     apiKeys: {} as Container["apiKeys"],
     db: {} as Container["db"],
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],

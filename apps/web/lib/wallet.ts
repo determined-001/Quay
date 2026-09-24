@@ -13,6 +13,8 @@
  *    version bump is a change here, not across the UI.
  */
 
+import type { WithdrawTransfer } from "@checkout/core";
+
 const NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
 
 export const NETWORK_PASSPHRASE =
@@ -139,6 +141,52 @@ export async function signTransaction(xdr: string, address: string): Promise<str
     networkPassphrase: NETWORK_PASSPHRASE,
   });
   return signedTxXdr;
+}
+
+const HORIZON_URL =
+  process.env.NEXT_PUBLIC_HORIZON_URL ??
+  (NETWORK === "public" ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org");
+
+/**
+ * Sends the on-chain leg of a withdrawal: the seller's own wallet pays the
+ * anchor exactly what the anchor asked for, with its memo. Built, signed and
+ * submitted from this browser — the server never sees a key or a signature it
+ * could replay, and there is no Quay account in the path.
+ *
+ * Returns the transaction hash.
+ */
+export async function sendAnchorTransfer(address: string, transfer: WithdrawTransfer): Promise<string> {
+  const stellar = await import("@stellar/stellar-sdk");
+  const server = new stellar.Horizon.Server(HORIZON_URL);
+  const account = await server.loadAccount(address);
+  const asset =
+    transfer.asset.issuer === null
+      ? stellar.Asset.native()
+      : new stellar.Asset(transfer.asset.code, transfer.asset.issuer);
+  const builder = new stellar.TransactionBuilder(account, {
+    fee: String(stellar.BASE_FEE),
+    networkPassphrase: NETWORK_PASSPHRASE,
+  }).addOperation(stellar.Operation.payment({ destination: transfer.destination, asset, amount: transfer.amount }));
+
+  // The memo is how the anchor matches this payment to the withdrawal. A
+  // wrong or missing one can strand the funds at the anchor, so send it
+  // exactly as given and never guess a type.
+  if (transfer.memo !== null) {
+    if (transfer.memoType === "id") builder.addMemo(stellar.Memo.id(transfer.memo));
+    else if (transfer.memoType === "hash") builder.addMemo(stellar.Memo.hash(hashMemoHex(transfer.memo)));
+    else builder.addMemo(stellar.Memo.text(transfer.memo));
+  }
+
+  const unsigned = builder.setTimeout(300).build().toXDR();
+  const signed = await signTransaction(unsigned, address);
+  const res = await server.submitTransaction(stellar.TransactionBuilder.fromXDR(signed, NETWORK_PASSPHRASE));
+  return res.hash;
+}
+
+/** SEP-6 sends a hash memo base64-encoded; the SDK wants hex. */
+function hashMemoHex(memo: string): string {
+  if (/^[0-9a-f]{64}$/i.test(memo)) return memo;
+  return Array.from(atob(memo), (c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
 }
 
 /** Reads the selected wallet's network so a wallet cannot sign for another chain. */

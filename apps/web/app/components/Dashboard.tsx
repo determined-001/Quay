@@ -6,6 +6,7 @@ import {
   api,
   CheckoutError,
   describeError,
+  type AnchorAuthView,
   type KycView,
   type PaymentLink,
   type UsdcTrustlineStatus,
@@ -238,6 +239,7 @@ export default function Dashboard() {
   const [copied, setCopied] = useState<string | null>(null);
   const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
   const [kyc, setKyc] = useState<KycView | null>(null);
+  const [anchorAuth, setAnchorAuth] = useState<AnchorAuthView | null>(null);
   // Which link has the cash-out modal open; null = closed (issue #32).
   const [cashOutLinkId, setCashOutLinkId] = useState<string | null>(null);
 
@@ -263,8 +265,16 @@ export default function Dashboard() {
   const refreshKyc = useCallback(async () => {
     if (OFFRAMP_IS_MOCK || !OFFRAMP_ENABLED) return; // no real anchor, nothing to verify
     try {
+      // KYC lives at the anchor under the seller's own account, so it can only
+      // be read once the seller's wallet has signed in there.
+      const session = await api.getAnchorAuth();
+      setAnchorAuth(session);
+      if (session.required && !session.connected) return;
       setKyc(await api.getKyc());
-    } catch {
+    } catch (e) {
+      if (e instanceof CheckoutError && e.code === "anchor_auth_required") {
+        setAnchorAuth((prev) => (prev ? { ...prev, connected: false } : prev));
+      }
       /* dashboard still works without it; the cash-out button just stays gated */
     }
   }, []);
@@ -475,7 +485,9 @@ export default function Dashboard() {
         {actionError && <div className="err">{actionError}</div>}
       </section>
 
-      {OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK && <KycPanel kyc={kyc} onUpdated={setKyc} />}
+      {OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK && (
+        <KycPanel kyc={kyc} anchor={anchorAuth} onUpdated={setKyc} onAnchorConnected={() => void refreshKyc()} />
+      )}
 
       <section className="panel">
         <h2>Links</h2>

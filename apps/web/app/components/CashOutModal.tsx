@@ -19,7 +19,16 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type OfframpRequirements, type PayoutFieldDescriptor } from "../../lib/api";
+import type { WithdrawTransfer } from "@checkout/core";
+import {
+  api,
+  CheckoutError,
+  describeError,
+  type OfframpRequirements,
+  type PayoutFieldDescriptor,
+} from "../../lib/api";
+import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
+import { useSellerWallet } from "./SessionGate";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,7 +44,7 @@ interface Props {
   onSuccess: () => void;
 }
 
-type ModalStep = "loading" | "form" | "confirming" | "submitting" | "error";
+type ModalStep = "loading" | "form" | "confirming" | "submitting" | "transfer" | "error";
 
 interface QuotePreview {
   jobId: string;
@@ -115,6 +124,13 @@ export default function CashOutModal({
   // blocked — the seller needs a link they can open themselves.
   const [interactiveUrl, setInteractiveUrl] = useState<string | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Set when the anchor is waiting for the asset. Only the seller's wallet can
+  // send it; the payout does not start until they do.
+  const wallet = useSellerWallet();
+  const [transfer, setTransfer] = useState<WithdrawTransfer | null>(null);
+  const [sending, setSending] = useState(false);
+  const [sentHash, setSentHash] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   // ---- fetch requirements on mount ----------------------------------------
   useEffect(() => {
@@ -234,11 +250,32 @@ export default function CashOutModal({
       const expiresAt = Date.now() + 5 * 60_000;
       startCountdown(expiresAt);
       // Cash-out is already initiated at this point (quote+initiate are atomic
-      // in the current API). Go straight to success after showing the summary.
-      onSuccess();
+      // in the current API). If the anchor now needs the asset, keep the modal
+      // open for the seller to send it; otherwise go straight to success.
+      if (result.transfer) {
+        setTransfer(result.transfer);
+        setStep("transfer");
+      } else {
+        onSuccess();
+      }
     } catch (e: unknown) {
-      setErrorMsg(e instanceof Error ? e.message : "Cash-out failed");
+      setErrorMsg(e instanceof CheckoutError ? describeError(e) : e instanceof Error ? e.message : "Cash-out failed");
       setStep("form");
+    }
+  }
+
+  async function handleSendTransfer() {
+    if (!transfer || !wallet) return;
+    setTransferError(null);
+    setSending(true);
+    try {
+      setSentHash(await sendAnchorTransfer(wallet, transfer));
+    } catch (e: unknown) {
+      setTransferError(
+        e instanceof Error && e.message ? `The payment was not sent: ${e.message}` : "The payment was not sent.",
+      );
+    } finally {
+      setSending(false);
     }
   }
 
@@ -445,6 +482,60 @@ export default function CashOutModal({
               Cancel
             </button>
           </form>
+        )}
+
+        {/* The anchor is waiting for the asset. The seller's wallet sends it
+            straight to the anchor; nothing passes through Quay. */}
+        {step === "transfer" && transfer && (
+          <div>
+            {sentHash ? (
+              <>
+                <div className="kyc-note kyc-note--ok" style={{ marginBottom: 12 }}>
+                  Sent. The anchor pays out once it sees the payment on the ledger.
+                </div>
+                <p className="muted mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
+                  {sentHash}
+                </p>
+                <button className="btn btn--primary btn--block" onClick={onSuccess}>
+                  Done
+                </button>
+              </>
+            ) : (
+              <>
+                <p style={{ marginTop: 0 }}>
+                  The anchor is ready. Send{" "}
+                  <strong>
+                    {transfer.amount} {transfer.asset.code}
+                  </strong>{" "}
+                  from your wallet to finish the cash-out.
+                </p>
+                <dl className="muted" style={{ fontSize: 13, margin: "0 0 12px" }}>
+                  <dt>To</dt>
+                  <dd className="mono" title={transfer.destination}>
+                    {shortAddress(transfer.destination)}
+                  </dd>
+                  {transfer.memo !== null && (
+                    <>
+                      <dt>Memo ({transfer.memoType ?? "text"})</dt>
+                      <dd className="mono">{transfer.memo}</dd>
+                    </>
+                  )}
+                </dl>
+                <p className="muted" style={{ fontSize: 12 }}>
+                  Keep this open until the payment is sent. The memo is how the anchor matches it to
+                  your withdrawal.
+                </p>
+                <button
+                  className="btn btn--primary btn--block"
+                  onClick={() => void handleSendTransfer()}
+                  disabled={sending || !wallet}
+                >
+                  {sending ? "Waiting for wallet…" : "Send with my wallet"}
+                </button>
+                {transferError && <div className="err">{transferError}</div>}
+              </>
+            )}
+          </div>
         )}
 
         {/* The anchor needs the seller in a browser and the popup was blocked —

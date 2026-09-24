@@ -7,7 +7,17 @@ import {
   StreamingHorizonWatcher,
   type HorizonStatus,
 } from "@checkout/stellar";
-import { DisabledOffRamp, MockAnchorOffRamp, NoKycRequired, TestAnchorKyc, TestAnchorOffRamp } from "@checkout/offramp";
+import {
+  AnchorDiscovery,
+  DisabledOffRamp,
+  MockAnchorOffRamp,
+  NoKycRequired,
+  SellerAnchorAuth,
+  TESTANCHOR_BASE_URL,
+  TESTANCHOR_HOME_DOMAIN,
+  TestAnchorKyc,
+  TestAnchorOffRamp,
+} from "@checkout/offramp";
 import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
@@ -23,6 +33,7 @@ import {
   DrizzleKycRepository,
   DrizzleOfframpTelemetryRepository,
   DrizzleApiKeyRepository,
+  DrizzleAnchorSessionRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -52,6 +63,9 @@ export interface Container {
   apiKeys: DrizzleApiKeyRepository;
   db: DB;
   kyc: KycPort;
+  /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
+   *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
+  anchorAuth: SellerAnchorAuth | null;
   telemetry: OffRampTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string | null };
   horizonStatus(): HorizonStatus;
@@ -147,8 +161,9 @@ export async function createContainer(): Promise<Container> {
     env.watchMode === "stream"
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : pollingWatcher;
-  const offramp = new CircuitBreakerOffRamp(createOffRamp(seller.keypair, offrampStateRepo, logger, stellar.networkPassphrase));
-  const kyc = createKyc(seller.keypair, db);
+  const anchor = createAnchor(db, logger, stellar.networkPassphrase);
+  const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
+  const kyc = createKyc(anchor, db);
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
   // off-ramp the probe is disabled and short-circuits to "always available" so
@@ -236,6 +251,7 @@ export async function createContainer(): Promise<Container> {
     apiKeys: apiKeysRepo,
     db,
     kyc,
+    anchorAuth: anchor?.auth ?? null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     horizonStatus: () => pollingWatcher.getStatus(),
@@ -308,8 +324,8 @@ function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string | null
   const enabled = offrampKind === "testanchor" || offrampKind === "anchor";
   // For OFFRAMP=anchor env.ts already required both of these, so the ??
   // fallbacks only ever apply to the testanchor sandbox preset.
-  const url = enabled ? env.anchorUrl ?? "https://testanchor.stellar.org" : null;
-  const homeDomain = enabled ? env.anchorHomeDomain ?? "testanchor.stellar.org" : null;
+  const url = enabled ? env.anchorUrl ?? TESTANCHOR_BASE_URL : null;
+  const homeDomain = enabled ? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN : null;
   const failureThreshold = Number(process.env.ANCHOR_PROBE_FAILURE_THRESHOLD ?? "3");
   const cooldownMs = Number(process.env.ANCHOR_PROBE_COOLDOWN_MS ?? "30000");
   return new AnchorHealth({
@@ -359,69 +375,74 @@ export function assertSharedStateOrSingleInstance(
 }
 
 
+interface AnchorWiring {
+  discovery: AnchorDiscovery;
+  auth: SellerAnchorAuth;
+}
+
 /**
- * Both `testanchor` and `anchor` are the same SEP-6 adapter; they differ only
- * in whether the endpoint is the SDF sandbox or an operator-supplied
- * production anchor. Passing the URL/domain through as `undefined` for
- * `testanchor` lets the adapter's own testnet defaults stand, so the sandbox
- * preset keeps working with no configuration at all.
+ * The anchor this deployment cashes out through, and the per-seller SEP-10
+ * sessions with it. Null for `mock`/`none`, which have no anchor.
+ *
+ * There is no server keypair here. Every authenticated anchor call runs as the
+ * seller whose wallet signed that anchor's challenge — so each seller is their
+ * own customer at the anchor, and the server holds nothing that can sign for
+ * a seller's funds.
  */
-function createOffRamp(
-  sellerKeypair: Keypair | null,
-  state: OffRampStateRepository,
-  logger: Logger,
-  networkPassphrase: string,
-): OffRampPort {
-  if (env.offramp === "none") {
-    // No cash-out leg. Every method throws OffRampDisabledError, which the
-    // routes translate to 501 — see packages/offramp/src/disabled.ts.
-    return new DisabledOffRamp();
-  }
-  if (env.offramp === "mock") {
-    // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
-    return new MockAnchorOffRamp({ state, settleAfterMs: 8000 });
-  }
-  if (!sellerKeypair) {
-    throw new Error(
-      `OFFRAMP=${env.offramp} requires the seller's secret key to sign SEP-10 auth: ` +
-        "set DEFAULT_SELLER_SECRET (matching DEFAULT_SELLER_WALLET), or leave " +
-        "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
-    );
-  }
-  return new TestAnchorOffRamp({
-    sellerKeypair,
-    state,
-    baseUrl: env.anchorUrl,
-    homeDomain: env.anchorHomeDomain,
-    preferredWithdrawType: env.offrampType,
+function createAnchor(db: DB, logger: Logger, networkPassphrase: string): AnchorWiring | null {
+  if (env.offramp !== "testanchor" && env.offramp !== "anchor") return null;
+  // For OFFRAMP=anchor env.ts already required both; the fallbacks are the
+  // testanchor sandbox preset.
+  const discovery = new AnchorDiscovery({
+    homeDomain: env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN,
+    fallbackBaseUrl: env.anchorUrl ?? TESTANCHOR_BASE_URL,
     // SEP-1 discovery refuses an anchor declaring a different network, so a
     // mainnet deployment cannot quote against a testnet anchor by mistake.
     expectedNetworkPassphrase: networkPassphrase,
     logger,
   });
+  const auth = new SellerAnchorAuth({
+    discovery,
+    networkPassphrase,
+    sessions: new DrizzleAnchorSessionRepository(db),
+    logger,
+  });
+  return { discovery, auth };
 }
 
-function createKyc(sellerKeypair: Keypair | null, db: DB): KycPort {
-  if (env.offramp === "mock" || env.offramp === "none") {
+/**
+ * Both `testanchor` and `anchor` are the same SEP-6 adapter; they differ only
+ * in whether the endpoint is the SDF sandbox or an operator-supplied
+ * production anchor.
+ */
+function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepository, logger: Logger): OffRampPort {
+  if (env.offramp === "none") {
+    // No cash-out leg. Every method throws OffRampDisabledError, which the
+    // routes translate to 501 — see packages/offramp/src/disabled.ts.
+    return new DisabledOffRamp();
+  }
+  if (!anchor) {
+    // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
+    return new MockAnchorOffRamp({ state, settleAfterMs: 8000 });
+  }
+  return new TestAnchorOffRamp({
+    discovery: anchor.discovery,
+    auth: anchor.auth,
+    state,
+    preferredWithdrawType: env.offrampType,
+    logger,
+  });
+}
+
+function createKyc(anchor: AnchorWiring | null, db: DB): KycPort {
+  if (!anchor) {
     // No real anchor, nothing to be compliant with. For "none" there is no
     // cash-out to gate at all; for "mock" it never gates the simulated one.
     return new NoKycRequired();
   }
-  if (!sellerKeypair) {
-    throw new Error(
-      `OFFRAMP=${env.offramp} requires the seller's secret key to sign SEP-10 auth: ` +
-        "set DEFAULT_SELLER_SECRET (matching DEFAULT_SELLER_WALLET), or leave " +
-        "DEFAULT_SELLER_WALLET unset on testnet to use the auto-generated keypair.",
-    );
-  }
-  // env.kycEncryptionKey is guaranteed set whenever OFFRAMP != mock (see env.ts).
+  // env.kycEncryptionKey is guaranteed set whenever OFFRAMP is testanchor/anchor (see env.ts).
   const repo = new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey as string));
-  return new TestAnchorKyc({
-    sellerKeypair,
-    repo,
-    baseUrl: env.anchorUrl,
-    homeDomain: env.anchorHomeDomain,
-  });
+  return new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo });
 }
 
 /**

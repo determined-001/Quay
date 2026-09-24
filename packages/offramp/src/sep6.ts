@@ -4,7 +4,11 @@ import { endpointUrl } from "./sep1";
 
 export interface Sep6WithdrawResult {
   id: string;
+  /** Where the seller sends the asset. Absent when the anchor has more to do
+   *  first (e.g. KYC review) and will publish it on the transaction later. */
   accountId?: string;
+  memo?: string;
+  memoType?: "text" | "id" | "hash";
 }
 
 /**
@@ -308,8 +312,9 @@ export async function startSep6Withdraw(
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
     throw new Error(`SEP-6 withdraw failed: ${res.status} ${await res.text()}`);
   }
-  const body = (await res.json()) as { id: string; account_id?: string };
-  const out: Sep6WithdrawResult = { id: body.id, accountId: body.account_id };
+  const body = (await res.json()) as { id: string; account_id?: string; memo?: string; memo_type?: string };
+  const memoType = body.memo_type === "id" || body.memo_type === "hash" || body.memo_type === "text" ? body.memo_type : undefined;
+  const out: Sep6WithdrawResult = { id: body.id, accountId: body.account_id, memo: body.memo, memoType };
   log.info(
     { event: "anchor.sep6.withdraw.ok", withdrawId: out.id, accountId: out.accountId, durationMs: Date.now() - t0 },
     "SEP-6 withdraw started",

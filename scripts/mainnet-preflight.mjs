@@ -132,16 +132,21 @@ export function checkOfframp(env) {
 
 export function checkSellerWallet(env) {
   const wallet = env.DEFAULT_SELLER_WALLET;
-  const secretRequired = (env.OFFRAMP ?? "mock") === "anchor";
 
   // Optional, and that is the point. Quay is multi-tenant: a seller signs in
   // with their own wallet over SEP-10 and every link they create is paid to
   // that address. This deployment does not need a wallet of its own, and
   // demanding one implied a custody relationship it does not have.
+  if (env.DEFAULT_SELLER_SECRET) {
+    // Nothing reads it any more, in any mode: each seller's own wallet signs
+    // the anchor's SEP-10 challenge and every on-chain leg of a withdrawal. A
+    // seller key on the server is pure blast radius.
+    return warn(
+      "seller-wallet",
+      "DEFAULT_SELLER_SECRET is set, but the server never signs for a seller — each seller's wallet signs its own anchor login and withdrawals. Unset it.",
+    );
+  }
   if (!wallet) {
-    if (secretRequired && !env.DEFAULT_SELLER_SECRET) {
-      return fail("seller-wallet", "OFFRAMP=anchor needs DEFAULT_SELLER_SECRET to sign SEP-10 auth for the anchor.");
-    }
     return warn(
       "seller-wallet",
       "No DEFAULT_SELLER_WALLET — sellers supply their own wallet at SEP-10 login, which is the multi-tenant path. /health will report usdcTrustline as not_configured; trustlines are still checked per seller on every link creation. Set one only if you want that health signal for your own wallet.",
@@ -149,15 +154,6 @@ export function checkSellerWallet(env) {
   }
   if (!STELLAR_PUBLIC_KEY.test(wallet)) {
     return fail("seller-wallet", `DEFAULT_SELLER_WALLET "${wallet}" is not a valid Stellar public key.`);
-  }
-  if (secretRequired && !env.DEFAULT_SELLER_SECRET) {
-    return fail("seller-wallet", "OFFRAMP=anchor needs DEFAULT_SELLER_SECRET to sign SEP-10 auth for the anchor.");
-  }
-  if (!secretRequired && env.DEFAULT_SELLER_SECRET) {
-    return warn(
-      "seller-wallet",
-      "DEFAULT_SELLER_SECRET is set but OFFRAMP is not \"anchor\". Under payments-only the server has no reason to hold a seller key — unset it and reduce the blast radius.",
-    );
   }
   return pass("seller-wallet", `DEFAULT_SELLER_WALLET=${wallet.slice(0, 6)}…${wallet.slice(-4)}`);
 }

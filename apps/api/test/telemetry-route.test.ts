@@ -14,6 +14,7 @@ function fakeContainer(): Container {
     apiKeys: {} as Container["apiKeys"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: "GSELLER" },
     kyc: {} as Container["kyc"],
+    anchorAuth: null,
     db: {} as Container["db"],
     telemetry: new FakeTelemetryRepository(),
     auth: {} as Container["auth"],

@@ -484,9 +484,22 @@ settled.
     "targetAmount": "17325.00",
     "rate": "1650"
   },
-  "interactiveUrl": "https://anchor.example.com/sep24/interactive?id=..."
+  "interactiveUrl": "https://anchor.example.com/sep24/interactive?id=...",
+  "transfer": {
+    "destination": "GANCHOR...",
+    "amount": "10.5",
+    "asset": { "code": "USDC", "issuer": "GA5Z..." },
+    "memo": "4242",
+    "memoType": "id"
+  }
 }
 ```
+- `transfer` — **present when the anchor is waiting for the asset** (SEP-6,
+  once it has named its deposit account). The seller's own wallet sends
+  `amount` of `asset` to `destination` with exactly this memo; the anchor pays
+  out only after it sees that payment. Quay cannot send it — no account Quay
+  controls is in the path. The dashboard builds, signs and submits it from the
+  browser.
 - `interactiveUrl` — **present only when the anchor requires the seller in a
   browser** (SEP-24). Absent for field-driven anchors (SEP-6), which is every
   adapter shipped today. When present, open it and keep polling `status()`
@@ -496,13 +509,40 @@ settled.
 
 **409** — link is not in `paid` state: `{ "error": "Link must be paid to cash out (is \"pending\")" }`
 **404** — `{ "error": "Link not found" }`
-**403** — `{ "error": "kyc_required" }`. Only possible with `OFFRAMP=testanchor`: the
+**403** — `{ "error": "anchor_auth_required" }`. Only possible with a real anchor
+(`OFFRAMP=testanchor|anchor`): the seller has no live SEP-10 session with the
+anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
+**403** — `{ "error": "kyc_required" }`. Only possible with a real anchor: the
 seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
 bank/routing info only — it is never used as a source of identity data.
 
 ---
 
+## `/seller/anchor-auth`
+
+**Requires auth** and the `offramp:initiate` scope. The seller's own SEP-10
+session with the anchor. An anchor knows its customer by the Stellar account
+that signed in, so each seller signs the anchor's challenge with **their own
+wallet**: the anchor's customer is the seller, never Quay. Quay fetches and
+verifies the challenge (issued by the anchor's published `SIGNING_KEY`, for this
+seller's account, on our network), relays the signed transaction, and keeps the
+anchor's JWT encrypted at rest so the cash-out poller can follow withdrawals.
+The JWT can read/update the seller's KYC and start a withdrawal; it cannot move
+funds. It is never returned to the client.
+
+- `GET /seller/anchor-auth` → `{ "required": true, "connected": false, "anchor": "testanchor.stellar.org", "expiresAt": null }`.
+  `required: false` means the deployment has no real anchor (`mock`/`none`).
+- `POST /seller/anchor-auth/challenge` → `{ "transaction": "<XDR>", "networkPassphrase": "..." }` — sign it with the wallet, never submit it.
+- `POST /seller/anchor-auth` `{ "transaction": "<signed XDR>" }` → `{ "connected": true, "anchor": "...", "expiresAt": 1750000000000 }`.
+  **400** `challenge_rejected` if it is not the anchor's challenge for this seller's account.
+- `DELETE /seller/anchor-auth` → **204**, forgets the session.
+
+---
+
 ## `GET /seller/kyc`
+
+**403** `{ "error": "anchor_auth_required" }` until the seller has signed in to
+the anchor (above).
 
 Current SEP-12 requirements and status for the seller, re-synced from the anchor
 (`OFFRAMP=mock` always reports `ACCEPTED` — there's no real anchor to satisfy).

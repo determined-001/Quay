@@ -2,6 +2,8 @@ import { and, desc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
+  AnchorSession,
+  AnchorSessionRepository,
   CreateLinkInput,
   KycFieldSpec,
   KycRecord,
@@ -40,6 +42,7 @@ import {
   offrampQuotes,
   offrampJobs,
   sellerKyc,
+  anchorSessions,
   revokedTokens,
   offrampTelemetry,
   apiKeys,
@@ -47,7 +50,7 @@ import {
 import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
-import { encryptSecret, last4 } from "../services/secret-crypto";
+import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
 
 type LinkRow = typeof links.$inferSelect;
 
@@ -731,6 +734,8 @@ function rowToJob(row: OffRampJobRow): StoredOffRampJob {
     jobId: row.jobId,
     linkId: row.linkId,
     anchor: row.anchor,
+    sellerId: row.sellerId ?? null,
+    account: row.account ?? null,
     targetCurrency: row.targetCurrency,
     targetAmount: row.targetAmount,
     rate: row.rate,
@@ -770,6 +775,8 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       jobId: job.jobId,
       linkId: job.linkId,
       anchor: job.anchor,
+      sellerId: job.sellerId,
+      account: job.account,
       targetCurrency: job.targetCurrency,
       targetAmount: job.targetAmount,
       rate: job.rate,
@@ -813,6 +820,7 @@ export class DrizzleKycRepository implements KycRepository {
   private rowToRecord(row: SellerKycRow): KycRecord {
     return {
       sellerId: row.sellerId,
+      account: row.account ?? null,
       customerId: row.customerId ?? null,
       status: row.status as KycStatus,
       requiredFields: JSON.parse(row.requiredFields) as KycFieldSpec[],
@@ -831,6 +839,7 @@ export class DrizzleKycRepository implements KycRepository {
   async save(record: KycRecord): Promise<void> {
     const row = {
       sellerId: record.sellerId,
+      account: record.account,
       customerId: record.customerId,
       status: record.status,
       requiredFields: JSON.stringify(record.requiredFields),
@@ -843,6 +852,54 @@ export class DrizzleKycRepository implements KycRepository {
       .insert(sellerKyc)
       .values(row)
       .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
+  }
+}
+
+/**
+ * Sellers' SEP-10 sessions with the anchor. The token is a bearer credential,
+ * so it is stored encrypted with the same key as webhook secrets and only
+ * decrypted in-process when a call to the anchor needs it.
+ */
+export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
+  constructor(private readonly db: DB) {}
+
+  async get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null> {
+    const rows = await this.db
+      .select()
+      .from(anchorSessions)
+      .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      sellerId: row.sellerId,
+      anchorDomain: row.anchorDomain,
+      account: row.account,
+      token: decryptSecret(row.tokenEncrypted),
+      expiresAt: row.expiresAt,
+      createdAt: row.createdAt,
+    };
+  }
+
+  async save(session: AnchorSession): Promise<void> {
+    const row = {
+      sellerId: session.sellerId,
+      anchorDomain: session.anchorDomain,
+      account: session.account,
+      tokenEncrypted: encryptSecret(session.token),
+      expiresAt: session.expiresAt,
+      createdAt: session.createdAt,
+    };
+    await this.db
+      .insert(anchorSessions)
+      .values(row)
+      .onConflictDoUpdate({ target: [anchorSessions.sellerId, anchorSessions.anchorDomain], set: row });
+  }
+
+  async delete(sellerId: string, anchorDomain: string): Promise<void> {
+    await this.db
+      .delete(anchorSessions)
+      .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
   }
 }
 

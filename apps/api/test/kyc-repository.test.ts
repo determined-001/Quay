@@ -14,6 +14,7 @@ async function makeDb(): Promise<DB> {
 function record(over: Partial<KycRecord> = {}): KycRecord {
   return {
     sellerId: "sel_1",
+    account: "GSELLER1",
     customerId: "cust_1",
     status: "ACCEPTED",
     requiredFields: [{ name: "first_name", type: "string", optional: false }],

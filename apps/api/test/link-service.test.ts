@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OffRampJobNotFoundError, type KycPort, type OffRampInitiation, type RailPort } from "@checkout/core";
+import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type RailPort } from "@checkout/core";
 import { MockAnchorOffRamp } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
@@ -178,6 +178,8 @@ describe("LinkService.backfillLostOffRampJobs", () => {
       jobId: "job_1",
       linkId: "lnk_1",
       anchor: "mock",
+      sellerId: null,
+      account: null,
       targetCurrency: "NGN",
       targetAmount: "16500",
       rate: "1650",
@@ -210,8 +212,9 @@ describe("LinkService.triggerCashOut — KYC gate", () => {
   it("rejects with 403 kyc_required when the seller's KYC isn't ACCEPTED", async () => {
     const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
     const kyc = new ScriptedKyc();
-    kyc.statusImpl = async (sellerId) => ({
+    kyc.statusImpl = async ({ sellerId, account }) => ({
       sellerId,
+      account,
       customerId: null,
       status: "NEEDS_INFO",
       requiredFields: [],
@@ -335,5 +338,57 @@ describe("cash-out response flattening", () => {
     expect(
       flatten({ kind: "interactive", jobId: "ofr_1", url: "https://anchor.example.com/sep24" }),
     ).toBe("https://anchor.example.com/sep24");
+  });
+});
+
+describe("LinkService cash-out — the seller is the anchor's customer", () => {
+  it("asks the anchor about the seller's own wallet, not a platform account", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const seen: AnchorCustomer[] = [];
+    const kyc = new ScriptedKyc();
+    kyc.statusImpl = async (customer) => {
+      seen.push(customer);
+      return new AlwaysAcceptedKyc().status(customer);
+    };
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 60_000 });
+    const service = makeService({ links, offramp, offrampState, kyc });
+
+    await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+
+    expect(seen).toEqual([{ sellerId: "sel_1", account: "GSELLER" }]);
+    const job = await offrampState.getJob(links.get("lnk_1")!.offrampJobId!);
+    expect(job).toMatchObject({ sellerId: "sel_1", account: "GSELLER" });
+  });
+
+  it("answers 403 anchor_auth_required when the seller has not signed in to the anchor", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const kyc = new ScriptedKyc();
+    kyc.statusImpl = async () => {
+      throw new AnchorAuthRequiredError("anchor.example");
+    };
+    const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState: new FakeOffRampStateRepository(), kyc });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 403, message: "anchor_auth_required" });
+    await expect(service.quoteCashOut("lnk_1", "NGN")).rejects.toMatchObject({
+      status: 403,
+      message: "anchor_auth_required",
+    });
+    expect(links.get("lnk_1")?.status).toBe("paid");
+  });
+
+  it("maps an expired anchor session during the quote to 403, not a 502 anchor error", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async () => {
+      throw new AnchorAuthRequiredError("anchor.example");
+    };
+    const service = makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 403, message: "anchor_auth_required" });
   });
 });

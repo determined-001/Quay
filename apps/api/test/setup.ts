@@ -280,6 +280,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     db: repos.db,
     client: repos.client,
     kyc: new NoKycRequired() as unknown as Container["kyc"],
+    anchorAuth: null,
     telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),

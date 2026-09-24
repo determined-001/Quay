@@ -151,47 +151,52 @@ payment operation, and each dedupes independently (issue 4.11).
 
 ### 3. Cash-out — SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, today's real adapter)
 
+The anchor's customer is always the **seller**, identified by their own wallet.
+Nothing in this flow is signed by a key the server holds: the seller's wallet
+signs the anchor's SEP-10 challenge (once, ahead of time) and the USDC transfer
+that funds the withdrawal. `SellerAnchorAuth` (`packages/offramp/src/anchor-session.ts`)
+verifies and relays the challenge and keeps the resulting JWT per seller in
+`anchor_sessions`, encrypted at rest.
+
 ```mermaid
 sequenceDiagram
-  participant Seller
-  participant API as apps/api (POST /links/:id/cash-out)
+  participant Wallet as Seller's wallet (browser)
+  participant API as apps/api
+  participant Auth as SellerAnchorAuth
   participant LS as LinkService
-  participant CB as CircuitBreakerOffRamp
   participant Anchor as TestAnchorOffRamp (OffRampPort)
-  participant Sep10 as Sep10Client
-  participant Testanchor as testanchor.stellar.org
+  participant Testanchor as anchor (SEP-10/12/38/6)
 
-  Seller->>API: POST /links/:id/cash-out { targetCurrency, payoutFields }
+  Note over Wallet,Testanchor: Once per seller (dashboard → Connect to anchor)
+  Wallet->>API: POST /seller/anchor-auth/challenge
+  API->>Auth: challenge({ sellerId, account: seller.wallet })
+  Auth->>Testanchor: GET /auth?account=seller.wallet
+  Auth->>Auth: readChallengeTx: anchor SIGNING_KEY, our network, this account
+  API-->>Wallet: challenge XDR
+  Wallet->>Wallet: sign (never submitted)
+  Wallet->>API: POST /seller/anchor-auth { transaction }
+  API->>Auth: complete(customer, signed)
+  Auth->>Testanchor: POST /auth { transaction }
+  Testanchor-->>Auth: { token } (sub = seller.wallet)
+  Auth->>Auth: anchor_sessions.save(sellerId, token encrypted)
+
+  Note over Wallet,Testanchor: Cash-out
+  Wallet->>API: POST /links/:id/cash-out { targetCurrency, payoutFields }
   API->>LS: triggerCashOut(linkId, body)
-  LS->>CB: quote({ sourceAsset, sourceAmount, targetCurrency })
-  CB->>Anchor: quote(...)
-  Anchor->>Sep10: token()  // cached JWT, or...
-  Sep10->>Testanchor: GET /auth?account=...  (SEP-10 challenge)
-  Testanchor-->>Sep10: challenge transaction (unsigned)
-  Sep10->>Sep10: sign with seller keypair
-  Sep10->>Testanchor: POST /auth { transaction: signed }
-  Testanchor-->>Sep10: { token }  // SEP-10 JWT
-  Anchor->>Testanchor: POST /sep38/quote  (Bearer token)
-  Testanchor-->>Anchor: { id, price, buy_amount, expires_at }
-  Anchor-->>CB: OffRampQuote
-  CB-->>LS: OffRampQuote
-  LS->>CB: initiate({ linkId, quoteId, payout })
-  CB->>Anchor: initiate(...)
-  Anchor->>Testanchor: PUT /sep12/customer  (KYC fields)
-  Anchor->>Testanchor: POST /sep6/withdraw
-  Testanchor-->>Anchor: { id: jobId }
-  Anchor-->>CB: OffRampJob { status: "pending" }
-  CB-->>LS: OffRampJob
-  LS->>LS: link.status = "offramp_pending", links.save()
-  LS-->>API: job
+  LS->>Anchor: kyc.status(customer) → must be ACCEPTED
+  LS->>Anchor: quote({ ..., customer })
+  Anchor->>Testanchor: POST /sep38/quote (seller's JWT)
+  LS->>Anchor: initiate({ linkId, quoteId, payout, customer })
+  Anchor->>Testanchor: GET /sep6/withdraw?account=seller.wallet (seller's JWT)
+  Testanchor-->>Anchor: { id, account_id, memo_type, memo }
+  Anchor-->>LS: { kind: "transfer", jobId, transfer }
+  API-->>Wallet: { job, transfer }
+  Wallet->>Wallet: build + sign payment to account_id with memo
+  Wallet->>Testanchor: submit to Horizon (from the seller's account)
 
   loop cash-out poller (startCashOutPoller)
-    LS->>CB: status(jobId)
-    CB->>Anchor: status(jobId)
-    Anchor->>Testanchor: GET /sep6/transaction?id=jobId
-    Testanchor-->>Anchor: { status: "completed" | "pending_*" | "error" }
-    Anchor-->>CB: OffRampJob
-    CB-->>LS: OffRampJob
+    LS->>Anchor: status(jobId)  // job row carries sellerId + account
+    Anchor->>Testanchor: GET /sep6/transaction?id=jobId (seller's JWT)
     alt settled
       LS->>LS: link.status = "offramp_settled", fireWebhook("offramp.settled")
     else failed
@@ -199,6 +204,9 @@ sequenceDiagram
     end
   end
 ```
+
+A seller with no live anchor session gets `403 anchor_auth_required` (and the
+circuit breaker does not count it — it says nothing about the anchor's health).
 
 Every `CircuitBreakerOffRamp` call is instrumented (`anchor_calls_total`,
 `anchor_call_duration_seconds` — see `docs/API.md#get-metrics`) and trips open after 3

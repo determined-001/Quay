@@ -9,7 +9,9 @@ import {
   QuoteExpiredError,
   normalizeAmount,
   OffRampJobNotFoundError,
+  AnchorAuthRequiredError,
   NOOP_LOGGER,
+  type AnchorCustomer,
   type AssetRef,
   type CashOutBody,
   type CreateLinkBody,
@@ -487,7 +489,7 @@ export class LinkService {
 
     let descriptors: PayoutFieldDescriptor[];
     try {
-      descriptors = await this.deps.offramp.offrampRequirements(link.asset.code);
+      descriptors = await this.deps.offramp.offrampRequirements(link.asset.code, customerOf(seller));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new HttpError(502, `Off-ramp requirements error: ${message}`);
@@ -808,6 +810,23 @@ export class LinkService {
   }
 
   /**
+   * KYC is keyed by seller, never by link — a live cash-out is impossible
+   * until the anchor has actually accepted this seller's identity. `status()`
+   * re-syncs rather than trusting a cached value, since paying out against
+   * stale/rejected KYC is exactly the failure this gate exists to prevent.
+   */
+  private async assertKycAccepted(customer: AnchorCustomer): Promise<void> {
+    let status: string;
+    try {
+      status = (await this.deps.kyc.status(customer)).status;
+    } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      throw err;
+    }
+    if (status !== "ACCEPTED") throw new HttpError(403, "kyc_required");
+  }
+
+  /**
    * Fetch a firm quote for a cash-out — gross, fee, and net — without
    * initiating anything (issue 1.5). Same gates as `triggerCashOut` up to
    * the quote step, so the seller sees exactly the numbers they'd get by
@@ -824,18 +843,19 @@ export class LinkService {
     if (!this.health.isAvailable()) {
       throw new HttpError(503, "anchor_unavailable");
     }
-    const kyc = await this.deps.kyc.status(link.sellerId);
-    if (kyc.status !== "ACCEPTED") {
-      throw new HttpError(403, "kyc_required");
-    }
+    const seller = await this.deps.sellers.findById(link.sellerId);
+    if (!seller) throw new HttpError(404, "seller_not_found");
+    const customer = customerOf(seller);
+    await this.assertKycAccepted(customer);
 
     const sourceAmount = link.paidAmount ?? link.amount;
     try {
       return await this.deps.offramp.quote(
-        { linkId: link.id, sourceAsset: link.asset, sourceAmount, targetCurrency },
+        { linkId: link.id, sourceAsset: link.asset, sourceAmount, targetCurrency, customer },
         { logger: log },
       );
     } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       const message = err instanceof Error ? err.message : String(err);
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
@@ -874,14 +894,8 @@ export class LinkService {
       throw new HttpError(503, "anchor_unavailable");
     }
 
-    // KYC is keyed by seller, never by link — a live cash-out is impossible
-    // until the anchor has actually accepted this seller's identity. `status()`
-    // re-syncs rather than trusting a cached value, since paying out against
-    // stale/rejected KYC is exactly the failure this gate exists to prevent.
-    const kyc = await this.deps.kyc.status(link.sellerId);
-    if (kyc.status !== "ACCEPTED") {
-      throw new HttpError(403, "kyc_required");
-    }
+    const customer = customerOf(seller);
+    await this.assertKycAccepted(customer);
 
     const sourceAmount = link.paidAmount ?? link.amount;
 
@@ -893,6 +907,7 @@ export class LinkService {
         sourceAsset: link.asset,
         sourceAmount,
         targetCurrency: body.targetCurrency,
+        customer,
       }, { logger: child });
 
     let quote: OffRampQuote;
@@ -927,6 +942,7 @@ export class LinkService {
         linkId: link.id,
         quoteId: quote.quoteId,
         payout: { currency: body.targetCurrency, fields: mergedFields },
+        customer,
       }, { logger: child });
       child.info(
         {
@@ -944,6 +960,7 @@ export class LinkService {
         "cash-out failed",
       );
       if (err instanceof HttpError) throw err;
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       if (err instanceof QuoteExpiredError) {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
@@ -1265,6 +1282,16 @@ function horizonPaymentReason(err: unknown): "insufficient_balance" | "missing_t
     return "missing_trustline";
   }
   return "payment_rejected";
+}
+
+/** The anchor's customer for this seller: always their own wallet. */
+export function customerOf(seller: Seller): AnchorCustomer {
+  return { sellerId: seller.id, account: seller.wallet };
+}
+
+/** Only the seller's wallet can open an anchor session, so this is theirs to fix. */
+function anchorAuthRequired(): HttpError {
+  return new HttpError(403, "anchor_auth_required");
 }
 
 export class HttpError extends Error {

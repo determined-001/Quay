@@ -1,6 +1,12 @@
-import type { Keypair } from "@stellar/stellar-sdk";
-import { KycRequiredError, type KycFieldSpec, type KycPort, type KycRecord, type KycRepository } from "@checkout/core";
-import { Sep10Client } from "./sep10";
+import {
+  KycRequiredError,
+  type AnchorCustomer,
+  type KycFieldSpec,
+  type KycPort,
+  type KycRecord,
+  type KycRepository,
+} from "@checkout/core";
+import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import { getSep12Customer, putSep12Customer } from "./sep12";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
@@ -10,46 +16,46 @@ export function missingRequiredFields(required: KycFieldSpec[], values: Record<s
   return required.filter((f) => !f.optional && !(values[f.name] ?? "").trim()).map((f) => f.name);
 }
 
-const DEFAULT_BASE_URL = "https://testanchor.stellar.org";
-const DEFAULT_HOME_DOMAIN = "testanchor.stellar.org";
-
 export interface TestAnchorKycOptions {
-  /** Same seller keypair used for the SEP-10/SEP-6 off-ramp adapter. */
-  sellerKeypair: Keypair;
+  discovery: AnchorDiscovery;
+  /** The seller's own SEP-10 session with the anchor — never a platform key. */
+  auth: SellerAnchorAuth;
   repo: KycRepository;
-  baseUrl?: string;
-  homeDomain?: string;
 }
 
 /**
- * SEP-12 KYC lifecycle for the real testanchor, kept separate from a cash-out
+ * SEP-12 KYC lifecycle against a real anchor, kept separate from a cash-out
  * request: identity is submitted once (or updated) and reused across links,
  * never re-derived from whatever happened to be in a cash-out form.
+ *
+ * The anchor's customer is the seller's own account, authenticated by the
+ * seller's own wallet. Values already on file are reused (the seller's
+ * reusable profile); the anchor still decides what it needs and whether it
+ * accepts them.
  */
 export class TestAnchorKyc implements KycPort {
-  private readonly baseUrl: string;
-  private readonly auth: Sep10Client;
+  private readonly discovery: AnchorDiscovery;
+  private readonly auth: SellerAnchorAuth;
   private readonly repo: KycRepository;
 
   constructor(opts: TestAnchorKycOptions) {
-    this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+    this.discovery = opts.discovery;
+    this.auth = opts.auth;
     this.repo = opts.repo;
-    this.auth = new Sep10Client(opts.sellerKeypair, {
-      baseUrl: this.baseUrl,
-      homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
-    });
   }
 
-  async status(sellerId: string): Promise<KycRecord> {
-    const existing = await this.repo.get(sellerId);
-    const jwt = await this.auth.token();
-    const remote = await getSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
-      customerId: existing?.customerId,
+  async status(customer: AnchorCustomer): Promise<KycRecord> {
+    const existing = await this.repo.get(customer.sellerId);
+    const jwt = await this.auth.token(customer);
+    const { kycServer } = await this.discovery.get();
+    const remote = await getSep12Customer(kycServer, jwt, {
+      account: customer.account,
+      customerId: reusableCustomerId(existing, customer),
     });
 
     const record: KycRecord = {
-      sellerId,
+      sellerId: customer.sellerId,
+      account: customer.account,
       customerId: remote.customerId,
       status: remote.status,
       requiredFields: remote.requiredFields,
@@ -62,12 +68,13 @@ export class TestAnchorKyc implements KycPort {
     return record;
   }
 
-  async submit(sellerId: string, fields: Record<string, string>): Promise<KycRecord> {
-    const existing = await this.repo.get(sellerId);
-    const jwt = await this.auth.token();
-    const discovery = await getSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
-      customerId: existing?.customerId,
+  async submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord> {
+    const existing = await this.repo.get(customer.sellerId);
+    const jwt = await this.auth.token(customer);
+    const { kycServer } = await this.discovery.get();
+    const discovery = await getSep12Customer(kycServer, jwt, {
+      account: customer.account,
+      customerId: reusableCustomerId(existing, customer),
     });
 
     const merged = { ...existing?.providedFields, ...fields };
@@ -79,21 +86,22 @@ export class TestAnchorKyc implements KycPort {
     const missing = missingRequiredFields(discovery.requiredFields, merged);
     if (missing.length > 0) throw new KycRequiredError(missing);
 
-    const put = await putSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
+    const put = await putSep12Customer(kycServer, jwt, {
+      account: customer.account,
       customerId: discovery.customerId,
       fields: merged,
     });
 
     // The anchor may reveal more required fields only after seeing this
     // submission (SEP-12 is progressive) — re-sync rather than assume ACCEPTED.
-    const after = await getSep12Customer(this.baseUrl, jwt, {
-      account: this.auth.publicKey,
+    const after = await getSep12Customer(kycServer, jwt, {
+      account: customer.account,
       customerId: put.customerId,
     });
 
     const record: KycRecord = {
-      sellerId,
+      sellerId: customer.sellerId,
+      account: customer.account,
       customerId: put.customerId,
       status: after.status,
       requiredFields: after.requiredFields,
@@ -107,20 +115,31 @@ export class TestAnchorKyc implements KycPort {
   }
 }
 
+/**
+ * An anchor customer id belongs to the account it was created for. A record
+ * with no account, or another one, dates from when every seller shared the
+ * platform's account (or the seller changed wallet): its id points at somebody
+ * else's customer, so look the seller up by their own account instead.
+ */
+function reusableCustomerId(existing: KycRecord | null, customer: AnchorCustomer): string | null {
+  return existing?.account === customer.account ? existing.customerId : null;
+}
+
 /** `OFFRAMP=mock` has no real anchor and nothing to be compliant with — never
  *  gates the (simulated) cash-out path. */
 export class NoKycRequired implements KycPort {
-  async status(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async status(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
 
-  async submit(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
 
-  private accepted(sellerId: string): KycRecord {
+  private accepted(customer: AnchorCustomer): KycRecord {
     return {
-      sellerId,
+      sellerId: customer.sellerId,
+      account: customer.account,
       customerId: null,
       status: "ACCEPTED",
       requiredFields: [],

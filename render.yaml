@@ -6,7 +6,6 @@
 # Secrets (sync: false) to set in the Render dashboard on first deploy:
 #   DATABASE_URL                    libsql://<db-name>-<org>.turso.io
 #   DATABASE_AUTH_TOKEN             from `turso db tokens create <db>` or the Turso dashboard
-#   DEFAULT_SELLER_SECRET           S... secret for DEFAULT_SELLER_WALLET (SEP-10 signing)
 #   KYC_ENCRYPTION_KEY              64 hex chars — REQUIRED whenever OFFRAMP=testanchor
 #   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED in production
 #   JWT_SECRET                      session signing secret
@@ -56,8 +55,6 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: DATABASE_AUTH_TOKEN
-        sync: false
-      - key: DEFAULT_SELLER_SECRET
         sync: false
       # OFFRAMP=testanchor above makes this REQUIRED: env.ts resolves it with
       # req() at module load, so the process cannot boot without it. It

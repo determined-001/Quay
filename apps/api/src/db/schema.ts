@@ -146,6 +146,10 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   jobId: text("job_id").primaryKey(),
   linkId: text("link_id").notNull(),
   anchor: text("anchor").notNull(),
+  // Whose anchor session polls this job. Null on rows from before
+  // withdrawals ran per seller (one shared platform account).
+  sellerId: text("seller_id"),
+  account: text("account"),
   targetCurrency: text("target_currency").notNull(),
   targetAmount: text("target_amount").notNull(),
   rate: text("rate").notNull(),
@@ -161,6 +165,9 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
 // blob of the seller's submitted field values, opaque without KYC_ENCRYPTION_KEY.
 export const sellerKyc = sqliteTable("seller_kyc", {
   sellerId: text("seller_id").primaryKey(),
+  // The Stellar account `customer_id` belongs to at the anchor. Null on rows
+  // written when every seller shared the platform's account.
+  account: text("account"),
   customerId: text("customer_id"),
   status: text("status").notNull(),
   requiredFields: text("required_fields").notNull(), // JSON KycFieldSpec[] — not PII, just schema metadata
@@ -168,6 +175,19 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   message: text("message"),
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),
+});
+
+// A seller's SEP-10 session with an anchor, issued to the seller's own wallet.
+// `tokenEncrypted` is a bearer credential for that seller at the anchor — it
+// can read their KYC and start a withdrawal, never move funds.
+// Primary key (seller_id, anchor_domain) comes from BOOTSTRAP_SQL, as for processed_tx.
+export const anchorSessions = sqliteTable("anchor_sessions", {
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  account: text("account").notNull(),
+  tokenEncrypted: text("token_encrypted").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  createdAt: integer("created_at").notNull(),
 });
 
 export const watcherCursors = sqliteTable("watcher_cursors", {

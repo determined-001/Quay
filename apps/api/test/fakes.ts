@@ -4,6 +4,7 @@ import {
   type AssetRef,
   type CreateLinkInput,
   type KycPort,
+  type AnchorCustomer,
   type KycRecord,
   type LinkPaymentRecord,
   type LinkRepository,
@@ -347,15 +348,16 @@ export class ScriptedOffRamp implements OffRampPort {
 /** KYC gate that's always ACCEPTED — mirrors `NoKycRequired`, used by tests
  *  that aren't exercising the KYC gate itself. */
 export class AlwaysAcceptedKyc implements KycPort {
-  async status(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async status(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
-  async submit(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
-  private accepted(sellerId: string): KycRecord {
+  private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      account,
       customerId: null,
       status: "ACCEPTED",
       requiredFields: [],
@@ -369,14 +371,14 @@ export class AlwaysAcceptedKyc implements KycPort {
 
 /** Fully scripted KycPort for testing the cash-out gate itself. */
 export class ScriptedKyc implements KycPort {
-  statusImpl: (sellerId: string) => Promise<KycRecord> = () => {
+  statusImpl: (customer: AnchorCustomer) => Promise<KycRecord> = () => {
     throw new Error("statusImpl not configured");
   };
-  async status(sellerId: string): Promise<KycRecord> {
-    return this.statusImpl(sellerId);
+  async status(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.statusImpl(customer);
   }
-  async submit(sellerId: string): Promise<KycRecord> {
-    return this.statusImpl(sellerId);
+  async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.statusImpl(customer);
   }
 }
 

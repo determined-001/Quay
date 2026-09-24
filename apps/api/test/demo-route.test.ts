@@ -33,6 +33,7 @@ function fakeContainer(
     telemetry: {} as Container["telemetry"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: seller.wallet },
     kyc: {} as Container["kyc"],
+    anchorAuth: null,
     db: {} as Container["db"],
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     metricsToken: "test-metrics-token",

@@ -85,14 +85,19 @@ const BOOTSTRAP_SQL = [
    )`,
   `CREATE TABLE IF NOT EXISTS offramp_jobs (
      job_id TEXT PRIMARY KEY, link_id TEXT NOT NULL, anchor TEXT NOT NULL,
-     target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
+     seller_id TEXT, account TEXT, target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
      status TEXT NOT NULL, external_status TEXT, last_error TEXT,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS seller_kyc (
-     seller_id TEXT PRIMARY KEY, customer_id TEXT, status TEXT NOT NULL,
+     seller_id TEXT PRIMARY KEY, account TEXT, customer_id TEXT, status TEXT NOT NULL,
      required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
      message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS anchor_sessions (
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT NOT NULL,
+     token_encrypted TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
+     PRIMARY KEY (seller_id, anchor_domain)
    )`,
   `CREATE TABLE IF NOT EXISTS watcher_cursors (
      account TEXT PRIMARY KEY, cursor TEXT NOT NULL, updated_at INTEGER NOT NULL
@@ -167,6 +172,12 @@ const ADDITIVE_MIGRATIONS = [
   //      last 4 chars in every API response and never logged or webhook'd.
   `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
   `ALTER TABLE link_payments ADD COLUMN ledger INTEGER`,
+  // Per-seller anchor identity: which seller/account a withdrawal and a KYC
+  // customer id belong to. Existing rows stay NULL — they were created under
+  // the old shared platform account and are treated as such.
+  `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
+  `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
   // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never
   // upgrades an existing table. `createIfAbsent` uses ON CONFLICT (wallet),

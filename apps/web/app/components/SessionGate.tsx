@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { api, CheckoutError, describeError } from "../../lib/api";
 import { connectWallet, detectWallet, disconnectWallet, shortAddress, signChallenge } from "../../lib/wallet";
 
@@ -23,6 +23,14 @@ import { connectWallet, detectWallet, disconnectWallet, shortAddress, signChalle
  * out, which the signed-in header says plainly rather than letting it surprise
  * anyone.
  */
+/** The signed-in seller's wallet: their identity, payout address, and the key
+ *  that signs anything that touches their funds or their anchor account. */
+const SellerWalletContext = createContext<string | null>(null);
+
+export function useSellerWallet(): string | null {
+  return useContext(SellerWalletContext);
+}
+
 export default function SessionGate({ children }: { children: ReactNode }) {
   const [address, setAddress] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -149,7 +157,7 @@ export default function SessionGate({ children }: { children: ReactNode }) {
           Sign out
         </button>
       </div>
-      {children}
+      <SellerWalletContext.Provider value={address}>{children}</SellerWalletContext.Provider>
     </>
   );
 }

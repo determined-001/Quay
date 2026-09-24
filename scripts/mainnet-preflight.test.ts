@@ -108,6 +108,15 @@ describe("checkSellerWallet", () => {
     expect(res.ok).toBe(false);
     expect(res.level).toBe("warning");
   });
+
+  it("warns about a seller secret even with a real anchor — sellers sign their own anchor login", () => {
+    const res = checkSellerWallet({ ...GOOD, OFFRAMP: "anchor", DEFAULT_SELLER_SECRET: "S".repeat(56) });
+    expect(res.level).toBe("warning");
+  });
+
+  it("does not require a seller secret for OFFRAMP=anchor", () => {
+    expect(checkSellerWallet({ ...GOOD, OFFRAMP: "anchor" }).ok).toBe(true);
+  });
 });
 
 describe("checkWebEnv", () => {

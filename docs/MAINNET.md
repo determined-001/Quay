@@ -54,10 +54,10 @@ This is the fastest route to a live mainnet deployment, and the lowest-risk one:
   code cannot solve.
 - **No SEP-12 identity data**, so no `KYC_ENCRYPTION_KEY` and none of the
   data-protection surface that holding seller PII creates.
-- **No `DEFAULT_SELLER_SECRET`.** That key is required only to sign SEP-10 auth
-  for a real anchor, so with the off-ramp disabled the server holds no key that
-  can spend a seller's funds at all. This is a materially smaller blast radius
-  than any configuration with an anchor in it.
+- **No anchor sessions.** With a real anchor, each seller signs the anchor's
+  SEP-10 challenge with their own wallet and Quay keeps the resulting token so
+  it can follow their withdrawals. That token cannot move funds, but it is
+  still a credential to hold. Payments-only holds none.
 - **Non-custodial end to end** — funds move from buyer to seller on the public
   ledger and never touch an account this service controls.
 
@@ -74,8 +74,9 @@ OFFRAMP=none                      # API
 NEXT_PUBLIC_OFFRAMP_MODE=none     # web
 ```
 
-and leave `ANCHOR_URL`, `ANCHOR_HOME_DOMAIN`, `KYC_ENCRYPTION_KEY` and
-`DEFAULT_SELLER_SECRET` unset. The dashboard hides the cash-out button, the KYC
+and leave `ANCHOR_URL`, `ANCHOR_HOME_DOMAIN` and `KYC_ENCRYPTION_KEY` unset.
+`DEFAULT_SELLER_SECRET` stays unset in every mode — the server never signs for a
+seller. The dashboard hides the cash-out button, the KYC
 panel and the cash-out modal; the API answers **501** (not 502 — this is
 permanent, not an outage) on `/:id/cash-out`, `/:id/cash-out/quote` and
 `/:id/offramp-requirements`; and the cash-out poller and anchor probe never
@@ -105,6 +106,11 @@ What you need from the anchor before proceeding:
   `OFFRAMP_TYPE`; otherwise the adapter refuses rather than guessing a rail.
 - **Its KYC requirements.** SEP-12 fields are collected per seller ahead of
   time, not per transaction.
+- **That it serves each seller as their own customer.** Every seller signs the
+  anchor's SEP-10 challenge with their own wallet (dashboard → identity
+  verification → *Connect to anchor*), so the anchor's customer is the seller's
+  account, not Quay's. Each seller also signs the USDC transfer that funds their
+  withdrawal. Nothing is sent from an account Quay controls.
 
 Verify before writing any config:
 
@@ -180,9 +186,8 @@ is worth nothing. The issuer is the only thing that distinguishes real USDC.
 described in Phase 0 — apply it as-is for that path. It creates a **second**
 service, `quay-api-mainnet`, deploying from `main`, while the existing
 `quay-api` stays on testnet deploying from `dev`. Two services, two databases,
-two branches — see docs/RUNBOOK.md "Promotion: dev to main". The anchor variables,
-`KYC_ENCRYPTION_KEY` and `DEFAULT_SELLER_SECRET` sit commented out in one block
-in that file; uncomment all of them together, and set `OFFRAMP=anchor`, only
+two branches — see docs/RUNBOOK.md "Promotion: dev to main". The anchor variables
+and `KYC_ENCRYPTION_KEY` sit commented out in one block in that file; uncomment all of them together, and set `OFFRAMP=anchor`, only
 after Phase 1 has an anchor that actually agreed to onboard you.
 
 

@@ -45,8 +45,10 @@ export function keypairFromSecret(secret: string, varName: string): Keypair {
 /**
  * Resolves the seller's public key, plus its Keypair when we actually hold the
  * secret in-memory (auto-generated testnet keypair, or DEFAULT_SELLER_SECRET
- * explicitly supplied). The Keypair is only needed to sign the SEP-10 auth
- * challenge for `OFFRAMP=testanchor` — never persisted beyond this process.
+ * explicitly supplied). The server itself never signs with it: every seller,
+ * this one included, signs their own anchor login and withdrawals from their
+ * wallet. It exists for the testnet convenience seller that `pnpm demo:seed`
+ * signs in as — never persisted beyond this process.
  *
  * The one human-facing line of output (the testnet convenience banner with
  * the secret) is guarded by `LOG_LEVEL=debug|trace` so an ordinary run never

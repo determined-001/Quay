@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { KycRequiredError, type KycRecord } from "@checkout/core";
+import { AnchorAuthRequiredError, KycRequiredError, type KycRecord } from "@checkout/core";
 import type { Container } from "../services/container";
+import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 
 const submitKycSchema = z.record(z.string(), z.string());
@@ -55,8 +56,13 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
 
   // Current requirements + status, re-synced from the anchor.
   app.get("/", async (ctx) => {
-    const record = await c.kyc.status(ctx.get("seller").id);
-    return ctx.json(toResponse(record));
+    try {
+      const record = await c.kyc.status(customerOf(ctx.get("seller")));
+      return ctx.json(toResponse(record));
+    } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      throw err;
+    }
   });
 
   // Submit or update identity fields. Never accepts a partial submission
@@ -67,9 +73,10 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
 
     try {
-      const record = await c.kyc.submit(ctx.get("seller").id, parsed.data);
+      const record = await c.kyc.submit(customerOf(ctx.get("seller")), parsed.data);
       return ctx.json(toResponse(record));
     } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
       if (err instanceof KycRequiredError) {
         return ctx.json({ error: "kyc_required", missingFields: err.missingFields }, 422);
       }

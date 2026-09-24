@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OffRampInitiation, OffRampJob, OffRampPort, OffRampQuote, PayoutFieldDescriptor } from "@checkout/core";
+import {
+  AnchorAuthRequiredError,
+  type OffRampInitiation,
+  type OffRampJob,
+  type OffRampPort,
+  type OffRampQuote,
+  type PayoutFieldDescriptor,
+} from "@checkout/core";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 
 const fakeQuote: OffRampQuote = {
@@ -41,7 +48,7 @@ describe("CircuitBreakerOffRamp", () => {
     const inner = fakePort();
     const breaker = new CircuitBreakerOffRamp(inner);
 
-    await breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" });
+    await breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD", customer: { sellerId: "sel_1", account: "G" } });
     expect(breaker.getState()).toBe("closed");
     expect(inner.quote).toHaveBeenCalledTimes(1);
   });
@@ -89,7 +96,23 @@ describe("CircuitBreakerOffRamp", () => {
     });
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
     expect(breaker.getStateNumeric()).toBe(0);
-    await expect(breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" })).rejects.toThrow();
+    await expect(breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD", customer: { sellerId: "sel_1", account: "G" } })).rejects.toThrow();
     expect(breaker.getStateNumeric()).toBe(2);
+  });
+
+  it("does not count a seller without an anchor session as an anchor failure", async () => {
+    const inner = fakePort({ quote: vi.fn(async () => Promise.reject(new AnchorAuthRequiredError("anchor.example"))) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
+    const input = {
+      linkId: "lnk_1",
+      sourceAsset: { code: "USDC", issuer: "G" },
+      sourceAmount: "1",
+      targetCurrency: "USD",
+      customer: { sellerId: "sel_1", account: "G" },
+    };
+
+    await expect(breaker.quote(input)).rejects.toBeInstanceOf(AnchorAuthRequiredError);
+    // One signed-out seller must not pause cash-outs for everyone else.
+    expect(breaker.getState()).toBe("closed");
   });
 });

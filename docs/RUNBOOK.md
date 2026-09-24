@@ -38,7 +38,7 @@ default.
 | `DEFAULT_SELLER_WALLET` | never — optional everywhere | Multi-tenant: sellers supply their own wallet at SEP-10 login and links pay that address. Set it only to give `/health` a wallet to report a USDC trustline for; unset, that field reads `not_configured`. On testnet, unset auto-generates a throwaway seller so `pnpm dev` needs no config |
 | `HOME_DOMAIN` | any real deployment | Falls back to `localhost:8787`. SEP-10 challenges are issued for localhost and `stellar.toml` advertises `WEB_AUTH_ENDPOINT="https://localhost:8787/auth"` — **wallet login cannot work at all** |
 | `CORS_ORIGINS` | always | The browser refuses the dashboard's cross-origin calls |
-| `DEFAULT_SELLER_SECRET` | `OFFRAMP=testanchor` with `DEFAULT_SELLER_WALLET` set | SEP-10 cannot sign the anchor's auth challenge, so every cash-out fails |
+| `DEFAULT_SELLER_SECRET` | never on a server — only `pnpm demo:seed`/`demo:reset` read it | Nothing. Sellers sign the anchor's SEP-10 challenge and their withdrawals with their own wallets |
 | `METRICS_TOKEN` | optional | Auto-generated per boot and printed once, so `/metrics` scraping breaks on each restart |
 | `REDIS_URL` | more than one instance | See the scaling note below |
 | `SINGLE_INSTANCE` | public network with no `REDIS_URL` | `true` asserts this deploy runs one instance. Boot fails without either. |
@@ -379,15 +379,14 @@ corrupted data.
   (`turso db tokens create <db>` or the Turso dashboard), update the Render
   env var, redeploy, then revoke the old token once the new deploy is
   confirmed healthy.
-- **`DEFAULT_SELLER_SECRET`**: this is the seller wallet's Stellar secret key
-  used for SEP-10 signing - rotating it means generating a new keypair,
-  updating `DEFAULT_SELLER_WALLET`/`DEFAULT_SELLER_SECRET` together, and
-  understanding that in-flight payment links pointed at the *old* wallet
-  address remain valid destinations (Stellar payments don't care which key
-  signs SEP-10 auth) but new SEP-10 challenges will be signed by the new key.
-  Coordinate with whichever anchor integration is configured
-  (`OFFRAMP=testanchor`) since it will have seen the old public key during
-  its own KYC/auth flow.
+- **`DEFAULT_SELLER_SECRET`**: not a server secret any more. The API never
+  signs with it; each seller signs their own anchor login and withdrawals. If
+  a deployment still has it set, unset it. Only the local demo scripts use it.
+- **Anchor sessions** (`anchor_sessions`): each seller's anchor JWT, encrypted
+  with `WEBHOOK_SECRET_ENCRYPTION_KEY`. Rotating that key makes the stored
+  tokens unreadable; sellers simply sign in to the anchor again. A seller who
+  changes wallet also has to sign in again — a session is only honoured for
+  the account it was issued to.
 
 ## Anchor outage
 

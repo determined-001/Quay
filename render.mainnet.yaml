@@ -26,8 +26,9 @@
 # deploy: buyers pay the seller's wallet directly, the watcher confirms on the
 # ledger, receipts and webhooks fire, and the seller moves their own funds.
 # It needs no anchor agreement, holds no SEP-12 identity data, and keeps no
-# seller secret key on the server — so DEFAULT_SELLER_SECRET, KYC_ENCRYPTION_KEY
-# and the ANCHOR_* variables are deliberately absent below. Enabling cash-out
+# seller secret key on the server — so KYC_ENCRYPTION_KEY and the ANCHOR_*
+# variables are deliberately absent below. DEFAULT_SELLER_SECRET is absent in
+# every mode: sellers sign their own anchor login and withdrawals. Enabling cash-out
 # later is a configuration change, not a migration: uncomment the anchor block.
 #
 # Set on the WEB deployment (Vercel), not here:
@@ -118,8 +119,6 @@ services:
       # - key: ANCHOR_HOME_DOMAIN
       #   sync: false
       # - key: KYC_ENCRYPTION_KEY        # 64 hex — encrypts real seller PII
-      #   sync: false
-      # - key: DEFAULT_SELLER_SECRET     # S... signs SEP-10 auth for the anchor
       #   sync: false
       # Set once you know the rail. Unset means "read /sep6/info and refuse if
       # the anchor offers more than one withdrawal type".
