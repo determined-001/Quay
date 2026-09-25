@@ -148,7 +148,7 @@ export interface SellerPayoutRef {
   fields: Record<string, string>;
 }
 
-export type OffRampJobStatus = "pending" | "settled" | "failed";
+export type OffRampJobStatus = "awaiting_transfer" | "pending" | "settled" | "failed";
 
 export interface OffRampJob {
   jobId: string;

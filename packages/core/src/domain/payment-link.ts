@@ -19,6 +19,8 @@ export function assetEquals(a: AssetRef, b: AssetRef): boolean {
   return a.code === b.code && a.issuer === b.issuer;
 }
 
+export type OffRampLinkStatus = "awaiting_transfer" | "pending" | "settled" | "failed";
+
 export interface PaymentLink {
   id: string; // public id, used in the checkout URL (/pay/:id)
   reference: string; // short, <=28 bytes — embedded as the Stellar MEMO_TEXT
@@ -40,7 +42,7 @@ export interface PaymentLink {
   // off-ramp (filled when the seller cashes out)
   offrampJobId: string | null;
   offrampTargetCurrency: string | null;
-  offrampStatus: string | null;
+  offrampStatus: OffRampLinkStatus | null;
   /**
    * Indicative rate shown to the seller before they committed (issue 3.5).
    * Stored at the moment the seller opens the cash-out form (GET offramp-preview).

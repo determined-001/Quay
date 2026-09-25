@@ -83,7 +83,7 @@ function rowToLink(row: LinkRow): PaymentLink {
     overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
-    offrampStatus: row.offrampStatus ?? null,
+    offrampStatus: (row.offrampStatus ?? null) as PaymentLink["offrampStatus"],
     offrampIndicativeRate: row.offrampIndicativeRate ?? null,
     offrampRate: row.offrampRate ?? null,
     offrampRateDelta: row.offrampRateDelta ?? null,

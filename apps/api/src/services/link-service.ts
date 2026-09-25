@@ -974,10 +974,11 @@ export class LinkService {
 
     const from = link.status;
     const jobId = initiation.jobId;
+    const initialOfframpStatus = initiation.kind === "transfer" ? "awaiting_transfer" : "pending";
     link.status = "offramp_pending";
     link.offrampJobId = jobId;
     link.offrampTargetCurrency = quote.targetCurrency;
-    link.offrampStatus = "pending";
+    link.offrampStatus = initialOfframpStatus;
 
     // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
     // offrampIndicativeRate may already be set if the seller visited the preview
@@ -1024,7 +1025,7 @@ export class LinkService {
     const job: OffRampJob = {
       jobId,
       linkId: link.id,
-      status: "pending",
+      status: initialOfframpStatus,
       targetCurrency: quote.targetCurrency,
       targetAmount: quote.targetAmount,
       rate: quote.rate,
@@ -1139,6 +1140,15 @@ export class LinkService {
           status: "failed",
           failureReason: job.reason ?? null,
         });
+      } else {
+        if (link.offrampStatus !== job.status) {
+          link.offrampStatus = job.status;
+          await this.deps.links.save(link);
+          child.info(
+            { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
+            "cash-out offrampStatus updated",
+          );
+        }
       }
     }
   }

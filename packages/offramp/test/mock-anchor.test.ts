@@ -88,15 +88,32 @@ describe("MockAnchorOffRamp", () => {
     expect(polled.linkId).toBe("lnk_1");
   });
 
-  it("settling is idempotent: polling again after settlement doesn't change the outcome", async () => {
+  it("passes through awaiting_transfer and pending phases before settling", async () => {
     const state = new FakeOffRampStateRepository();
-    const offramp = new MockAnchorOffRamp({ state, settleAfterMs: 0 });
+    // 1000ms settle time: 0-500ms is awaiting_transfer, 500-1000ms is pending, 1000ms+ is settled
+    const offramp = new MockAnchorOffRamp({ state, settleAfterMs: 1000 });
     const quote = await offramp.quote({ linkId: "lnk_1", sourceAsset: USDC, sourceAmount: "10", targetCurrency: "NGN" });
     const job = await offramp.initiate({ linkId: "lnk_1", quoteId: quote.quoteId, payout: { currency: "NGN", fields: {} } });
 
-    const first = await offramp.status(job.jobId);
-    const second = await offramp.status(job.jobId);
-    expect(first.status).toBe("settled");
-    expect(second).toEqual(first);
+    // Immediately after initiate
+    const immediate = await offramp.status(job.jobId);
+    expect(immediate.status).toBe("awaiting_transfer");
+
+    // After settleAfterMs / 2
+    const stored = await state.getJob(job.jobId);
+    if (stored) {
+      stored.createdAt = Date.now() - 600;
+      await state.saveJob(stored);
+    }
+    const middle = await offramp.status(job.jobId);
+    expect(middle.status).toBe("pending");
+
+    // After settleAfterMs
+    if (stored) {
+      stored.createdAt = Date.now() - 1100;
+      await state.saveJob(stored);
+    }
+    const final = await offramp.status(job.jobId);
+    expect(final.status).toBe("settled");
   });
 });

@@ -153,6 +153,26 @@ describe("LinkService.pollCashOuts", () => {
 
     expect(links.get("lnk_1")?.status).toBe("offramp_failed");
   });
+
+  it("updates offrampStatus from awaiting_transfer to pending when anchor moves to pending", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "awaiting_transfer" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "pending",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
+
+    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() }).pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    expect(links.get("lnk_1")?.offrampStatus).toBe("pending");
+  });
 });
 
 describe("LinkService.backfillLostOffRampJobs", () => {
@@ -318,6 +338,43 @@ describe("LinkService.triggerCashOut — discriminated union return", () => {
     expect(job.jobId).toBe("job_interactive_123");
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
     expect(links.get("lnk_1")?.offrampJobId).toBe("job_interactive_123");
+  });
+
+  it("moves link to offramp_pending with offrampStatus awaiting_transfer for transfer initiation arm", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async (input) => ({
+      quoteId: "q_1",
+      sourceAsset: input.sourceAsset,
+      sourceAmount: input.sourceAmount,
+      targetCurrency: input.targetCurrency,
+      targetAmount: "1650.00",
+      rate: "1650",
+      expiresAt: Date.now() + 60_000,
+      fee: { amount: "16.50", currency: input.targetCurrency, source: "anchor" },
+      netTargetAmount: "1633.50",
+    });
+    offramp.initiateImpl = async () => ({
+      kind: "transfer",
+      jobId: "job_transfer_123",
+      transfer: {
+        destination: "GANCHOR_ACCOUNT",
+        amount: "10",
+        asset: { code: "USDC", issuer: "GUSDC" },
+        memo: "12345",
+        memoType: "id",
+      },
+    });
+
+    const service = makeService({ links, offramp, offrampState });
+    const { job, initiation } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+
+    expect(initiation.kind).toBe("transfer");
+    expect(job.jobId).toBe("job_transfer_123");
+    expect(job.status).toBe("awaiting_transfer");
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    expect(links.get("lnk_1")?.offrampStatus).toBe("awaiting_transfer");
   });
 });
 
