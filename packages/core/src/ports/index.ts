@@ -534,10 +534,13 @@ export interface LinkRepository {
   paymentLedger(txHash: string): Promise<number | null>;
 }
 
+export type SellerProfileKind = "individual" | "organization";
+
 export interface Seller {
   id: string;
   name: string;
   wallet: string;
+  profileKind: SellerProfileKind;
   /**
    * The seller's last-used payout destination fields (e.g. bank account).
    * Null until the seller completes their first cash-out. Treated as
@@ -561,6 +564,8 @@ export interface SellerRepository {
   /** Persist the seller's last-used payout destination fields for reuse on the
    *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
   savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
+  /** Select the kind of reusable KYC profile this merchant needs. */
+  saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void>;
 }
 
 /**

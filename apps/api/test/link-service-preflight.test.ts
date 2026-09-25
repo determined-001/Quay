@@ -13,7 +13,7 @@ import type { StellarConfig } from "@checkout/stellar";
 import { HttpError, LinkService } from "../src/services/link-service";
 import { AlwaysAcceptedKyc, FakeOffRampStateRepository, FakeTelemetryRepository } from "./fakes";
 
-const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", payoutFields: null, createdAt: Date.now() };
+const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLERWALLETADDRESS", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
 
 const stellar: StellarConfig = {
   network: "testnet",
@@ -44,6 +44,7 @@ function fakeSellers(): SellerRepository {
     findByWallet: vi.fn(async () => seller),
     createIfAbsent: vi.fn(async () => seller),
     savePayoutFields: vi.fn(async () => {}),
+    saveProfileKind: vi.fn(async () => {}),
   };
 }
 

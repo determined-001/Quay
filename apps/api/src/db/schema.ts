@@ -4,6 +4,9 @@ export const sellers = sqliteTable("sellers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   wallet: text("wallet").notNull().unique(),
+  profileKind: text("profile_kind", { enum: ["individual", "organization"] })
+    .notNull()
+    .default("individual"),
   /**
    * JSON-serialised Record<string,string> of the seller's last-used payout
    * fields (e.g. bank account number). Never emitted in logs or webhooks;
