@@ -8,9 +8,14 @@ export const sellers = sqliteTable("sellers", {
    * JSON-serialised Record<string,string> of the seller's last-used payout
    * fields (e.g. bank account number). Never emitted in logs or webhooks;
    * exposed to the dashboard only in masked form. Null until the seller
-   * completes their first cash-out.
+   * completes their first cash-out. Deprecated in favor of payoutFieldsEncrypted.
    */
   payoutFieldsJson: text("payout_fields_json"),
+  /**
+   * AES-256-GCM encrypted blob (iv || authTag || ciphertext) of the seller's
+   * last-used payout fields at rest (issue 4.34).
+   */
+  payoutFieldsEncrypted: text("payout_fields_encrypted"),
   createdAt: integer("created_at").notNull(),
 });
 

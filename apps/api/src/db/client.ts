@@ -8,12 +8,12 @@ export type DB = LibSQLDatabase<typeof schema>;
 // CREATE TABLE IF NOT EXISTS so a fresh clone runs with no migration step.
 // (drizzle-kit push can manage this instead; see drizzle.config.ts.)
 const BOOTSTRAP_SQL = [
-  // payout_fields_json included here so fresh databases get the full schema
-  // (issue #32). Existing databases are handled by the ALTER TABLE statement
+  // payout_fields_json and payout_fields_encrypted included here so fresh databases get the full schema
+  // (issue #32, issue 4.34). Existing databases are handled by the ALTER TABLE statements
   // in ADDITIVE_MIGRATIONS below.
   `CREATE TABLE IF NOT EXISTS sellers (
      id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL UNIQUE,
-     payout_fields_json TEXT, created_at INTEGER NOT NULL
+     payout_fields_json TEXT, payout_fields_encrypted TEXT, created_at INTEGER NOT NULL
    )`,
   // New columns (offramp_indicative_rate, offramp_rate, offramp_rate_delta) are
   // included here so fresh databases get the full schema. Existing databases are
@@ -171,6 +171,8 @@ const ADDITIVE_MIGRATIONS = [
   //      default — so this is treated as sensitive end-to-end: masked to the
   //      last 4 chars in every API response and never logged or webhook'd.
   `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
+  // 4.34: encrypt seller payout fields at rest like KYC.
+  `ALTER TABLE sellers ADD COLUMN payout_fields_encrypted TEXT`,
   `ALTER TABLE link_payments ADD COLUMN ledger INTEGER`,
   // Per-seller anchor identity: which seller/account a withdrawal and a KYC
   // customer id belong to. Existing rows stay NULL — they were created under
