@@ -106,7 +106,7 @@ curl -X POST https://quay-api.onrender.com/links \
   "link": {
     "id": "lnk_123",
     "reference": "ref_abc",
-    "status": "pending",
+    "status": "active",
     "title": "T-shirt",
     "amount": "10.50",
     "asset": { "code": "USDC", "issuer": "GBBD456..." },
@@ -162,9 +162,11 @@ So two deliberate boundaries are baked into the architecture:
   flip to `inline` until a licensed anchor relationship and a compliance story are real.
 
 - **Ports-and-adapters everywhere.** The domain never imports a chain SDK. `RailPort`,
-  `WatcherPort`, and `OffRampPort` are the seams. Today: a Stellar (SEP-7 + Horizon) rail and a
-  mock anchor. Tomorrow: the same `PaymentIntent` spine behind an `adapter-gateway` (Arc/Circle)
-  or a different chain — without touching the domain or the worker.
+  `WatcherPort`, and `OffRampPort` are the seams. Today: a Stellar (SEP-7 + Horizon) rail and
+  three off-ramp adapters — a real SEP-10/38/6 flow against the testnet reference anchor, a mock
+  for offline dev, and a disabled mode for mainnet. Tomorrow: the same `PaymentIntent` spine
+  behind an `adapter-gateway` (Arc/Circle) or a different chain — without touching the domain or
+  the worker.
 
 ---
 
@@ -214,9 +216,13 @@ component and flow detail is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ```
 packages/
   core/        Domain brain — entities, status machine, money math, SEP-7 builder,
-               the pure payment matcher, port interfaces, zod schemas.  (29 unit tests)
+               the pure payment matcher, port interfaces, zod schemas.
   stellar/     Stellar adapter — SEP-7 rail + Horizon polling watcher (RailPort/WatcherPort).
-  offramp/     Off-ramp adapter — MockAnchorOffRamp (OffRampPort, seller_initiated).  *** mock ***
+  offramp/     Off-ramp adapters (OffRampPort, seller_initiated) — TestAnchorOffRamp
+               (real SEP-10 → SEP-38 → SEP-6 against testanchor.stellar.org), MockAnchorOffRamp
+               (offline dev), DisabledOffRamp (mainnet), plus TestAnchorKyc (SEP-12) and
+               SellerAnchorAuth (per-seller SEP-10 anchor sessions).
+  widget/      Source of the embeddable checkout widget (built and served as widget.js).
 apps/
   api/         Hono API + Drizzle (libSQL) + the ledger-watching worker.
   web/         Next.js (App Router) seller dashboard + buyer checkout page + widget.js.
@@ -260,13 +266,15 @@ report.
 
 Then: open the dashboard, create a link, open its checkout page, and pay the displayed amount
 of USDC **with the shown memo** from any Stellar testnet wallet. Within a poll interval the
-dashboard flips the link to **paid**; hit **Cash out to NGN** to exercise the off-ramp seam.
+dashboard flips the link to **paid**; hit the **Cash out** button to exercise the off-ramp seam
+(labelled with `NEXT_PUBLIC_OFFRAMP_CURRENCY` — NGN with the default `OFFRAMP=mock`; set it to
+USD when `OFFRAMP=testanchor`, since the testnet anchor only quotes USDC against USD/CAD).
 
 Useful scripts (from the repo root):
 
 ```bash
 pnpm typecheck      # all packages
-pnpm test           # core unit tests
+pnpm test           # every package's test suite, via turbo
 pnpm test:coverage  # the same tests, with the CI coverage gate applied
 pnpm build          # builds the web app
 pnpm sweep          # pre-entry ritual: uptime + synthetic checks against the live demo
@@ -274,12 +282,12 @@ pnpm sweep          # pre-entry ritual: uptime + synthetic checks against the li
 
 **Coverage gating.** `pnpm test:coverage` fails if any package drops below the
 floor in its `vitest.config.ts`, and CI runs it on every push. Those floors are
-a *ratchet*: each was set to that package's measured coverage when gating landed
-(`packages/offramp` at 38%, for instance, is a statement of fact, not of
-approval). Raise a floor when you raise the coverage; never lower one to make a
-build pass — that is the single move the gate exists to prevent. The run also
-uploads an HTML report as a CI artifact and prints a per-package table to the
-job summary.
+a *ratchet*: each was set to that package's measured coverage when gating (or a
+later raise) landed — the per-package `vitest.config.ts` is the source of
+truth for the current numbers, so none are repeated here to drift. Raise a
+floor when you raise the coverage; never lower one to make a build pass — that
+is the single move the gate exists to prevent. The run also uploads an HTML
+report as a CI artifact and prints a per-package table to the job summary.
 
 ### Demo seed (pre-populated dashboard)
 
@@ -387,12 +395,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Build the wallet-connect UI.** SEP-10 login + session enforcement are both
-   real now (`/auth`, `requireSeller` on `/links` and `/webhooks`), but there's
-   no button anywhere to actually sign in — that needs a wallet-connect
-   integration (Stellar Wallets Kit or similar) calling `apps/web/lib/api.ts`'s
-   `getAuthChallenge`/`submitAuthChallenge`. Add API keys for programmatic access.
-5. **Multiple sellers / scale:** the watcher polls per active destination account; for many
+4. **Multiple sellers / scale:** the watcher polls per active destination account; for many
    sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
 
 > This README is engineering guidance, not legal advice. Money transmission is the box you do
