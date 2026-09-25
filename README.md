@@ -168,6 +168,47 @@ So two deliberate boundaries are baked into the architecture:
 
 ---
 
+## Custody model
+
+"Non-custodial" should be a claim you can check, not one you have to trust.
+This is everything the Quay server holds, where it lives in the code, and what
+it can do — verify each row against the cited file:
+
+| Held by the server | Where | Can it move a seller's funds? |
+| --- | --- | --- |
+| `SERVER_SIGNING_SECRET` — signs SEP-10 *login* challenges for the dashboard | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`serverSigningSecret`), used in [`apps/api/src/services/container.ts`](apps/api/src/services/container.ts) | **No.** It is an identity key for authentication; it is not a signer on any seller account |
+| `JWT_SECRET` — signs Quay session JWTs | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`jwtSecret`) | **No** |
+| Each seller's anchor SEP-10 JWT, AES-256-GCM encrypted at rest | `anchor_sessions.token_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts); encryption in [`apps/api/src/repos/index.ts`](apps/api/src/repos/index.ts) | **No.** See the paragraph below for exactly what it can do |
+| Seller SEP-12 KYC fields, encrypted with `KYC_ENCRYPTION_KEY` | `kyc_records.fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
+| Seller payout fields (bank details) | `sellers.payout_fields_json` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) — currently plaintext, masked in the dashboard; encrypting it at rest is tracked in [#245](https://github.com/determined-001/Quay/issues/245) | **No** |
+| Webhook signing secrets (current and previous), encrypted | `webhooks.secret_encrypted` / `previous_secret_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
+
+The rule all of this adds up to: **no key on the server can sign a payment
+from a seller's account or a withdrawal transfer — sellers sign with their own
+wallet**, in the browser
+([`apps/web/lib/wallet.ts`](apps/web/lib/wallet.ts), `sendAnchorTransfer`).
+
+The one credential that deserves elaboration is the **anchor SEP-10 JWT**. It
+can read and update the seller's KYC record at the anchor and *start* a
+withdrawal (SEP-6), which yields payment instructions. It cannot move money:
+the on-chain leg of a cash-out is a Stellar transaction that only the seller's
+wallet can sign. The token is also never returned to the browser — the API
+relays the anchor challenge for the seller's wallet to sign, then keeps the
+resulting JWT server-side, encrypted
+([`apps/api/src/routes/anchor-auth.ts`](apps/api/src/routes/anchor-auth.ts)).
+
+You can check the core claim without trusting this README or this service:
+the mainnet transaction linked at the top of this file shows the buyer's
+wallet paying the seller's wallet directly, with no intermediate account. That
+is the whole payment path — checkout pages expose the seller's own
+`destination` address ([`apps/api/src/routes/links.ts`](apps/api/src/routes/links.ts),
+`toCheckoutView`) and buyers pay it straight from their wallet.
+
+Threat handling and reporting live in [`SECURITY.md`](SECURITY.md); the full
+component and flow detail is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
 ## Monorepo layout
 
 ```
