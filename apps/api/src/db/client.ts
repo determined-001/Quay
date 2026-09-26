@@ -8,12 +8,12 @@ export type DB = LibSQLDatabase<typeof schema>;
 // CREATE TABLE IF NOT EXISTS so a fresh clone runs with no migration step.
 // (drizzle-kit push can manage this instead; see drizzle.config.ts.)
 const BOOTSTRAP_SQL = [
-  // payout_fields_json included here so fresh databases get the full schema
-  // (issue #32). Existing databases are handled by the ALTER TABLE statement
+  // payout_fields_json and last_active_at included here so fresh databases get the full schema
+  // (issue #32, issue #240). Existing databases are handled by the ALTER TABLE statement
   // in ADDITIVE_MIGRATIONS below.
   `CREATE TABLE IF NOT EXISTS sellers (
      id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL UNIQUE,
-     payout_fields_json TEXT, created_at INTEGER NOT NULL
+     payout_fields_json TEXT, last_active_at INTEGER, created_at INTEGER NOT NULL
    )`,
   // New columns (offramp_indicative_rate, offramp_rate, offramp_rate_delta) are
   // included here so fresh databases get the full schema. Existing databases are
@@ -178,6 +178,7 @@ const ADDITIVE_MIGRATIONS = [
   `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
+  `ALTER TABLE sellers ADD COLUMN last_active_at INTEGER`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
   // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never
   // upgrades an existing table. `createIfAbsent` uses ON CONFLICT (wallet),
@@ -311,6 +312,36 @@ async function migrateLegacyLinkPaymentsTable(client: Client): Promise<void> {
   await client.execute("DROP TABLE link_payments_legacy_4_11");
 }
 
+/**
+ * Backfill `last_active_at` on existing sellers that do not have it populated.
+ * Uses the latest activity timestamp across links, seller_kyc, anchor_sessions,
+ * and api_keys, falling back to sellers.created_at.
+ */
+async function backfillSellerLastActiveAt(client: Client): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(sellers)");
+  const columns = new Set(info.rows.map((r) => String(r.name)));
+  if (!columns.has("last_active_at")) return;
+
+  await client.execute(`
+    UPDATE sellers
+    SET last_active_at = COALESCE(
+      (
+        SELECT MAX(val) FROM (
+          SELECT created_at AS val FROM links WHERE seller_id = sellers.id
+          UNION ALL
+          SELECT updated_at AS val FROM seller_kyc WHERE seller_id = sellers.id
+          UNION ALL
+          SELECT created_at AS val FROM anchor_sessions WHERE seller_id = sellers.id
+          UNION ALL
+          SELECT last_used_at AS val FROM api_keys WHERE seller_id = sellers.id AND last_used_at IS NOT NULL
+        )
+      ),
+      created_at
+    )
+    WHERE last_active_at IS NULL
+  `);
+}
+
 export async function bootstrap(client: Client): Promise<void> {
   await migrateLegacyWebhooksTable(client);
   await migrateLegacyProcessedTxTable(client);
@@ -334,6 +365,7 @@ export async function bootstrap(client: Client): Promise<void> {
       if (!message.toLowerCase().includes("duplicate column")) throw err;
     }
   }
+  await backfillSellerLastActiveAt(client);
 }
 
 export { schema };

@@ -466,6 +466,34 @@ typical settlement time.
    reality. `offramp_failed` can transition back to `offramp_pending` to
    retry.
 
+## KYC and Identity Data Retention Policy (NDPA Compliance)
+
+The Nigeria Data Protection Act 2023 (NDPA) requires that personal identity data is not kept longer than necessary for its purpose. To minimize exposure in the event of credential compromise, Quay implements an automated data retention policy for inactive sellers.
+
+### Retention Inactivity Tracking & Purge Schedule
+- **Activity tracking**: A seller's `last_active_at` is updated on wallet login (`POST /auth`), link creation (`POST /links`), and KYC submissions (`PUT /seller/kyc`). Database writes are throttled to at most once per hour per seller.
+- **Retention period**: Controlled via `KYC_RETENTION_DAYS` (default `730` days / 2 years). Setting `KYC_RETENTION_DAYS=0` disables the sweep entirely.
+- **In-flight protection**: Sellers with links currently in `offramp_pending` status are excluded from purging to avoid disrupting live cash-outs.
+- **Purged data**:
+  - `seller_kyc` rows (AES-256-GCM encrypted SEP-12 PII fields and customer IDs).
+  - `anchor_sessions` rows (encrypted anchor auth tokens).
+  - `sellers.payout_fields_json` (last-used payout bank/account details are cleared to `NULL`).
+  - Anchor contact is not attempted (recorded as `anchor_not_contacted`).
+- **Telemetry & Metrics**:
+  - Metrics counter: `quay_kyc_retention_purged_total` tracks total purged sellers.
+  - Logs structured event: `{"event": "privacy.retention.purged", "count": N}` with strictly zero PII.
+
+### Operator CLI Usage
+Operators can manually trigger or preview the retention sweep using the retention CLI script:
+
+```bash
+# Dry run: preview counts of eligible inactive sellers without modifying the database
+pnpm --filter @checkout/api exec tsx scripts/kyc-retention.ts --dry-run
+
+# Live run: execute retention purge against configured DATABASE_URL
+pnpm --filter @checkout/api exec tsx scripts/kyc-retention.ts
+```
+
 ## Incident template
 
 Copy this into a new incident doc/issue when something goes wrong:

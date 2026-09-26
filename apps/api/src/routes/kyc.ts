@@ -73,7 +73,9 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
 
     try {
-      const record = await c.kyc.submit(customerOf(ctx.get("seller")), parsed.data);
+      const seller = ctx.get("seller");
+      const record = await c.kyc.submit(customerOf(seller), parsed.data);
+      await c.sellers.touchLastActive?.(seller.id);
       return ctx.json(toResponse(record));
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);

@@ -365,6 +365,7 @@ export class LinkService {
       isDemo: body.isDemo ?? false,
     });
     metrics.linkStatusTransitionsTotal.inc({ to: link.status });
+    await this.deps.sellers.touchLastActive?.(seller.id);
 
     log.info(
       {
