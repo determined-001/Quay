@@ -43,18 +43,16 @@ export function keypairFromSecret(secret: string, varName: string): Keypair {
 }
 
 /**
- * Resolves the seller's public key, plus its Keypair when we actually hold the
- * secret in-memory (auto-generated testnet keypair, or DEFAULT_SELLER_SECRET
- * explicitly supplied). The server itself never signs with it: every seller,
- * this one included, signs their own anchor login and withdrawals from their
- * wallet. It exists for the testnet convenience seller that `pnpm demo:seed`
- * signs in as — never persisted beyond this process.
+ * Resolves the seller's public key. The server itself never signs with it:
+ * every seller, this one included, signs their own anchor login and withdrawals
+ * from their wallet. It exists for the testnet convenience seller that
+ * `pnpm demo:seed` signs in as — never persisted beyond this process.
  *
  * The one human-facing line of output (the testnet convenience banner with
  * the secret) is guarded by `LOG_LEVEL=debug|trace` so an ordinary run never
  * echoes the seller key. When plaintext output is wanted, set LOG_LEVEL=debug.
  */
-export function resolveSellerKeypairOrWallet(logger: Logger): { keypair: Keypair | null; publicKey: string | null } {
+export function resolveSellerKeypairOrWallet(logger: Logger): { publicKey: string | null } {
   if (env.defaultSellerWallet) {
     if (!StrKey.isValidEd25519PublicKey(env.defaultSellerWallet)) {
       throw new Error("DEFAULT_SELLER_WALLET is not a valid Stellar G-address");
@@ -64,7 +62,7 @@ export function resolveSellerKeypairOrWallet(logger: Logger): { keypair: Keypair
         { event: "seller.configured", wallet: env.defaultSellerWallet, hasSecret: false, network: env.network },
         "seller wallet configured (no secret loaded)",
       );
-      return { keypair: null, publicKey: env.defaultSellerWallet };
+      return { publicKey: env.defaultSellerWallet };
     }
     const kp = keypairFromSecret(env.defaultSellerSecret, "DEFAULT_SELLER_SECRET");
     if (kp.publicKey() !== env.defaultSellerWallet) {
@@ -74,7 +72,7 @@ export function resolveSellerKeypairOrWallet(logger: Logger): { keypair: Keypair
       { event: "seller.configured", wallet: kp.publicKey(), hasSecret: true, network: env.network },
       "seller wallet configured (secret loaded)",
     );
-    return { keypair: kp, publicKey: kp.publicKey() };
+    return { publicKey: kp.publicKey() };
   }
   if (env.network === "public") {
     // Deliberately not an error any more. Before wallet-native auth this was
@@ -86,7 +84,7 @@ export function resolveSellerKeypairOrWallet(logger: Logger): { keypair: Keypair
       { event: "seller.multi_tenant", network: env.network },
       "no DEFAULT_SELLER_WALLET — sellers supply their own wallet at SEP-10 login",
     );
-    return { keypair: null, publicKey: null };
+    return { publicKey: null };
   }
   // Testnet convenience: generate a throwaway account and tell the operator how to fund it.
   // The plaintext secret banner is opt-in (LOG_LEVEL=debug|trace) so an ordinary
@@ -116,5 +114,5 @@ export function resolveSellerKeypairOrWallet(logger: Logger): { keypair: Keypair
       ].join("\n") + "\n",
     );
   }
-  return { keypair: kp, publicKey: pub };
+  return { publicKey: pub };
 }
