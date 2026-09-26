@@ -407,6 +407,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 
 - **[Roadmap](ROADMAP.md)** — where this is going and why: the off-ramp as the actual product, who the buyer really is, and the parts that are built but undersold.
 - **[Architecture](docs/ARCHITECTURE.md)** — package graph, the three ports, sequence diagrams for each flow, the status machine, and how to add a new chain/anchor/rail.
+- **[Seller-signed anchor threat model](docs/THREAT-MODEL.md)** — assets, trust boundaries, implemented controls, failure paths, and open risks in anchor authentication and withdrawals.
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
 - **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, [anchor outage](docs/RUNBOOK.md#anchor-outage), [anchor incidents](docs/RUNBOOK.md#anchor-incidents), watcher-stuck, stuck off-ramp jobs, and the incident template.
