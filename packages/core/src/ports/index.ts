@@ -593,7 +593,7 @@ export type PublicWebhook = Omit<Webhook, "secretEncrypted" | "previousSecretEnc
 export interface WebhookDelivery {
   id: string;
   webhookId: string;
-  linkId: string;
+  linkId: string | null;
   event: string;
   /** Which attempt number (1-based). */
   attempt: number;
@@ -617,7 +617,7 @@ export type WebhookQueueStatus = "pending" | "claimed" | "delivered" | "dead";
 export interface WebhookQueueEntry {
   id: string;
   webhookId: string;
-  linkId: string;
+  linkId: string | null;
   event: string;
   /** The signed JSON body, serialised once at enqueue time. */
   payload: string;

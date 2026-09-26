@@ -90,7 +90,7 @@ export const webhooks = sqliteTable("webhooks", {
 export const webhookDeliveries = sqliteTable("webhook_deliveries", {
   id: text("id").primaryKey(),
   webhookId: text("webhook_id").notNull(),
-  linkId: text("link_id").notNull(),
+  linkId: text("link_id"),
   event: text("event").notNull(),
   /** Which attempt number this row records (1-based). */
   attempt: integer("attempt").notNull().default(1),
@@ -116,7 +116,7 @@ export const webhookDeliveries = sqliteTable("webhook_deliveries", {
 export const webhookQueue = sqliteTable("webhook_queue", {
   id: text("id").primaryKey(),
   webhookId: text("webhook_id").notNull(),
-  linkId: text("link_id").notNull(),
+  linkId: text("link_id"),
   event: text("event").notNull(),
   /** JSON-serialised event payload — the exact body that will be signed & sent. */
   payload: text("payload").notNull(),

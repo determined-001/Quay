@@ -52,7 +52,7 @@ const BOOTSTRAP_SQL = [
      created_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS webhook_deliveries (
-     id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT NOT NULL,
+     id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT,
      event TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
      queue_entry_id TEXT,
      status_code INTEGER, ok INTEGER NOT NULL,
@@ -63,7 +63,7 @@ const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS webhook_queue (
      id TEXT PRIMARY KEY,
      webhook_id TEXT NOT NULL,
-     link_id TEXT NOT NULL,
+     link_id TEXT,
      event TEXT NOT NULL,
      payload TEXT NOT NULL,
      attempts INTEGER NOT NULL DEFAULT 0,
@@ -311,10 +311,61 @@ async function migrateLegacyLinkPaymentsTable(client: Client): Promise<void> {
   await client.execute("DROP TABLE link_payments_legacy_4_11");
 }
 
+/**
+ * Rebuilds `webhook_queue` so `link_id` is nullable (allowing seller-level events).
+ */
+async function migrateLegacyWebhookQueueTable(client: Client): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(webhook_queue)");
+  const linkIdCol = info.rows.find((r) => String(r.name) === "link_id");
+  if (linkIdCol && Number(linkIdCol.notnull) === 1) {
+    await client.execute("ALTER TABLE webhook_queue RENAME TO webhook_queue_legacy_4_30");
+    await client.execute(`CREATE TABLE webhook_queue (
+      id TEXT PRIMARY KEY,
+      webhook_id TEXT NOT NULL,
+      link_id TEXT,
+      event TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      last_status_code INTEGER,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`);
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_webhook_queue_due ON webhook_queue (status, next_attempt_at)");
+    await client.execute("INSERT INTO webhook_queue SELECT * FROM webhook_queue_legacy_4_30");
+    await client.execute("DROP TABLE webhook_queue_legacy_4_30");
+  }
+}
+
+/**
+ * Rebuilds `webhook_deliveries` so `link_id` is nullable (allowing seller-level events).
+ */
+async function migrateLegacyWebhookDeliveriesTable(client: Client): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(webhook_deliveries)");
+  const linkIdCol = info.rows.find((r) => String(r.name) === "link_id");
+  if (linkIdCol && Number(linkIdCol.notnull) === 1) {
+    await client.execute("ALTER TABLE webhook_deliveries RENAME TO webhook_deliveries_legacy_4_30");
+    await client.execute(`CREATE TABLE webhook_deliveries (
+      id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT,
+      event TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+      queue_entry_id TEXT,
+      status_code INTEGER, ok INTEGER NOT NULL,
+      error TEXT, created_at INTEGER NOT NULL
+    )`);
+    await client.execute("CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_created_at_idx ON webhook_deliveries (webhook_id, created_at DESC)");
+    await client.execute("INSERT INTO webhook_deliveries SELECT * FROM webhook_deliveries_legacy_4_30");
+    await client.execute("DROP TABLE webhook_deliveries_legacy_4_30");
+  }
+}
+
 export async function bootstrap(client: Client): Promise<void> {
   await migrateLegacyWebhooksTable(client);
   await migrateLegacyProcessedTxTable(client);
   await migrateLegacyLinkPaymentsTable(client);
+  await migrateLegacyWebhookQueueTable(client);
+  await migrateLegacyWebhookDeliveriesTable(client);
   for (const sql of BOOTSTRAP_SQL) {
     try {
       await client.execute(sql);
