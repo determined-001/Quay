@@ -283,4 +283,25 @@ export const env = {
   // and "none" has no KYC lifecycle to store PII for.
   kycEncryptionKey:
     offramp === "testanchor" || offramp === "anchor" ? req("KYC_ENCRYPTION_KEY") : undefined,
+  // E2E harness mode (issue 5.7). "1" makes the API runnable with no network:
+  // the ledger watcher never starts, the link-creation Horizon preflight is
+  // skipped, and /__test__ routes are mounted that can mint a session and
+  // inject a synthetic payment. Everything else — auth, the matcher, the
+  // status machine, webhooks, the mock off-ramp — runs for real. See
+  // routes/test-only.ts for exactly what the synthetic payment does and does
+  // not verify.
+  e2eTestMode: process.env.E2E_TEST_MODE === "1",
 } as const;
+
+// A production process with the e2e backdoors mounted would accept
+// unauthenticated session minting and payments conjured from nothing. There
+// is no configuration in which that is intended, so refuse to boot rather
+// than trust deployment hygiene.
+if (env.e2eTestMode && (process.env.NODE_ENV === "production" || network === "public")) {
+  throw new Error(
+    "E2E_TEST_MODE=1 with NODE_ENV=production or STELLAR_NETWORK=public: refusing to start. " +
+      "The e2e test mode mounts routes that mint sessions and mark links paid " +
+      "without authentication or a ledger; it exists for the local Playwright " +
+      "suite only and must never reach a production deployment.",
+  );
+}
