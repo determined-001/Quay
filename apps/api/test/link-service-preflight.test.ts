@@ -90,7 +90,7 @@ function fakeOfframp(): OffRampPort {
     quote: vi.fn(),
     initiate: vi.fn(),
     status: vi.fn(),
-    offrampRequirements: vi.fn(async () => []),
+    offrampRequirements: vi.fn(async () => ({ types: [], defaultType: null })),
   };
 }
 
