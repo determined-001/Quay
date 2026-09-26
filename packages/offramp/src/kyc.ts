@@ -1,13 +1,24 @@
 import type { Keypair } from "@stellar/stellar-sdk";
-import { KycRequiredError, type KycFieldSpec, type KycPort, type KycRecord, type KycRepository } from "@checkout/core";
+import {
+  KycRequiredError,
+  type KycFieldSpec,
+  type KycPort,
+  type KycRecord,
+  type KycRepository,
+} from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { getSep12Customer, putSep12Customer } from "./sep12";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
  *  entry for. Exported for direct unit testing of the "name exactly which
  *  fields are missing" requirement, without needing a live/mocked anchor. */
-export function missingRequiredFields(required: KycFieldSpec[], values: Record<string, string>): string[] {
-  return required.filter((f) => !f.optional && !(values[f.name] ?? "").trim()).map((f) => f.name);
+export function missingRequiredFields(
+  required: KycFieldSpec[],
+  values: Record<string, string>,
+): string[] {
+  return required
+    .filter((f) => !f.optional && !(values[f.name] ?? "").trim())
+    .map((f) => f.name);
 }
 
 const DEFAULT_BASE_URL = "https://testanchor.stellar.org";
@@ -62,7 +73,10 @@ export class TestAnchorKyc implements KycPort {
     return record;
   }
 
-  async submit(sellerId: string, fields: Record<string, string>): Promise<KycRecord> {
+  async submit(
+    sellerId: string,
+    fields: Record<string, string>,
+  ): Promise<KycRecord> {
     const existing = await this.repo.get(sellerId);
     const jwt = await this.auth.token();
     const discovery = await getSep12Customer(this.baseUrl, jwt, {

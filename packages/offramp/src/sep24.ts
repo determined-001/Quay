@@ -1,10 +1,136 @@
 import type { Keypair } from "@stellar/stellar-sdk";
-import type { AssetRef } from "@checkout/core";
+import type { AssetRef, Logger } from "@checkout/core";
+import { NOOP_LOGGER } from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { endpointUrl, fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
+import { AnchorLimitError } from "./sep6";
 
+export { AnchorLimitError };
 export type { Sep1DiscoveryInfo };
 export { endpointUrl };
+
+export interface Sep24AssetInfo {
+  enabled: boolean;
+  minAmount?: number;
+  maxAmount?: number;
+  feeFixed?: number;
+  feePercent?: number;
+  feeMinimum?: number;
+}
+
+export interface Sep24Info {
+  withdraw: Record<string, Sep24AssetInfo>;
+}
+
+const INFO_TTL_MS = 5 * 60_000;
+const infoCache = new Map<string, { at: number; info: Sep24Info }>();
+
+/**
+ * GET /sep24/info, parsed into the shape the domain uses and cached per base URL
+ * for 5 minutes.
+ */
+export async function getSep24Info(
+  baseUrl: string,
+  logger?: Logger,
+): Promise<Sep24Info> {
+  const cached = infoCache.get(baseUrl);
+  if (cached && Date.now() - cached.at < INFO_TTL_MS) return cached.info;
+
+  const log = (logger ?? NOOP_LOGGER).child({ component: "sep24", baseUrl });
+  const res = await fetch(endpointUrl(baseUrl, "info"));
+  if (!res.ok) {
+    log.warn(
+      { event: "anchor.sep24.info.fail", statusCode: res.status },
+      "SEP-24 /info failed",
+    );
+    throw new Error(`SEP-24 /info failed: ${res.status} ${await res.text()}`);
+  }
+
+  const body = (await res.json()) as {
+    withdraw?: Record<
+      string,
+      {
+        enabled?: boolean;
+        min_amount?: number;
+        max_amount?: number;
+        fee_fixed?: number;
+        fee_percent?: number;
+        fee_minimum?: number;
+      }
+    >;
+  };
+
+  const withdraw: Record<string, Sep24AssetInfo> = {};
+  for (const [code, raw] of Object.entries(body.withdraw ?? {})) {
+    withdraw[code] = {
+      enabled: raw.enabled ?? false,
+      minAmount: raw.min_amount,
+      maxAmount: raw.max_amount,
+      feeFixed: raw.fee_fixed,
+      feePercent: raw.fee_percent,
+      feeMinimum: raw.fee_minimum,
+    };
+  }
+
+  const info: Sep24Info = { withdraw };
+  infoCache.set(baseUrl, { at: Date.now(), info });
+  return info;
+}
+
+/** Test seam — drops the cached /info for a base URL, or all of them. */
+export function clearSep24InfoCache(baseUrl?: string): void {
+  if (baseUrl) infoCache.delete(baseUrl);
+  else infoCache.clear();
+}
+
+/**
+ * Validate that the anchor supports withdrawing this asset and that the amount
+ * falls within the anchor's published limits.
+ */
+export function validateSep24Withdraw(
+  info: Sep24Info,
+  assetCode: string,
+  amount: string,
+): Sep24AssetInfo {
+  const asset = info.withdraw[assetCode];
+  if (!asset) {
+    throw new AnchorLimitError(
+      `Anchor does not list ${assetCode} for withdrawal`,
+      {},
+      [],
+    );
+  }
+  if (!asset.enabled) {
+    throw new AnchorLimitError(
+      `Anchor has withdrawal of ${assetCode} disabled`,
+    );
+  }
+
+  const minAmount = asset.minAmount;
+  const maxAmount = asset.maxAmount;
+  const value = Number(amount);
+
+  if (!Number.isFinite(value)) {
+    throw new AnchorLimitError(`Amount "${amount}" is not a number`, {
+      minAmount,
+      maxAmount,
+    });
+  }
+  if (minAmount !== undefined && value < minAmount) {
+    throw new AnchorLimitError(
+      `Amount ${amount} is below the anchor's minimum of ${minAmount} ${assetCode}`,
+      { minAmount, maxAmount },
+    );
+  }
+  if (maxAmount !== undefined && value > maxAmount) {
+    throw new AnchorLimitError(
+      `Amount ${amount} is above the anchor's maximum of ${maxAmount} ${assetCode}`,
+      { minAmount, maxAmount },
+    );
+  }
+
+  return asset;
+}
 
 export interface Sep24WithdrawInteractiveInput {
   assetCode: string;
@@ -29,13 +155,16 @@ export interface Sep24Transaction {
   withdrawMemoType?: string;
   amountIn?: string;
   amountOut?: string;
+  amountFee?: string;
   message?: string;
   stellarTransactionId?: string;
   moreInfoUrl?: string;
 }
 
 function assetIdentifier(asset: AssetRef): string {
-  return asset.issuer === null ? "stellar:native" : `stellar:${asset.code}:${asset.issuer}`;
+  return asset.issuer === null
+    ? "stellar:native"
+    : `stellar:${asset.code}:${asset.issuer}`;
 }
 
 export class Sep24Client {
@@ -66,11 +195,16 @@ export class Sep24Client {
     return this.authClient.token();
   }
 
-  async startInteractiveWithdraw(input: Sep24WithdrawInteractiveInput): Promise<Sep24InteractiveResult> {
+  async startInteractiveWithdraw(
+    input: Sep24WithdrawInteractiveInput,
+  ): Promise<Sep24InteractiveResult> {
     const discovery = await this.getDiscoveryInfo();
     const token = await this.getAuthToken();
 
-    const endpoint = endpointUrl(discovery.transferServerSep24, "transactions/withdraw/interactive");
+    const endpoint = endpointUrl(
+      discovery.transferServerSep24,
+      "transactions/withdraw/interactive",
+    );
 
     const bodyData: Record<string, string> = {
       asset_code: input.assetCode,
@@ -94,10 +228,16 @@ export class Sep24Client {
     });
 
     if (!res.ok) {
-      throw new Error(`SEP-24 interactive withdraw failed: ${res.status} ${await res.text()}`);
+      throw new Error(
+        `SEP-24 interactive withdraw failed: ${res.status} ${await res.text()}`,
+      );
     }
 
-    const data = (await res.json()) as { id: string; url: string; type: string };
+    const data = (await res.json()) as {
+      id: string;
+      url: string;
+      type: string;
+    };
     return {
       id: data.id,
       url: data.url,
@@ -117,7 +257,9 @@ export class Sep24Client {
     });
 
     if (!res.ok) {
-      throw new Error(`SEP-24 getTransaction failed: ${res.status} ${await res.text()}`);
+      throw new Error(
+        `SEP-24 getTransaction failed: ${res.status} ${await res.text()}`,
+      );
     }
 
     const data = (await res.json()) as {
@@ -129,6 +271,7 @@ export class Sep24Client {
         withdraw_memo_type?: string;
         amount_in?: string;
         amount_out?: string;
+        amount_fee?: string;
         message?: string;
         stellar_transaction_id?: string;
         more_info_url?: string;
@@ -144,6 +287,7 @@ export class Sep24Client {
       withdrawMemoType: tx.withdraw_memo_type,
       amountIn: tx.amount_in,
       amountOut: tx.amount_out,
+      amountFee: tx.amount_fee,
       message: tx.message,
       stellarTransactionId: tx.stellar_transaction_id,
       moreInfoUrl: tx.more_info_url,

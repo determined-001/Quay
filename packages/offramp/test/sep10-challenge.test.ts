@@ -37,7 +37,11 @@ function challengeFrom(signer: Keypair): string {
  * flagging a fake credential is to stop writing something that looks like one,
  * not to add an allowlist entry that also covers the real thing.
  */
-const FAKE_JWT = ["header", Buffer.from(JSON.stringify({ exp: 9_999_999_999 })).toString("base64url"), "sig"].join(".");
+const FAKE_JWT = [
+  "header",
+  Buffer.from(JSON.stringify({ exp: 9_999_999_999 })).toString("base64url"),
+  "sig",
+].join(".");
 
 /** A stub anchor that serves `challenge` and then hands back a JWT. */
 function stubAnchor(challenge: string) {
@@ -48,7 +52,10 @@ function stubAnchor(challenge: string) {
       return new Response(JSON.stringify({ token: FAKE_JWT }), { status: 200 });
     }
     return new Response(
-      JSON.stringify({ transaction: challenge, network_passphrase: Networks.TESTNET }),
+      JSON.stringify({
+        transaction: challenge,
+        network_passphrase: Networks.TESTNET,
+      }),
       { status: 200 },
     );
   });
@@ -81,7 +88,9 @@ describe("Sep10Client challenge verification", () => {
       signingKey: anchorKey.publicKey(),
     });
 
-    await expect(client.token()).rejects.toBeInstanceOf(Sep10ChallengeRejectedError);
+    await expect(client.token()).rejects.toBeInstanceOf(
+      Sep10ChallengeRejectedError,
+    );
     // The decisive assertion: nothing was ever submitted, so the seller's
     // signature never left this process.
     expect(posted).toHaveLength(0);
@@ -103,7 +112,9 @@ describe("Sep10Client challenge verification", () => {
       signingKey: anchorKey.publicKey(),
     });
 
-    await expect(client.token()).rejects.toBeInstanceOf(Sep10ChallengeRejectedError);
+    await expect(client.token()).rejects.toBeInstanceOf(
+      Sep10ChallengeRejectedError,
+    );
     expect(posted).toHaveLength(0);
   });
 
@@ -112,7 +123,10 @@ describe("Sep10Client challenge verification", () => {
     // It is a downgrade, logged as one — but refusing outright would take the
     // off-ramp down for anchors that have always worked.
     const { posted } = stubAnchor(challengeFrom(impostorKey));
-    const client = new Sep10Client(sellerKey, { baseUrl: WEB_AUTH, homeDomain: HOME_DOMAIN });
+    const client = new Sep10Client(sellerKey, {
+      baseUrl: WEB_AUTH,
+      homeDomain: HOME_DOMAIN,
+    });
 
     await expect(client.token()).resolves.toBeTruthy();
     expect(posted).toHaveLength(1);

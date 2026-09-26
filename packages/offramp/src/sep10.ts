@@ -1,4 +1,9 @@
-import { Keypair, Transaction, TransactionBuilder, WebAuth } from "@stellar/stellar-sdk";
+import {
+  Keypair,
+  Transaction,
+  TransactionBuilder,
+  WebAuth,
+} from "@stellar/stellar-sdk";
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 
@@ -46,7 +51,10 @@ export class Sep10Client {
     private readonly opts: Sep10Options,
     logger?: Logger,
   ) {
-    this.logger = (logger ?? NOOP_LOGGER).child({ component: "sep10", baseUrl: opts.baseUrl });
+    this.logger = (logger ?? NOOP_LOGGER).child({
+      component: "sep10",
+      baseUrl: opts.baseUrl,
+    });
   }
 
   get publicKey(): string {
@@ -72,11 +80,23 @@ export class Sep10Client {
     challengeUrl.searchParams.set("home_domain", this.opts.homeDomain);
 
     const t0 = Date.now();
-    child.info({ event: "anchor.sep10.challenge.start" }, "fetching SEP-10 challenge");
+    child.info(
+      { event: "anchor.sep10.challenge.start" },
+      "fetching SEP-10 challenge",
+    );
     const challengeRes = await fetch(challengeUrl);
     if (!challengeRes.ok) {
-      child.warn({ event: "anchor.sep10.challenge.fail", statusCode: challengeRes.status, durationMs: Date.now() - t0 }, "SEP-10 challenge failed");
-      throw new Error(`SEP-10 challenge fetch failed: ${challengeRes.status} ${await challengeRes.text()}`);
+      child.warn(
+        {
+          event: "anchor.sep10.challenge.fail",
+          statusCode: challengeRes.status,
+          durationMs: Date.now() - t0,
+        },
+        "SEP-10 challenge failed",
+      );
+      throw new Error(
+        `SEP-10 challenge fetch failed: ${challengeRes.status} ${await challengeRes.text()}`,
+      );
     }
     const { transaction, network_passphrase } = (await challengeRes.json()) as {
       transaction: string;
@@ -107,10 +127,15 @@ export class Sep10Client {
         );
       } catch (err) {
         child.warn(
-          { event: "anchor.sep10.challenge.rejected", reason: err instanceof Error ? err.message : String(err) },
+          {
+            event: "anchor.sep10.challenge.rejected",
+            reason: err instanceof Error ? err.message : String(err),
+          },
           "SEP-10 challenge failed verification; refusing to sign",
         );
-        throw new Sep10ChallengeRejectedError(err instanceof Error ? err.message : String(err));
+        throw new Sep10ChallengeRejectedError(
+          err instanceof Error ? err.message : String(err),
+        );
       }
     } else {
       // Reachable only when SEP-1 discovery failed or the anchor omits
@@ -130,8 +155,17 @@ export class Sep10Client {
       body: JSON.stringify({ transaction: tx.toXDR() }),
     });
     if (!authRes.ok) {
-      child.warn({ event: "anchor.sep10.auth.fail", statusCode: authRes.status, durationMs: Date.now() - t1 }, "SEP-10 auth submit failed");
-      throw new Error(`SEP-10 auth submit failed: ${authRes.status} ${await authRes.text()}`);
+      child.warn(
+        {
+          event: "anchor.sep10.auth.fail",
+          statusCode: authRes.status,
+          durationMs: Date.now() - t1,
+        },
+        "SEP-10 auth submit failed",
+      );
+      throw new Error(
+        `SEP-10 auth submit failed: ${authRes.status} ${await authRes.text()}`,
+      );
     }
     const { token } = (await authRes.json()) as { token: string };
     const exp = decodeJwtExp(token);
@@ -157,7 +191,9 @@ function decodeJwtExp(token: string): number {
   const payload = token.split(".")[1];
   if (!payload) return fallback;
   try {
-    const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: number };
+    const json = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8"),
+    ) as { exp?: number };
     return json.exp ?? fallback;
   } catch {
     return fallback;

@@ -27,7 +27,9 @@ export interface Sep12CustomerResult {
   message: string | null;
 }
 
-function toFieldSpecs(fields: Record<string, RawFieldSpec> | undefined): KycFieldSpec[] {
+function toFieldSpecs(
+  fields: Record<string, RawFieldSpec> | undefined,
+): KycFieldSpec[] {
   if (!fields) return [];
   return Object.entries(fields).map(([name, spec]) => ({
     name,
@@ -42,7 +44,12 @@ function toKycStatus(status: string): KycStatus {
   // ACCEPTED / REJECTED / NEEDS_INFO / PROCESSING are the SEP-12 statuses we
   // model; anything else (e.g. NEEDS_VERIFICATION) is treated as PROCESSING —
   // still not cleared to cash out, but not a hard rejection either.
-  if (status === "ACCEPTED" || status === "REJECTED" || status === "NEEDS_INFO" || status === "PROCESSING") {
+  if (
+    status === "ACCEPTED" ||
+    status === "REJECTED" ||
+    status === "NEEDS_INFO" ||
+    status === "PROCESSING"
+  ) {
     return status;
   }
   return "PROCESSING";
@@ -65,10 +72,17 @@ export async function getSep12Customer(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (res.status === 404) {
     // No customer record yet — every field is required, nothing on file.
-    return { customerId: null, status: "unsubmitted" as KycStatus, requiredFields: [], message: null };
+    return {
+      customerId: null,
+      status: "unsubmitted" as KycStatus,
+      requiredFields: [],
+      message: null,
+    };
   }
   if (!res.ok) {
-    throw new Error(`SEP-12 customer GET failed: ${res.status} ${await res.text()}`);
+    throw new Error(
+      `SEP-12 customer GET failed: ${res.status} ${await res.text()}`,
+    );
   }
   const body = (await res.json()) as RawGetCustomerResponse;
   return {
@@ -83,18 +97,29 @@ export async function getSep12Customer(
 export async function putSep12Customer(
   baseUrl: string,
   jwt: string,
-  params: { account: string; customerId?: string | null; fields: Record<string, string> },
+  params: {
+    account: string;
+    customerId?: string | null;
+    fields: Record<string, string>;
+  },
 ): Promise<{ customerId: string }> {
   const res = await fetch(new URL("/sep12/customer", baseUrl), {
     method: "PUT",
-    headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${jwt}`,
+    },
     body: JSON.stringify({
-      ...(params.customerId ? { id: params.customerId } : { account: params.account }),
+      ...(params.customerId
+        ? { id: params.customerId }
+        : { account: params.account }),
       ...params.fields,
     }),
   });
   if (!res.ok) {
-    throw new Error(`SEP-12 customer PUT failed: ${res.status} ${await res.text()}`);
+    throw new Error(
+      `SEP-12 customer PUT failed: ${res.status} ${await res.text()}`,
+    );
   }
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };

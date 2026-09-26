@@ -1,4 +1,11 @@
-import { Asset, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import {
+  Asset,
+  Horizon,
+  Keypair,
+  Memo,
+  Operation,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
 import { OffRampJobNotFoundError } from "@checkout/core";
 import type {
   AssetRef,
@@ -12,7 +19,12 @@ import type {
   SellerPayoutRef,
 } from "@checkout/core";
 import { getSep38Quote } from "./sep38";
-import { Sep24Client, type Sep24Transaction } from "./sep24";
+import {
+  getSep24Info,
+  validateSep24Withdraw,
+  Sep24Client,
+  type Sep24Transaction,
+} from "./sep24";
 
 export interface AnchorOptions {
   homeDomain: string;
@@ -45,13 +57,15 @@ interface StoredJob {
   targetCurrency: string;
   targetAmount: string;
   rate: string;
+  amountFee?: string;
   sendTxHash?: string;
   sending?: boolean;
 }
 
 export function mapSep24Status(status: string): OffRampJobStatus {
   if (status === "completed") return "settled";
-  if (status === "error" || status === "refunded" || status === "expired") return "failed";
+  if (status === "error" || status === "refunded" || status === "expired")
+    return "failed";
   // pending_user_transfer_start, pending_anchor, pending_external, pending_user_info_required, incomplete
   return "pending";
 }
@@ -103,37 +117,101 @@ export class AnchorOffRamp implements OffRampPort {
     targetCurrency: string;
   }): Promise<OffRampQuote> {
     const discovery = await this.sep24.getDiscoveryInfo();
-    const token = await this.sep24["getAuthToken"]();
+    const info = await getSep24Info(discovery.transferServerSep24);
+    const assetInfo = validateSep24Withdraw(
+      info,
+      input.sourceAsset.code,
+      input.sourceAmount,
+    );
 
-    const q = await getSep38Quote(discovery.anchorQuoteServer, token, {
+    let q: {
+      id: string;
+      price: string;
+      buyAmount: string;
+      expiresAt: string;
+    } | null = null;
+    if (discovery.anchorQuoteServer) {
+      try {
+        const token = await this.sep24["getAuthToken"]();
+        q = await getSep38Quote(discovery.anchorQuoteServer, token, {
+          sellAsset: input.sourceAsset,
+          sellAmount: input.sourceAmount,
+          buyCurrency: input.targetCurrency,
+        });
+      } catch (err) {
+        q = null;
+      }
+    }
+
+    if (q) {
+      this.quotes.set(q.id, {
+        sellAsset: input.sourceAsset,
+        sellAmount: input.sourceAmount,
+        buyCurrency: input.targetCurrency,
+        price: q.price,
+      });
+
+      // Gross is what sourceAmount converts to at the quoted rate; buyAmount is
+      // what the anchor actually pays out — the difference is its fee (issue 1.5).
+      const grossTargetAmount = (
+        Number(input.sourceAmount) / Number(q.price)
+      ).toFixed(4);
+      const netTargetAmount = q.buyAmount;
+      const feeAmount = (
+        Number(grossTargetAmount) - Number(netTargetAmount)
+      ).toFixed(4);
+
+      return {
+        quoteId: q.id,
+        sourceAsset: input.sourceAsset,
+        sourceAmount: input.sourceAmount,
+        targetCurrency: input.targetCurrency,
+        targetAmount: grossTargetAmount,
+        rate: q.price,
+        expiresAt: Date.parse(q.expiresAt),
+        fee: {
+          amount: feeAmount,
+          currency: input.targetCurrency,
+          source: "anchor",
+        },
+        netTargetAmount,
+      };
+    }
+
+    // No SEP-38 quote available: compute estimated fee from SEP-24 /info
+    const amountNum = Number(input.sourceAmount);
+    const feeFixed = assetInfo.feeFixed ?? 0;
+    const feePercent = assetInfo.feePercent ?? 0;
+    const feeMin = assetInfo.feeMinimum ?? 0;
+    const computedFee = Math.max(
+      feeMin,
+      feeFixed + (amountNum * feePercent) / 100,
+    );
+    const feeAmount = computedFee.toFixed(4);
+    const netSourceAmount = Math.max(0, amountNum - computedFee).toFixed(4);
+
+    const syntheticId = `sep24-est-${Date.now()}`;
+    this.quotes.set(syntheticId, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
+      price: "1.0",
     });
-
-    this.quotes.set(q.id, {
-      sellAsset: input.sourceAsset,
-      sellAmount: input.sourceAmount,
-      buyCurrency: input.targetCurrency,
-      price: q.price,
-    });
-
-    // Gross is what sourceAmount converts to at the quoted rate; buyAmount is
-    // what the anchor actually pays out — the difference is its fee (issue 1.5).
-    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
-    const netTargetAmount = q.buyAmount;
-    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
 
     return {
-      quoteId: q.id,
+      quoteId: syntheticId,
       sourceAsset: input.sourceAsset,
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
-      targetAmount: grossTargetAmount,
-      rate: q.price,
-      expiresAt: Date.parse(q.expiresAt),
-      fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
-      netTargetAmount,
+      targetAmount: input.sourceAmount,
+      rate: "1.0",
+      expiresAt: Date.now() + 5 * 60_000,
+      fee: {
+        amount: feeAmount,
+        currency: input.sourceAsset.code,
+        source: "estimated",
+      },
+      netTargetAmount: netSourceAmount,
     };
   }
 
@@ -182,8 +260,18 @@ export class AnchorOffRamp implements OffRampPort {
 
     const tx: Sep24Transaction = await this.sep24.getTransaction(jobId);
 
+    if (tx.amountFee) {
+      stored.amountFee = tx.amountFee;
+    }
+
     // Handle Send Leg if anchor is waiting for user transfer
-    if (tx.status === "pending_user_transfer_start" && !stored.sendTxHash && !stored.sending && tx.withdrawAnchorAccount && tx.withdrawMemo) {
+    if (
+      tx.status === "pending_user_transfer_start" &&
+      !stored.sendTxHash &&
+      !stored.sending &&
+      tx.withdrawAnchorAccount &&
+      tx.withdrawMemo
+    ) {
       stored.sending = true;
       try {
         const hash = await this.sendWithdrawalPayment(
@@ -191,11 +279,14 @@ export class AnchorOffRamp implements OffRampPort {
           tx.withdrawMemo,
           tx.withdrawMemoType || "text",
           tx.amountIn || "0",
-          stored.sellAsset
+          stored.sellAsset,
         );
         stored.sendTxHash = hash;
       } catch (err) {
-        console.error("Failed to send on-chain withdrawal payment to anchor:", err);
+        console.error(
+          "Failed to send on-chain withdrawal payment to anchor:",
+          err,
+        );
       } finally {
         stored.sending = false;
       }
@@ -219,7 +310,7 @@ export class AnchorOffRamp implements OffRampPort {
     memoStr: string,
     memoType: string,
     amount: string,
-    sellAsset: AssetRef
+    sellAsset: AssetRef,
   ): Promise<string> {
     const server = new Horizon.Server(this.horizonUrl);
     const account = await server.loadAccount(this.sellerKeypair.publicKey());
@@ -251,7 +342,7 @@ export class AnchorOffRamp implements OffRampPort {
           destination,
           asset,
           amount,
-        })
+        }),
       )
       .addMemo(memo)
       .setTimeout(30)

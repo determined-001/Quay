@@ -6,7 +6,10 @@ const JWT = "jwt-token";
 const ACCOUNT = "GDEST0000000000000000000000000000000000000000000000000000";
 
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 afterEach(() => {
@@ -26,7 +29,11 @@ describe("putSep12Customer", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(body).toEqual({ account: ACCOUNT, first_name: "Ada", email_address: "ada@example.org" });
+    expect(body).toEqual({
+      account: ACCOUNT,
+      first_name: "Ada",
+      email_address: "ada@example.org",
+    });
     // No literal placeholder value ever appears in the outgoing request body.
     const raw = init.body as string;
     expect(raw).not.toContain("Demo");
@@ -48,7 +55,11 @@ describe("putSep12Customer", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_1", fields: { first_name: "Ada" } });
+    await putSep12Customer(BASE_URL, JWT, {
+      account: ACCOUNT,
+      customerId: "cust_1",
+      fields: { first_name: "Ada" },
+    });
 
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     const body = JSON.parse(init.body as string);
@@ -57,16 +68,29 @@ describe("putSep12Customer", () => {
   });
 
   it("throws with the anchor's response text on a non-OK PUT", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("nope", { status: 400 })));
-    await expect(putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {} })).rejects.toThrow(/400/);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("nope", { status: 400 })),
+    );
+    await expect(
+      putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {} }),
+    ).rejects.toThrow(/400/);
   });
 });
 
 describe("getSep12Customer", () => {
   it("reports unsubmitted (no fields known yet) on a 404", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("not found", { status: 404 })),
+    );
     const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
-    expect(result).toEqual({ customerId: null, status: "unsubmitted", requiredFields: [], message: null });
+    expect(result).toEqual({
+      customerId: null,
+      status: "unsubmitted",
+      requiredFields: [],
+      message: null,
+    });
   });
 
   it("parses required fields, status, and message verbatim", async () => {
@@ -78,7 +102,11 @@ describe("getSep12Customer", () => {
           status: "NEEDS_INFO",
           fields: {
             first_name: { type: "string", optional: false },
-            middle_name: { type: "string", optional: true, description: "Optional middle name" },
+            middle_name: {
+              type: "string",
+              optional: true,
+              description: "Optional middle name",
+            },
           },
           message: "please provide your legal name",
         }),
@@ -90,7 +118,13 @@ describe("getSep12Customer", () => {
     expect(result.status).toBe("NEEDS_INFO");
     expect(result.message).toBe("please provide your legal name");
     expect(result.requiredFields).toEqual([
-      { name: "first_name", type: "string", optional: false, description: undefined, choices: undefined },
+      {
+        name: "first_name",
+        type: "string",
+        optional: false,
+        description: undefined,
+        choices: undefined,
+      },
       {
         name: "middle_name",
         type: "string",
@@ -104,10 +138,17 @@ describe("getSep12Customer", () => {
   it("queries by id when a customerId is known, else by account", async () => {
     // A fresh Response per call — a Response body can only be read once, and
     // both calls below get their body consumed by getSep12Customer's res.json().
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ status: "ACCEPTED" })));
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(jsonResponse({ status: "ACCEPTED" })),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
-    await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_1" });
+    await getSep12Customer(BASE_URL, JWT, {
+      account: ACCOUNT,
+      customerId: "cust_1",
+    });
     const [urlWithId] = fetchMock.mock.calls[0] as [URL];
     expect(urlWithId.searchParams.get("id")).toBe("cust_1");
     expect(urlWithId.searchParams.get("account")).toBeNull();

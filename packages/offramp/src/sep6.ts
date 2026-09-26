@@ -42,7 +42,10 @@ export async function getSep6WithdrawInfo(
       string,
       {
         enabled?: boolean;
-        fields?: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
+        fields?: Record<
+          string,
+          { description?: string; optional?: boolean; choices?: string[] }
+        >;
       }
     >;
   };
@@ -72,7 +75,10 @@ export async function getSep6WithdrawInfo(
 
 /** One withdrawal type (`bank_account`, `cash`, …) under an asset. */
 export interface Sep6WithdrawType {
-  fields: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
+  fields: Record<
+    string,
+    { description?: string; optional?: boolean; choices?: string[] }
+  >;
   /** Per-type bounds. When present these are tighter than the asset's own. */
   minAmount?: number;
   maxAmount?: number;
@@ -96,16 +102,20 @@ export interface Sep6Info {
  * limits so the caller can tell the seller what would be accepted rather than
  * just that this wasn't.
  */
-export class Sep6ValidationError extends Error {
+export class AnchorLimitError extends Error {
   constructor(
     message: string,
     readonly limits: { minAmount?: number; maxAmount?: number } = {},
     readonly availableTypes: string[] = [],
   ) {
     super(message);
-    this.name = "Sep6ValidationError";
+    this.name = "AnchorLimitError";
   }
 }
+
+/** Backward-compatible alias for AnchorLimitError. */
+export const Sep6ValidationError = AnchorLimitError;
+export type Sep6ValidationError = AnchorLimitError;
 
 const INFO_TTL_MS = 5 * 60_000;
 const infoCache = new Map<string, { at: number; info: Sep6Info }>();
@@ -115,14 +125,20 @@ const infoCache = new Map<string, { at: number; info: Sep6Info }>();
  * for 5 minutes. Capability discovery does not change between two cash-outs a
  * minute apart, and an anchor should not be polled once per checkout for it.
  */
-export async function getSep6Info(baseUrl: string, logger?: Logger): Promise<Sep6Info> {
+export async function getSep6Info(
+  baseUrl: string,
+  logger?: Logger,
+): Promise<Sep6Info> {
   const cached = infoCache.get(baseUrl);
   if (cached && Date.now() - cached.at < INFO_TTL_MS) return cached.info;
 
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep6", baseUrl });
   const res = await fetch(endpointUrl(baseUrl, "info"));
   if (!res.ok) {
-    log.warn({ event: "anchor.sep6.info.fail", statusCode: res.status }, "SEP-6 /info failed");
+    log.warn(
+      { event: "anchor.sep6.info.fail", statusCode: res.status },
+      "SEP-6 /info failed",
+    );
     throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
   }
 
@@ -138,7 +154,10 @@ export async function getSep6Info(baseUrl: string, logger?: Logger): Promise<Sep
         types?: Record<
           string,
           {
-            fields?: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
+            fields?: Record<
+              string,
+              { description?: string; optional?: boolean; choices?: string[] }
+            >;
             min_amount?: number;
             max_amount?: number;
           }
@@ -208,7 +227,9 @@ export async function resolveWithdrawType(
     );
   }
   if (!asset.enabled) {
-    throw new Sep6ValidationError(`Anchor has withdrawal of ${assetCode} disabled`);
+    throw new Sep6ValidationError(
+      `Anchor has withdrawal of ${assetCode} disabled`,
+    );
   }
 
   const typeNames = Object.keys(asset.types);
@@ -242,7 +263,11 @@ export async function resolveWithdrawType(
   const value = Number(amount);
 
   if (!Number.isFinite(value)) {
-    throw new Sep6ValidationError(`Amount "${amount}" is not a number`, { minAmount, maxAmount }, typeNames);
+    throw new Sep6ValidationError(
+      `Amount "${amount}" is not a number`,
+      { minAmount, maxAmount },
+      typeNames,
+    );
   }
   if (minAmount !== undefined && value < minAmount) {
     throw new Sep6ValidationError(
@@ -259,7 +284,12 @@ export async function resolveWithdrawType(
     );
   }
 
-  return { type, typeInfo, feeFixed: asset.feeFixed, feePercent: asset.feePercent };
+  return {
+    type,
+    typeInfo,
+    feeFixed: asset.feeFixed,
+    feePercent: asset.feePercent,
+  };
 }
 
 export interface Sep6TransactionResult {
@@ -305,13 +335,25 @@ export async function startSep6Withdraw(
   );
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
-    log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
+    log.warn(
+      {
+        event: "anchor.sep6.withdraw.fail",
+        statusCode: res.status,
+        durationMs: Date.now() - t0,
+      },
+      "SEP-6 withdraw failed",
+    );
     throw new Error(`SEP-6 withdraw failed: ${res.status} ${await res.text()}`);
   }
   const body = (await res.json()) as { id: string; account_id?: string };
   const out: Sep6WithdrawResult = { id: body.id, accountId: body.account_id };
   log.info(
-    { event: "anchor.sep6.withdraw.ok", withdrawId: out.id, accountId: out.accountId, durationMs: Date.now() - t0 },
+    {
+      event: "anchor.sep6.withdraw.ok",
+      withdrawId: out.id,
+      accountId: out.accountId,
+      durationMs: Date.now() - t0,
+    },
     "SEP-6 withdraw started",
   );
   return out;
@@ -323,18 +365,36 @@ export async function getSep6Transaction(
   id: string,
   logger?: Logger,
 ): Promise<Sep6TransactionResult> {
-  const log = (logger ?? NOOP_LOGGER).child({ component: "sep6", baseUrl, transactionId: id });
+  const log = (logger ?? NOOP_LOGGER).child({
+    component: "sep6",
+    baseUrl,
+    transactionId: id,
+  });
   const url = endpointUrl(baseUrl, "transaction");
   url.searchParams.set("id", id);
 
   const t0 = Date.now();
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
-    log.warn({ event: "anchor.sep6.status.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 transaction fetch failed");
-    throw new Error(`SEP-6 transaction fetch failed: ${res.status} ${await res.text()}`);
+    log.warn(
+      {
+        event: "anchor.sep6.status.fail",
+        statusCode: res.status,
+        durationMs: Date.now() - t0,
+      },
+      "SEP-6 transaction fetch failed",
+    );
+    throw new Error(
+      `SEP-6 transaction fetch failed: ${res.status} ${await res.text()}`,
+    );
   }
   const body = (await res.json()) as {
-    transaction: { id: string; status: string; amount_out?: string; message?: string };
+    transaction: {
+      id: string;
+      status: string;
+      amount_out?: string;
+      message?: string;
+    };
   };
   const out: Sep6TransactionResult = {
     id: body.transaction.id,
@@ -343,7 +403,12 @@ export async function getSep6Transaction(
     message: body.transaction.message,
   };
   log.info(
-    { event: "anchor.sep6.status.ok", status: out.status, amountOut: out.amountOut, durationMs: Date.now() - t0 },
+    {
+      event: "anchor.sep6.status.ok",
+      status: out.status,
+      amountOut: out.amountOut,
+      durationMs: Date.now() - t0,
+    },
     "SEP-6 transaction polled",
   );
   return out;

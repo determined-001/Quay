@@ -1,4 +1,8 @@
-import type { OffRampStateRepository, StoredOffRampJob, StoredOffRampQuote } from "@checkout/core";
+import type {
+  OffRampStateRepository,
+  StoredOffRampJob,
+  StoredOffRampQuote,
+} from "@checkout/core";
 
 /**
  * In-memory `OffRampStateRepository` for tests. Two adapter instances pointed
@@ -28,7 +32,12 @@ export class FakeOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<
+      Pick<
+        StoredOffRampJob,
+        "targetAmount" | "status" | "externalStatus" | "lastError"
+      >
+    >,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;

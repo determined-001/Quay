@@ -112,7 +112,10 @@ export async function fetchStellarToml(
   homeDomain: string,
   opts: FetchTomlOptions = {},
 ): Promise<Sep1DiscoveryInfo> {
-  const log = (opts.logger ?? NOOP_LOGGER).child({ component: "sep1", homeDomain });
+  const log = (opts.logger ?? NOOP_LOGGER).child({
+    component: "sep1",
+    homeDomain,
+  });
 
   if (!opts.force) {
     const hit = cache.get(homeDomain);
@@ -127,7 +130,10 @@ export async function fetchStellarToml(
     info = parseStellarToml(await res.text(), homeDomain);
   } catch (err) {
     log.warn(
-      { event: "anchor.sep1.fallback", reason: err instanceof Error ? err.message : String(err) },
+      {
+        event: "anchor.sep1.fallback",
+        reason: err instanceof Error ? err.message : String(err),
+      },
       "SEP-1 discovery failed; falling back to guessed endpoint paths",
     );
     return fallbackInfo(homeDomain);
@@ -138,7 +144,11 @@ export async function fetchStellarToml(
     info.networkPassphrase &&
     info.networkPassphrase !== opts.expectedNetworkPassphrase
   ) {
-    throw new Sep1NetworkMismatchError(homeDomain, info.networkPassphrase, opts.expectedNetworkPassphrase);
+    throw new Sep1NetworkMismatchError(
+      homeDomain,
+      info.networkPassphrase,
+      opts.expectedNetworkPassphrase,
+    );
   }
 
   cache.set(homeDomain, { at: Date.now(), info });
@@ -176,7 +186,10 @@ function fallbackInfo(homeDomain: string): Sep1DiscoveryInfo {
  * `code` of each `[[CURRENCIES]]` block. A full parser would be more surface
  * area for no more capability.
  */
-export function parseStellarToml(tomlText: string, homeDomain: string): Sep1DiscoveryInfo {
+export function parseStellarToml(
+  tomlText: string,
+  homeDomain: string,
+): Sep1DiscoveryInfo {
   const base = fallbackInfo(homeDomain);
   const info: Sep1DiscoveryInfo = { ...base, fallback: false };
   const currencies: string[] = [];

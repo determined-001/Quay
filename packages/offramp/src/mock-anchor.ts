@@ -67,7 +67,8 @@ const MOCK_PAYOUT_FIELDS: PayoutFieldDescriptor[] = [
   {
     name: "dest_extra",
     label: "Bank Code / Routing Info",
-    description: "Sort code, SWIFT/BIC, or mobile money provider code (if required).",
+    description:
+      "Sort code, SWIFT/BIC, or mobile money provider code (if required).",
     optional: true,
   },
 ];
@@ -98,7 +99,9 @@ export class MockAnchorOffRamp implements OffRampPort {
     this.quoteTtlMs = opts.quoteTtlMs ?? 5 * 60_000;
     this.settleAfterMs = opts.settleAfterMs ?? 8_000;
     this.alwaysFail = opts.alwaysFail ?? false;
-    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.mock" });
+    this.logger = (opts.logger ?? NOOP_LOGGER).child({
+      component: "offramp.mock",
+    });
   }
 
   /**
@@ -124,12 +127,19 @@ export class MockAnchorOffRamp implements OffRampPort {
    * Field descriptors for the mock anchor's cash-out form. Fixed set
    * mirroring what `initiate()` reads from `payout.fields` (issue #32).
    */
-  async offrampRequirements(_assetCode: string): Promise<PayoutFieldDescriptor[]> {
+  async offrampRequirements(
+    _assetCode: string,
+  ): Promise<PayoutFieldDescriptor[]> {
     return MOCK_PAYOUT_FIELDS;
   }
 
   async quote(
-    input: { linkId: string; sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    input: {
+      linkId: string;
+      sourceAsset: AssetRef;
+      sourceAmount: string;
+      targetCurrency: string;
+    },
     opts: { logger?: Logger } = {},
   ): Promise<OffRampQuote> {
     const log = opts.logger ?? this.logger;
@@ -139,7 +149,9 @@ export class MockAnchorOffRamp implements OffRampPort {
     }
     const targetAmount = (Number(input.sourceAmount) * rate).toFixed(2);
     const feeAmount = (Number(targetAmount) * 0.01).toFixed(2);
-    const netTargetAmount = (Number(targetAmount) - Number(feeAmount)).toFixed(2);
+    const netTargetAmount = (Number(targetAmount) - Number(feeAmount)).toFixed(
+      2,
+    );
 
     const quoteId = id("quote");
     const now = Date.now();
@@ -156,7 +168,15 @@ export class MockAnchorOffRamp implements OffRampPort {
       createdAt: now,
     });
 
-    log.info({ event: "anchor.mock.quote", quoteId, targetCurrency: input.targetCurrency, targetAmount }, "mock quote");
+    log.info(
+      {
+        event: "anchor.mock.quote",
+        quoteId,
+        targetCurrency: input.targetCurrency,
+        targetAmount,
+      },
+      "mock quote",
+    );
     return {
       quoteId,
       sourceAsset: input.sourceAsset,
@@ -165,7 +185,11 @@ export class MockAnchorOffRamp implements OffRampPort {
       targetAmount,
       rate: String(rate),
       expiresAt,
-      fee: { amount: feeAmount, currency: input.targetCurrency, source: "estimated" },
+      fee: {
+        amount: feeAmount,
+        currency: input.targetCurrency,
+        source: "estimated",
+      },
       netTargetAmount,
     };
   }
@@ -199,22 +223,35 @@ export class MockAnchorOffRamp implements OffRampPort {
       updatedAt: now,
     });
 
-    log.info({ event: "anchor.mock.initiate", jobId, linkId: input.linkId }, "mock initiate");
+    log.info(
+      { event: "anchor.mock.initiate", jobId, linkId: input.linkId },
+      "mock initiate",
+    );
     return { kind: "fields", jobId };
   }
 
-  async status(jobId: string, opts: { logger?: Logger } = {}): Promise<OffRampJob> {
+  async status(
+    jobId: string,
+    opts: { logger?: Logger } = {},
+  ): Promise<OffRampJob> {
     const log = opts.logger ?? this.logger;
     const job = await this.state.getJob(jobId);
     if (!job) throw new OffRampJobNotFoundError(jobId);
 
     let status = job.status;
     let lastError = job.lastError;
-    if (status === "pending" && Date.now() - job.createdAt >= this.settleAfterMs) {
+    if (
+      status === "pending" &&
+      Date.now() - job.createdAt >= this.settleAfterMs
+    ) {
       status = this.alwaysFail ? "failed" : "settled";
-      lastError = status === "failed" ? "mock anchor: simulated payout failure" : null;
+      lastError =
+        status === "failed" ? "mock anchor: simulated payout failure" : null;
       await this.state.updateJob(jobId, { status, lastError });
-      log.info({ event: "anchor.mock.status.transition", jobId, status }, "mock status transition");
+      log.info(
+        { event: "anchor.mock.status.transition", jobId, status },
+        "mock status transition",
+      );
     }
 
     return {
