@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { endpointUrl } from "../src/sep24";
+// Issue #207: `endpointUrl` lives in sep1.ts. The deleted sep24.ts only
+// re-exported it, so this regression cover — the nightly anchor probe 404ing
+// because `new URL("/transaction", base)` throws the base path away (issue
+// #117) — is unchanged in substance and now imports it from its real home.
+import { endpointUrl } from "../src/sep1";
 
 // Regression cover for the nightly anchor probe's SEP-24 failure (issue #117):
 // every SEP-24 call went to the anchor's origin instead of its transfer server,

@@ -109,9 +109,10 @@ pnpm test                         # unit tests
 pnpm build                        # builds the web app
 pnpm docs:check-status-diagram    # docs/generated/status-diagram.mmd matches status.ts
 pnpm docs:check-domain-boundary   # packages/core imports no chain SDK
+pnpm check:no-server-signing      # no server-held key signs a payment or anchor challenge
 ```
 
-All five must pass. If you change domain logic in `packages/core`, add or update
+All six must pass. If you change domain logic in `packages/core`, add or update
 the corresponding unit tests (`packages/core/test/`). New behaviour in the API,
 worker, or adapters should come with tests where practical. If you change
 `LINK_STATUSES`/`TRANSITIONS` in `packages/core/src/domain/status.ts`, run

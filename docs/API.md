@@ -154,7 +154,8 @@ already used, or the transaction doesn't match what we issued.
 [SEP-1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)
 descriptor advertising `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`, and `NETWORK_PASSPHRASE`
 so wallets can discover this service's SEP-10 endpoint — the server-side mirror of
-how `packages/offramp/src/sep10.ts` discovers anchors.
+how `SellerAnchorAuth` (`packages/offramp/src/anchor-session.ts`) discovers an anchor
+and verifies its challenge before the seller's wallet signs it.
 
 ---
 
@@ -268,7 +269,8 @@ the `session` cookie.
 [SEP-1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)
 descriptor advertising `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`, and `NETWORK_PASSPHRASE`
 so wallets can discover this service's SEP-10 endpoint — the server-side mirror of
-how `packages/offramp/src/sep10.ts` discovers anchors.
+how `SellerAnchorAuth` (`packages/offramp/src/anchor-session.ts`) discovers an anchor
+and verifies its challenge before the seller's wallet signs it.
 
 ---
 
