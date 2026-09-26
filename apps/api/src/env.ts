@@ -283,4 +283,6 @@ export const env = {
   // and "none" has no KYC lifecycle to store PII for.
   kycEncryptionKey:
     offramp === "testanchor" || offramp === "anchor" ? req("KYC_ENCRYPTION_KEY") : undefined,
+  // Maximum allowed size (bytes) for multipart KYC file uploads (default 10 MiB).
+  kycMaxUploadBytes: num("KYC_MAX_UPLOAD_BYTES", 10 * 1024 * 1024),
 } as const;
