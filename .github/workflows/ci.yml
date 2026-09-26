@@ -81,6 +81,41 @@ jobs:
           set -e
           python3 .github/scripts/check-audit-allowlist.py audit.json .github/audit-allowlist.txt
 
+  # The payment loop, end to end, against a locally-composed stack (issue
+  # 5.7): API + web + in-memory DB, ledger watcher disabled — the job makes
+  # no outbound network calls beyond installing its own toolchain. The @live
+  # suite against the deployed demo runs separately (e2e-live.yml), nightly
+  # and on demand, so it can never block a merge.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @checkout/web exec playwright install --with-deps chromium
+
+      - name: E2E — payment loop (local stack, no network)
+        run: pnpm e2e
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: apps/web/test-results
+          retention-days: 7
+
   docker:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,60 @@
+name: e2e-live
+
+# The @live Playwright suite against the DEPLOYED demo (issue 5.7): /ready,
+# the stranger's checkout path, the public receipt, and the placeholder scan
+# over the rendered production HTML. Deliberately NOT on pull_request — it
+# checks the deployment, not the diff, so it must never block a merge. It is
+# the automated form of MAINTAINER.md's pre-entry sweep; `pnpm sweep` runs
+# the same suite locally.
+#
+# A failed scheduled run emails the last committer to this file (GitHub's
+# failed-run notification); route it wider with a repo notification rule.
+
+on:
+  schedule:
+    # Nightly, offset from the hour like uptime.yml so scheduled workflows
+    # on a free public repo don't all queue at :00.
+    - cron: "23 3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: e2e-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @checkout/web exec playwright install --with-deps chromium
+
+      # Defaults target the testnet demo (quay-api.onrender.com /
+      # quay-web.vercel.app). Override with repo Actions variables to point a
+      # fork's run at its own deployment.
+      - name: E2E — deployed stranger flow + placeholder scan
+        run: pnpm e2e:live
+        env:
+          E2E_LIVE_API_URL: ${{ vars.E2E_LIVE_API_URL }}
+          E2E_LIVE_WEB_URL: ${{ vars.E2E_LIVE_WEB_URL }}
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-live-traces
+          path: apps/web/test-results
+          retention-days: 7
