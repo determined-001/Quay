@@ -276,4 +276,8 @@ export const env = {
   // and "none" has no KYC lifecycle to store PII for.
   kycEncryptionKey:
     offramp === "testanchor" || offramp === "anchor" ? req("KYC_ENCRYPTION_KEY") : undefined,
+  // Retention window (days) for inactive seller KYC & identity data (NDPA compliance).
+  // Purges seller KYC and payout fields after N days without activity. Default 730 (2 years).
+  // Set to 0 to disable the retention purge.
+  kycRetentionDays: num("KYC_RETENTION_DAYS", 730),
 } as const;

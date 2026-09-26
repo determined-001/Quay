@@ -275,6 +275,10 @@ const watcherLagSeconds = registry.gauge(
   "watcher_lag_seconds",
   "Seconds since the watcher's last completed poll tick across all accounts.",
 );
+const kycRetentionPurgedTotal = registry.counter(
+  "quay_kyc_retention_purged_total",
+  "Total number of inactive sellers whose KYC and identity data was purged under the retention policy.",
+);
 
 export const metrics = {
   registry,
@@ -292,4 +296,5 @@ export const metrics = {
   webhookQueueDepth,
   circuitBreakerState,
   watcherLagSeconds,
+  kycRetentionPurgedTotal,
 };

@@ -57,6 +57,7 @@ export function authRoutes(deps: {
     }
 
     const seller = await deps.sellers.createIfAbsent(account);
+    await deps.sellers.touchLastActive?.(seller.id);
     const { token, expiresAt } = await deps.session.issue({ sub: account, sellerId: seller.id });
 
     // SameSite: the dashboard and this API are on different registrable

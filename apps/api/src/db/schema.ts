@@ -11,6 +11,7 @@ export const sellers = sqliteTable("sellers", {
    * completes their first cash-out.
    */
   payoutFieldsJson: text("payout_fields_json"),
+  lastActiveAt: integer("last_active_at"),
   createdAt: integer("created_at").notNull(),
 });
 

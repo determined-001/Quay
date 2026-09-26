@@ -544,6 +544,8 @@ export interface Seller {
    * sensitive — never logged or included in webhook payloads.
    */
   payoutFields: Record<string, string> | null;
+  /** Timestamp (epoch ms) of the seller's most recent activity. */
+  lastActiveAt?: number | null;
   createdAt: number;
 }
 
@@ -561,6 +563,8 @@ export interface SellerRepository {
   /** Persist the seller's last-used payout destination fields for reuse on the
    *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
   savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
+  /** Update last active timestamp with hourly throttling. */
+  touchLastActive?(sellerId: string, now?: number, throttleMs?: number): Promise<void>;
 }
 
 /**
