@@ -151,6 +151,8 @@ payment operation, and each dedupes independently (issue 4.11).
 
 ### 3. Cash-out — SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, today's real adapter)
 
+For security boundaries, attack paths and the failure branches of this flow, see the [seller-signed anchor threat model](THREAT-MODEL.md).
+
 The anchor's customer is always the **seller**, identified by their own wallet.
 Nothing in this flow is signed by a key the server holds: the seller's wallet
 signs the anchor's SEP-10 challenge (once, ahead of time) and the USDC transfer

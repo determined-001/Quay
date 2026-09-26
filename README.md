@@ -106,7 +106,7 @@ curl -X POST https://quay-api.onrender.com/links \
   "link": {
     "id": "lnk_123",
     "reference": "ref_abc",
-    "status": "pending",
+    "status": "active",
     "title": "T-shirt",
     "amount": "10.50",
     "asset": { "code": "USDC", "issuer": "GBBD456..." },
@@ -162,9 +162,52 @@ So two deliberate boundaries are baked into the architecture:
   flip to `inline` until a licensed anchor relationship and a compliance story are real.
 
 - **Ports-and-adapters everywhere.** The domain never imports a chain SDK. `RailPort`,
-  `WatcherPort`, and `OffRampPort` are the seams. Today: a Stellar (SEP-7 + Horizon) rail and a
-  mock anchor. Tomorrow: the same `PaymentIntent` spine behind an `adapter-gateway` (Arc/Circle)
-  or a different chain — without touching the domain or the worker.
+  `WatcherPort`, and `OffRampPort` are the seams. Today: a Stellar (SEP-7 + Horizon) rail and
+  three off-ramp adapters — a real SEP-10/38/6 flow against the testnet reference anchor, a mock
+  for offline dev, and a disabled mode for mainnet. Tomorrow: the same `PaymentIntent` spine
+  behind an `adapter-gateway` (Arc/Circle) or a different chain — without touching the domain or
+  the worker.
+
+---
+
+## Custody model
+
+"Non-custodial" should be a claim you can check, not one you have to trust.
+This is everything the Quay server holds, where it lives in the code, and what
+it can do — verify each row against the cited file:
+
+| Held by the server | Where | Can it move a seller's funds? |
+| --- | --- | --- |
+| `SERVER_SIGNING_SECRET` — signs SEP-10 *login* challenges for the dashboard | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`serverSigningSecret`), used in [`apps/api/src/services/container.ts`](apps/api/src/services/container.ts) | **No.** It is an identity key for authentication; it is not a signer on any seller account |
+| `JWT_SECRET` — signs Quay session JWTs | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`jwtSecret`) | **No** |
+| Each seller's anchor SEP-10 JWT, AES-256-GCM encrypted at rest | `anchor_sessions.token_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts); encryption in [`apps/api/src/repos/index.ts`](apps/api/src/repos/index.ts) | **No.** See the paragraph below for exactly what it can do |
+| Seller SEP-12 KYC fields, encrypted with `KYC_ENCRYPTION_KEY` | `kyc_records.fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
+| Seller payout fields (bank details) | `sellers.payout_fields_json` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) — currently plaintext, masked in the dashboard; encrypting it at rest is tracked in [#245](https://github.com/determined-001/Quay/issues/245) | **No** |
+| Webhook signing secrets (current and previous), encrypted | `webhooks.secret_encrypted` / `previous_secret_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
+
+The rule all of this adds up to: **no key on the server can sign a payment
+from a seller's account or a withdrawal transfer — sellers sign with their own
+wallet**, in the browser
+([`apps/web/lib/wallet.ts`](apps/web/lib/wallet.ts), `sendAnchorTransfer`).
+
+The one credential that deserves elaboration is the **anchor SEP-10 JWT**. It
+can read and update the seller's KYC record at the anchor and *start* a
+withdrawal (SEP-6), which yields payment instructions. It cannot move money:
+the on-chain leg of a cash-out is a Stellar transaction that only the seller's
+wallet can sign. The token is also never returned to the browser — the API
+relays the anchor challenge for the seller's wallet to sign, then keeps the
+resulting JWT server-side, encrypted
+([`apps/api/src/routes/anchor-auth.ts`](apps/api/src/routes/anchor-auth.ts)).
+
+You can check the core claim without trusting this README or this service:
+the mainnet transaction linked at the top of this file shows the buyer's
+wallet paying the seller's wallet directly, with no intermediate account. That
+is the whole payment path — checkout pages expose the seller's own
+`destination` address ([`apps/api/src/routes/links.ts`](apps/api/src/routes/links.ts),
+`toCheckoutView`) and buyers pay it straight from their wallet.
+
+Threat handling and reporting live in [`SECURITY.md`](SECURITY.md); the full
+component and flow detail is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -173,9 +216,13 @@ So two deliberate boundaries are baked into the architecture:
 ```
 packages/
   core/        Domain brain — entities, status machine, money math, SEP-7 builder,
-               the pure payment matcher, port interfaces, zod schemas.  (29 unit tests)
+               the pure payment matcher, port interfaces, zod schemas.
   stellar/     Stellar adapter — SEP-7 rail + Horizon polling watcher (RailPort/WatcherPort).
-  offramp/     Off-ramp adapter — MockAnchorOffRamp (OffRampPort, seller_initiated).  *** mock ***
+  offramp/     Off-ramp adapters (OffRampPort, seller_initiated) — TestAnchorOffRamp
+               (real SEP-10 → SEP-38 → SEP-6 against testanchor.stellar.org), MockAnchorOffRamp
+               (offline dev), DisabledOffRamp (mainnet), plus TestAnchorKyc (SEP-12) and
+               SellerAnchorAuth (per-seller SEP-10 anchor sessions).
+  widget/      Source of the embeddable checkout widget (built and served as widget.js).
 apps/
   api/         Hono API + Drizzle (libSQL) + the ledger-watching worker.
   web/         Next.js (App Router) seller dashboard + buyer checkout page + widget.js.
@@ -219,13 +266,15 @@ report.
 
 Then: open the dashboard, create a link, open its checkout page, and pay the displayed amount
 of USDC **with the shown memo** from any Stellar testnet wallet. Within a poll interval the
-dashboard flips the link to **paid**; hit **Cash out to NGN** to exercise the off-ramp seam.
+dashboard flips the link to **paid**; hit the **Cash out** button to exercise the off-ramp seam
+(labelled with `NEXT_PUBLIC_OFFRAMP_CURRENCY` — NGN with the default `OFFRAMP=mock`; set it to
+USD when `OFFRAMP=testanchor`, since the testnet anchor only quotes USDC against USD/CAD).
 
 Useful scripts (from the repo root):
 
 ```bash
 pnpm typecheck      # all packages
-pnpm test           # core unit tests
+pnpm test           # every package's test suite, via turbo
 pnpm test:coverage  # the same tests, with the CI coverage gate applied
 pnpm build          # builds the web app
 pnpm sweep          # pre-entry ritual: uptime + synthetic checks against the live demo
@@ -233,12 +282,12 @@ pnpm sweep          # pre-entry ritual: uptime + synthetic checks against the li
 
 **Coverage gating.** `pnpm test:coverage` fails if any package drops below the
 floor in its `vitest.config.ts`, and CI runs it on every push. Those floors are
-a *ratchet*: each was set to that package's measured coverage when gating landed
-(`packages/offramp` at 38%, for instance, is a statement of fact, not of
-approval). Raise a floor when you raise the coverage; never lower one to make a
-build pass — that is the single move the gate exists to prevent. The run also
-uploads an HTML report as a CI artifact and prints a per-package table to the
-job summary.
+a *ratchet*: each was set to that package's measured coverage when gating (or a
+later raise) landed — the per-package `vitest.config.ts` is the source of
+truth for the current numbers, so none are repeated here to drift. Raise a
+floor when you raise the coverage; never lower one to make a build pass — that
+is the single move the gate exists to prevent. The run also uploads an HTML
+report as a CI artifact and prints a per-package table to the job summary.
 
 ### Demo seed (pre-populated dashboard)
 
@@ -346,12 +395,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Build the wallet-connect UI.** SEP-10 login + session enforcement are both
-   real now (`/auth`, `requireSeller` on `/links` and `/webhooks`), but there's
-   no button anywhere to actually sign in — that needs a wallet-connect
-   integration (Stellar Wallets Kit or similar) calling `apps/web/lib/api.ts`'s
-   `getAuthChallenge`/`submitAuthChallenge`. Add API keys for programmatic access.
-5. **Multiple sellers / scale:** the watcher polls per active destination account; for many
+4. **Multiple sellers / scale:** the watcher polls per active destination account; for many
    sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
 
 > This README is engineering guidance, not legal advice. Money transmission is the box you do
@@ -363,10 +407,12 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 
 - **[Roadmap](ROADMAP.md)** — where this is going and why: the off-ramp as the actual product, who the buyer really is, and the parts that are built but undersold.
 - **[Architecture](docs/ARCHITECTURE.md)** — package graph, the three ports, sequence diagrams for each flow, the status machine, and how to add a new chain/anchor/rail.
+- **[Seller-signed anchor threat model](docs/THREAT-MODEL.md)** — assets, trust boundaries, implemented controls, failure paths, and open risks in anchor authentication and withdrawals.
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
-- **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, anchor outage, watcher-stuck, stuck off-ramp jobs, and the incident template.
+- **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, [anchor outage](docs/RUNBOOK.md#anchor-outage), [anchor incidents](docs/RUNBOOK.md#anchor-incidents), watcher-stuck, stuck off-ramp jobs, and the incident template.
 - **[Mainnet cutover](docs/MAINNET.md)** — choosing a production anchor, generating and funding real keys, the public-network guardrails and why each refuses to boot, and the pre-announcement verification list.
+- **[Anchor due diligence](docs/ANCHOR-DUE-DILIGENCE.md)** — custody, credential scope, seller data flows and storage, retention, and incident coordination for production anchors.
 - **[SCF Build proposal](docs/PROPOSAL.md)** — the problem, the wedge, milestones, budget, traction, and risk register.
 - **[Contributing](CONTRIBUTING.md)** — setup, the check suite, and PR guidelines.
 - **[Security policy](SECURITY.md)** — how to report a vulnerability privately.

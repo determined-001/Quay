@@ -13,7 +13,8 @@ const BOOTSTRAP_SQL = [
   // in ADDITIVE_MIGRATIONS below.
   `CREATE TABLE IF NOT EXISTS sellers (
      id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL UNIQUE,
-     payout_fields_json TEXT, payout_fields_encrypted TEXT, created_at INTEGER NOT NULL
+     payout_fields_json TEXT, payout_fields_encrypted TEXT,
+     profile_kind TEXT NOT NULL DEFAULT 'individual', created_at INTEGER NOT NULL
    )`,
   // New columns (offramp_indicative_rate, offramp_rate, offramp_rate_delta) are
   // included here so fresh databases get the full schema. Existing databases are
@@ -173,6 +174,7 @@ const ADDITIVE_MIGRATIONS = [
   `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
   // 4.34: encrypt seller payout fields at rest like KYC.
   `ALTER TABLE sellers ADD COLUMN payout_fields_encrypted TEXT`,
+  `ALTER TABLE sellers ADD COLUMN profile_kind TEXT NOT NULL DEFAULT 'individual'`,
   `ALTER TABLE link_payments ADD COLUMN ledger INTEGER`,
   // Per-seller anchor identity: which seller/account a withdrawal and a KYC
   // customer id belong to. Existing rows stay NULL — they were created under

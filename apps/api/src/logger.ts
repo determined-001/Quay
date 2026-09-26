@@ -1,4 +1,14 @@
 import { pino, type Logger as PinoLogger } from "pino";
+import { SEP9_SENSITIVE_FIELD_NAMES } from "@checkout/core";
+
+// SEP-9 field names are literal object keys. Pino interprets a bare dot as
+// object traversal, so bracket notation is required for organization.* keys.
+export function kycRedactionPaths(names: readonly string[]): string[] {
+  return names.flatMap((name) => {
+    const key = JSON.stringify(name);
+    return [`[${key}]`, `*[${key}]`];
+  });
+}
 
 /**
  * Redact paths applied to EVERY logged object. These are intentional floors,
@@ -46,14 +56,7 @@ export const REDACT_PATHS: string[] = [
   "payoutFieldsEncrypted",
   "*.payoutFieldsEncrypted",
   // SEP-12 KYC PII — every field is personal data
-  "first_name",
-  "last_name",
-  "email_address",
-  "address",
-  "*.first_name",
-  "*.last_name",
-  "*.email_address",
-  "*.address",
+  ...kycRedactionPaths(SEP9_SENSITIVE_FIELD_NAMES),
   "fields",
   "*.fields",
 ];

@@ -188,6 +188,7 @@ function makeUnusedSellerRepo(): SellerRepository {
       return null;
     },
     async savePayoutFields(): Promise<void> {},
+    async saveProfileKind(): Promise<void> {},
   };
 }
 
