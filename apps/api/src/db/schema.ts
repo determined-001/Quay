@@ -180,6 +180,7 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   status: text("status").notNull(),
   requiredFields: text("required_fields").notNull(), // JSON KycFieldSpec[] — not PII, just schema metadata
   fieldsEncrypted: text("fields_encrypted").notNull(), // AES-256-GCM blob of Record<string,string>
+  callbackTokenHash: text("callback_token_hash"),
   message: text("message"),
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),

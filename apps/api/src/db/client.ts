@@ -93,6 +93,7 @@ const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS seller_kyc (
      seller_id TEXT PRIMARY KEY, account TEXT, customer_id TEXT, status TEXT NOT NULL,
      required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
+     callback_token_hash TEXT,
      message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS anchor_sessions (
@@ -182,6 +183,8 @@ const ADDITIVE_MIGRATIONS = [
   `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
+  `ALTER TABLE seller_kyc ADD COLUMN callback_token_hash TEXT`,
+  `CREATE INDEX IF NOT EXISTS seller_kyc_callback_token_hash_idx ON seller_kyc (callback_token_hash)`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
   // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never
   // upgrades an existing table. `createIfAbsent` uses ON CONFLICT (wallet),

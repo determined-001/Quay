@@ -418,6 +418,8 @@ export interface KycRecord {
   /** Values we have on file for this seller. PII — never log, never put on a
    *  webhook payload or a `/links` response; encrypted at rest by the repo. */
   providedFields: Record<string, string>;
+  /** SHA-256 hash of the per-seller SEP-12 callback endpoint token. */
+  callbackTokenHash?: string | null;
   /** Anchor's status/rejection message, verbatim. */
   message: string | null;
   lastSyncedAt: number | null;
@@ -446,6 +448,7 @@ export interface KycPort {
  *  must be encrypted at rest by the implementation. */
 export interface KycRepository {
   get(sellerId: string): Promise<KycRecord | null>;
+  getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
 }
 

@@ -890,6 +890,7 @@ export class DrizzleKycRepository implements KycRepository {
       status: row.status as KycStatus,
       requiredFields: JSON.parse(row.requiredFields) as KycFieldSpec[],
       providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.piiKey)) as Record<string, string>,
+      callbackTokenHash: row.callbackTokenHash ?? null,
       message: row.message ?? null,
       lastSyncedAt: row.lastSyncedAt ?? null,
       updatedAt: row.updatedAt,
@@ -901,6 +902,11 @@ export class DrizzleKycRepository implements KycRepository {
     return rows[0] ? this.rowToRecord(rows[0]) : null;
   }
 
+  async getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null> {
+    const rows = await this.db.select().from(sellerKyc).where(eq(sellerKyc.callbackTokenHash, tokenHash)).limit(1);
+    return rows[0] ? this.rowToRecord(rows[0]) : null;
+  }
+
   async save(record: KycRecord): Promise<void> {
     const row = {
       sellerId: record.sellerId,
@@ -909,6 +915,7 @@ export class DrizzleKycRepository implements KycRepository {
       status: record.status,
       requiredFields: JSON.stringify(record.requiredFields),
       fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.piiKey),
+      callbackTokenHash: record.callbackTokenHash ?? null,
       message: record.message,
       lastSyncedAt: record.lastSyncedAt,
       updatedAt: record.updatedAt,
