@@ -7,6 +7,7 @@
 #   DATABASE_URL                    libsql://<db-name>-<org>.turso.io
 #   DATABASE_AUTH_TOKEN             from `turso db tokens create <db>` or the Turso dashboard
 #   KYC_ENCRYPTION_KEY              64 hex chars — REQUIRED whenever OFFRAMP=testanchor
+#   KYC_ENCRYPTION_KEY_PREVIOUS     comma-separated 64 hex chars — optional for key rotation
 #   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED in production
 #   JWT_SECRET                      session signing secret
 #   SERVER_SIGNING_SECRET           S... the platform's own stable SEP-10 identity
