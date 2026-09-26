@@ -899,28 +899,58 @@ export class LinkService {
     let initiation: OffRampInitiation;
     const t0 = Date.now();
     try {
-      quote = await fetchFreshQuote();
-
-      // Guard: reject quotes with unparsable or already-expired expiresAt.
-      if (isQuoteExpired(quote)) {
-        // One automatic re-quote in case of clock skew or a very short TTL.
-        quote = await fetchFreshQuote();
-        if (isQuoteExpired(quote)) {
-          throw new QuoteExpiredError(quote.quoteId);
+      if (body.quoteId) {
+        const stored = await this.deps.offrampState.getQuote(body.quoteId);
+        if (!stored) {
+          throw new HttpError(409, "quote_mismatch");
         }
+        if (stored.linkId !== link.id || stored.buyCurrency !== body.targetCurrency) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+        if (Number.isNaN(stored.expiresAt) || Date.now() >= stored.expiresAt) {
+          throw new HttpError(409, `quote_expired: Quote ${stored.quoteId} has expired`);
+        }
+
+        const rateNum = Number(stored.price);
+        const grossAmount = (Number(stored.sellAmount) * rateNum).toFixed(2);
+        const feeAmount = (Number(grossAmount) * 0.01).toFixed(2);
+        const netTargetAmount = (Number(grossAmount) - Number(feeAmount)).toFixed(2);
+
+        quote = {
+          quoteId: stored.quoteId,
+          sourceAsset: stored.sellAsset,
+          sourceAmount: stored.sellAmount,
+          targetCurrency: stored.buyCurrency,
+          targetAmount: grossAmount,
+          rate: stored.price,
+          expiresAt: stored.expiresAt,
+          fee: { amount: feeAmount, currency: stored.buyCurrency, source: "estimated" },
+          netTargetAmount,
+        };
+      } else {
+        quote = await fetchFreshQuote();
+
+        // Guard: reject quotes with unparsable or already-expired expiresAt.
+        if (isQuoteExpired(quote)) {
+          // One automatic re-quote in case of clock skew or a very short TTL.
+          quote = await fetchFreshQuote();
+          if (isQuoteExpired(quote)) {
+            throw new QuoteExpiredError(quote.quoteId);
+          }
+        }
+        child.info(
+          {
+            event: "cashout.quote",
+            anchor: this.deps.offramp.mode,
+            quoteId: quote.quoteId,
+            targetCurrency: quote.targetCurrency,
+            targetAmount: quote.targetAmount,
+            rate: quote.rate,
+            durationMs: Date.now() - t0,
+          },
+          "cash-out quoted",
+        );
       }
-      child.info(
-        {
-          event: "cashout.quote",
-          anchor: this.deps.offramp.mode,
-          quoteId: quote.quoteId,
-          targetCurrency: quote.targetCurrency,
-          targetAmount: quote.targetAmount,
-          rate: quote.rate,
-          durationMs: Date.now() - t0,
-        },
-        "cash-out quoted",
-      );
 
       const t1 = Date.now();
       initiation = await this.deps.offramp.initiate({

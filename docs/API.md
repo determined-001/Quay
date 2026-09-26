@@ -467,11 +467,13 @@ settled.
 ```json
 {
   "targetCurrency": "NGN",
-  "payoutFields": { "bank": "...", "accountNumber": "..." }
+  "payoutFields": { "bank": "...", "accountNumber": "..." },
+  "quoteId": "quote_..."
 }
 ```
 - `targetCurrency` — 3-letter code, defaults to `NGN`.
 - `payoutFields` — opaque string map handed to the anchor adapter.
+- `quoteId` — *optional*. The firm quote ID returned by `GET /links/:id/cash-out/quote`. When supplied, the withdrawal initiates against that exact quote with no re-quote. If omitted, a fresh quote is fetched and initiated atomically.
 
 **200**
 ```json
