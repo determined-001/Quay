@@ -18,7 +18,14 @@ import {
   TestAnchorKyc,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
+import type {
+  KycPort,
+  Logger,
+  OffRampPort,
+  OffRampStateRepository,
+  OffRampTelemetryRepository,
+  RailPort,
+} from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey } from "../crypto/pii";
@@ -148,7 +155,19 @@ export async function createContainer(): Promise<Container> {
   const sellerWallet = seller.publicKey;
   if (sellerWallet) await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
 
-  const rail = new StellarRail(stellar);
+  const realRail = new StellarRail(stellar);
+  // E2E test mode runs with no network at all (issue 5.7): keep the pure
+  // parts of the rail (SEP-7 building, address validation) and skip only the
+  // Horizon account/trustline preflight. The preflight's own behavior is
+  // covered by unit tests; env.ts guarantees this branch cannot be reached
+  // in production or on the public network.
+  const rail: RailPort = env.e2eTestMode
+    ? {
+        buildRequest: (input) => realRail.buildRequest(input),
+        isValidDestination: (address) => realRail.isValidDestination(address),
+        assertCanReceive: async () => {},
+      }
+    : realRail;
   // Polling watcher gets the retry / fallback / degraded-tracking wrapper
   // (issue #10). The streaming path has its own reconnect handling.
   const pollingWatcher = new HorizonWatcher({
@@ -267,8 +286,17 @@ export async function createContainer(): Promise<Container> {
       allowedOrigins: env.corsOrigins,
     },
     start() {
-      logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
-      loop.start();
+      if (env.e2eTestMode) {
+        // The watcher is the one component that reaches out to Horizon on its
+        // own; in e2e mode payments are injected through /__test__/pay at the
+        // same applyMatch boundary, so the loop never starts and the process
+        // makes no outbound calls. Everything downstream of a matched payment
+        // (state machine, webhooks, mock off-ramp settlement) still runs.
+        logger.warn({ event: "watcher.skipped.e2e" }, "E2E_TEST_MODE=1 - ledger watcher not started");
+      } else {
+        logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
+        loop.start();
+      }
       webhookWorker.start();
       // With no off-ramp there is nothing to advance: no link can reach
       // offramp_pending, so the poller would query an always-empty set on
