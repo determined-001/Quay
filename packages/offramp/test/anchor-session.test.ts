@@ -259,7 +259,7 @@ describe("TestAnchorOffRamp — per seller", () => {
     expect(await state.getJob("wd_1")).toMatchObject({ sellerId: ALICE.sellerId, account: alice.publicKey() });
 
     const polled = await offramp.status("wd_1");
-    expect(polled.status).toBe("pending");
+    expect(polled.status).toBe("awaiting_transfer");
   });
 
   it("will not quote for a seller with no anchor session", async () => {
