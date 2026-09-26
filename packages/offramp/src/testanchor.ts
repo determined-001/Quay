@@ -11,14 +11,15 @@ import {
   type OffRampQuote,
   type IndicativePrice,
   type OffRampStateRepository,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type SellerPayoutRef,
+  type WithdrawTypeRequirements,
 } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import { listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
-import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6Withdraw } from "./sep6";
+import { getSep6Info, getSep6Transaction, resolveWithdrawType, startSep6Withdraw } from "./sep6";
 
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
@@ -147,22 +148,40 @@ export class TestAnchorOffRamp implements OffRampPort {
   }
 
   /**
-   * Field descriptors from the anchor's SEP-6 GET /info for this asset.
-   * /info is sent with the JWT when one is cached so authenticated anchors can
-   * return KYC-aware field sets, but a SEP-10 round-trip is not forced just to
-   * render the form (issue #32).
+   * Every SEP-6 withdrawal type the anchor offers for this asset, with each
+   * type's field descriptors read from /info `types[].fields` — the level the
+   * spec keeps withdraw fields at (issue 5.24; the old asset-level read meant
+   * the form never changed with the rail). `defaultType` preselects the
+   * operator's OFFRAMP_TYPE when the anchor actually offers it, or the only
+   * type when there is exactly one; otherwise the seller must choose.
    */
-  async offrampRequirements(assetCode: string, customer?: AnchorCustomer): Promise<PayoutFieldDescriptor[]> {
-    const jwt = customer ? await this.auth.token(customer).catch(() => undefined) : undefined;
+  async offrampRequirements(assetCode: string, _customer?: AnchorCustomer): Promise<OfframpRequirementTypes> {
     const d = await this.discover();
     this.assertListed(d, assetCode);
-    const fields = await getSep6WithdrawInfo(d.transferServer, assetCode, jwt);
-    return fields.map((f) => ({
-      name: f.name,
-      label: f.description, // SEP-6 uses "description" as the human label
-      optional: f.optional ?? false,
-      choices: f.choices,
+    const info = await getSep6Info(d.transferServer, this.logger);
+    const asset = info.withdraw[assetCode];
+    if (!asset?.enabled) {
+      throw new Error(`SEP-6 anchor does not support withdrawing ${assetCode}`);
+    }
+
+    const types: WithdrawTypeRequirements[] = Object.entries(asset.types).map(([name, t]) => ({
+      name,
+      descriptors: Object.entries(t.fields).map(([fieldName, meta]) => ({
+        name: fieldName,
+        label: meta.description ?? fieldName, // SEP-6 uses "description" as the human label
+        optional: meta.optional ?? false,
+        choices: meta.choices,
+      })),
     }));
+
+    const defaultType =
+      this.preferredWithdrawType && types.some((t) => t.name === this.preferredWithdrawType)
+        ? this.preferredWithdrawType
+        : types.length === 1
+          ? types[0]!.name
+          : null;
+
+    return { types, defaultType };
   }
 
   async quote(
@@ -172,6 +191,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       sourceAmount: string;
       targetCurrency: string;
       customer: AnchorCustomer;
+      withdrawType?: string;
     },
     opts: { logger?: Logger } = {},
   ): Promise<OffRampQuote> {
@@ -186,11 +206,14 @@ export class TestAnchorOffRamp implements OffRampPort {
     // Sep6ValidationError propagates as-is so callers can surface anchor limits.
     const d = await this.discover();
     this.assertListed(d, input.sourceAsset.code);
+    // The seller's choice wins; the operator-wide OFFRAMP_TYPE is only the
+    // fallback default (issue 5.24). resolveWithdrawType still rejects a type
+    // the anchor does not offer, carrying availableTypes for the 400 upstream.
     const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
       d.transferServer,
       input.sourceAsset.code,
       input.sourceAmount,
-      this.preferredWithdrawType,
+      input.withdrawType ?? this.preferredWithdrawType,
     );
 
     const jwt = await this.auth.token(input.customer);

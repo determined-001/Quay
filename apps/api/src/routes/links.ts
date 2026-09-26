@@ -195,6 +195,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     const linkId = ctx.req.param("id");
     const targetCurrency = ctx.req.query("targetCurrency");
     if (!targetCurrency) return ctx.json({ error: "invalid_query", message: "targetCurrency is required" }, 400);
+    // The seller's rail choice (issue 5.24); optional — adapters fall back to
+    // the operator default. An unknown type comes back 400 with availableTypes.
+    const withdrawType = ctx.req.query("withdrawType") || undefined;
     try {
       const existing = await c.service.getLink(linkId);
       if (!existing) return ctx.json({ error: "not_found" }, 404);
@@ -203,11 +206,15 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
         // the id and leaks the link's existence (issue #41).
         return ctx.json({ error: "not_found" }, 404);
       }
-      const quote = await c.service.quoteCashOut(linkId, targetCurrency, { logger: getLogger(ctx) });
+      const quote = await c.service.quoteCashOut(linkId, targetCurrency, withdrawType, {
+        logger: getLogger(ctx),
+      });
       return ctx.json(quote);
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
+      if (err instanceof HttpError) {
+        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 502);
+      }
       throw err;
     }
   });
@@ -272,7 +279,8 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       if (err instanceof HttpError) {
         log.warn({ event: "cashout.request.error", linkId, error: err.message }, "cash-out request failed");
-        return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
+        // `extra` carries availableTypes on unknown_withdraw_type (issue 5.24).
+        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 502);
       }
       throw err;
     }

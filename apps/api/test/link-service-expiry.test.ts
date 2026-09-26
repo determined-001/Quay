@@ -10,7 +10,7 @@ import {
   type OffRampPort,
   type OffRampQuote,
   type PaymentLink,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type RailPort,
   type Seller,
   type Webhook,
@@ -249,8 +249,8 @@ class FakeOffRamp implements OffRampPort {
   async status(): Promise<OffRampJob> {
     throw new Error("not used in this suite");
   }
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return { types: [], defaultType: null };
   }
 }
 

@@ -5,7 +5,7 @@ import {
   type OffRampJob,
   type OffRampPort,
   type OffRampQuote,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
 } from "@checkout/core";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 
@@ -38,7 +38,7 @@ function fakePort(overrides: Partial<OffRampPort> = {}): OffRampPort {
     quote: vi.fn(async () => fakeQuote),
     initiate: vi.fn(async () => fakeInitiation),
     status: vi.fn(async () => fakeJob),
-    offrampRequirements: vi.fn(async (): Promise<PayoutFieldDescriptor[]> => []),
+    offrampRequirements: vi.fn(async (): Promise<OfframpRequirementTypes> => ({ types: [], defaultType: null })),
     ...overrides,
   };
 }

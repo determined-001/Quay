@@ -6,7 +6,7 @@ import {
   type OffRampMode,
   type OffRampPort,
   type OffRampQuote,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type SellerPayoutRef,
 } from "@checkout/core";
 
@@ -38,6 +38,7 @@ export class DisabledOffRamp implements OffRampPort {
     sourceAsset: AssetRef;
     sourceAmount: string;
     targetCurrency: string;
+    withdrawType?: string;
   }): Promise<OffRampQuote> {
     throw new OffRampDisabledError("quote");
   }
@@ -54,7 +55,7 @@ export class DisabledOffRamp implements OffRampPort {
     throw new OffRampDisabledError("status");
   }
 
-  async offrampRequirements(_assetCode: string): Promise<PayoutFieldDescriptor[]> {
+  async offrampRequirements(_assetCode: string): Promise<OfframpRequirementTypes> {
     throw new OffRampDisabledError("offrampRequirements");
   }
 
