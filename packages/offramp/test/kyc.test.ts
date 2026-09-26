@@ -5,11 +5,16 @@ import { missingRequiredFields } from "../src/kyc";
 const NAME: KycFieldSpec = { name: "first_name", type: "string", optional: false };
 const EMAIL: KycFieldSpec = { name: "email_address", type: "string", optional: false };
 const MIDDLE: KycFieldSpec = { name: "middle_name", type: "string", optional: true };
+const PHOTO_FRONT: KycFieldSpec = { name: "photo_id_front", type: "binary", optional: false };
 
 describe("missingRequiredFields", () => {
   it("names exactly the missing required fields", () => {
     expect(missingRequiredFields([NAME, EMAIL], {})).toEqual(["first_name", "email_address"]);
     expect(missingRequiredFields([NAME, EMAIL], { first_name: "Ada" })).toEqual(["email_address"]);
+  });
+
+  it("ignores binary fields in missingRequiredFields for text submissions", () => {
+    expect(missingRequiredFields([NAME, PHOTO_FRONT], { first_name: "Ada" })).toEqual([]);
   });
 
   it("returns nothing once every required field has a non-blank value", () => {

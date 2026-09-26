@@ -5,15 +5,29 @@ import {
   type KycPort,
   type KycRecord,
   type KycRepository,
+  type KycUploadFile,
 } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { getSep12Customer, putSep12Customer } from "./sep12";
+import { getSep12Customer, putSep12Customer, putSep12CustomerMultipart } from "./sep12";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
- *  entry for. Exported for direct unit testing of the "name exactly which
- *  fields are missing" requirement, without needing a live/mocked anchor. */
+ *  entry for. Binary fields are handled via file uploads, so they are excluded
+ *  from text-field completeness checks. */
 export function missingRequiredFields(required: KycFieldSpec[], values: Record<string, string>): string[] {
-  return required.filter((f) => !f.optional && !(values[f.name] ?? "").trim()).map((f) => f.name);
+  return required
+    .filter((f) => !f.optional && f.type !== "binary" && !(values[f.name] ?? "").trim())
+    .map((f) => f.name);
+}
+
+function stripBinaryFields(provided: Record<string, string>, required: KycFieldSpec[]): Record<string, string> {
+  const binaryNames = new Set(required.filter((f) => f.type === "binary").map((f) => f.name));
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(provided)) {
+    if (!binaryNames.has(k)) {
+      result[k] = v;
+    }
+  }
+  return result;
 }
 
 export interface TestAnchorKycOptions {
@@ -53,13 +67,14 @@ export class TestAnchorKyc implements KycPort {
       customerId: reusableCustomerId(existing, customer),
     });
 
+    const cleanProvided = stripBinaryFields(existing?.providedFields ?? {}, remote.requiredFields);
     const record: KycRecord = {
       sellerId: customer.sellerId,
       account: customer.account,
       customerId: remote.customerId,
       status: remote.status,
       requiredFields: remote.requiredFields,
-      providedFields: existing?.providedFields ?? {},
+      providedFields: cleanProvided,
       message: remote.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -99,13 +114,55 @@ export class TestAnchorKyc implements KycPort {
       customerId: put.customerId,
     });
 
+    const cleanProvided = stripBinaryFields(merged, [...discovery.requiredFields, ...after.requiredFields]);
     const record: KycRecord = {
       sellerId: customer.sellerId,
       account: customer.account,
       customerId: put.customerId,
       status: after.status,
       requiredFields: after.requiredFields,
-      providedFields: merged,
+      providedFields: cleanProvided,
+      message: after.message,
+      lastSyncedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await this.repo.save(record);
+    return record;
+  }
+
+  async submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord> {
+    const existing = await this.repo.get(customer.sellerId);
+    const jwt = await this.auth.token(customer);
+    const { kycServer } = await this.discovery.get();
+    const discovery = await getSep12Customer(kycServer, jwt, {
+      account: customer.account,
+      customerId: reusableCustomerId(existing, customer),
+    });
+
+    const put = await putSep12CustomerMultipart(kycServer, jwt, {
+      account: customer.account,
+      customerId: discovery.customerId,
+      fields: existing?.providedFields,
+      files,
+    });
+
+    const after = await getSep12Customer(kycServer, jwt, {
+      account: customer.account,
+      customerId: put.customerId,
+    });
+
+    const cleanProvided = stripBinaryFields(existing?.providedFields ?? {}, [
+      ...discovery.requiredFields,
+      ...after.requiredFields,
+    ]);
+
+    const record: KycRecord = {
+      sellerId: customer.sellerId,
+      account: customer.account,
+      customerId: put.customerId,
+      status: after.status,
+      requiredFields: after.requiredFields,
+      providedFields: cleanProvided,
       message: after.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -136,6 +193,10 @@ export class NoKycRequired implements KycPort {
     return this.accepted(customer);
   }
 
+  async submitFiles(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
+  }
+
   private accepted(customer: AnchorCustomer): KycRecord {
     return {
       sellerId: customer.sellerId,
@@ -150,3 +211,4 @@ export class NoKycRequired implements KycPort {
     };
   }
 }
+

@@ -23,6 +23,7 @@ export default function KycPanel({
   const wallet = useSellerWallet();
   const [connecting, setConnecting] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [files, setFiles] = useState<Record<string, File>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [missing, setMissing] = useState<Set<string>>(new Set());
@@ -32,9 +33,23 @@ export default function KycPanel({
     setMissing(new Set());
     setSubmitting(true);
     try {
-      const next = await api.submitKyc(fields);
+      let next: KycView;
+      const textFields = { ...fields };
+      if (Object.keys(textFields).length > 0 || Object.keys(files).length === 0) {
+        next = await api.submitKyc(textFields);
+      } else {
+        next = kyc!;
+      }
+      if (Object.keys(files).length > 0) {
+        const formData = new FormData();
+        for (const [name, file] of Object.entries(files)) {
+          formData.append(name, file);
+        }
+        next = await api.submitKycFiles(formData);
+      }
       onUpdated(next);
       setValues({});
+      setFiles({});
     } catch (e) {
       if (e instanceof CheckoutError && e.code === "kyc_required") {
         setMissing(new Set(e.missingFields ?? []));
@@ -142,7 +157,32 @@ export default function KycPanel({
             {humanize(field)}
             {!field.optional && " *"}
           </label>
-          {field.choices ? (
+          {field.type === "binary" ? (
+            <div>
+              <input
+                type="file"
+                id={`kyc-${field.name}`}
+                accept="image/jpeg,image/png,application/pdf"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    setFiles((f) => ({ ...f, [field.name]: file }));
+                  } else {
+                    setFiles((f) => {
+                      const next = { ...f };
+                      delete next[field.name];
+                      return next;
+                    });
+                  }
+                }}
+                aria-invalid={missing.has(field.name)}
+                style={missing.has(field.name) ? { borderColor: "var(--red)" } : undefined}
+              />
+              <small style={{ color: "var(--muted)", fontSize: 11, display: "block", marginTop: 4 }}>
+                sent to {anchor?.anchor ?? "anchor"}, not stored by Quay
+              </small>
+            </div>
+          ) : field.choices ? (
             <select
               id={`kyc-${field.name}`}
               value={values[field.name] ?? kyc.providedFields[field.name] ?? ""}

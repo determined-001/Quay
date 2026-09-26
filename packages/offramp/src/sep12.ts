@@ -101,3 +101,51 @@ export async function putSep12Customer(
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };
 }
+
+export interface Sep12FileField {
+  name: string;
+  blob: Blob;
+  filename: string;
+}
+
+/**
+ * Submits multipart/form-data with non-binary fields first, followed by binary
+ * file fields, exactly as specified in SEP-12.
+ */
+export async function putSep12CustomerMultipart(
+  kycServer: string,
+  jwt: string,
+  params: {
+    account: string;
+    customerId?: string | null;
+    fields?: Record<string, string>;
+    files: Sep12FileField[];
+  },
+): Promise<{ customerId: string }> {
+  const formData = new FormData();
+  if (params.customerId) {
+    formData.append("id", params.customerId);
+  } else {
+    formData.append("account", params.account);
+  }
+  if (params.fields) {
+    for (const [key, value] of Object.entries(params.fields)) {
+      formData.append(key, value);
+    }
+  }
+  for (const file of params.files) {
+    formData.append(file.name, file.blob, file.filename);
+  }
+
+  const res = await fetch(endpointUrl(kycServer, "customer"), {
+    method: "PUT",
+    headers: { authorization: `Bearer ${jwt}` },
+    body: formData,
+  });
+  if (!res.ok) {
+    throw new Error(`SEP-12 customer PUT failed: ${res.status} ${await res.text()}`);
+  }
+  const body = (await res.json()) as { id: string };
+  return { customerId: body.id };
+}
+
