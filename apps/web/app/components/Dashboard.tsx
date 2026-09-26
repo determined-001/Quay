@@ -13,6 +13,7 @@ import {
 } from "../../lib/api";
 import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
+import RegistrationForm from "./RegistrationForm";
 import CashOutModal from "./CashOutModal";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
@@ -486,7 +487,10 @@ export default function Dashboard() {
       </section>
 
       {OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK && (
-        <KycPanel kyc={kyc} anchor={anchorAuth} onUpdated={setKyc} onAnchorConnected={() => void refreshKyc()} />
+        <>
+          <RegistrationForm />
+          <KycPanel kyc={kyc} anchor={anchorAuth} onUpdated={setKyc} onAnchorConnected={() => void refreshKyc()} />
+        </>
       )}
 
       <section className="panel">

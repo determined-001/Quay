@@ -74,6 +74,11 @@ export interface KycView {
   lastSyncedAt: number | null;
 }
 
+export interface ProfileView {
+  fields: Record<string, string>;
+  updatedAt: Record<string, number>;
+}
+
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
 //
 // This has actually broken production once already (docs/FIXLOG.md, BUG-1.4,
@@ -152,7 +157,48 @@ export type ApiErrorCode =
   | "missing_trustline"
   | "wrong_network"
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
+  | "anchor_unavailable"
+  | "offramp_disabled"
+  | "quote_expired"
+  | "request_in_progress"
+  | "challenge_rejected"
   | "server_error"; // 5xx or unexpected non-JSON response
+
+const BY_REASON_409: Record<string, ApiErrorCode> = {
+  insufficient_balance: "insufficient_balance",
+  missing_trustline: "missing_trustline",
+  wrong_network: "wrong_network",
+};
+
+const BY_CODE: Record<string, ApiErrorCode> = {
+  not_found: "not_found",
+  invalid_body: "invalid_body",
+  kyc_required: "kyc_required",
+  anchor_auth_required: "anchor_auth_required",
+  destination_cannot_receive: "destination_cannot_receive",
+  payment_rejected: "payment_rejected",
+};
+
+export function classifyError(status: number, body: Record<string, unknown>): ApiErrorCode {
+  const error = typeof body.error === "string" ? body.error : "";
+  const reason = typeof body.reason === "string" ? body.reason : "";
+
+  if (error === "anchor_unavailable") return "anchor_unavailable";
+  if (error === "offramp_disabled") return "offramp_disabled";
+  if (error.startsWith("quote_expired:")) return "quote_expired";
+  if (error === "request_in_progress" || error === "idempotency_key_reuse") return "request_in_progress";
+  if (error === "challenge_rejected") return "challenge_rejected";
+
+  if (status >= 500) return "server_error";
+
+  if (status === 409 && BY_REASON_409[reason]) return BY_REASON_409[reason];
+  if (status === 409 && error === "payment_rejected") return "payment_rejected";
+  if (status === 409) return "conflict";
+
+  if (BY_CODE[error]) return BY_CODE[error];
+
+  return "server_error";
+}
 
 /** Structured error thrown by http() so callers can branch on code. */
 export class CheckoutError extends Error {
@@ -197,6 +243,16 @@ export function describeError(err: CheckoutError): string {
       return "The wallet request was cancelled.";
     case "unreachable":
       return "We can't reach the payment service right now. Check your connection and try again.";
+    case "anchor_unavailable":
+      return "The anchor is currently unavailable. Please try again later.";
+    case "offramp_disabled":
+      return "Offramping is currently disabled for this anchor.";
+    case "quote_expired":
+      return "The quote expired before the transaction could complete. Try refreshing.";
+    case "request_in_progress":
+      return "This request is already being processed. Please wait.";
+    case "challenge_rejected":
+      return "The anchor rejected the sign-in challenge. Please try again.";
     case "server_error":
       return "Something went wrong on the server. Please try again in a moment.";
     default:
@@ -273,32 +329,7 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
     const apiCode = typeof error === "string" ? error : undefined;
     const missingFields = Array.isArray(rawMissing) ? (rawMissing as string[]) : undefined;
     const reason = typeof details.reason === "string" ? details.reason : undefined;
-    const code: ApiErrorCode =
-      res.status >= 500
-        ? "server_error"
-        : res.status === 409 && reason === "insufficient_balance"
-          ? "insufficient_balance"
-          : res.status === 409 && reason === "missing_trustline"
-            ? "missing_trustline"
-            : res.status === 409 && reason === "wrong_network"
-              ? "wrong_network"
-              : res.status === 409 && apiCode === "payment_rejected"
-                ? "payment_rejected"
-                : res.status === 409
-                  ? "conflict"
-                  : apiCode === "not_found"
-                    ? "not_found"
-                    : apiCode === "invalid_body"
-                      ? "invalid_body"
-                      : apiCode === "kyc_required"
-                        ? "kyc_required"
-                        : apiCode === "anchor_auth_required"
-                          ? "anchor_auth_required"
-                        : apiCode === "destination_cannot_receive"
-                          ? "destination_cannot_receive"
-                          : apiCode === "payment_rejected"
-                            ? "payment_rejected"
-                            : "server_error";
+    const code: ApiErrorCode = classifyError(res.status, body);
     const detail = typeof message === "string" ? message : (apiCode ?? res.statusText);
     throw new CheckoutError(code, res.status, detail, missingFields, details);
   }
@@ -471,6 +502,9 @@ export const api = {
 
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: () => http<KycView>("/seller/kyc"),
+  
+  getProfile: () => http<ProfileView>("/seller/profile"),
+  saveProfile: (fields: Record<string, string>) => http<ProfileView>("/seller/profile", { method: "PUT", body: JSON.stringify(fields) }),
 
   // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
   // sign with the wallet -> completeAnchorAuth(). Quay never signs it.
