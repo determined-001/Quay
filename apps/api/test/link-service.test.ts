@@ -337,3 +337,146 @@ describe("cash-out response flattening", () => {
     ).toBe("https://anchor.example.com/sep24");
   });
 });
+
+describe("LinkService.triggerCashOut — quoteId handling", () => {
+  it("initiates against the exact quote without calling offramp.quote when quoteId is provided", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid", amount: "10" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new ScriptedOffRamp();
+    let quoteCalled = false;
+    offramp.quoteImpl = async () => {
+      quoteCalled = true;
+      throw new Error("offramp.quote should not have been called!");
+    };
+    let initiatedQuoteId = "";
+    offramp.initiateImpl = async (input) => {
+      initiatedQuoteId = input.quoteId;
+      return { kind: "fields", jobId: "job_from_quote_123" };
+    };
+
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_valid_123",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "1650",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+
+    const service = makeService({ links, offramp, offrampState });
+    const { job, initiation } = await service.triggerCashOut("lnk_1", {
+      targetCurrency: "NGN",
+      payoutFields: {},
+      quoteId: "quote_valid_123",
+    });
+
+    expect(quoteCalled).toBe(false);
+    expect(initiatedQuoteId).toBe("quote_valid_123");
+    expect(initiation.kind).toBe("fields");
+    expect(job.jobId).toBe("job_from_quote_123");
+    expect(job.targetCurrency).toBe("NGN");
+    expect(job.rate).toBe("1650");
+
+    const savedLink = links.get("lnk_1");
+    expect(savedLink?.status).toBe("offramp_pending");
+    expect(savedLink?.offrampRate).toBe("1650");
+    expect(savedLink?.offrampTargetCurrency).toBe("NGN");
+  });
+
+  it("rejects with 409 quote_mismatch when quoteId does not exist", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_nonexistent",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rejects with 409 quote_mismatch when quoteId belongs to a different link", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_other_link",
+      linkId: "lnk_2",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "1650",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_other_link",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rejects with 409 quote_mismatch when quote target currency does not match requested currency", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_usd",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "USD",
+      price: "1",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_usd",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rejects with 409 quote_expired when quoteId is expired", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_expired_1",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "1650",
+      expiresAt: now - 10_000,
+      createdAt: now - 70_000,
+    });
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_expired_1",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining("quote_expired") });
+  });
+});
+

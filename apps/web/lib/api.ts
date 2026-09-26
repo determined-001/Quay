@@ -373,6 +373,17 @@ export interface HealthResponse {
   usdcTrustline: UsdcTrustlineStatus;
 }
 
+export interface CashOutQuote {
+  quoteId: string;
+  sourceAmount: string;
+  targetCurrency: string;
+  targetAmount: string; // Gross
+  rate: string;
+  expiresAt: number;
+  fee: { amount: string; currency: string; source: "anchor" | "estimated" | string };
+  netTargetAmount: string; // Net
+}
+
 export const api = {
   createLink: (input: CreateLinkInput, idempotencyKey?: string) =>
     http<LinkWithRequest>("/links", { method: "POST", body: JSON.stringify(input), idempotencyKey }),
@@ -403,29 +414,23 @@ export const api = {
   health: () => http<HealthResponse>("/health"),
 
   quoteCashOut: (id: string, targetCurrency: string) =>
-    http<{
-      quoteId: string;
-      sourceAmount: string;
-      targetCurrency: string;
-      targetAmount: string; // Gross
-      rate: string;
-      fee: { amount: string; currency: string; source: string };
-      netTargetAmount: string; // Net
-    }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+    http<CashOutQuote>(`/links/${id}/cash-out/quote?targetCurrency=${encodeURIComponent(targetCurrency)}`),
 
   cashOut: (
     id: string,
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
+    quoteId?: string,
   ) =>
     http<{
       job: { jobId: string; status: string; targetAmount: string; targetCurrency: string };
       interactiveUrl?: string;
     }>(
       `/links/${id}/cash-out`,
-      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
+      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields, ...(quoteId ? { quoteId } : {}) }), idempotencyKey },
     ),
+
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
