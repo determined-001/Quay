@@ -63,6 +63,7 @@ export interface Container {
   apiKeys: DrizzleApiKeyRepository;
   db: DB;
   kyc: KycPort;
+  kycRepo?: DrizzleKycRepository | null;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
@@ -140,6 +141,7 @@ export async function createContainer(): Promise<Container> {
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
+  const kycRepo = piiKey ? new DrizzleKycRepository(db, piiKey) : null;
 
   // Optional. Quay is multi-tenant: a seller signs in with their own wallet
   // over SEP-10, that address becomes their identity AND their payout
@@ -172,7 +174,7 @@ export async function createContainer(): Promise<Container> {
       : pollingWatcher;
   const anchor = createAnchor(db, logger, stellar.networkPassphrase);
   const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
-  const kyc = createKyc(anchor, db);
+  const kyc = createKyc(anchor, kycRepo, logger);
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
   // off-ramp the probe is disabled and short-circuits to "always available" so
@@ -260,6 +262,7 @@ export async function createContainer(): Promise<Container> {
     apiKeys: apiKeysRepo,
     db,
     kyc,
+    kycRepo,
     anchorAuth: anchor?.auth ?? null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
@@ -443,15 +446,24 @@ function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepositor
   });
 }
 
-function createKyc(anchor: AnchorWiring | null, db: DB): KycPort {
-  if (!anchor) {
+function createKyc(anchor: AnchorWiring | null, repo: DrizzleKycRepository | null, logger: Logger): KycPort {
+  if (!anchor || !repo) {
     // No real anchor, nothing to be compliant with. For "none" there is no
     // cash-out to gate at all; for "mock" it never gates the simulated one.
     return new NoKycRequired();
   }
-  // env.kycEncryptionKey is guaranteed set whenever OFFRAMP is testanchor/anchor (see env.ts).
-  const repo = new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey as string));
-  return new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo });
+  const callbackBaseUrl = env.homeDomain
+    ? env.homeDomain.startsWith("http://") || env.homeDomain.startsWith("https://")
+      ? env.homeDomain
+      : `https://${env.homeDomain}`
+    : undefined;
+  return new TestAnchorKyc({
+    discovery: anchor.discovery,
+    auth: anchor.auth,
+    repo,
+    callbackBaseUrl,
+    logger,
+  });
 }
 
 /**
