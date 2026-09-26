@@ -3,4 +3,5 @@ export * from "./disabled";
 export * from "./testanchor";
 export * from "./kyc";
 export * from "./sep6";
+export * from "./sep24";
 export * from "./sep1";

@@ -16,9 +16,18 @@ import {
 } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { Sep10Client } from "./sep10";
-import { fetchStellarToml, listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
+import {
+  fetchStellarToml,
+  listsCurrency,
+  type Sep1DiscoveryInfo,
+} from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
-import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6Withdraw } from "./sep6";
+import {
+  getSep6Transaction,
+  getSep6WithdrawInfo,
+  resolveWithdrawType,
+  startSep6Withdraw,
+} from "./sep6";
 
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
@@ -89,7 +98,8 @@ export interface TestAnchorOptions {
 
 function mapSep6Status(status: string): OffRampJobStatus {
   if (status === "completed") return "settled";
-  if (status === "error" || status === "refunded" || status === "expired") return "failed";
+  if (status === "error" || status === "refunded" || status === "expired")
+    return "failed";
   return "pending"; // pending_anchor, pending_user_transfer_start, pending_external, ...
 }
 
@@ -125,7 +135,10 @@ export class TestAnchorOffRamp implements OffRampPort {
     this.expectedNetworkPassphrase = opts.expectedNetworkPassphrase;
     this.state = opts.state;
     this.preferredWithdrawType = opts.preferredWithdrawType;
-    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.anchor", anchor: this.anchorName });
+    this.logger = (opts.logger ?? NOOP_LOGGER).child({
+      component: "offramp.anchor",
+      anchor: this.anchorName,
+    });
   }
 
   /**
@@ -144,7 +157,11 @@ export class TestAnchorOffRamp implements OffRampPort {
         logger: this.logger,
       }).then((info) =>
         info.fallback
-          ? { ...info, ...fallbackEndpoints(this.fallbackBaseUrl), homeDomain: this.homeDomain }
+          ? {
+              ...info,
+              ...fallbackEndpoints(this.fallbackBaseUrl),
+              homeDomain: this.homeDomain,
+            }
           : info,
       );
       // A rejected discovery must not be cached as the answer forever.
@@ -161,7 +178,11 @@ export class TestAnchorOffRamp implements OffRampPort {
     if (!this.authClient) {
       this.authClient = new Sep10Client(
         this.sellerKeypair,
-        { baseUrl: d.webAuthEndpoint, homeDomain: this.homeDomain, signingKey: d.signingKey },
+        {
+          baseUrl: d.webAuthEndpoint,
+          homeDomain: this.homeDomain,
+          signingKey: d.signingKey,
+        },
         this.logger,
       );
     }
@@ -207,7 +228,9 @@ export class TestAnchorOffRamp implements OffRampPort {
    * return KYC-aware field sets, but a SEP-10 round-trip is not forced just to
    * render the form (issue #32).
    */
-  async offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]> {
+  async offrampRequirements(
+    assetCode: string,
+  ): Promise<PayoutFieldDescriptor[]> {
     const jwt = await (await this.auth10()).token().catch(() => undefined);
     const d = await this.discover();
     this.assertListed(d, assetCode);
@@ -221,7 +244,12 @@ export class TestAnchorOffRamp implements OffRampPort {
   }
 
   async quote(
-    input: { linkId: string; sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    input: {
+      linkId: string;
+      sourceAsset: AssetRef;
+      sourceAmount: string;
+      targetCurrency: string;
+    },
     opts: { logger?: Logger } = {},
   ): Promise<OffRampQuote> {
     if (input.sourceAsset.issuer === null) {
@@ -229,13 +257,18 @@ export class TestAnchorOffRamp implements OffRampPort {
         'This anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
       );
     }
-    const log = (opts.logger ?? this.logger);
+    const log = opts.logger ?? this.logger;
 
     // Validate amount against /sep6/info and discover the withdrawal type.
     // Sep6ValidationError propagates as-is so callers can surface anchor limits.
     const d = await this.discover();
     this.assertListed(d, input.sourceAsset.code);
-    const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
+    const {
+      type: withdrawType,
+      typeInfo,
+      feeFixed,
+      feePercent,
+    } = await resolveWithdrawType(
       d.transferServer,
       input.sourceAsset.code,
       input.sourceAmount,
@@ -243,14 +276,19 @@ export class TestAnchorOffRamp implements OffRampPort {
     );
 
     const jwt = await (await this.auth10()).token({ logger: log });
-    const q = await getSep38Quote(d.anchorQuoteServer, jwt, {
-      sellAsset: input.sourceAsset,
-      sellAmount: input.sourceAmount,
-      buyCurrency: input.targetCurrency,
-      // Use the delivery method matching the resolved withdraw type when the
-      // anchor publishes one; fall back to omitting it so the anchor chooses.
-      buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
-    }, log);
+    const q = await getSep38Quote(
+      d.anchorQuoteServer,
+      jwt,
+      {
+        sellAsset: input.sourceAsset,
+        sellAmount: input.sourceAmount,
+        buyCurrency: input.targetCurrency,
+        // Use the delivery method matching the resolved withdraw type when the
+        // anchor publishes one; fall back to omitting it so the anchor chooses.
+        buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
+      },
+      log,
+    );
 
     const expiresAt = Date.parse(q.expiresAt);
     await this.state.saveQuote({
@@ -267,9 +305,13 @@ export class TestAnchorOffRamp implements OffRampPort {
       createdAt: Date.now(),
     });
 
-    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
+    const grossTargetAmount = (
+      Number(input.sourceAmount) / Number(q.price)
+    ).toFixed(4);
     const netTargetAmount = q.buyAmount;
-    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+    const feeAmount = (
+      Number(grossTargetAmount) - Number(netTargetAmount)
+    ).toFixed(4);
 
     return {
       quoteId: q.id,
@@ -279,7 +321,11 @@ export class TestAnchorOffRamp implements OffRampPort {
       targetAmount: grossTargetAmount,
       rate: q.price,
       expiresAt,
-      fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
+      fee: {
+        amount: feeAmount,
+        currency: input.targetCurrency,
+        source: "anchor",
+      },
       netTargetAmount,
     };
   }
@@ -301,18 +347,30 @@ export class TestAnchorOffRamp implements OffRampPort {
     // exactly what this PR exists to stop doing.
     const withdrawType =
       q.withdrawType ??
-      (await resolveWithdrawType(dsc.transferServer, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
-        .type;
+      (
+        await resolveWithdrawType(
+          dsc.transferServer,
+          q.sellAsset.code,
+          q.sellAmount,
+          this.preferredWithdrawType,
+          baseLog,
+        )
+      ).type;
 
-    const withdraw = await startSep6Withdraw(dsc.transferServer, jwt, {
-      assetCode: q.sellAsset.code,
-      amount: q.sellAmount,
-      account: (await this.auth10()).publicKey,
-      // The type discovered from /sep6/info at quote time — never assumed.
-      type: withdrawType,
-      dest: input.payout.fields.dest,
-      destExtra: input.payout.fields.dest_extra,
-    }, baseLog);
+    const withdraw = await startSep6Withdraw(
+      dsc.transferServer,
+      jwt,
+      {
+        assetCode: q.sellAsset.code,
+        amount: q.sellAmount,
+        account: (await this.auth10()).publicKey,
+        // The type discovered from /sep6/info at quote time — never assumed.
+        type: withdrawType,
+        dest: input.payout.fields.dest,
+        destExtra: input.payout.fields.dest_extra,
+      },
+      baseLog,
+    );
 
     const now = Date.now();
     await this.state.saveJob({
@@ -328,7 +386,14 @@ export class TestAnchorOffRamp implements OffRampPort {
       createdAt: now,
       updatedAt: now,
     });
-    child.info({ event: "anchor.sep6.withdraw.init", withdrawId: withdraw.id, linkId: input.linkId }, "anchor withdraw init");
+    child.info(
+      {
+        event: "anchor.sep6.withdraw.init",
+        withdrawId: withdraw.id,
+        linkId: input.linkId,
+      },
+      "anchor withdraw init",
+    );
 
     return {
       kind: "fields",
@@ -336,17 +401,28 @@ export class TestAnchorOffRamp implements OffRampPort {
     };
   }
 
-  async status(jobId: string, opts: { logger?: Logger } = {}): Promise<OffRampJob> {
+  async status(
+    jobId: string,
+    opts: { logger?: Logger } = {},
+  ): Promise<OffRampJob> {
     const job = await this.state.getJob(jobId);
     if (!job) throw new OffRampJobNotFoundError(jobId);
 
-    const baseLog = (opts.logger ?? this.logger);
+    const baseLog = opts.logger ?? this.logger;
     const child = baseLog.child({ jobId, linkId: job.linkId });
     const jwt = await (await this.auth10()).token({ logger: baseLog });
-    const tx = await getSep6Transaction((await this.discover()).transferServer, jwt, jobId, baseLog);
+    const tx = await getSep6Transaction(
+      (await this.discover()).transferServer,
+      jwt,
+      jobId,
+      baseLog,
+    );
     const status = mapSep6Status(tx.status);
     const targetAmount = tx.amountOut ?? job.targetAmount;
-    const reason = status === "failed" ? (tx.message ?? `${this.anchorName}: withdrawal failed`) : null;
+    const reason =
+      status === "failed"
+        ? (tx.message ?? `${this.anchorName}: withdrawal failed`)
+        : null;
 
     await this.state.updateJob(jobId, {
       targetAmount,

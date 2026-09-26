@@ -22,7 +22,9 @@ export interface Sep38PriceEntry {
 
 function assetIdentifier(asset: AssetRef): string {
   // SEP-38 asset identification format: native XLM is "stellar:native".
-  return asset.issuer === null ? "stellar:native" : `stellar:${asset.code}:${asset.issuer}`;
+  return asset.issuer === null
+    ? "stellar:native"
+    : `stellar:${asset.code}:${asset.issuer}`;
 }
 
 /**
@@ -100,7 +102,10 @@ export async function getSep38Quote(
   );
   const res = await fetch(endpointUrl(baseUrl, "quote"), {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${jwt}`,
+    },
     body: JSON.stringify({
       sell_asset: assetIdentifier(input.sellAsset),
       sell_amount: input.sellAmount,
@@ -112,7 +117,14 @@ export async function getSep38Quote(
     }),
   });
   if (!res.ok) {
-    log.warn({ event: "anchor.sep38.quote.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-38 quote failed");
+    log.warn(
+      {
+        event: "anchor.sep38.quote.fail",
+        statusCode: res.status,
+        durationMs: Date.now() - t0,
+      },
+      "SEP-38 quote failed",
+    );
     throw new Error(`SEP-38 quote failed: ${res.status} ${await res.text()}`);
   }
   const body = (await res.json()) as {

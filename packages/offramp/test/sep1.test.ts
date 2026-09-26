@@ -28,7 +28,10 @@ issuer = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
 `;
 
 function tomlResponse(body: string, status = 200) {
-  return new Response(body, { status, headers: { "content-type": "text/plain" } });
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/plain" },
+  });
 }
 
 describe("parseStellarToml", () => {
@@ -39,7 +42,9 @@ describe("parseStellarToml", () => {
     expect(p.transferServerSep24).toBe("https://anchor.example/sep24");
     expect(p.anchorQuoteServer).toBe("https://anchor.example/sep38");
     expect(p.kycServer).toBe("https://anchor.example/sep12");
-    expect(p.signingKey).toBe("GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR");
+    expect(p.signingKey).toBe(
+      "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR",
+    );
     expect(p.networkPassphrase).toBe("Test SDF Network ; September 2015");
     expect(p.currencies).toEqual(["USDC", "EURC"]);
     expect(p.fallback).toBe(false);
@@ -57,12 +62,18 @@ describe("parseStellarToml", () => {
   it("falls back to the transfer server for SEP-12 when KYC_SERVER is absent", () => {
     // The spec says an anchor without KYC_SERVER serves SEP-12 from its
     // transfer server; guessing /sep12 would 404.
-    const p = parseStellarToml(`TRANSFER_SERVER = "https://anchor.example/api/sep6"\n`, "anchor.example");
+    const p = parseStellarToml(
+      `TRANSFER_SERVER = "https://anchor.example/api/sep6"\n`,
+      "anchor.example",
+    );
     expect(p.kycServer).toBe("https://anchor.example/api/sep6");
   });
 
   it("strips quotes and trailing comments", () => {
-    const p = parseStellarToml(`SIGNING_KEY = "GABC" # the anchor's key\n`, "anchor.example");
+    const p = parseStellarToml(
+      `SIGNING_KEY = "GABC" # the anchor's key\n`,
+      "anchor.example",
+    );
     expect(p.signingKey).toBe("GABC");
   });
 });
@@ -83,10 +94,16 @@ describe("fetchStellarToml", () => {
   });
 
   it("refuses an anchor whose declared network is not ours", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => tomlResponse(TOML)));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => tomlResponse(TOML)),
+    );
 
     await expect(
-      fetchStellarToml("anchor.example", { expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015" }),
+      fetchStellarToml("anchor.example", {
+        expectedNetworkPassphrase:
+          "Public Global Stellar Network ; September 2015",
+      }),
     ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
   });
 
@@ -105,7 +122,9 @@ describe("fetchStellarToml", () => {
     // A transient outage must not pin guessed endpoints for the whole TTL.
     const good = await fetchStellarToml("anchor.example");
     expect(good.fallback).toBe(false);
-    expect(good.signingKey).toBe("GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR");
+    expect(good.signingKey).toBe(
+      "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR",
+    );
   });
 });
 

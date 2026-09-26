@@ -54,7 +54,9 @@ export class DisabledOffRamp implements OffRampPort {
     throw new OffRampDisabledError("status");
   }
 
-  async offrampRequirements(_assetCode: string): Promise<PayoutFieldDescriptor[]> {
+  async offrampRequirements(
+    _assetCode: string,
+  ): Promise<PayoutFieldDescriptor[]> {
     throw new OffRampDisabledError("offrampRequirements");
   }
 

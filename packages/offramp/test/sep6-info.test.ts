@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getSep6Info, resolveWithdrawType, Sep6ValidationError } from "../src/sep6";
+import {
+  getSep6Info,
+  resolveWithdrawType,
+  Sep6ValidationError,
+} from "../src/sep6";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,7 +70,9 @@ describe("getSep6Info", () => {
     const info = await getSep6Info("https://anchor-b.test");
     const types = info.withdraw["USDC"]!.types;
     expect(types["bank_account"]).toBeDefined();
-    expect(types["bank_account"]!.fields["dest"]!.description).toBe("Bank account number");
+    expect(types["bank_account"]!.fields["dest"]!.description).toBe(
+      "Bank account number",
+    );
     expect(types["bank_account"]!.fields["dest_extra"]!.optional).toBe(true);
   });
 
@@ -91,7 +97,9 @@ describe("getSep6Info", () => {
         text: async () => "Service Unavailable",
       }),
     );
-    await expect(getSep6Info("https://anchor-d.test")).rejects.toThrow("SEP-6 /info failed: 503");
+    await expect(getSep6Info("https://anchor-d.test")).rejects.toThrow(
+      "SEP-6 /info failed: 503",
+    );
   });
 });
 
@@ -130,7 +138,12 @@ describe("resolveWithdrawType", () => {
         cash: { fields: {} },
       },
     });
-    const result = await resolveWithdrawType(`${BASE}/prefer`, "USDC", "100", "cash");
+    const result = await resolveWithdrawType(
+      `${BASE}/prefer`,
+      "USDC",
+      "100",
+      "cash",
+    );
     expect(result.type).toBe("cash");
   });
 
