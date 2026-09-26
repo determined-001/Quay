@@ -49,7 +49,7 @@ import {
 } from "../db/schema";
 import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
-import { decryptPii, encryptPii } from "../crypto/pii";
+import { computeKeyId, decryptPii, encryptPii, getBlobKeyId, type PiiKeyring } from "../crypto/pii";
 import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
 
 type LinkRow = typeof links.$inferSelect;
@@ -808,13 +808,13 @@ type SellerKycRow = typeof sellerKyc.$inferSelect;
 
 /**
  * Seller-level SEP-12 KYC state. `fieldsEncrypted` is the seller's submitted
- * PII (name, email, address, ...) — encrypted with `piiKey` before it ever
+ * PII (name, email, address, ...) — encrypted with `keyring` before it ever
  * touches the database, decrypted only in-process when read back.
  */
 export class DrizzleKycRepository implements KycRepository {
   constructor(
     private readonly db: DB,
-    private readonly piiKey: Buffer,
+    private readonly keyring: Buffer | PiiKeyring,
   ) {}
 
   private rowToRecord(row: SellerKycRow): KycRecord {
@@ -824,7 +824,7 @@ export class DrizzleKycRepository implements KycRepository {
       customerId: row.customerId ?? null,
       status: row.status as KycStatus,
       requiredFields: JSON.parse(row.requiredFields) as KycFieldSpec[],
-      providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.piiKey)) as Record<string, string>,
+      providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.keyring)) as Record<string, string>,
       message: row.message ?? null,
       lastSyncedAt: row.lastSyncedAt ?? null,
       updatedAt: row.updatedAt,
@@ -843,7 +843,7 @@ export class DrizzleKycRepository implements KycRepository {
       customerId: record.customerId,
       status: record.status,
       requiredFields: JSON.stringify(record.requiredFields),
-      fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.piiKey),
+      fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.keyring),
       message: record.message,
       lastSyncedAt: record.lastSyncedAt,
       updatedAt: record.updatedAt,
@@ -852,6 +852,20 @@ export class DrizzleKycRepository implements KycRepository {
       .insert(sellerKyc)
       .values(row)
       .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
+  }
+
+  async countNonPrimaryRows(): Promise<number> {
+    const primaryId = Buffer.isBuffer(this.keyring)
+      ? computeKeyId(this.keyring)
+      : this.keyring.primary.id;
+    const rows = await this.db.select({ fieldsEncrypted: sellerKyc.fieldsEncrypted }).from(sellerKyc);
+    let count = 0;
+    for (const r of rows) {
+      if (getBlobKeyId(r.fieldsEncrypted) !== primaryId) {
+        count++;
+      }
+    }
+    return count;
   }
 }
 

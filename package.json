@@ -22,6 +22,7 @@
     "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
     "demo:seed": "pnpm --filter @checkout/api exec tsx scripts/demo-seed.ts",
     "demo:reset": "pnpm --filter @checkout/api exec tsx scripts/demo-reset.ts",
+    "kyc:rotate-key": "pnpm --filter @checkout/api exec tsx scripts/rotate-kyc-key.ts",
     "test:coverage": "turbo run test:coverage"
   },
   "dependencies": {

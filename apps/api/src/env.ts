@@ -276,4 +276,7 @@ export const env = {
   // and "none" has no KYC lifecycle to store PII for.
   kycEncryptionKey:
     offramp === "testanchor" || offramp === "anchor" ? req("KYC_ENCRYPTION_KEY") : undefined,
+  // Optional comma-separated list of previous 32-byte hex keys used for decrypting
+  // older KYC records during key rotation.
+  kycEncryptionKeyPrevious: process.env.KYC_ENCRYPTION_KEY_PREVIOUS || undefined,
 } as const;

@@ -21,7 +21,8 @@ import {
 import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
-import { parsePiiKey } from "../crypto/pii";
+import { parsePiiKeyring } from "../crypto/pii";
+import { metrics } from "../metrics";
 import { createLogger } from "../logger";
 import {
   DrizzleLinkRepository,
@@ -441,7 +442,19 @@ function createKyc(anchor: AnchorWiring | null, db: DB): KycPort {
     return new NoKycRequired();
   }
   // env.kycEncryptionKey is guaranteed set whenever OFFRAMP is testanchor/anchor (see env.ts).
-  const repo = new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey as string));
+  const keyring = parsePiiKeyring(
+    env.kycEncryptionKey as string,
+    env.kycEncryptionKeyPrevious,
+  );
+  const repo = new DrizzleKycRepository(db, keyring);
+  repo
+    .countNonPrimaryRows()
+    .then((count) => {
+      metrics.kycNonPrimaryKeyRows.set(count);
+    })
+    .catch(() => {
+      // ignore DB errors during initial metric probe if tables are not yet migrated
+    });
   return new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo });
 }
 

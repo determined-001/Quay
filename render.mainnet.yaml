@@ -120,6 +120,8 @@ services:
       #   sync: false
       # - key: KYC_ENCRYPTION_KEY        # 64 hex — encrypts real seller PII
       #   sync: false
+      # - key: KYC_ENCRYPTION_KEY_PREVIOUS # comma-separated 64 hex — optional for key rotation
+      #   sync: false
       # Set once you know the rail. Unset means "read /sep6/info and refuse if
       # the anchor offers more than one withdrawal type".
       # - key: OFFRAMP_TYPE
