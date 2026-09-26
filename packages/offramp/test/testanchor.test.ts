@@ -159,8 +159,8 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
       customer,
     });
 
-    // New instance, new in-process Sep10Client/JWT cache — nothing carried
-    // over except what `state` persisted. This is what a redeploy looks like.
+    // New instance, nothing carried over except what `state` persisted. This
+    // is what a redeploy looks like.
     // The seller's anchor session is persisted too (anchor_sessions), so the
     // same wiring stands in for it here.
     const postRestart = makeOffRamp(state, wiring);

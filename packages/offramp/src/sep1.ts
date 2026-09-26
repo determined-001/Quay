@@ -15,7 +15,8 @@ import { NOOP_LOGGER } from "@checkout/core";
  *
  * - `signingKey` is the account a SEP-10 challenge MUST be signed by. Without
  *   it a client signs whatever transaction the server hands back, which is the
- *   entire attack surface of SEP-10 (see sep10.ts).
+ *   entire attack surface of SEP-10. Quay's runtime path verifies it in
+ *   anchor-session.ts; the client-side reference lives in test/sep10.ts.
  * - `networkPassphrase` is checked against the network we are actually on, so a
  *   mainnet deployment cannot be pointed at a testnet anchor (or the reverse)
  *   by a typo in one env var.

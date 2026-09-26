@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Keypair, Networks, WebAuth } from "@stellar/stellar-sdk";
-import { Sep10Client, Sep10ChallengeRejectedError } from "../src/sep10";
+// Issue #207: the SEP-10 client is a test-only reference now. It signs with a
+// keypair it holds, which is fine for a client and unacceptable for a runtime
+// module, so it lives here beside its tests instead of in src/.
+import { Sep10Client, Sep10ChallengeRejectedError } from "./sep10";
 
 // ---------------------------------------------------------------------------
 // Issue #14, item 3: "Verify the SEP-10 challenge is signed by the TOML's
