@@ -741,8 +741,13 @@ registered URL.
 | `link.underpaid`  | a payment arrived for less than requested   |
 | `offramp.settled` | a cash-out job settled                       |
 | `offramp.failed`  | a cash-out job failed                        |
+| `kyc.accepted`    | anchor accepted seller's KYC submission     |
+| `kyc.rejected`    | anchor rejected seller's KYC submission     |
+| `kyc.needs_info`  | anchor requested additional/missing fields  |
 
 ### Body
+
+#### Payment link events (`link.*`, `offramp.*`)
 ```json
 {
   "event": "link.paid",
@@ -757,6 +762,23 @@ registered URL.
     "overpaid": false
   },
   "id": "lnk_...",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+
+#### KYC events (`kyc.*`)
+For seller-level KYC events, `id` is the seller ID and the payload contains **no PII** (only status metadata and field names). `message` is populated only on `kyc.rejected` and is `null` for all other events:
+```json
+{
+  "event": "kyc.needs_info",
+  "data": {
+    "anchorDomain": "testanchor.stellar.org",
+    "status": "NEEDS_INFO",
+    "previousStatus": "PROCESSING",
+    "missingFields": ["id_document_front", "id_document_back"],
+    "message": null
+  },
+  "id": "sel_...",
   "sentAt": "2026-06-19T12:00:00.000Z"
 }
 ```

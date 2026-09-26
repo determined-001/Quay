@@ -144,6 +144,33 @@ export class WebhookSender {
   }
 
   /**
+   * Enqueue a seller-level event (e.g. KYC status transition).
+   * Sets `id` in payload to `sellerId`, and `linkId` in queue to `null`.
+   */
+  async enqueueSellerEvent(
+    hooks: Webhook[],
+    sellerId: string,
+    event: WebhookEvent,
+  ): Promise<void> {
+    const body = JSON.stringify({ ...event, id: sellerId, sentAt: new Date().toISOString() });
+    const now = Date.now();
+
+    await Promise.all(
+      hooks.map((hook) =>
+        this.repo.enqueue({
+          id: newId("wqe"),
+          webhookId: hook.id,
+          linkId: null,
+          event: event.event,
+          payload: body,
+          nextAttemptAt: now,
+          createdAt: now,
+        }),
+      ),
+    );
+  }
+
+  /**
    * One delivery attempt, with every protection the in-process sender had:
    * delivery-time SSRF re-check, rotation-overlap dual signature, no redirect
    * following, and a capped response read.

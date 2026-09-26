@@ -18,11 +18,13 @@ import {
   TestAnchorKyc,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
+import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository, WebhookRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey } from "../crypto/pii";
 import { createLogger } from "../logger";
+import { WebhookSender } from "./webhook-sender";
+import { KycEvents } from "./kyc-events";
 import {
   DrizzleLinkRepository,
   DrizzleSellerRepository,
@@ -51,7 +53,6 @@ import { SessionIssuer } from "./session";
 import type { StellarTomlConfig } from "../routes/well-known";
 import { CircuitBreakerOffRamp } from "./circuit-breaker";
 import { WebhookWorker } from "../worker/webhook-worker";
-import { WebhookSender } from "./webhook-sender";
 import { assertKeyConfigured } from "./secret-crypto";
 
 export interface Container {
@@ -163,7 +164,9 @@ export async function createContainer(): Promise<Container> {
       : pollingWatcher;
   const anchor = createAnchor(db, logger, stellar.networkPassphrase);
   const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
-  const kyc = createKyc(anchor, db);
+  const anchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
+  const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
+  const kyc = createKyc(anchor, db, webhooksRepo, webhookSender, anchorDomain);
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
   // off-ramp the probe is disabled and short-circuits to "always available" so
@@ -216,7 +219,7 @@ export async function createContainer(): Promise<Container> {
   // leaves retry scheduling to the queue, so its maxAttempts is deliberately 1.
   const webhookWorker = new WebhookWorker(
     webhooksRepo,
-    new WebhookSender(webhooksRepo, { maxAttempts: 1, logger }),
+    webhookSender,
     { log: (m) => console.log(`[webhook] ${m}`) },
   );
   const metricsToken = resolveMetricsToken();
@@ -434,7 +437,13 @@ function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepositor
   });
 }
 
-function createKyc(anchor: AnchorWiring | null, db: DB): KycPort {
+function createKyc(
+  anchor: AnchorWiring | null,
+  db: DB,
+  webhooks?: WebhookRepository,
+  sender?: WebhookSender,
+  anchorDomain?: string,
+): KycPort {
   if (!anchor) {
     // No real anchor, nothing to be compliant with. For "none" there is no
     // cash-out to gate at all; for "mock" it never gates the simulated one.
@@ -442,7 +451,17 @@ function createKyc(anchor: AnchorWiring | null, db: DB): KycPort {
   }
   // env.kycEncryptionKey is guaranteed set whenever OFFRAMP is testanchor/anchor (see env.ts).
   const repo = new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey as string));
-  return new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo });
+  const baseKyc = new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo });
+  if (webhooks && sender && anchorDomain) {
+    return new KycEvents({
+      inner: baseKyc,
+      repo,
+      webhooks,
+      sender,
+      anchorDomain,
+    });
+  }
+  return baseKyc;
 }
 
 /**
