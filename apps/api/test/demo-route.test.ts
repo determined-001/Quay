@@ -4,7 +4,7 @@ import { NOOP_LOGGER, type Seller, type SellerRepository, type TokenRevocationRe
 import { SessionIssuer } from "../src/services/session";
 import { demoRoutes } from "../src/routes/demo";
 
-const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLER", payoutFields: null, createdAt: Date.now() };
+const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
 
 function fakeContainer(
   deleteDemo: (sellerId?: string) => Promise<number>,
@@ -15,6 +15,7 @@ function fakeContainer(
     findByWallet: async () => null,
     createIfAbsent: async () => seller,
     savePayoutFields: async () => {},
+    saveProfileKind: async () => {},
   };
   const revocations: TokenRevocationRepository = {
     revoke: async () => {},

@@ -14,6 +14,7 @@ import type {
   OffRampStateRepository,
   PaymentLink,
   Seller,
+  SellerProfileKind,
   SellerRepository,
   TokenRevocationRepository,
   StoredOffRampJob,
@@ -280,7 +281,14 @@ function rowToSeller(row: typeof sellers.$inferSelect): Seller {
       payoutFields = null;
     }
   }
-  return { id: row.id, name: row.name, wallet: row.wallet, payoutFields, createdAt: row.createdAt };
+  return {
+    id: row.id,
+    name: row.name,
+    wallet: row.wallet,
+    profileKind: row.profileKind,
+    payoutFields,
+    createdAt: row.createdAt,
+  };
 }
 
 export class DrizzleSellerRepository implements SellerRepository {
@@ -301,6 +309,7 @@ export class DrizzleSellerRepository implements SellerRepository {
       id: newId("sel"),
       name,
       wallet,
+      profileKind: "individual",
       payoutFieldsJson: null,
       createdAt: now,
     };
@@ -318,6 +327,10 @@ export class DrizzleSellerRepository implements SellerRepository {
       .update(sellers)
       .set({ payoutFieldsJson: JSON.stringify(fields) })
       .where(eq(sellers.id, sellerId));
+  }
+
+  async saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void> {
+    await this.db.update(sellers).set({ profileKind: kind }).where(eq(sellers.id, sellerId));
   }
 
   async findByWallet(wallet: string): Promise<Seller | null> {

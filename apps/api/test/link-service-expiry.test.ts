@@ -155,6 +155,7 @@ class FakeSellerRepo {
     return this.seller;
   }
   async savePayoutFields(): Promise<void> {}
+  async saveProfileKind(): Promise<void> {}
 }
 
 // Captures successful deliveries (2xx) so tests can introspect the body.
@@ -329,6 +330,7 @@ async function makeFixture(): Promise<Fixture> {
     id: "s_1",
     name: "Demo",
     wallet: DEST,
+    profileKind: "individual",
     payoutFields: null,
     createdAt: 1_700_000_000_000,
   });
