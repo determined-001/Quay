@@ -158,7 +158,9 @@ Nothing in this flow is signed by a key the server holds: the seller's wallet
 signs the anchor's SEP-10 challenge (once, ahead of time) and the USDC transfer
 that funds the withdrawal. `SellerAnchorAuth` (`packages/offramp/src/anchor-session.ts`)
 verifies and relays the challenge and keeps the resulting JWT per seller in
-`anchor_sessions`, encrypted at rest.
+`anchor_sessions`, encrypted at rest. Sensitive seller payout fields (`sellers.payout_fields_encrypted`)
+and SEP-12 KYC records (`seller_kyc.fields_encrypted`) are likewise encrypted at rest using AES-256-GCM
+via `KYC_ENCRYPTION_KEY`.
 
 ```mermaid
 sequenceDiagram

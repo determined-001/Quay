@@ -52,6 +52,7 @@ import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { decryptPii, encryptPii } from "../crypto/pii";
 import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
+import type { Logger } from "pino";
 
 type LinkRow = typeof links.$inferSelect;
 
@@ -272,9 +273,29 @@ export class DrizzleLinkRepository implements LinkRepository {
   }
 }
 
-function rowToSeller(row: typeof sellers.$inferSelect): Seller {
+function rowToSeller(
+  row: typeof sellers.$inferSelect,
+  piiKey?: Buffer | null,
+  logger?: Logger | null,
+): Seller {
   let payoutFields: Record<string, string> | null = null;
-  if (row.payoutFieldsJson) {
+  if (row.payoutFieldsEncrypted) {
+    if (piiKey) {
+      try {
+        payoutFields = JSON.parse(decryptPii(row.payoutFieldsEncrypted, piiKey)) as Record<string, string>;
+      } catch {
+        payoutFields = null;
+        const payload = { event: "seller.payout_fields.decrypt_failed", sellerId: row.id };
+        if (logger) {
+          logger.warn(payload, "failed to decrypt seller payout fields");
+        } else {
+          console.warn(JSON.stringify(payload));
+        }
+      }
+    } else {
+      payoutFields = null;
+    }
+  } else if (row.payoutFieldsJson) {
     try {
       payoutFields = JSON.parse(row.payoutFieldsJson) as Record<string, string>;
     } catch {
@@ -292,7 +313,11 @@ function rowToSeller(row: typeof sellers.$inferSelect): Seller {
 }
 
 export class DrizzleSellerRepository implements SellerRepository {
-  constructor(private readonly db: DB) {}
+  constructor(
+    private readonly db: DB,
+    private readonly piiKey: Buffer | null = null,
+    private readonly logger?: Logger | null,
+  ) {}
 
   /** Seed (once) and return the single demo seller. */
   async ensureDefault(wallet: string, name: string): Promise<Seller> {
@@ -302,7 +327,7 @@ export class DrizzleSellerRepository implements SellerRepository {
       if (existing[0].wallet !== wallet) {
         await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
       }
-      return rowToSeller({ ...existing[0], wallet });
+      return rowToSeller({ ...existing[0], wallet }, this.piiKey, this.logger);
     }
     const now = Date.now();
     const seller: typeof sellers.$inferSelect = {
@@ -311,21 +336,26 @@ export class DrizzleSellerRepository implements SellerRepository {
       wallet,
       profileKind: "individual",
       payoutFieldsJson: null,
+      payoutFieldsEncrypted: null,
       createdAt: now,
     };
     await this.db.insert(sellers).values(seller);
-    return rowToSeller(seller);
+    return rowToSeller(seller, this.piiKey, this.logger);
   }
 
   async findById(id: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
-    return rows[0] ? rowToSeller(rows[0]) : null;
+    return rows[0] ? rowToSeller(rows[0], this.piiKey, this.logger) : null;
   }
 
   async savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void> {
+    if (!this.piiKey) {
+      return;
+    }
+    const encrypted = encryptPii(JSON.stringify(fields), this.piiKey);
     await this.db
       .update(sellers)
-      .set({ payoutFieldsJson: JSON.stringify(fields) })
+      .set({ payoutFieldsEncrypted: encrypted, payoutFieldsJson: null })
       .where(eq(sellers.id, sellerId));
   }
 
@@ -335,11 +365,11 @@ export class DrizzleSellerRepository implements SellerRepository {
 
   async findByWallet(wallet: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
-    // Must go through rowToSeller — the raw row carries payoutFieldsJson but
+    // Must go through rowToSeller — the raw row carries payoutFieldsEncrypted/payoutFieldsJson but
     // not the parsed payoutFields; every other read path already does this,
     // and this is the SEP-10 login path, so skipping it would make the payout
     // reuse feature silently do nothing for wallet-logged-in sellers.
-    return rows[0] ? rowToSeller(rows[0]) : null;
+    return rows[0] ? rowToSeller(rows[0], this.piiKey, this.logger) : null;
   }
 
   async createIfAbsent(wallet: string): Promise<Seller> {
@@ -350,6 +380,28 @@ export class DrizzleSellerRepository implements SellerRepository {
     const seller = await this.findByWallet(wallet);
     if (!seller) throw new Error(`failed to create or find seller for wallet ${wallet}`);
     return seller;
+  }
+
+  /**
+   * Backfill on boot: for each row with non-null payout_fields_json and a configured key,
+   * encrypt it into payout_fields_encrypted and null the plaintext.
+   * Idempotent and never logs values.
+   */
+  async backfillLegacyPayoutFields(): Promise<void> {
+    if (!this.piiKey) return;
+    const legacyRows = await this.db
+      .select({ id: sellers.id, payoutFieldsJson: sellers.payoutFieldsJson })
+      .from(sellers)
+      .where(isNotNull(sellers.payoutFieldsJson));
+
+    for (const row of legacyRows) {
+      if (!row.payoutFieldsJson) continue;
+      const encrypted = encryptPii(row.payoutFieldsJson, this.piiKey);
+      await this.db
+        .update(sellers)
+        .set({ payoutFieldsEncrypted: encrypted, payoutFieldsJson: null })
+        .where(eq(sellers.id, row.id));
+    }
   }
 }
 

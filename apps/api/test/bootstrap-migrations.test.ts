@@ -166,6 +166,17 @@ describe("bootstrap() against a pre-existing database", () => {
     expect(await columnsOf(client, "sellers")).toContain("payout_fields_json");
   });
 
+  it("adds sellers.payout_fields_encrypted to a legacy table (issue 4.34)", async () => {
+    const client = createClient({ url: "file::memory:" });
+    await client.execute(LEGACY_LINKS);
+    await client.execute(LEGACY_LINK_PAYMENTS);
+    await client.execute(LEGACY_SELLERS);
+
+    await bootstrap(client);
+
+    expect(await columnsOf(client, "sellers")).toContain("payout_fields_encrypted");
+  });
+
   // Issue 4.11 rebuilds processed_tx and link_payments rather than ALTERing
   // them — SQLite cannot move a column into or out of a PRIMARY KEY. A rebuild
   // that drops rows is a money bug: processed_tx is the dedup ledger, so

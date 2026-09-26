@@ -123,8 +123,17 @@ export async function createContainer(): Promise<Container> {
   const { db, client } = createDb(env.databaseUrl, env.databaseAuthToken);
   await bootstrap(client);
 
+  const piiKey = env.kycEncryptionKey ? parsePiiKey(env.kycEncryptionKey) : null;
+  if (!piiKey) {
+    logger.info(
+      { event: "seller.payout_fields.reuse_disabled" },
+      "KYC_ENCRYPTION_KEY not set; seller payout field reuse is disabled",
+    );
+  }
+
   const linksRepo = new DrizzleLinkRepository(db);
-  const sellersRepo = new DrizzleSellerRepository(db);
+  const sellersRepo = new DrizzleSellerRepository(db, piiKey, logger);
+  await sellersRepo.backfillLegacyPayoutFields();
   const webhooksRepo = new DrizzleWebhookRepository(db);
   const stateRepo = new DrizzleWatcherStateRepository(db);
   const revocationsRepo = new DrizzleTokenRevocationRepository(db);

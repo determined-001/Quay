@@ -50,6 +50,11 @@ export const REDACT_PATHS: string[] = [
   // cash-out payload — opaque to the domain, anchor interprets it
   "payout",
   "payoutFields",
+  "*.payoutFields",
+  "payoutFieldsJson",
+  "*.payoutFieldsJson",
+  "payoutFieldsEncrypted",
+  "*.payoutFieldsEncrypted",
   // SEP-12 KYC PII — every field is personal data
   ...kycRedactionPaths(SEP9_SENSITIVE_FIELD_NAMES),
   "fields",
