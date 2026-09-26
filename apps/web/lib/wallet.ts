@@ -14,6 +14,7 @@
  */
 
 import type { WithdrawTransfer } from "@checkout/core";
+import { checkPaymentPreflight, horizonPaymentReason } from "./payment-preflight";
 
 const NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
 
@@ -155,10 +156,38 @@ const HORIZON_URL =
  *
  * Returns the transaction hash.
  */
-export async function sendAnchorTransfer(address: string, transfer: WithdrawTransfer): Promise<string> {
+export async function sendAnchorTransfer(
+  address: string,
+  transfer: WithdrawTransfer,
+  expectedAddress?: string,
+): Promise<string> {
   const stellar = await import("@stellar/stellar-sdk");
   const server = new stellar.Horizon.Server(HORIZON_URL);
-  const account = await server.loadAccount(address);
+  let account: Awaited<ReturnType<typeof server.loadAccount>>;
+  try {
+    account = await server.loadAccount(address);
+  } catch {
+    throw new Error("This wallet is not funded on the selected network.");
+  }
+
+  const preflight = checkPaymentPreflight(
+    account,
+    {
+      code: transfer.asset.code,
+      issuer: transfer.asset.issuer,
+    },
+    transfer.amount,
+    {
+      connectedAddress: address,
+      expectedAddress,
+      feeStroops: BigInt(stellar.BASE_FEE),
+    },
+  );
+
+  if (!preflight.ok) {
+    throw new Error(preflight.message);
+  }
+
   const asset =
     transfer.asset.issuer === null
       ? stellar.Asset.native()
@@ -179,8 +208,19 @@ export async function sendAnchorTransfer(address: string, transfer: WithdrawTran
 
   const unsigned = builder.setTimeout(300).build().toXDR();
   const signed = await signTransaction(unsigned, address);
-  const res = await server.submitTransaction(stellar.TransactionBuilder.fromXDR(signed, NETWORK_PASSPHRASE));
-  return res.hash;
+  try {
+    const res = await server.submitTransaction(stellar.TransactionBuilder.fromXDR(signed, NETWORK_PASSPHRASE));
+    return res.hash;
+  } catch (err: unknown) {
+    const reason = horizonPaymentReason(err);
+    if (reason === "missing_trustline") {
+      throw new Error(`The payment was not sent: missing trustline for ${transfer.asset.code}.`);
+    }
+    if (reason === "insufficient_balance") {
+      throw new Error("The payment was not sent: insufficient balance or fee.");
+    }
+    throw err;
+  }
 }
 
 /** SEP-6 sends a hash memo base64-encoded; the SDK wants hex. */

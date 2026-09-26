@@ -28,6 +28,10 @@ import {
   type PayoutFieldDescriptor,
 } from "../../lib/api";
 import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
+import {
+  checkPaymentPreflight,
+  type PaymentPreflightResult,
+} from "../../lib/payment-preflight";
 import { useSellerWallet } from "./SessionGate";
 
 // ---------------------------------------------------------------------------
@@ -131,6 +135,52 @@ export default function CashOutModal({
   const [sending, setSending] = useState(false);
   const [sentHash, setSentHash] = useState<string | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
+  const [preflight, setPreflight] = useState<PaymentPreflightResult | null>(null);
+  const [checkingPreflight, setCheckingPreflight] = useState(false);
+
+  const runPreflight = useCallback(async () => {
+    if (!transfer || !wallet) return;
+    setCheckingPreflight(true);
+    setTransferError(null);
+    try {
+      const stellar = await import("@stellar/stellar-sdk");
+      const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
+      const horizonUrl =
+        process.env.NEXT_PUBLIC_HORIZON_URL ??
+        (network === "public" ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org");
+      const server = new stellar.Horizon.Server(horizonUrl);
+      let account: Awaited<ReturnType<typeof server.loadAccount>> | null = null;
+      try {
+        account = await server.loadAccount(wallet);
+      } catch {
+        account = null;
+      }
+      const result = checkPaymentPreflight(
+        account,
+        {
+          code: transfer.asset.code,
+          issuer: transfer.asset.issuer,
+        },
+        transfer.amount,
+        {
+          connectedAddress: wallet,
+          expectedAddress: wallet,
+          feeStroops: BigInt(stellar.BASE_FEE),
+        },
+      );
+      setPreflight(result);
+    } catch {
+      setPreflight(null);
+    } finally {
+      setCheckingPreflight(false);
+    }
+  }, [transfer, wallet]);
+
+  useEffect(() => {
+    if (step === "transfer" && transfer && wallet) {
+      void runPreflight();
+    }
+  }, [step, transfer, wallet, runPreflight]);
 
   // ---- fetch requirements on mount ----------------------------------------
   useEffect(() => {
@@ -269,7 +319,7 @@ export default function CashOutModal({
     setTransferError(null);
     setSending(true);
     try {
-      setSentHash(await sendAnchorTransfer(wallet, transfer));
+      setSentHash(await sendAnchorTransfer(wallet, transfer, wallet));
     } catch (e: unknown) {
       setTransferError(
         e instanceof Error && e.message ? `The payment was not sent: ${e.message}` : "The payment was not sent.",
@@ -525,14 +575,52 @@ export default function CashOutModal({
                   Keep this open until the payment is sent. The memo is how the anchor matches it to
                   your withdrawal.
                 </p>
-                <button
-                  className="btn btn--primary btn--block"
-                  onClick={() => void handleSendTransfer()}
-                  disabled={sending || !wallet}
-                >
-                  {sending ? "Waiting for wallet…" : "Send with my wallet"}
-                </button>
-                {transferError && <div className="err">{transferError}</div>}
+
+                {checkingPreflight && (
+                  <p className="muted" style={{ fontSize: 12 }}>
+                    Checking wallet balance…
+                  </p>
+                )}
+
+                {preflight && !preflight.ok && (
+                  <div className="err" role="alert" style={{ marginBottom: 12 }}>
+                    {preflight.message}
+                  </div>
+                )}
+
+                {preflight && !preflight.ok && preflight.reason === "missing_trustline" ? (
+                  <button
+                    type="button"
+                    className="btn btn--block"
+                    onClick={() => void runPreflight()}
+                    disabled={checkingPreflight}
+                  >
+                    {checkingPreflight ? "Checking…" : "Check again"}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      className="btn btn--primary btn--block"
+                      onClick={() => void handleSendTransfer()}
+                      disabled={sending || !wallet || checkingPreflight || (preflight !== null && !preflight.ok)}
+                      aria-disabled={preflight !== null && !preflight.ok}
+                    >
+                      {sending ? "Waiting for wallet…" : "Send with my wallet"}
+                    </button>
+                    {preflight && !preflight.ok && (
+                      <button
+                        type="button"
+                        className="btn btn--block"
+                        style={{ marginTop: 8 }}
+                        onClick={() => void runPreflight()}
+                        disabled={checkingPreflight}
+                      >
+                        {checkingPreflight ? "Checking…" : "Check again"}
+                      </button>
+                    )}
+                  </>
+                )}
+                {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
               </>
             )}
           </div>
