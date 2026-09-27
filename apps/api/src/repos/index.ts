@@ -921,6 +921,13 @@ export class DrizzleKycRepository implements KycRepository {
 }
 
 /**
+ * Grace period after expiration before an anchor session row is swept at rest.
+ * A grace period of 24h keeps "your session expired" distinguishable from
+ * "never connected" for the dashboard reconnection prompt.
+ */
+export const ANCHOR_SESSION_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Sellers' SEP-10 sessions with the anchor. The token is a bearer credential,
  * so it is stored encrypted with the same key as webhook secrets and only
  * decrypted in-process when a call to the anchor needs it.
@@ -965,6 +972,21 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
     await this.db
       .delete(anchorSessions)
       .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
+  }
+
+  /**
+   * Delete anchor session rows that expired longer than graceMs ago.
+   *
+   * @param now Current timestamp in epoch ms.
+   * @param graceMs Minimum elapsed ms past expiresAt before deletion.
+   * @returns The number of deleted rows.
+   */
+  async sweepExpired(now: number, graceMs: number = ANCHOR_SESSION_SWEEP_GRACE_MS): Promise<number> {
+    const cutoff = now - graceMs;
+    const res = await this.db
+      .delete(anchorSessions)
+      .where(lt(anchorSessions.expiresAt, cutoff));
+    return res.rowsAffected ?? 0;
   }
 }
 
