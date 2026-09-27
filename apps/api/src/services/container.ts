@@ -34,6 +34,7 @@ import {
   DrizzleOfframpTelemetryRepository,
   DrizzleApiKeyRepository,
   DrizzleAnchorSessionRepository,
+  ANCHOR_SESSION_SWEEP_GRACE_MS,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -140,6 +141,7 @@ export async function createContainer(): Promise<Container> {
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
+  const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db);
 
   // Optional. Quay is multi-tenant: a seller signs in with their own wallet
   // over SEP-10, that address becomes their identity AND their payout
@@ -170,7 +172,7 @@ export async function createContainer(): Promise<Container> {
     env.watchMode === "stream"
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : pollingWatcher;
-  const anchor = createAnchor(db, logger, stellar.networkPassphrase);
+  const anchor = createAnchor(db, logger, stellar.networkPassphrase, anchorSessionsRepo);
   const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
   const kyc = createKyc(anchor, db);
 
@@ -288,10 +290,21 @@ export async function createContainer(): Promise<Container> {
         stopPoller = startCashOutPoller(service, Math.max(3000, env.pollMs));
         stopProbe = startAnchorProbeTimer(anchorHealth, 60_000);
       }
-      const sweepTimer = setInterval(
-        () => void revocationsRepo.sweepExpired(Math.floor(Date.now() / 1000)),
-        60 * 60 * 1000, // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
-      );
+      const sweepTimer = setInterval(() => {
+        void revocationsRepo.sweepExpired(Math.floor(Date.now() / 1000));
+        if (anchor) {
+          void anchorSessionsRepo
+            .sweepExpired(Date.now(), ANCHOR_SESSION_SWEEP_GRACE_MS)
+            .then((count) => {
+              if (count > 0) {
+                logger.info({ event: "anchor.sessions.swept", count }, `swept ${count} expired anchor session(s)`);
+              }
+            })
+            .catch((err) => {
+              logger.warn({ event: "anchor.sessions.sweep_failed", err }, "failed to sweep expired anchor sessions");
+            });
+        }
+      }, 60 * 60 * 1000); // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
       stopRevocationSweep = () => clearInterval(sweepTimer);
     },
     async stop() {
@@ -398,7 +411,12 @@ interface AnchorWiring {
  * own customer at the anchor, and the server holds nothing that can sign for
  * a seller's funds.
  */
-function createAnchor(db: DB, logger: Logger, networkPassphrase: string): AnchorWiring | null {
+function createAnchor(
+  db: DB,
+  logger: Logger,
+  networkPassphrase: string,
+  sessions: DrizzleAnchorSessionRepository = new DrizzleAnchorSessionRepository(db),
+): AnchorWiring | null {
   if (env.offramp !== "testanchor" && env.offramp !== "anchor") return null;
   // For OFFRAMP=anchor env.ts already required both; the fallbacks are the
   // testanchor sandbox preset.
@@ -413,7 +431,7 @@ function createAnchor(db: DB, logger: Logger, networkPassphrase: string): Anchor
   const auth = new SellerAnchorAuth({
     discovery,
     networkPassphrase,
-    sessions: new DrizzleAnchorSessionRepository(db),
+    sessions,
     logger,
   });
   return { discovery, auth };
