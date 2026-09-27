@@ -12,5 +12,9 @@ export * from "./matching/match-payment";
 // Ports (interfaces / seams)
 export * from "./ports/index";
 
+// KYC SEP-9
+export * from "./kyc/sep9";
+export * from "./kyc/validate";
+
 // Validation schemas
 export * from "./schemas";

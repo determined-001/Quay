@@ -1,4 +1,5 @@
 import { pino, type Logger as PinoLogger } from "pino";
+import { SEP9_SENSITIVE_FIELD_NAMES } from "@checkout/core";
 
 /**
  * Redact paths applied to EVERY logged object. These are intentional floors,
@@ -13,8 +14,7 @@ import { pino, type Logger as PinoLogger } from "pino";
  *                                  (SEP-10, SEP-38, SEP-12, SEP-6)
  *  - defaultSellerSecret         → DEFAULT_SELLER_SECRET env var if ever logged
  *  - payout / payoutFields       → cash-out body (NGN target, fields map)
- *  - first_name / last_name /
- *    email_address               → SEP-12 KYC payload (every field is PII)
+ *  - SEP-9 sensitive fields      → derived from SEP9_SENSITIVE_FIELD_NAMES
  *  - *.fields.*                  → defensive — the SEP-12 PUT body shape
  */
 export const REDACT_PATHS: string[] = [
@@ -40,15 +40,8 @@ export const REDACT_PATHS: string[] = [
   // cash-out payload — opaque to the domain, anchor interprets it
   "payout",
   "payoutFields",
-  // SEP-12 KYC PII — every field is personal data
-  "first_name",
-  "last_name",
-  "email_address",
-  "address",
-  "*.first_name",
-  "*.last_name",
-  "*.email_address",
-  "*.address",
+  // SEP-12 KYC PII — derived from SEP-9 catalogue
+  ...SEP9_SENSITIVE_FIELD_NAMES.flatMap((name) => [name, `*.${name}`]),
   "fields",
   "*.fields",
 ];
