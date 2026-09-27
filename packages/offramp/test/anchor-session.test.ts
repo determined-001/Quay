@@ -226,6 +226,76 @@ describe("TestAnchorKyc — per seller", () => {
     // What she had on file is still there to resubmit — the reusable profile.
     expect(record.providedFields.first_name).toBe("Alice");
   });
+
+  it("serves cached status without querying anchor if within maxAgeMs", async () => {
+    stubAnchor();
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    await repo.save({
+      sellerId: ALICE.sellerId,
+      account: alice.publicKey(),
+      customerId: "cus_alice",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFields: { first_name: "Alice" },
+      message: null,
+      lastSyncedAt: Date.now() - 5000,
+      updatedAt: Date.now() - 5000,
+    });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    // Note: Alice has NOT signed in, so querying anchor would throw AnchorAuthRequiredError.
+    // Serving from cache succeeds without needing a live session or hitting the anchor.
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.customerId).toBe("cus_alice");
+  });
+
+  it("re-syncs from anchor if cached record is older than maxAgeMs", async () => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    await repo.save({
+      sellerId: ALICE.sellerId,
+      account: alice.publicKey(),
+      customerId: "cus_alice",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFields: { first_name: "Alice" },
+      message: null,
+      lastSyncedAt: Date.now() - 70_000,
+      updatedAt: Date.now() - 70_000,
+    });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.lastSyncedAt).toBeGreaterThan(Date.now() - 5000);
+  });
+
+  it("caps maxAgeMs to 15s when record is PROCESSING", async () => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    await repo.save({
+      sellerId: ALICE.sellerId,
+      account: alice.publicKey(),
+      customerId: "cus_alice",
+      status: "PROCESSING",
+      requiredFields: [],
+      providedFields: { first_name: "Alice" },
+      message: null,
+      lastSyncedAt: Date.now() - 20_000, // older than 15s cap, but less than 60s
+      updatedAt: Date.now() - 20_000,
+    });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.lastSyncedAt).toBeGreaterThan(Date.now() - 5000);
+  });
 });
 
 describe("TestAnchorOffRamp — per seller", () => {

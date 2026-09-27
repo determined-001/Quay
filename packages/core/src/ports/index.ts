@@ -433,10 +433,20 @@ export class KycRequiredError extends Error {
   }
 }
 
+export interface KycStatusOptions {
+  /**
+   * Maximum acceptable age (ms) of a cached KYC record.
+   * If provided and the stored record's `lastSyncedAt` is within `maxAgeMs`
+   * (and its account matches `customer.account`), implementations may return
+   * the cached record without querying the anchor.
+   */
+  maxAgeMs?: number;
+}
+
 export interface KycPort {
   /** Refreshes from the anchor (if applicable) and persists the result.
    *  Throws {@link AnchorAuthRequiredError} without a live anchor session. */
-  status(customer: AnchorCustomer): Promise<KycRecord>;
+  status(customer: AnchorCustomer, opts?: KycStatusOptions): Promise<KycRecord>;
   /** Submits/updates fields. Throws {@link KycRequiredError} if a required
    *  field is still missing after merging with what's already on file. */
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
