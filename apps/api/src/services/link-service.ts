@@ -35,6 +35,7 @@ import {
   type IndicativePrice,
   type OffRampTelemetryRepository,
   type OffRampTelemetryRow,
+  type WithdrawTransfer,
 } from "@checkout/core";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
@@ -1037,6 +1038,37 @@ export class LinkService {
       job: { ...job, quoteExpiresAt: quote.expiresAt, quoteExpiresInSeconds },
       initiation,
     };
+  }
+
+  /**
+   * Fetches pending withdrawal transfer instructions for an offramp_pending link.
+   * Returns `{ transfer: WithdrawTransfer | null }`.
+   */
+  async pendingTransfer(
+    linkId: string,
+    opts: ServiceCallOptions = {},
+  ): Promise<{ transfer: WithdrawTransfer | null }> {
+    const log = opts.logger ?? this.deps.logger!;
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+    if (link.status !== "offramp_pending") {
+      throw new HttpError(409, `Link must be offramp_pending to fetch pending transfer (is "${link.status}")`);
+    }
+    if (!link.offrampJobId) {
+      return { transfer: null };
+    }
+    if (!this.health.isAvailable()) {
+      throw new HttpError(503, "anchor_unavailable");
+    }
+    try {
+      const job = await this.deps.offramp.status(link.offrampJobId, { logger: log });
+      return { transfer: job.transfer ?? null };
+    } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      if (err instanceof HttpError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new HttpError(502, `Off-ramp error: ${message}`);
+    }
   }
 
   /** Advance any pending cash-outs by polling the off-ramp adapter. */

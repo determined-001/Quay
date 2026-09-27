@@ -13,6 +13,7 @@ import {
   type OffRampStateRepository,
   type PayoutFieldDescriptor,
   type SellerPayoutRef,
+  type WithdrawTransfer,
 } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
@@ -324,6 +325,16 @@ export class TestAnchorOffRamp implements OffRampPort {
       lastError: reason,
     });
 
+    const transfer: WithdrawTransfer | undefined = tx.withdrawAnchorAccount
+      ? {
+          destination: tx.withdrawAnchorAccount,
+          amount: tx.amountIn ?? "",
+          asset: { code: "USDC", issuer: null },
+          memo: tx.withdrawMemo ?? null,
+          memoType: tx.withdrawMemoType ?? null,
+        }
+      : undefined;
+
     return {
       jobId,
       linkId: job.linkId,
@@ -332,6 +343,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       targetAmount,
       rate: job.rate,
       reason: reason ?? undefined,
+      transfer,
     };
   }
 }

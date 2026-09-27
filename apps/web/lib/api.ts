@@ -449,6 +449,11 @@ export const api = {
       { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
     ),
 
+  getPendingTransfer: (id: string) =>
+    http<{
+      transfer: WithdrawTransfer | null;
+    }>(`/links/${id}/cash-out/transfer`),
+
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
     if (from) params.set("from", from);

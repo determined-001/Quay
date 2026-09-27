@@ -27,12 +27,7 @@ import {
   type OfframpRequirements,
   type PayoutFieldDescriptor,
 } from "../../lib/api";
-import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
-import {
-  checkPaymentPreflight,
-  type PaymentPreflightResult,
-} from "../../lib/payment-preflight";
-import { useSellerWallet } from "./SessionGate";
+import TransferStep from "./TransferStep";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -128,59 +123,7 @@ export default function CashOutModal({
   // blocked — the seller needs a link they can open themselves.
   const [interactiveUrl, setInteractiveUrl] = useState<string | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Set when the anchor is waiting for the asset. Only the seller's wallet can
-  // send it; the payout does not start until they do.
-  const wallet = useSellerWallet();
   const [transfer, setTransfer] = useState<WithdrawTransfer | null>(null);
-  const [sending, setSending] = useState(false);
-  const [sentHash, setSentHash] = useState<string | null>(null);
-  const [transferError, setTransferError] = useState<string | null>(null);
-  const [preflight, setPreflight] = useState<PaymentPreflightResult | null>(null);
-  const [checkingPreflight, setCheckingPreflight] = useState(false);
-
-  const runPreflight = useCallback(async () => {
-    if (!transfer || !wallet) return;
-    setCheckingPreflight(true);
-    setTransferError(null);
-    try {
-      const stellar = await import("@stellar/stellar-sdk");
-      const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
-      const horizonUrl =
-        process.env.NEXT_PUBLIC_HORIZON_URL ??
-        (network === "public" ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org");
-      const server = new stellar.Horizon.Server(horizonUrl);
-      let account: Awaited<ReturnType<typeof server.loadAccount>> | null = null;
-      try {
-        account = await server.loadAccount(wallet);
-      } catch {
-        account = null;
-      }
-      const result = checkPaymentPreflight(
-        account,
-        {
-          code: transfer.asset.code,
-          issuer: transfer.asset.issuer,
-        },
-        transfer.amount,
-        {
-          connectedAddress: wallet,
-          expectedAddress: wallet,
-          feeStroops: BigInt(stellar.BASE_FEE),
-        },
-      );
-      setPreflight(result);
-    } catch {
-      setPreflight(null);
-    } finally {
-      setCheckingPreflight(false);
-    }
-  }, [transfer, wallet]);
-
-  useEffect(() => {
-    if (step === "transfer" && transfer && wallet) {
-      void runPreflight();
-    }
-  }, [step, transfer, wallet, runPreflight]);
 
   // ---- fetch requirements on mount ----------------------------------------
   useEffect(() => {
@@ -311,21 +254,6 @@ export default function CashOutModal({
     } catch (e: unknown) {
       setErrorMsg(e instanceof CheckoutError ? describeError(e) : e instanceof Error ? e.message : "Cash-out failed");
       setStep("form");
-    }
-  }
-
-  async function handleSendTransfer() {
-    if (!transfer || !wallet) return;
-    setTransferError(null);
-    setSending(true);
-    try {
-      setSentHash(await sendAnchorTransfer(wallet, transfer, wallet));
-    } catch (e: unknown) {
-      setTransferError(
-        e instanceof Error && e.message ? `The payment was not sent: ${e.message}` : "The payment was not sent.",
-      );
-    } finally {
-      setSending(false);
     }
   }
 
@@ -537,93 +465,11 @@ export default function CashOutModal({
         {/* The anchor is waiting for the asset. The seller's wallet sends it
             straight to the anchor; nothing passes through Quay. */}
         {step === "transfer" && transfer && (
-          <div>
-            {sentHash ? (
-              <>
-                <div className="kyc-note kyc-note--ok" style={{ marginBottom: 12 }}>
-                  Sent. The anchor pays out once it sees the payment on the ledger.
-                </div>
-                <p className="muted mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
-                  {sentHash}
-                </p>
-                <button className="btn btn--primary btn--block" onClick={onSuccess}>
-                  Done
-                </button>
-              </>
-            ) : (
-              <>
-                <p style={{ marginTop: 0 }}>
-                  The anchor is ready. Send{" "}
-                  <strong>
-                    {transfer.amount} {transfer.asset.code}
-                  </strong>{" "}
-                  from your wallet to finish the cash-out.
-                </p>
-                <dl className="muted" style={{ fontSize: 13, margin: "0 0 12px" }}>
-                  <dt>To</dt>
-                  <dd className="mono" title={transfer.destination}>
-                    {shortAddress(transfer.destination)}
-                  </dd>
-                  {transfer.memo !== null && (
-                    <>
-                      <dt>Memo ({transfer.memoType ?? "text"})</dt>
-                      <dd className="mono">{transfer.memo}</dd>
-                    </>
-                  )}
-                </dl>
-                <p className="muted" style={{ fontSize: 12 }}>
-                  Keep this open until the payment is sent. The memo is how the anchor matches it to
-                  your withdrawal.
-                </p>
-
-                {checkingPreflight && (
-                  <p className="muted" style={{ fontSize: 12 }}>
-                    Checking wallet balance…
-                  </p>
-                )}
-
-                {preflight && !preflight.ok && (
-                  <div className="err" role="alert" style={{ marginBottom: 12 }}>
-                    {preflight.message}
-                  </div>
-                )}
-
-                {preflight && !preflight.ok && preflight.reason === "missing_trustline" ? (
-                  <button
-                    type="button"
-                    className="btn btn--block"
-                    onClick={() => void runPreflight()}
-                    disabled={checkingPreflight}
-                  >
-                    {checkingPreflight ? "Checking…" : "Check again"}
-                  </button>
-                ) : (
-                  <>
-                    <button
-                      className="btn btn--primary btn--block"
-                      onClick={() => void handleSendTransfer()}
-                      disabled={sending || !wallet || checkingPreflight || (preflight !== null && !preflight.ok)}
-                      aria-disabled={preflight !== null && !preflight.ok}
-                    >
-                      {sending ? "Waiting for wallet…" : "Send with my wallet"}
-                    </button>
-                    {preflight && !preflight.ok && (
-                      <button
-                        type="button"
-                        className="btn btn--block"
-                        style={{ marginTop: 8 }}
-                        onClick={() => void runPreflight()}
-                        disabled={checkingPreflight}
-                      >
-                        {checkingPreflight ? "Checking…" : "Check again"}
-                      </button>
-                    )}
-                  </>
-                )}
-                {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
-              </>
-            )}
-          </div>
+          <TransferStep
+            transfer={transfer}
+            onSuccess={() => onSuccess()}
+            onClose={onClose}
+          />
         )}
 
         {/* The anchor needs the seller in a browser and the popup was blocked —

@@ -278,6 +278,31 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     }
   });
 
+  // Fetch pending withdrawal transfer instructions (for resuming an unsent cash-out)
+  app.get("/:id/cash-out/transfer", auth, requireScope("links:read"), async (ctx) => {
+    const log = getLogger(ctx);
+    const linkId = ctx.req.param("id");
+    try {
+      const existing = await c.service.getLink(linkId);
+      if (!existing) return ctx.json({ error: "not_found" }, 404);
+      if (existing.link.sellerId !== ctx.get("seller").id) {
+        // 404, not 403: telling a stranger "this exists but is not yours" confirms
+        // the id and leaks the link's existence (issue #41).
+        return ctx.json({ error: "not_found" }, 404);
+      }
+      const result = await c.service.pendingTransfer(linkId, { logger: log });
+      return ctx.json(result);
+    } catch (err) {
+      if (err instanceof OffRampDisabledError) {
+        return ctx.json(OFFRAMP_DISABLED_BODY, 501);
+      }
+      if (err instanceof HttpError) {
+        return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502 | 503);
+      }
+      throw err;
+    }
+  });
+
   // Link detail with webhook deliveries (for the seller's timeline page).
   // Gated and ownership-checked: unlike GET /:id this is the seller's
   // reconciliation view and carries webhook delivery history.

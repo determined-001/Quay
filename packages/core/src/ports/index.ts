@@ -158,6 +158,7 @@ export interface OffRampJob {
   targetAmount: string;
   rate: string;
   reason?: string; // set when failed
+  transfer?: WithdrawTransfer;
 }
 
 /**
