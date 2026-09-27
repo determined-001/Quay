@@ -51,6 +51,7 @@ const sellers: SellerRepository = {
   async findByWallet() { return seller; },
   async createIfAbsent() { return seller; },
   async savePayoutFields() {},
+  async clearPayoutFields() {},
   async saveProfileKind() {},
 };
 const rail: RailPort = {

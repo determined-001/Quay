@@ -1,13 +1,15 @@
 import {
+  AnchorAuthRequiredError,
   KycRequiredError,
   type AnchorCustomer,
+  type AnchorEraseOutcome,
   type KycFieldSpec,
   type KycPort,
   type KycRecord,
   type KycRepository,
 } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { getSep12Customer, putSep12Customer } from "./sep12";
+import { deleteSep12Customer, getSep12Customer, putSep12Customer } from "./sep12";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
  *  entry for. Exported for direct unit testing of the "name exactly which
@@ -113,6 +115,29 @@ export class TestAnchorKyc implements KycPort {
     await this.repo.save(record);
     return record;
   }
+
+  async erase(customer: AnchorCustomer): Promise<AnchorEraseOutcome[]> {
+    const anchorDomain = this.discovery.homeDomain;
+    let jwt: string;
+    try {
+      jwt = await this.auth.token(customer);
+    } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) {
+        return [{ anchorDomain, result: "not_attempted:no_session" }];
+      }
+      throw err;
+    }
+
+    const { kycServer } = await this.discovery.get();
+    try {
+      const outcome = await deleteSep12Customer(kycServer, jwt, customer.account);
+      return [{ anchorDomain, result: outcome }];
+    } catch (err) {
+      const m = err instanceof Error ? err.message.match(/SEP-12 customer DELETE failed:\s*(\d+)/) : null;
+      const status = m ? `refused:${m[1]}` : "refused:error";
+      return [{ anchorDomain, result: status }];
+    }
+  }
 }
 
 /**
@@ -136,6 +161,10 @@ export class NoKycRequired implements KycPort {
     return this.accepted(customer);
   }
 
+  async erase(_customer: AnchorCustomer): Promise<AnchorEraseOutcome[]> {
+    return [];
+  }
+
   private accepted(customer: AnchorCustomer): KycRecord {
     return {
       sellerId: customer.sellerId,
@@ -150,3 +179,4 @@ export class NoKycRequired implements KycPort {
     };
   }
 }
+

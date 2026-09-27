@@ -18,7 +18,7 @@ import {
   TestAnchorKyc,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
+import type { KycPort, KycRepository, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey } from "../crypto/pii";
@@ -63,6 +63,8 @@ export interface Container {
   apiKeys: DrizzleApiKeyRepository;
   db: DB;
   kyc: KycPort;
+  kycRepo: KycRepository | null;
+  anchorSessions: DrizzleAnchorSessionRepository;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
@@ -251,6 +253,9 @@ export async function createContainer(): Promise<Container> {
   let stopRevocationSweep: (() => void) | null = null;
   let stopProbe: (() => void) | null = null;
 
+  const kycRepo = piiKey ? new DrizzleKycRepository(db, piiKey) : null;
+  const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db);
+
   return {
     service,
     logger,
@@ -260,6 +265,8 @@ export async function createContainer(): Promise<Container> {
     apiKeys: apiKeysRepo,
     db,
     kyc,
+    kycRepo,
+    anchorSessions: anchorSessionsRepo,
     anchorAuth: anchor?.auth ?? null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },

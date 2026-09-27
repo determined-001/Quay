@@ -522,4 +522,11 @@ export const api = {
 
   revokeApiKey: (id: string) =>
     http<{ id: string; revokedAt: number }>(`/api-keys/${id}`, { method: "DELETE" }),
+
+  eraseProfile: (confirm: string) =>
+    http<{
+      erased: string[];
+      anchors: Array<{ anchorDomain: string; result: string }>;
+      retained: Array<{ what: string; why: string }>;
+    }>("/seller/profile", { method: "DELETE", body: JSON.stringify({ confirm }) }),
 };

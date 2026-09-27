@@ -101,3 +101,29 @@ export async function putSep12Customer(
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };
 }
+
+/**
+ * Requests deletion of customer data at the anchor: DELETE {KYC_SERVER}/customer/{account}.
+ * Authenticated by the seller's SEP-10 JWT.
+ * 200/204 ok -> "erased"
+ * 404 -> "not_held"
+ * Anything else -> throws an error carrying the status.
+ */
+export async function deleteSep12Customer(
+  kycServer: string,
+  jwt: string,
+  account: string,
+): Promise<"erased" | "not_held"> {
+  const url = endpointUrl(kycServer, `customer/${encodeURIComponent(account)}`);
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${jwt}` },
+  });
+  if (res.status === 404) {
+    return "not_held";
+  }
+  if (!res.ok) {
+    throw new Error(`SEP-12 customer DELETE failed: ${res.status} ${await res.text()}`);
+  }
+  return "erased";
+}

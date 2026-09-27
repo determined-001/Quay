@@ -363,6 +363,13 @@ export class DrizzleSellerRepository implements SellerRepository {
     await this.db.update(sellers).set({ profileKind: kind }).where(eq(sellers.id, sellerId));
   }
 
+  async clearPayoutFields(sellerId: string): Promise<void> {
+    await this.db
+      .update(sellers)
+      .set({ payoutFieldsEncrypted: null, payoutFieldsJson: null })
+      .where(eq(sellers.id, sellerId));
+  }
+
   async findByWallet(wallet: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
     // Must go through rowToSeller — the raw row carries payoutFieldsEncrypted/payoutFieldsJson but
@@ -918,6 +925,10 @@ export class DrizzleKycRepository implements KycRepository {
       .values(row)
       .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
   }
+
+  async delete(sellerId: string): Promise<void> {
+    await this.db.delete(sellerKyc).where(eq(sellerKyc.sellerId, sellerId));
+  }
 }
 
 /**
@@ -965,6 +976,10 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
     await this.db
       .delete(anchorSessions)
       .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
+  }
+
+  async deleteBySeller(sellerId: string): Promise<void> {
+    await this.db.delete(anchorSessions).where(eq(anchorSessions.sellerId, sellerId));
   }
 }
 

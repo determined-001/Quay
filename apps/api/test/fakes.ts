@@ -354,6 +354,9 @@ export class AlwaysAcceptedKyc implements KycPort {
   async submit(customer: AnchorCustomer): Promise<KycRecord> {
     return this.accepted(customer);
   }
+  async erase(_customer: AnchorCustomer) {
+    return [];
+  }
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
@@ -374,11 +377,17 @@ export class ScriptedKyc implements KycPort {
   statusImpl: (customer: AnchorCustomer) => Promise<KycRecord> = () => {
     throw new Error("statusImpl not configured");
   };
+  eraseImpl?: (customer: AnchorCustomer) => Promise<any> = async () => [];
+
   async status(customer: AnchorCustomer): Promise<KycRecord> {
     return this.statusImpl(customer);
   }
   async submit(customer: AnchorCustomer): Promise<KycRecord> {
     return this.statusImpl(customer);
+  }
+  async erase(customer: AnchorCustomer): Promise<any> {
+    if (this.eraseImpl) return this.eraseImpl(customer);
+    return [];
   }
 }
 

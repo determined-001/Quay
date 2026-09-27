@@ -10,6 +10,8 @@ import {
   DrizzleOffRampStateRepository,
   DrizzleTokenRevocationRepository,
   DrizzleApiKeyRepository,
+  DrizzleKycRepository,
+  DrizzleAnchorSessionRepository,
 } from "../src/repos/index";
 import { SessionIssuer } from "../src/services/session";
 import type { Container } from "../src/services/container";
@@ -265,6 +267,9 @@ export async function createTestContainer(): Promise<TestContainer> {
   const session = new SessionIssuer("test-session-secret");
   const revocations = new DrizzleTokenRevocationRepository(repos.db);
 
+  const kycRepo = new DrizzleKycRepository(repos.db, Buffer.alloc(32, 1));
+  const anchorSessions = new DrizzleAnchorSessionRepository(repos.db);
+
   return {
     service,
     seller: repos.seller,
@@ -280,6 +285,8 @@ export async function createTestContainer(): Promise<TestContainer> {
     db: repos.db,
     client: repos.client,
     kyc: new NoKycRequired() as unknown as Container["kyc"],
+    kycRepo,
+    anchorSessions,
     anchorAuth: null,
     telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],

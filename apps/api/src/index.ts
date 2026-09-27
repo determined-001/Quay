@@ -13,6 +13,7 @@ import { authRoutes } from "./routes/auth";
 import { wellKnownRoutes } from "./routes/well-known";
 import { kycRoutes } from "./routes/kyc";
 import { anchorAuthRoutes } from "./routes/anchor-auth";
+import { profileRoutes } from "./routes/profile";
 import { demoRoutes } from "./routes/demo";
 import { telemetryRoutes } from "./routes/telemetry";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
@@ -183,6 +184,7 @@ async function main(): Promise<void> {
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
   app.route("/seller/kyc", kycRoutes(container));
+  app.route("/seller/profile", profileRoutes(container));
   app.route("/seller/anchor-auth", anchorAuthRoutes(container, anchorAuthLimit));
   app.route("/demo", demoRoutes(container));
   // Operator-only off-ramp telemetry (issue #20, 3.8). The routes gate
