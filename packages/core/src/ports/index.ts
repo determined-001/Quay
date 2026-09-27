@@ -317,6 +317,9 @@ export interface StoredOffRampJob {
   status: OffRampJobStatus;
   externalStatus: string | null; // raw upstream status string, for debugging
   lastError: string | null;
+  lastPollError?: string | null;
+  lastPollErrorAt?: number | null;
+  lastPollReason?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -328,7 +331,7 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
   ): Promise<void>;
 }
 

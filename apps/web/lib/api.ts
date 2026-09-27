@@ -38,10 +38,17 @@ export interface WebhookDelivery {
   createdAt: number;
 }
 
+export interface OfframpPollStatus {
+  reason: string;
+  message: string;
+  at: number;
+}
+
 export interface LinkDetail {
   link: PaymentLink;
   request: PaymentRequest;
   deliveries: WebhookDelivery[];
+  offrampPoll?: OfframpPollStatus | null;
 }
 
 /** Fields exposed on the public receipt — never includes seller PII. */

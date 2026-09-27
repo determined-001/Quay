@@ -290,7 +290,8 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json({ error: "not_found" }, 404);
     }
     const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
-    return ctx.json({ link: result.link, request: result.request, deliveries });
+    const offrampPoll = await c.service.getOfframpPollStatus(result.link);
+    return ctx.json({ link: result.link, request: result.request, deliveries, offrampPoll });
   });
 
   // Seller voids a link they created by mistake. Idempotent: cancelling an

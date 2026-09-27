@@ -164,6 +164,9 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   status: text("status").notNull(),
   externalStatus: text("external_status"),
   lastError: text("last_error"),
+  lastPollError: text("last_poll_error"),
+  lastPollErrorAt: integer("last_poll_error_at"),
+  lastPollReason: text("last_poll_reason"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
