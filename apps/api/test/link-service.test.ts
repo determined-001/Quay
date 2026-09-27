@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type RailPort } from "@checkout/core";
+import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampPort, type RailPort } from "@checkout/core";
 import { MockAnchorOffRamp } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
+import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 import {
   AlwaysAcceptedKyc,
   FakeLinkRepository,
@@ -33,7 +34,7 @@ const UNUSED_RAIL: RailPort = {
 
 function makeService(opts: {
   links: FakeLinkRepository;
-  offramp: ScriptedOffRamp | MockAnchorOffRamp;
+  offramp: OffRampPort;
   offrampState: FakeOffRampStateRepository;
   webhooks?: FakeWebhookRepository;
   kyc?: KycPort;
@@ -391,5 +392,32 @@ describe("LinkService cash-out — the seller is the anchor's customer", () => {
     await expect(
       service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
     ).rejects.toMatchObject({ status: 403, message: "anchor_auth_required" });
+  });
+
+  describe("getOfframpPreview with CircuitBreakerOffRamp", () => {
+    it("returns non-null preview when wrapped around MockAnchorOffRamp", async () => {
+      const links = new FakeLinkRepository([makeLink({ status: "paid", amount: "10" })]);
+      const offrampState = new FakeOffRampStateRepository();
+      const inner = new MockAnchorOffRamp({ state: offrampState });
+      const wrapped = new CircuitBreakerOffRamp(inner);
+      const service = makeService({ links, offramp: wrapped, offrampState });
+
+      const preview = await service.getOfframpPreview("lnk_1", "USD");
+      expect(preview).not.toBeNull();
+      expect(preview!.indicative).toBe(true);
+      expect(preview!.sourceAmount).toBe("10");
+      expect(preview!.prices.length).toBeGreaterThan(0);
+    });
+
+    it("returns null preview when wrapped around an adapter lacking indicativePrices", async () => {
+      const links = new FakeLinkRepository([makeLink({ status: "paid", amount: "10.0000000" })]);
+      const offrampState = new FakeOffRampStateRepository();
+      const inner = new ScriptedOffRamp(); // does not have indicativePrices
+      const wrapped = new CircuitBreakerOffRamp(inner);
+      const service = makeService({ links, offramp: wrapped, offrampState });
+
+      const preview = await service.getOfframpPreview("lnk_1", "USD");
+      expect(preview).toBeNull();
+    });
   });
 });
