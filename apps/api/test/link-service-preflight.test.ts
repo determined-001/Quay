@@ -44,6 +44,7 @@ function fakeSellers(): SellerRepository {
     findByWallet: vi.fn(async () => seller),
     createIfAbsent: vi.fn(async () => seller),
     savePayoutFields: vi.fn(async () => {}),
+    clearPayoutFields: vi.fn(async () => {}),
     saveProfileKind: vi.fn(async () => {}),
   };
 }

@@ -361,6 +361,7 @@ class FakeSellerRepoForAnchor {
     return this.s;
   }
   async savePayoutFields(): Promise<void> {}
+  async clearPayoutFields(): Promise<void> {}
   async saveProfileKind(): Promise<void> {}
 }
 
@@ -473,6 +474,9 @@ class FakeKycAlwaysAcceptedForAnchor implements KycPort {
   }
   async submit(customer: AnchorCustomer): Promise<KycRecord> {
     return this.accepted(customer);
+  }
+  async erase(_customer: AnchorCustomer) {
+    return [];
   }
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {

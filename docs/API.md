@@ -594,6 +594,38 @@ naming exactly which ones, never silently substituting a placeholder.
 
 ---
 
+## `DELETE /seller/profile`
+
+**Requires interactive session auth** (`authKind === "session"`). Data-subject erasure endpoint for privacy compliance (GDPR/CCPA). Erases local KYC fields, anchor session credentials, consents, and cached payout details. Calls downstream anchors (`DELETE /customer/:account` per SEP-12) using the seller's active session token before local deletion.
+
+API keys are rejected with **403 Forbidden** to prevent accidental or automated bulk deletion without interactive confirmation.
+
+**Request**
+```json
+{ "confirm": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" }
+```
+- `confirm` — must exactly match the authenticated seller's Stellar wallet public key (`seller.wallet`). Returns **400** `{ "error": "invalid_confirmation" }` if missing or mismatched.
+
+**200**
+```json
+{
+  "erased": ["profile", "kyc", "consents", "anchor_sessions", "payout_fields"],
+  "anchors": [
+    { "anchorDomain": "testanchor.stellar.org", "result": "erased" }
+  ],
+  "retained": [
+    { "what": "payment history", "why": "public on the Stellar ledger" },
+    { "what": "database backups", "why": "expire after BACKUP_RETENTION_DAYS" }
+  ]
+}
+```
+
+- `anchors[].result`: `"erased"`, `"not_held"`, `"not_attempted:no_session"`, or `"refused:<code>"`.
+- `retained`: Explains public ledger permanence and backup retention windows.
+
+
+---
+
 ## `POST /webhooks`
 
 Register a webhook endpoint. The signing secret is returned **once** — store it.

@@ -15,6 +15,7 @@ function fakeContainer(
     findByWallet: async () => null,
     createIfAbsent: async () => seller,
     savePayoutFields: async () => {},
+    clearPayoutFields: async () => {},
     saveProfileKind: async () => {},
   };
   const revocations: TokenRevocationRepository = {
@@ -34,6 +35,8 @@ function fakeContainer(
     telemetry: {} as Container["telemetry"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: seller.wallet },
     kyc: {} as Container["kyc"],
+    kycRepo: null,
+    anchorSessions: {} as Container["anchorSessions"],
     anchorAuth: null,
     db: {} as Container["db"],
     auth: { session, sellers, revocations } as unknown as Container["auth"],

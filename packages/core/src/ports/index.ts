@@ -433,6 +433,11 @@ export class KycRequiredError extends Error {
   }
 }
 
+export interface AnchorEraseOutcome {
+  anchorDomain: string;
+  result: "erased" | "not_held" | string;
+}
+
 export interface KycPort {
   /** Refreshes from the anchor (if applicable) and persists the result.
    *  Throws {@link AnchorAuthRequiredError} without a live anchor session. */
@@ -440,6 +445,8 @@ export interface KycPort {
   /** Submits/updates fields. Throws {@link KycRequiredError} if a required
    *  field is still missing after merging with what's already on file. */
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
+  /** Requests deletion of the customer's KYC data at all configured anchors. */
+  erase(customer: AnchorCustomer): Promise<AnchorEraseOutcome[]>;
 }
 
 /** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
@@ -447,6 +454,7 @@ export interface KycPort {
 export interface KycRepository {
   get(sellerId: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
+  delete(sellerId: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +478,7 @@ export interface AnchorSessionRepository {
   get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null>;
   save(session: AnchorSession): Promise<void>;
   delete(sellerId: string, anchorDomain: string): Promise<void>;
+  deleteBySeller(sellerId: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +573,8 @@ export interface SellerRepository {
   /** Persist the seller's last-used payout destination fields for reuse on the
    *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
   savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
+  /** Clear saved payout fields for data erasure / right to be forgotten. */
+  clearPayoutFields(sellerId: string): Promise<void>;
   /** Select the kind of reusable KYC profile this merchant needs. */
   saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void>;
 }

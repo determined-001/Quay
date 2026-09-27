@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getSep12Customer, putSep12Customer } from "../src/sep12";
+import { deleteSep12Customer, getSep12Customer, putSep12Customer } from "../src/sep12";
 
 const BASE_URL = "https://testanchor.stellar.org";
 const JWT = "jwt-token";
@@ -11,6 +11,32 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("deleteSep12Customer", () => {
+  it("returns erased on 200 or 204", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteSep12Customer(BASE_URL, JWT, ACCOUNT);
+    expect(result).toBe("erased");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.pathname).toBe(`/customer/${ACCOUNT}`);
+    expect(init.method).toBe("DELETE");
+    expect(init.headers).toEqual({ authorization: `Bearer ${JWT}` });
+  });
+
+  it("returns not_held on 404", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
+    const result = await deleteSep12Customer(BASE_URL, JWT, ACCOUNT);
+    expect(result).toBe("not_held");
+  });
+
+  it("throws on 400 or other errors", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("forbidden", { status: 403 })));
+    await expect(deleteSep12Customer(BASE_URL, JWT, ACCOUNT)).rejects.toThrow(/SEP-12 customer DELETE failed: 403/);
+  });
 });
 
 describe("putSep12Customer", () => {

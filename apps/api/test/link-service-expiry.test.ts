@@ -155,6 +155,7 @@ class FakeSellerRepo {
     return this.seller;
   }
   async savePayoutFields(): Promise<void> {}
+  async clearPayoutFields(): Promise<void> {}
   async saveProfileKind(): Promise<void> {}
 }
 

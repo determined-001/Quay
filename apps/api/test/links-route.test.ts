@@ -44,6 +44,7 @@ function fakeContainer(): Container {
     findByWallet: async () => null,
     createIfAbsent: async () => owner,
     savePayoutFields: async () => {},
+    clearPayoutFields: async () => {},
     saveProfileKind: async () => {},
   };
   const revocations: TokenRevocationRepository = {
@@ -68,6 +69,8 @@ function fakeContainer(): Container {
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     apiKeys: {} as Container["apiKeys"],
     kyc: {} as Container["kyc"],
+    kycRepo: null,
+    anchorSessions: {} as Container["anchorSessions"],
     anchorAuth: null,
     db: {} as Container["db"],
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],

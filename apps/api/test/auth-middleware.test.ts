@@ -12,6 +12,7 @@ function fakeSellers(knownSeller: Seller | null = seller): SellerRepository {
     findByWallet: async () => knownSeller,
     createIfAbsent: async () => seller,
     savePayoutFields: async () => {},
+    clearPayoutFields: async () => {},
     saveProfileKind: async () => {},
   };
 }
