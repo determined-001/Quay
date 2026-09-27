@@ -283,4 +283,6 @@ export const env = {
   // and "none" has no KYC lifecycle to store PII for.
   kycEncryptionKey:
     offramp === "testanchor" || offramp === "anchor" ? req("KYC_ENCRYPTION_KEY") : undefined,
+  // TTL (ms) for caching SEP-12 KYC status lookups per seller before re-querying the anchor.
+  kycStatusCacheMs: num("KYC_STATUS_CACHE_MS", 60000),
 } as const;

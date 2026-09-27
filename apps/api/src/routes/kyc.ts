@@ -54,10 +54,12 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
     requireScope("offramp:initiate"),
   );
 
-  // Current requirements + status, re-synced from the anchor.
+  // Current requirements + status, re-synced from the anchor (or served from cache).
   app.get("/", async (ctx) => {
     try {
-      const record = await c.kyc.status(customerOf(ctx.get("seller")));
+      const refresh = ctx.req.query("refresh") === "1" || ctx.req.query("refresh") === "true";
+      const maxAgeMs = refresh ? 0 : (c.config.kycStatusCacheMs ?? 60_000);
+      const record = await c.kyc.status(customerOf(ctx.get("seller")), { maxAgeMs });
       return ctx.json(toResponse(record));
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
