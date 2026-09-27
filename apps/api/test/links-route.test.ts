@@ -59,6 +59,15 @@ function fakeContainer(): Container {
       createLink: async () => ({ link: ownedLink, request: {} as any }),
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
+      pendingTransfer: async () => ({
+        transfer: {
+          destination: "GANCHOR",
+          amount: "10",
+          asset: { code: "USDC", issuer: "GISSUER" },
+          memo: "123",
+          memoType: "id",
+        },
+      }),
     } as unknown as Container["service"],
     logger: NOOP_LOGGER,
     links: {} as Container["links"],
@@ -188,3 +197,54 @@ describe("POST /links/:id/submit — public wallet relay", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("GET /links/:id/cash-out/transfer — pending withdrawal transfer instructions", () => {
+  it("rejects with 401 when no token is provided", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects with 404 when a different seller requests the pending transfer", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, other.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as Record<string, unknown>).error).toBe("not_found");
+  });
+
+  it("returns 404 for a nonexistent link", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/lnk_does_not_exist/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 200 with transfer instructions for the owning seller", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { transfer: { destination: string; amount: string; memo: string } };
+    expect(body.transfer).toEqual({
+      destination: "GANCHOR",
+      amount: "10",
+      asset: { code: "USDC", issuer: "GISSUER" },
+      memo: "123",
+      memoType: "id",
+    });
+  });
+});
+

@@ -269,8 +269,12 @@ export async function resolveWithdrawType(
 export interface Sep6TransactionResult {
   id: string;
   status: string;
+  amountIn?: string;
   amountOut?: string;
   message?: string;
+  withdrawAnchorAccount?: string;
+  withdrawMemo?: string;
+  withdrawMemoType?: "id" | "hash" | "text";
 }
 
 /** SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md */
@@ -339,13 +343,32 @@ export async function getSep6Transaction(
     throw new Error(`SEP-6 transaction fetch failed: ${res.status} ${await res.text()}`);
   }
   const body = (await res.json()) as {
-    transaction: { id: string; status: string; amount_out?: string; message?: string };
+    transaction: {
+      id: string;
+      status: string;
+      amount_in?: string;
+      amount_out?: string;
+      message?: string;
+      withdraw_anchor_account?: string;
+      withdraw_memo?: string;
+      withdraw_memo_type?: string;
+    };
   };
+  const withdrawMemoType =
+    body.transaction.withdraw_memo_type === "id" ||
+    body.transaction.withdraw_memo_type === "hash" ||
+    body.transaction.withdraw_memo_type === "text"
+      ? body.transaction.withdraw_memo_type
+      : undefined;
   const out: Sep6TransactionResult = {
     id: body.transaction.id,
     status: body.transaction.status,
+    amountIn: body.transaction.amount_in,
     amountOut: body.transaction.amount_out,
     message: body.transaction.message,
+    withdrawAnchorAccount: body.transaction.withdraw_anchor_account,
+    withdrawMemo: body.transaction.withdraw_memo,
+    withdrawMemoType,
   };
   log.info(
     { event: "anchor.sep6.status.ok", status: out.status, amountOut: out.amountOut, durationMs: Date.now() - t0 },

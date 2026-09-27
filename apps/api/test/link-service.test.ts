@@ -393,3 +393,95 @@ describe("LinkService cash-out — the seller is the anchor's customer", () => {
     ).rejects.toMatchObject({ status: 403, message: "anchor_auth_required" });
   });
 });
+
+describe("LinkService.pendingTransfer", () => {
+  it("rejects 404 for nonexistent link", async () => {
+    const service = makeService({
+      links: new FakeLinkRepository([]),
+      offramp: new ScriptedOffRamp(),
+      offrampState: new FakeOffRampStateRepository(),
+    });
+    await expect(service.pendingTransfer("lnk_unknown")).rejects.toMatchObject({
+      status: 404,
+      message: "Link not found",
+    });
+  });
+
+  it("rejects 409 when link status is not offramp_pending", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const service = makeService({
+      links,
+      offramp: new ScriptedOffRamp(),
+      offrampState: new FakeOffRampStateRepository(),
+    });
+    await expect(service.pendingTransfer("lnk_1")).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  it("returns { transfer: null } if link has no offrampJobId", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "offramp_pending", offrampJobId: null })]);
+    const service = makeService({
+      links,
+      offramp: new ScriptedOffRamp(),
+      offrampState: new FakeOffRampStateRepository(),
+    });
+    const res = await service.pendingTransfer("lnk_1");
+    expect(res).toEqual({ transfer: null });
+  });
+
+  it("returns { transfer } from offramp status", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ id: "lnk_1", status: "offramp_pending", offrampJobId: "job_123" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "pending",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      transfer: {
+        destination: "GANCHOR",
+        amount: "10",
+        asset: { code: "USDC", issuer: "GISSUER" },
+        memo: "42",
+        memoType: "id",
+      },
+    });
+    const service = makeService({
+      links,
+      offramp,
+      offrampState: new FakeOffRampStateRepository(),
+    });
+    const res = await service.pendingTransfer("lnk_1");
+    expect(res.transfer).toEqual({
+      destination: "GANCHOR",
+      amount: "10",
+      asset: { code: "USDC", issuer: "GISSUER" },
+      memo: "42",
+      memoType: "id",
+    });
+  });
+
+  it("maps AnchorAuthRequiredError to 403 anchor_auth_required", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ id: "lnk_1", status: "offramp_pending", offrampJobId: "job_123" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async () => {
+      throw new AnchorAuthRequiredError("anchor.example");
+    };
+    const service = makeService({
+      links,
+      offramp,
+      offrampState: new FakeOffRampStateRepository(),
+    });
+    await expect(service.pendingTransfer("lnk_1")).rejects.toMatchObject({
+      status: 403,
+      message: "anchor_auth_required",
+    });
+  });
+});
+

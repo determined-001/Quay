@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { api, type WebhookDelivery, type PaymentLink } from "../../../lib/api";
-import { TimelineClient } from "./TimelineClient";
+import { TimelineClient, PendingTransferAction } from "./TimelineClient";
 
 interface TimelineEvent {
   id: string;
@@ -196,6 +196,11 @@ export default async function LinkDetailPage({ params }: { params: Promise<{ id:
             <span className="mono">{link.paidAmount} {link.asset.code}</span>
           </div>
         )}
+        {link.status === "offramp_pending" && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+            <PendingTransferAction linkId={link.id} />
+          </div>
+        )}
       </section>
 
       {/* Timeline */}
@@ -321,7 +326,7 @@ export default async function LinkDetailPage({ params }: { params: Promise<{ id:
         <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
           Share this link with the buyer for proof of payment.
         </p>
-        <TimelineClient linkId={link.id} reference={link.reference} />
+        <TimelineClient linkId={link.id} reference={link.reference} linkStatus={link.status} />
       </section>
     </main>
   );

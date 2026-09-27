@@ -14,6 +14,7 @@ import {
 import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
 import CashOutModal from "./CashOutModal";
+import { PendingTransferModal } from "./TransferStep";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
@@ -158,10 +159,11 @@ interface TableProps {
   copied: string | null;
   onCopy: (id: string) => void;
   onCashOut: (id: string) => void;
+  onPendingTransfer: (id: string) => void;
   cashOutBlocked: boolean;
 }
 
-function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableProps) {
+function LinksTable({ links, copied, onCopy, onCashOut, onPendingTransfer, cashOutBlocked }: TableProps) {
   return (
     <table className="table">
       <thead>
@@ -215,6 +217,14 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableP
                   )}
                 </>
               )}
+              {OFFRAMP_ENABLED && link.status === "offramp_pending" && (
+                <>
+                  {" · "}
+                  <button className="linkbtn" onClick={() => onPendingTransfer(link.id)}>
+                    Send USDC to finish cash-out
+                  </button>
+                </>
+              )}
             </td>
           </tr>
         ))}
@@ -242,6 +252,7 @@ export default function Dashboard() {
   const [anchorAuth, setAnchorAuth] = useState<AnchorAuthView | null>(null);
   // Which link has the cash-out modal open; null = closed (issue #32).
   const [cashOutLinkId, setCashOutLinkId] = useState<string | null>(null);
+  const [pendingTransferLinkId, setPendingTransferLinkId] = useState<string | null>(null);
 
   const [tab, setTab] = useState<"links" | "api-keys">("links");
 
@@ -507,6 +518,7 @@ export default function Dashboard() {
                 copied={copied}
                 onCopy={copyCheckout}
                 onCashOut={(id) => setCashOutLinkId(id)}
+                onPendingTransfer={(id) => setPendingTransferLinkId(id)}
                 cashOutBlocked={cashOutBlocked}
               />
             </div>
@@ -523,6 +535,7 @@ export default function Dashboard() {
             copied={copied}
             onCopy={copyCheckout}
             onCashOut={(id) => setCashOutLinkId(id)}
+            onPendingTransfer={(id) => setPendingTransferLinkId(id)}
             cashOutBlocked={cashOutBlocked}
           />
         )}
@@ -568,6 +581,17 @@ export default function Dashboard() {
           isMock={OFFRAMP_IS_MOCK}
           onClose={() => setCashOutLinkId(null)}
           onSuccess={handleCashOutSuccess}
+        />
+      )}
+
+      {/* Pending transfer modal — resume unsent cash-out */}
+      {OFFRAMP_ENABLED && pendingTransferLinkId && (
+        <PendingTransferModal
+          linkId={pendingTransferLinkId}
+          onClose={() => {
+            setPendingTransferLinkId(null);
+            void refresh();
+          }}
         />
       )}
         </>

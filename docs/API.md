@@ -518,6 +518,36 @@ bank/routing info only — it is never used as a source of identity data.
 
 ---
 
+## `GET /links/:id/cash-out/transfer`
+
+**Requires auth** and `links:read` scope (404 if the link belongs to a different seller). Fetches the pending withdrawal transfer instructions for an `offramp_pending` link from the anchor adapter so the seller can resume and complete an unsent withdrawal transfer from their wallet.
+
+**200**
+```json
+{
+  "transfer": {
+    "destination": "GANCHOR...",
+    "amount": "10.5",
+    "asset": { "code": "USDC", "issuer": "GA5Z..." },
+    "memo": "4242",
+    "memoType": "id"
+  }
+}
+```
+If the anchor has no pending user transfer instructions or has already transitioned past `pending_user_transfer_start`, `transfer` is `null`:
+```json
+{
+  "transfer": null
+}
+```
+
+**409** — link is not in `offramp_pending` state: `{ "error": "Link must be offramp_pending to fetch pending transfer (is \"paid\")" }`
+**404** — `{ "error": "Link not found" }`
+**403** — `{ "error": "anchor_auth_required" }` (live anchor session missing/expired)
+**503** — `{ "error": "anchor_unavailable" }` (circuit breaker open)
+
+---
+
 ## `/seller/anchor-auth`
 
 **Requires auth** and the `offramp:initiate` scope. The seller's own SEP-10
