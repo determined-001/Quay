@@ -42,6 +42,8 @@ export interface LinkDetail {
   link: PaymentLink;
   request: PaymentRequest;
   deliveries: WebhookDelivery[];
+  /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
+  offrampExternalStatus: string | null;
 }
 
 /** Fields exposed on the public receipt — never includes seller PII. */
