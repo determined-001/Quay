@@ -11,9 +11,12 @@ async function makeDb(): Promise<DB> {
   return db;
 }
 
+const ANCHOR = "testanchor.stellar.org";
+
 function record(over: Partial<KycRecord> = {}): KycRecord {
   return {
     sellerId: "sel_1",
+    anchorDomain: "testanchor.stellar.org",
     account: "GSELLER1",
     customerId: "cust_1",
     status: "ACCEPTED",
@@ -32,12 +35,12 @@ describe("DrizzleKycRepository", () => {
   it("round-trips a saved record exactly", async () => {
     const repo = new DrizzleKycRepository(await makeDb(), randomBytes(32));
     await repo.save(record());
-    expect(await repo.get("sel_1")).toEqual(record());
+    expect(await repo.get("sel_1", ANCHOR)).toEqual(record());
   });
 
   it("returns null for a seller with no KYC record", async () => {
     const repo = new DrizzleKycRepository(await makeDb(), randomBytes(32));
-    expect(await repo.get("sel_nobody")).toBeNull();
+    expect(await repo.get("sel_nobody", ANCHOR)).toBeNull();
   });
 
   it("stores providedFields encrypted at rest — the raw row never contains the plaintext PII", async () => {
@@ -59,7 +62,7 @@ describe("DrizzleKycRepository", () => {
 
     const rows = await db.select().from(sellerKyc);
     expect(rows).toHaveLength(1);
-    expect((await repo.get("sel_1"))?.status).toBe("ACCEPTED");
+    expect((await repo.get("sel_1", ANCHOR))?.status).toBe("ACCEPTED");
   });
 
   it("never leaks one seller's KYC fields into another seller's record", async () => {
@@ -68,8 +71,8 @@ describe("DrizzleKycRepository", () => {
     await repo.save(record({ sellerId: "sel_1", providedFields: { first_name: "Seller One" } }));
     await repo.save(record({ sellerId: "sel_2", providedFields: { first_name: "Seller Two" } }));
 
-    const one = await repo.get("sel_1");
-    const two = await repo.get("sel_2");
+    const one = await repo.get("sel_1", ANCHOR);
+    const two = await repo.get("sel_2", ANCHOR);
     expect(one?.providedFields.first_name).toBe("Seller One");
     expect(two?.providedFields.first_name).toBe("Seller Two");
   });
@@ -78,7 +81,7 @@ describe("DrizzleKycRepository", () => {
     const db = await makeDb();
     await new DrizzleKycRepository(db, randomBytes(32)).save(record());
     const wrongKeyRepo = new DrizzleKycRepository(db, randomBytes(32));
-    await expect(wrongKeyRepo.get("sel_1")).rejects.toThrow();
+    await expect(wrongKeyRepo.get("sel_1", ANCHOR)).rejects.toThrow();
   });
 
   it("reads records encrypted under previous keys when configured with a keyring", async () => {
@@ -95,7 +98,7 @@ describe("DrizzleKycRepository", () => {
     const keyring = parsePiiKeyring(newKey.toString("hex"), oldKey.toString("hex"));
     const newRepo = new DrizzleKycRepository(db, keyring);
 
-    const rec = await newRepo.get("sel_1");
+    const rec = await newRepo.get("sel_1", ANCHOR);
     expect(rec).toEqual(record());
   });
 
@@ -121,5 +124,33 @@ describe("DrizzleKycRepository", () => {
     await repo.save(record({ sellerId: "sel_new" }));
 
     expect(await repo.countNonPrimaryRows()).toBe(1);
+  });
+
+  it("keeps independent state per (seller, anchor) - a second anchor never overwrites the first", async () => {
+    const db = await makeDb();
+    const repo = new DrizzleKycRepository(db, randomBytes(32));
+    await repo.save(record({ anchorDomain: "a.example", customerId: "cust_a", status: "ACCEPTED" }));
+    await repo.save(record({ anchorDomain: "b.example", customerId: "cust_b", status: "NEEDS_INFO" }));
+
+    expect(await db.select().from(sellerKyc)).toHaveLength(2);
+    expect(await repo.get("sel_1", "a.example")).toMatchObject({ customerId: "cust_a", status: "ACCEPTED" });
+    expect(await repo.get("sel_1", "b.example")).toMatchObject({ customerId: "cust_b", status: "NEEDS_INFO" });
+    expect(await repo.get("sel_1", "c.example")).toBeNull();
+  });
+
+  it("deletes one anchor's record, or every anchor's when none is named", async () => {
+    const db = await makeDb();
+    const repo = new DrizzleKycRepository(db, randomBytes(32));
+    await repo.save(record({ anchorDomain: "a.example" }));
+    await repo.save(record({ anchorDomain: "b.example" }));
+    await repo.save(record({ sellerId: "sel_2", anchorDomain: "a.example" }));
+
+    await repo.delete("sel_1", "a.example");
+    expect(await repo.get("sel_1", "a.example")).toBeNull();
+    expect(await repo.get("sel_1", "b.example")).not.toBeNull();
+
+    await repo.delete("sel_1");
+    expect(await repo.get("sel_1", "b.example")).toBeNull();
+    expect(await repo.get("sel_2", "a.example")).not.toBeNull();
   });
 });

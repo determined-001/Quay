@@ -51,16 +51,17 @@ export class TestAnchorKyc implements KycPort {
   }
 
   async status(customer: AnchorCustomer): Promise<KycRecord> {
-    const existing = await this.repo.get(customer.sellerId);
+    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
     const jwt = await this.auth.token(customer);
     const { kycServer } = await this.discovery.get();
     const remote = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
-      customerId: reusableCustomerId(existing, customer),
+      customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
     });
 
     const record: KycRecord = {
       sellerId: customer.sellerId,
+      anchorDomain: this.auth.anchorDomain,
       account: customer.account,
       customerId: remote.customerId,
       status: remote.status,
@@ -77,12 +78,12 @@ export class TestAnchorKyc implements KycPort {
   }
 
   async submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord> {
-    const existing = await this.repo.get(customer.sellerId);
+    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
     const jwt = await this.auth.token(customer);
     const { kycServer } = await this.discovery.get();
     const discovery = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
-      customerId: reusableCustomerId(existing, customer),
+      customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
     });
 
     // Get the reusable profile for this seller
@@ -137,6 +138,7 @@ export class TestAnchorKyc implements KycPort {
 
     const record: KycRecord = {
       sellerId: customer.sellerId,
+      anchorDomain: this.auth.anchorDomain,
       account: customer.account,
       customerId: put.customerId,
       status: after.status,
@@ -154,13 +156,22 @@ export class TestAnchorKyc implements KycPort {
 }
 
 /**
- * An anchor customer id belongs to the account it was created for. A record
+ * An anchor customer id belongs to the anchor that assigned it and to the
+ * account it was created for. A record
  * with no account, or another one, dates from when every seller shared the
  * platform's account (or the seller changed wallet): its id points at somebody
  * else's customer, so look the seller up by their own account instead.
  */
-function reusableCustomerId(existing: KycRecord | null, customer: AnchorCustomer): string | null {
-  return existing?.account === customer.account ? existing.customerId : null;
+function reusableCustomerId(
+  existing: KycRecord | null,
+  customer: AnchorCustomer,
+  anchorDomain: string,
+): string | null {
+  if (!existing) return null;
+  // The id is assigned by one anchor: never send it to another (issue 4.24).
+  // A "legacy" row has no attributable anchor, so it never matches.
+  if (existing.anchorDomain !== anchorDomain) return null;
+  return existing.account === customer.account ? existing.customerId : null;
 }
 
 /** `OFFRAMP=mock` has no real anchor and nothing to be compliant with — never
@@ -177,6 +188,7 @@ export class NoKycRequired implements KycPort {
   private accepted(customer: AnchorCustomer): KycRecord {
     return {
       sellerId: customer.sellerId,
+      anchorDomain: "mock",
       account: customer.account,
       customerId: null,
       status: "ACCEPTED",

@@ -219,6 +219,7 @@ describe("LinkService.triggerCashOut — KYC gate", () => {
     const kyc = new ScriptedKyc();
     kyc.statusImpl = async ({ sellerId, account }) => ({
       sellerId,
+      anchorDomain: "testanchor.stellar.org",
       account,
       customerId: null,
       status: "NEEDS_INFO",

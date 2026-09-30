@@ -168,3 +168,89 @@ describe("TestAnchorKyc.submit field mapping", () => {
     await expect(kyc.submit(mockAnchorCustomer, {})).rejects.toThrow("Missing required KYC fields");
   });
 });
+describe("TestAnchorKyc customer ids are scoped to the anchor (issue 4.24)", () => {
+  const customer: AnchorCustomer = { sellerId: "sel_1", account: "GSELLER" };
+
+  function memoryRepo() {
+    const rows = new Map<string, KycRecord>();
+    const key = (s: string, a: string) => `${s}|${a}`;
+    return {
+      rows,
+      get: async (s: string, a: string) => rows.get(key(s, a)) ?? null,
+      save: async (r: KycRecord) => void rows.set(key(r.sellerId, r.anchorDomain), r),
+      delete: async () => {},
+    };
+  }
+
+  function kycFor(repo: ReturnType<typeof memoryRepo>, anchorDomain: string) {
+    return new TestAnchorKyc({
+      discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://kyc.example" }) } as any,
+      auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain } as any,
+      repo,
+      profileRepo: { get: vi.fn().mockResolvedValue(null) },
+    });
+  }
+
+  function remote(customerId: string, status: "ACCEPTED" | "NEEDS_INFO") {
+    return { customerId, status, requiredFields: [], providedFieldStatus: [], message: null };
+  }
+
+  it("keeps independent status and customer id per anchor for one seller", async () => {
+    const repo = memoryRepo();
+    const get = vi.spyOn(sep12, "getSep12Customer");
+
+    get.mockResolvedValueOnce(remote("cust_a", "ACCEPTED"));
+    await kycFor(repo, "a.example").status(customer);
+
+    get.mockResolvedValueOnce(remote("cust_b", "NEEDS_INFO"));
+    await kycFor(repo, "b.example").status(customer);
+
+    expect(repo.rows.size).toBe(2);
+    expect(repo.rows.get("sel_1|a.example")).toMatchObject({ customerId: "cust_a", status: "ACCEPTED" });
+    expect(repo.rows.get("sel_1|b.example")).toMatchObject({ customerId: "cust_b", status: "NEEDS_INFO" });
+  });
+
+  it("never sends one anchor's customer id to another", async () => {
+    const repo = memoryRepo();
+    const get = vi.spyOn(sep12, "getSep12Customer");
+    get.mockReset();
+
+    get.mockResolvedValueOnce(remote("cust_a", "ACCEPTED"));
+    await kycFor(repo, "a.example").status(customer);
+
+    get.mockResolvedValueOnce(remote("cust_b", "NEEDS_INFO"));
+    await kycFor(repo, "b.example").status(customer);
+    expect(get.mock.calls[1]![2]).toEqual({ account: "GSELLER", customerId: null });
+
+    // The same anchor on the next sync does reuse its own id.
+    get.mockResolvedValueOnce(remote("cust_a", "ACCEPTED"));
+    await kycFor(repo, "a.example").status(customer);
+    expect(get.mock.calls[2]![2]).toEqual({ account: "GSELLER", customerId: "cust_a" });
+  });
+
+  it("does not use a legacy row to resolve a customer id", async () => {
+    const repo = memoryRepo();
+    repo.rows.set("sel_1|legacy", {
+      sellerId: "sel_1",
+      anchorDomain: "legacy",
+      account: "GSELLER",
+      customerId: "cust_old",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
+      message: null,
+      lastSyncedAt: null,
+      updatedAt: 1,
+    });
+    const get = vi.spyOn(sep12, "getSep12Customer");
+    get.mockReset();
+    get.mockResolvedValueOnce(remote("cust_new", "NEEDS_INFO"));
+
+    const record = await kycFor(repo, "a.example").status(customer);
+
+    expect(get.mock.calls[0]![2]).toEqual({ account: "GSELLER", customerId: null });
+    expect(record.status).toBe("NEEDS_INFO");
+  });
+});

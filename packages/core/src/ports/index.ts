@@ -434,6 +434,10 @@ export interface KycFieldSpec {
 
 export interface KycRecord {
   sellerId: string;
+  /** The anchor this record is about (its home domain). `customerId`, `status`
+   *  and `requiredFields` are that anchor's decision; `"legacy"` marks a row
+   *  that predates per-anchor keys and could not be attributed. */
+  anchorDomain: string;
   /** The Stellar account the anchor's customer record belongs to. A stored
    *  `customerId` is only reused while this still matches the seller's wallet;
    *  null on rows written when every seller shared the platform's account. */
@@ -483,18 +487,14 @@ export interface KycPort {
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
 }
 
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
+/** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
+ *  to one anchor, so two anchors never share or overwrite a record.
+ *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
+  get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
-}
-
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
-export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
-  save(record: KycRecord): Promise<void>;
+  /** Removes the seller's record for one anchor, or for every anchor when omitted. */
+  delete(sellerId: string, anchorDomain?: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
