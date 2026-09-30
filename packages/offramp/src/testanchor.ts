@@ -14,7 +14,7 @@ import {
   type PayoutFieldDescriptor,
   type SellerPayoutRef,
 } from "@checkout/core";
-import { NOOP_LOGGER } from "@checkout/core";
+import { NOOP_LOGGER, targetPerSourceRate } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import { listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
@@ -35,10 +35,7 @@ import { getSep6Transaction, getSep6WithdrawInfo, resolveWithdrawType, startSep6
 // seller already holds the stablecoin, this only quotes an FX rate and drives
 // a real off-chain withdrawal to local/bank rails via the anchor's SEP-6 flow.
 //
-// SEP-24 (interactive) was considered instead of SEP-6 and rejected: the port
-// is backend-only today (no interactive-redirect concept anywhere upstream of
-// this adapter), while SEP-6 is fully field-driven and needs no changes to
-// LinkService, the API routes, or the dashboard.
+// SEP-6 vs SEP-24: both are supported; see docs/decisions/0001-sep6-vs-sep24.md.
 //
 // Quotes and jobs are persisted through `OffRampStateRepository` rather than
 // kept in a Map — this is money-adjacent state that must survive a restart.
@@ -228,7 +225,10 @@ export class TestAnchorOffRamp implements OffRampPort {
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
       targetAmount: grossTargetAmount,
-      rate: q.price,
+      // OffRampQuote.rate is TARGET per source (issue 5.21); SEP-38's price
+      // is the inverse. The raw price stays on the stored quote above —
+      // this is a unit conversion at the boundary, not a loss of data.
+      rate: targetPerSourceRate(q.price),
       expiresAt,
       fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
       netTargetAmount,
@@ -274,10 +274,14 @@ export class TestAnchorOffRamp implements OffRampPort {
       account: input.customer.account,
       targetCurrency: q.buyCurrency,
       targetAmount: "",
-      rate: q.price,
+      // Same direction as OffRampQuote.rate: telemetry falls back to
+      // job.rate at settlement, so a sell-per-buy value here would poison
+      // the spread exactly the way issue 5.21 describes.
+      rate: targetPerSourceRate(q.price),
       status: "pending",
       externalStatus: null,
       lastError: null,
+      transferNotifiedAt: null,
       createdAt: now,
       updatedAt: now,
     });

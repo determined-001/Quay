@@ -116,7 +116,16 @@ export interface OffRampQuote {
   sourceAmount: string;
   targetCurrency: string; // ISO code, e.g. "NGN"
   targetAmount: string; // gross amount before fees
-  rate: string; // sourceAsset -> targetCurrency
+  /**
+   * TARGET currency per 1 unit of source asset (issue 5.21): multiplying
+   * `sourceAmount` by `rate` gives the gross target amount. This is the
+   * direction the mock always used and the direction telemetry's effective
+   * rate (`targetAmount / sourceAmount`) is measured in — SEP-38's `price`
+   * is the OPPOSITE (sell units per buy unit), so adapters wrapping SEP-38
+   * must invert it (see {@link targetPerSourceRate}) rather than pass it
+   * through, or every spread computed against settlement is meaningless.
+   */
+  rate: string;
   expiresAt: number; // epoch ms — after this the quote is void
   fee: { amount: string; currency: string; source: "anchor" | "estimated" };
   netTargetAmount: string; // what the seller actually receives
@@ -137,6 +146,22 @@ export class QuoteExpiredError extends Error {
 export function isQuoteExpired(quote: OffRampQuote, now: number = Date.now()): boolean {
   if (Number.isNaN(quote.expiresAt)) return true;
   return now >= quote.expiresAt;
+}
+
+/**
+ * Convert a SEP-38 `price` (SELL units per BUY unit) into
+ * {@link OffRampQuote.rate}'s direction (TARGET currency per 1 source unit),
+ * as a fixed-precision string. 8 decimals: enough that round-tripping a
+ * realistic FX price loses less than the 4-decimal amounts derived from it.
+ * Throws on a non-positive or non-numeric price — a quote carrying one is
+ * unusable and must fail at the adapter, not surface as rate "Infinity".
+ */
+export function targetPerSourceRate(sellPerBuyPrice: string): string {
+  const p = Number(sellPerBuyPrice);
+  if (!Number.isFinite(p) || p <= 0) {
+    throw new Error(`Cannot derive a rate from SEP-38 price "${sellPerBuyPrice}"`);
+  }
+  return (1 / p).toFixed(8);
 }
 
 /** Where the seller wants their local-currency payout to land. */
@@ -317,6 +342,10 @@ export interface StoredOffRampJob {
   status: OffRampJobStatus;
   externalStatus: string | null; // raw upstream status string, for debugging
   lastError: string | null;
+  /** When the offramp.transfer_required webhook was first sent for this job.
+   *  Null means the transfer instructions haven't been surfaced yet; once set,
+   *  the webhook is not re-fired on subsequent polls or restarts. */
+  transferNotifiedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -328,7 +357,7 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
   ): Promise<void>;
 }
 
@@ -418,10 +447,22 @@ export interface KycRecord {
   /** Values we have on file for this seller. PII — never log, never put on a
    *  webhook payload or a `/links` response; encrypted at rest by the repo. */
   providedFields: Record<string, string>;
+  /** Per-field status from the anchor's `provided_fields` (SEP-12). */
+  providedFieldStatus: ProvidedFieldStatus[];
+  /** Field names (not values) sent to the anchor in the last submission. */
+  sentFields: string[];
   /** Anchor's status/rejection message, verbatim. */
   message: string | null;
   lastSyncedAt: number | null;
   updatedAt: number;
+}
+
+export interface ProvidedFieldStatus {
+  name: string;
+  /** The anchor's status for this field: "ACCEPTED", "REJECTED", "NEEDS_INFO", etc. */
+  status: string | null;
+  /** Any error message from the anchor for this field. */
+  error: string | null;
 }
 
 /** Thrown by {@link KycPort.submit} when required fields are missing, naming
@@ -447,6 +488,53 @@ export interface KycPort {
 export interface KycRepository {
   get(sellerId: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
+}
+
+/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
+ *  must be encrypted at rest by the implementation. */
+export interface KycRepository {
+  get(sellerId: string): Promise<KycRecord | null>;
+  save(record: KycRecord): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// KYC Consent port
+// ---------------------------------------------------------------------------
+// Records which fields a seller agreed to share with which anchor, when, and
+// whether that consent has been revoked. No PII values — only field names
+// from the SEP-9 catalogue.
+
+export interface KycConsent {
+  id: string;
+  sellerId: string;
+  anchorDomain: string;
+  fields: string[]; // SEP-9 field names
+  grantedAt: number;
+  revokedAt: number | null;
+  grantedVia: "session";
+  noticeVersion: string;
+}
+
+/** Thrown when a seller has no active consent covering the fields an anchor requests. */
+export class ConsentRequiredError extends Error {
+  constructor(
+    readonly anchorDomain: string,
+    readonly missingFields: string[],
+  ) {
+    super(`Consent required for anchor ${anchorDomain} for fields: ${missingFields.join(", ")}`);
+    this.name = "ConsentRequiredError";
+  }
+}
+
+export interface KycConsentRepository {
+  /** Grant or update consent for a seller/anchor pair. */
+  grant(consent: Omit<KycConsent, "id">): Promise<KycConsent>;
+  /** Get the active (unrevoked) consent for a seller/anchor pair, if any. */
+  active(sellerId: string, anchorDomain: string): Promise<KycConsent | null>;
+  /** Revoke the active consent for a seller/anchor pair. */
+  revoke(sellerId: string, anchorDomain: string): Promise<void>;
+  /** List all consents (active and revoked) for a seller. */
+  list(sellerId: string): Promise<KycConsent[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +686,7 @@ export type PublicWebhook = Omit<Webhook, "secretEncrypted" | "previousSecretEnc
 export interface WebhookDelivery {
   id: string;
   webhookId: string;
-  linkId: string;
+  linkId: string | null;
   event: string;
   /** Which attempt number (1-based). */
   attempt: number;
@@ -622,7 +710,7 @@ export type WebhookQueueStatus = "pending" | "claimed" | "delivered" | "dead";
 export interface WebhookQueueEntry {
   id: string;
   webhookId: string;
-  linkId: string;
+  linkId: string | null;
   event: string;
   /** The signed JSON body, serialised once at enqueue time. */
   payload: string;

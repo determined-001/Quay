@@ -1,13 +1,14 @@
 import type {
   KycFieldSpec,
   KycStatus,
+  OffRampQuote,
   PaymentLink,
   PaymentRequest,
   PayoutFieldDescriptor,
   WithdrawTransfer,
 } from "@checkout/core";
 
-export type { PaymentLink, PaymentRequest, PayoutFieldDescriptor };
+export type { OffRampQuote, PaymentLink, PaymentRequest, PayoutFieldDescriptor };
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -152,7 +153,12 @@ export type ApiErrorCode =
   | "missing_trustline"
   | "wrong_network"
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
-  | "server_error"; // 5xx or unexpected non-JSON response
+  | "server_error" // 5xx or unexpected non-JSON response
+  | "consent_required" // per-anchor consent missing for KYC fields
+  // Operator telemetry (issue 5.21):
+  | "unauthorized" // telemetry token rejected
+  | "telemetry_not_enabled" // deployment has no TELEMETRY_TOKEN configured
+  | "telemetry_error"; // any other telemetry-route failure
 
 /** Structured error thrown by http() so callers can branch on code. */
 export class CheckoutError extends Error {
@@ -199,6 +205,8 @@ export function describeError(err: CheckoutError): string {
       return "We can't reach the payment service right now. Check your connection and try again.";
     case "server_error":
       return "Something went wrong on the server. Please try again in a moment.";
+    case "consent_required":
+      return "You need to approve sharing these identity fields with the anchor before submitting.";
     default:
       return "An unexpected error occurred. Please try again.";
   }
@@ -422,16 +430,11 @@ export const api = {
 
   health: () => http<HealthResponse>("/health"),
 
+  /** The route returns the whole OffRampQuote — including `expiresAt` (epoch
+   *  ms, the ANCHOR's own TTL) — so the type is the shared one rather than a
+   *  redeclaration that drops fields (issue 5.22 dropped exactly that one). */
   quoteCashOut: (id: string, targetCurrency: string) =>
-    http<{
-      quoteId: string;
-      sourceAmount: string;
-      targetCurrency: string;
-      targetAmount: string; // Gross
-      rate: string;
-      fee: { amount: string; currency: string; source: string };
-      netTargetAmount: string; // Net
-    }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+    http<OffRampQuote>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
 
   cashOut: (
     id: string,
@@ -440,7 +443,16 @@ export const api = {
     idempotencyKey?: string,
   ) =>
     http<{
-      job: { jobId: string; status: string; targetAmount: string; targetCurrency: string };
+      job: {
+        jobId: string;
+        status: string;
+        targetAmount: string;
+        targetCurrency: string;
+        /** When the anchor's firm quote expires — epoch ms on the SERVER's
+         *  clock; compare against serverNow(), never Date.now() (issue 5.22). */
+        quoteExpiresAt: number;
+        quoteExpiresInSeconds: number;
+      };
       interactiveUrl?: string;
       /** The anchor's deposit instructions — the seller's wallet signs and sends this. */
       transfer?: WithdrawTransfer;
@@ -488,6 +500,32 @@ export const api = {
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),
 
+  // KYC consent
+  listKycConsents: () =>
+    http<{ consents: Array<{
+      id: string;
+      anchorDomain: string;
+      fields: string[];
+      grantedAt: number;
+      revokedAt: number | null;
+      grantedVia: string;
+      noticeVersion: string;
+    }> }>("/seller/kyc/consent"),
+
+  grantKycConsent: (anchorDomain: string, fields: string[]) =>
+    http<{
+      id: string;
+      anchorDomain: string;
+      fields: string[];
+      grantedAt: number;
+      revokedAt: number | null;
+      grantedVia: string;
+      noticeVersion: string;
+    }>("/seller/kyc/consent", { method: "POST", body: JSON.stringify({ anchorDomain, fields }) }),
+
+  revokeKycConsent: (anchorDomain: string) =>
+    http<{ revoked: boolean; anchorDomain: string; note: string }>(`/seller/kyc/consent/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" }),
+
   listWebhooks: () => http<{ webhooks: Webhook[] }>("/webhooks"),
 
   createWebhook: (url: string) =>
@@ -523,3 +561,65 @@ export const api = {
   revokeApiKey: (id: string) =>
     http<{ id: string; revokedAt: number }>(`/api-keys/${id}`, { method: "DELETE" }),
 };
+
+// ── Operator telemetry (issue 5.21) ─────────────────────────────────────────
+// Token-per-call: the operator's TELEMETRY_TOKEN is typed into the ops page,
+// held ONLY in that page's memory, and attached here — never persisted, never
+// mixed with the seller session above.
+
+export interface TelemetrySummaryRow {
+  anchorDomain: string;
+  corridor: string;
+  count: number;
+  settledCount: number;
+  failedCount: number;
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+  meanSpread: number | null;
+}
+
+export interface TelemetryRow {
+  anchorDomain: string;
+  corridor: string;
+  sellAsset: string;
+  sellAmount: string;
+  quotedRate: string;
+  effectiveRate: string | null;
+  feeAmount: string | null;
+  quotedAt: number;
+  initiatedAt: number | null;
+  settledAt: number | null;
+  status: string;
+  failureReason: string | null;
+}
+
+async function telemetryFetch<T>(path: string, token: string): Promise<T> {
+  const res = await fetch(`${apiBase()}${path}`, {
+    headers: { authorization: `Bearer ${token}` },
+    cache: 'no-store',
+  });
+  if (res.status === 401) throw new CheckoutError('unauthorized', 401, 'That token was rejected.');
+  if (res.status === 404)
+    throw new CheckoutError(
+      'telemetry_not_enabled',
+      404,
+      'Telemetry is not enabled on this deployment (TELEMETRY_TOKEN unset).',
+    );
+  if (!res.ok) throw new CheckoutError('telemetry_error', res.status, `Telemetry request failed (${res.status}).`);
+  return (await res.json()) as T;
+}
+
+export function getTelemetrySummary(token: string): Promise<{ summary: TelemetrySummaryRow[] }> {
+  return telemetryFetch('/telemetry/summary', token);
+}
+
+export function getTelemetryRows(
+  token: string,
+  opts: { corridor?: string; limit?: number } = {},
+): Promise<{ rows: TelemetryRow[] }> {
+  const params = new URLSearchParams();
+  if (opts.corridor) params.set('corridor', opts.corridor);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const qs = params.toString();
+  return telemetryFetch(`/telemetry/rows${qs ? `?${qs}` : ''}`, token);
+}
