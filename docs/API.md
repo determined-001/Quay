@@ -594,6 +594,101 @@ naming exactly which ones, never silently substituting a placeholder.
 
 ---
 
+## `GET /seller/kyc/consent`
+
+List all consent records (active and revoked) for the authenticated seller.
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**200**
+```json
+{
+  "consents": [
+    {
+      "id": "cnc_1",
+      "anchorDomain": "testanchor.stellar.org",
+      "fields": ["first_name", "last_name", "email_address"],
+      "grantedAt": 1750000000000,
+      "revokedAt": null,
+      "grantedVia": "session",
+      "noticeVersion": "1.0"
+    }
+  ]
+}
+```
+`revokedAt` is `null` for active consents, an epoch-ms timestamp when revoked.
+
+---
+
+## `POST /seller/kyc/consent`
+
+Grant consent to share specific identity fields with an anchor. The server
+re-derives the fields the anchor currently requires from the latest KYC record
+and refuses any mismatch — the UI cannot consent to fields the anchor did not
+ask for. All required fields must be covered; optional fields may be omitted.
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**Request**
+```json
+{ "anchorDomain": "testanchor.stellar.org", "fields": ["first_name", "last_name", "email_address"] }
+```
+
+**201** — consent granted
+```json
+{
+  "id": "cnc_2",
+  "anchorDomain": "testanchor.stellar.org",
+  "fields": ["first_name", "last_name", "email_address"],
+  "grantedAt": 1750000001000,
+  "revokedAt": null,
+  "grantedVia": "session",
+  "noticeVersion": "1.0"
+}
+```
+
+**400** — validation errors
+- `{ "error": "invalid_fields", "message": "Consent request includes fields the anchor does not currently require", "fields": ["phone_number"] }`
+- `{ "error": "missing_required_fields", "message": "Consent must cover all required fields", "fields": ["last_name"] }`
+
+---
+
+## `DELETE /seller/kyc/consent/:anchorDomain`
+
+Revoke the active consent for an anchor. Revocation stops future data sends to
+that anchor; it does not erase data already held by the anchor (see issue 4.28).
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**200**
+```json
+{
+  "revoked": true,
+  "anchorDomain": "testanchor.stellar.org",
+  "note": "Revocation stops future data sends to this anchor. It does not erase data already held by the anchor (see issue 4.28)."
+}
+```
+
+---
+
+## `PUT /seller/kyc` — consent enforcement
+
+Submit or update identity fields. **Before any field is sent to the anchor, the
+server checks that every field about to be sent is covered by an active consent
+for that anchor.** If any field lacks consent, the request is rejected with
+`403 consent_required`.
+
+**403**
+```json
+{ "error": "consent_required", "anchorDomain": "testanchor.stellar.org", "fields": ["last_name", "email_address"] }
+```
+The `fields` array names exactly which fields lack consent. The seller must
+grant consent via `POST /seller/kyc/consent` before retrying.
+
+**422** — same as before when a required field is missing from the request body.
+
+---
+
 ## `POST /webhooks`
 
 Register a webhook endpoint. The signing secret is returned **once** — store it.

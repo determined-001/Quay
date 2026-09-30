@@ -8,6 +8,8 @@ import type {
   KycFieldSpec,
   KycRecord,
   KycRepository,
+  KycConsent,
+  KycConsentRepository,
   KycStatus,
   LinkPaymentRecord,
   LinkRepository,
@@ -47,6 +49,7 @@ import {
   revokedTokens,
   offrampTelemetry,
   apiKeys,
+  kycConsents,
 } from "../db/schema";
 import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
@@ -310,6 +313,81 @@ function rowToSeller(
     payoutFields,
     createdAt: row.createdAt,
   };
+}
+
+/**
+ * Per-anchor KYC consent repository.
+ * Records which fields a seller agreed to share with which anchor.
+ * No PII values stored — only field names from SEP-9 catalogue and metadata.
+ */
+export class DrizzleKycConsentRepository implements KycConsentRepository {
+  constructor(private readonly db: DB) {}
+
+  private rowToConsent(row: typeof kycConsents.$inferSelect): KycConsent {
+    return {
+      id: row.id,
+      sellerId: row.sellerId,
+      anchorDomain: row.anchorDomain,
+      fields: JSON.parse(row.fields) as string[],
+      grantedAt: row.grantedAt,
+      revokedAt: row.revokedAt ?? null,
+      grantedVia: "session",
+      noticeVersion: row.noticeVersion,
+    };
+  }
+
+  async grant(consent: Omit<KycConsent, "id">): Promise<KycConsent> {
+    const now = Date.now();
+    const row = {
+      id: newId("cnc"),
+      sellerId: consent.sellerId,
+      anchorDomain: consent.anchorDomain,
+      fields: JSON.stringify(consent.fields),
+      grantedAt: consent.grantedAt,
+      revokedAt: consent.revokedAt ?? null,
+      grantedVia: consent.grantedVia,
+      noticeVersion: consent.noticeVersion,
+    };
+    await this.db
+      .insert(kycConsents)
+      .values(row)
+      .onConflictDoUpdate({
+        target: [kycConsents.sellerId, kycConsents.anchorDomain],
+        set: row,
+      });
+    return this.rowToConsent(row);
+  }
+
+  async active(sellerId: string, anchorDomain: string): Promise<KycConsent | null> {
+    const rows = await this.db
+      .select()
+      .from(kycConsents)
+      .where(
+        and(
+          eq(kycConsents.sellerId, sellerId),
+          eq(kycConsents.anchorDomain, anchorDomain),
+          isNull(kycConsents.revokedAt),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? this.rowToConsent(rows[0]) : null;
+  }
+
+  async revoke(sellerId: string, anchorDomain: string): Promise<void> {
+    await this.db
+      .update(kycConsents)
+      .set({ revokedAt: Date.now() })
+      .where(and(eq(kycConsents.sellerId, sellerId), eq(kycConsents.anchorDomain, anchorDomain)));
+  }
+
+  async list(sellerId: string): Promise<KycConsent[]> {
+    const rows = await this.db
+      .select()
+      .from(kycConsents)
+      .where(eq(kycConsents.sellerId, sellerId))
+      .orderBy(desc(kycConsents.grantedAt));
+    return rows.map(this.rowToConsent);
+  }
 }
 
 export class DrizzleSellerRepository implements SellerRepository {

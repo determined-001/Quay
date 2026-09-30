@@ -34,6 +34,13 @@ function fakeContainer(
     telemetry: {} as Container["telemetry"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: seller.wallet },
     kyc: {} as Container["kyc"],
+    kycConsents: {
+      async list(sellerId: string) { return []; },
+      async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+      async active(sellerId: string, anchorDomain: string) { return null; },
+      async revoke(sellerId: string, anchorDomain: string) { },
+    } as unknown as Container["kycConsents"],
+    anchorDomain: "testanchor.stellar.org",
     anchorAuth: null,
     db: {} as Container["db"],
     auth: { session, sellers, revocations } as unknown as Container["auth"],

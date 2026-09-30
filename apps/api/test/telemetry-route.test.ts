@@ -30,6 +30,13 @@ function fakeContainer(): Container {
       perAccountLag: new Map(),
       circuitBreakersOpen: 0,
     }),
+    kycConsents: {
+      async list(sellerId: string) { return []; },
+      async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+      async active(sellerId: string, anchorDomain: string) { return null; },
+      async revoke(sellerId: string, anchorDomain: string) { },
+    } as unknown as Container["kycConsents"],
+    anchorDomain: "testanchor.stellar.org",
     start() {},
     stop() {},
   };

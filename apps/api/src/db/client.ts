@@ -2,6 +2,7 @@ import { createClient, type Client } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 import * as schema from "./schema";
 import { encryptSecret, last4 } from "../services/secret-crypto";
+import { newId } from "../services/ids";
 
 export type DB = LibSQLDatabase<typeof schema>;
 
@@ -150,6 +151,20 @@ const BOOTSTRAP_SQL = [
      last_used_at INTEGER,
      created_at INTEGER NOT NULL,
      revoked_at INTEGER
+   )`,
+  // Per-anchor consent record for KYC field disclosure.
+  // No PII values — only field names from SEP-9 catalogue and metadata.
+  // Primary key (seller_id, anchor_domain) for one active consent per anchor.
+  `CREATE TABLE IF NOT EXISTS kyc_consents (
+     id TEXT PRIMARY KEY,
+     seller_id TEXT NOT NULL,
+     anchor_domain TEXT NOT NULL,
+     fields TEXT NOT NULL, -- JSON string[] of SEP-9 field names
+     granted_at INTEGER NOT NULL,
+     revoked_at INTEGER,
+     granted_via TEXT NOT NULL, -- 'session'
+     notice_version TEXT NOT NULL,
+     UNIQUE(seller_id, anchor_domain)
    )`,
 ];
 

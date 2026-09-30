@@ -449,6 +449,53 @@ export interface KycRepository {
   save(record: KycRecord): Promise<void>;
 }
 
+/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
+ *  must be encrypted at rest by the implementation. */
+export interface KycRepository {
+  get(sellerId: string): Promise<KycRecord | null>;
+  save(record: KycRecord): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// KYC Consent port
+// ---------------------------------------------------------------------------
+// Records which fields a seller agreed to share with which anchor, when, and
+// whether that consent has been revoked. No PII values — only field names
+// from the SEP-9 catalogue.
+
+export interface KycConsent {
+  id: string;
+  sellerId: string;
+  anchorDomain: string;
+  fields: string[]; // SEP-9 field names
+  grantedAt: number;
+  revokedAt: number | null;
+  grantedVia: "session";
+  noticeVersion: string;
+}
+
+/** Thrown when a seller has no active consent covering the fields an anchor requests. */
+export class ConsentRequiredError extends Error {
+  constructor(
+    readonly anchorDomain: string,
+    readonly missingFields: string[],
+  ) {
+    super(`Consent required for anchor ${anchorDomain} for fields: ${missingFields.join(", ")}`);
+    this.name = "ConsentRequiredError";
+  }
+}
+
+export interface KycConsentRepository {
+  /** Grant or update consent for a seller/anchor pair. */
+  grant(consent: Omit<KycConsent, "id">): Promise<KycConsent>;
+  /** Get the active (unrevoked) consent for a seller/anchor pair, if any. */
+  active(sellerId: string, anchorDomain: string): Promise<KycConsent | null>;
+  /** Revoke the active consent for a seller/anchor pair. */
+  revoke(sellerId: string, anchorDomain: string): Promise<void>;
+  /** List all consents (active and revoked) for a seller. */
+  list(sellerId: string): Promise<KycConsent[]>;
+}
+
 // ---------------------------------------------------------------------------
 // Anchor sessions (SEP-10, per seller)
 // ---------------------------------------------------------------------------
