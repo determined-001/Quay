@@ -66,6 +66,21 @@ describe("mainnet guardrails in env.ts", () => {
     expect(err?.message).toMatch(/testanchor\.stellar\.org is the/);
   });
 
+  it("refuses to boot with DEFAULT_SELLER_SECRET on public network", async () => {
+    setPublicBase({ DEFAULT_SELLER_SECRET: "S" + "A".repeat(55) });
+    const err = await loadEnv();
+    expect(err?.message).toMatch(/DEFAULT_SELLER_SECRET is set on the public network/);
+  });
+
+  it("accepts DEFAULT_SELLER_SECRET on testnet for demo scripts", async () => {
+    setPublicBase({
+      STELLAR_NETWORK: "testnet",
+      OFFRAMP: "mock",
+      DEFAULT_SELLER_SECRET: "S" + "A".repeat(55),
+    });
+    expect(await loadEnv()).toBeNull();
+  });
+
   it("requires ANCHOR_URL when OFFRAMP=anchor", async () => {
     setPublicBase({ ANCHOR_URL: "" });
     const err = await loadEnv();

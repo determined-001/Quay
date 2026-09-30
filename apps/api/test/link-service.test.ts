@@ -43,10 +43,11 @@ function makeService(opts: {
     links: opts.links,
     sellers: {
       findById: async (id) =>
-        id === "sel_1" ? { id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 } : null,
+        id === "sel_1" ? { id: "sel_1", name: "Seller", wallet: "GSELLER", profileKind: "individual", payoutFields: null, createdAt: 0 } : null,
       findByWallet: async () => null,
-      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 }),
+      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", profileKind: "individual", payoutFields: null, createdAt: 0 }),
       savePayoutFields: async () => {},
+      saveProfileKind: async () => {},
     },
     webhooks: opts.webhooks ?? new FakeWebhookRepository(),
     rail: UNUSED_RAIL,

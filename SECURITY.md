@@ -70,6 +70,17 @@ signature, or cause incorrect money math — are exactly what we want to hear ab
 | `DEFAULT_SELLER_SECRET` | Render env var (or local `.env`) | This is the seller wallet's Stellar secret key, used to sign SEP-10 auth challenges when `OFFRAMP=testanchor`. Generate a new Stellar keypair, update `DEFAULT_SELLER_WALLET`/`DEFAULT_SELLER_SECRET` together, redeploy. In-flight payment links pointed at the *old* wallet address remain valid payment destinations (Stellar payments don't depend on which key signs SEP-10 auth) but new SEP-10 challenges will be signed by the new key - coordinate with whichever anchor is configured, since it will have seen the old public key during its own auth/KYC flow. |
 | `DATABASE_AUTH_TOKEN` | Render env var | Turso auth token. Create a new one (`turso db tokens create <db>` or the Turso dashboard), update the Render env var, redeploy, confirm the new deploy is healthy, then revoke the old token. |
 | `JWT_SECRET` | Render env var (or local `.env`) | Signs the session JWTs minted after a SEP-10 wallet login (`POST /auth`). Rotating it invalidates every outstanding session immediately, forcing all sellers to log in again; there is no mixed-validity window today, so rotate during a quiet period or accept the forced re-authentication. Revoked-token rows keyed by `jti` become inert on rotation and are swept on their own expiry. Required explicitly on `public`; auto-generates an ephemeral secret on testnet, which means a restart silently rotates it. |
+| `KYC_ENCRYPTION_KEY` | Render env var (or local `.env`) | 32-byte hex key (64 chars) for AES-256-GCM encryption of seller PII at rest (`seller_kyc.fields_encrypted` and `sellers.payout_fields_encrypted`). Generate with `crypto.randomBytes(32).toString('hex')`. Required for `OFFRAMP=testanchor\|anchor`. If rotated, existing KYC records and saved payout destinations fail decryption safely (payout fields fallback to `null` without crashing logins, requiring re-entry on next cash-out). |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | Render env var (or local `.env`) | AES-256-GCM key encrypting outgoing webhook signing secrets (`webhooks.secret_encrypted`) and anchor session bearer tokens (`anchor_sessions.token_encrypted`). |
+
+### At-rest encryption inventory
+
+| Data | Table & Column | Key | Algorithm | Handling |
+|---|---|---|---|---|
+| Seller KYC PII | `seller_kyc.fields_encrypted` | `KYC_ENCRYPTION_KEY` | AES-256-GCM | Encrypted before insert, decrypted only in-process for anchor SEP-12 submission. |
+| Seller Payout Fields | `sellers.payout_fields_encrypted` | `KYC_ENCRYPTION_KEY` | AES-256-GCM | Encrypted on cash-out (`savePayoutFields`), decrypted in-process for payout reuse. Plaintext `payout_fields_json` is backfilled to NULL on startup. Corrupted blobs log a warning and return NULL without breaking logins. Masked in all API responses. |
+| Anchor Session JWTs | `anchor_sessions.token_encrypted` | `WEBHOOK_SECRET_ENCRYPTION_KEY` | AES-256-GCM | Bearer credentials encrypted at rest. |
+| Webhook Signing Secrets | `webhooks.secret_encrypted` | `WEBHOOK_SECRET_ENCRYPTION_KEY` | AES-256-GCM | Reversible encryption for signing deliveries; plaintext never logged or emitted. |
 
 Rotating any of the above requires updating the value in Render's dashboard
 (or wherever it's actually deployed) and redeploying - none of these are

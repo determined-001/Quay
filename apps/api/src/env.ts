@@ -112,6 +112,13 @@ if (!OFFRAMP_KINDS.includes(offramp)) {
 // refuses to start is loud; one that silently settles into a sandbox anchor is
 // not. Nothing here is reachable when STELLAR_NETWORK=testnet.
 if (network === "public") {
+  if (process.env.DEFAULT_SELLER_SECRET) {
+    throw new Error(
+      "DEFAULT_SELLER_SECRET is set on the public network. Quay never signs for a seller; " +
+        "each seller's wallet signs its own anchor login and withdrawals. Remove it from " +
+        "this deployment's environment.",
+    );
+  }
   // "anchor" and "none" are the two valid pubnet settings. "none" is in fact
   // the safest configuration this service has: with no cash-out leg there is
   // no anchor to trust, no SEP-12 PII to hold, and no seller secret key on the
@@ -240,8 +247,8 @@ export const env = {
   // Preferred SEP-6 withdrawal type (e.g. "bank_account"). Unset means "read
   // /sep6/info and use the only enabled type, or refuse if there are several".
   offrampType: process.env.OFFRAMP_TYPE || undefined,
-  // Required only when a real anchor is configured and DEFAULT_SELLER_WALLET is set (SEP-10
-  // needs the seller's secret key to sign the auth challenge). Never persisted.
+  // Testnet-only convenience secret for demo scripts (pnpm demo:seed / pnpm demo:reset).
+  // Never set on public network.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
   // Bearer token required to read GET /metrics. Auto-generates an ephemeral one
   // (printed once at boot) if unset — the endpoint is always gated.

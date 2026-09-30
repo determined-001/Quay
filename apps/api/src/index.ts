@@ -75,6 +75,15 @@ async function main(): Promise<void> {
     trustProxyHops: env.trustProxyHops,
     keyFor: apiKeyRateLimitKey(container.apiKeys),
   });
+  // Anchor SEP-10 requests trigger outbound calls to the anchor. Keep their
+  // strict budget per authenticated seller so one credential cannot amplify
+  // traffic at the anchor, regardless of which IP or API key it uses.
+  const anchorAuthLimit = rateLimit({
+    windowMs: env.rateLimitStrictWindowMs,
+    max: env.rateLimitStrictMax,
+    store: rateLimitStore,
+    keyFor: (ctx) => `anchor-auth:${ctx.get("seller").id}`,
+  });
 
   // Liveness: the process is up and answering HTTP at all.
   app.get("/health", async (ctx) => {
@@ -174,7 +183,7 @@ async function main(): Promise<void> {
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
   app.route("/seller/kyc", kycRoutes(container));
-  app.route("/seller/anchor-auth", anchorAuthRoutes(container));
+  app.route("/seller/anchor-auth", anchorAuthRoutes(container, anchorAuthLimit));
   app.route("/demo", demoRoutes(container));
   // Operator-only off-ramp telemetry (issue #20, 3.8). The routes gate
   // themselves on TELEMETRY_TOKEN (404 when unset), so mounting them

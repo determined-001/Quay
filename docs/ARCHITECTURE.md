@@ -151,12 +151,16 @@ payment operation, and each dedupes independently (issue 4.11).
 
 ### 3. Cash-out — SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, today's real adapter)
 
+For security boundaries, attack paths and the failure branches of this flow, see the [seller-signed anchor threat model](THREAT-MODEL.md).
+
 The anchor's customer is always the **seller**, identified by their own wallet.
 Nothing in this flow is signed by a key the server holds: the seller's wallet
 signs the anchor's SEP-10 challenge (once, ahead of time) and the USDC transfer
 that funds the withdrawal. `SellerAnchorAuth` (`packages/offramp/src/anchor-session.ts`)
 verifies and relays the challenge and keeps the resulting JWT per seller in
-`anchor_sessions`, encrypted at rest.
+`anchor_sessions`, encrypted at rest. Sensitive seller payout fields (`sellers.payout_fields_encrypted`)
+and SEP-12 KYC records (`seller_kyc.fields_encrypted`) are likewise encrypted at rest using AES-256-GCM
+via `KYC_ENCRYPTION_KEY`.
 
 ```mermaid
 sequenceDiagram
@@ -213,7 +217,7 @@ Every `CircuitBreakerOffRamp` call is instrumented (`anchor_calls_total`,
 consecutive failures, so a down anchor gets a 30s cooldown instead of being hit by every
 poll tick.
 
-### 4. Cash-out — SEP-24 interactive variant (not implemented — MAINTAINER.md roadmap item 1)
+### 4. Cash-out — SEP-24 interactive variant (per-anchor selection tracked in [#216](https://github.com/determined-001/Quay/issues/216); quote gaps in [#217](https://github.com/determined-001/Quay/issues/217)/[#219](https://github.com/determined-001/Quay/issues/219))
 
 ```mermaid
 sequenceDiagram
@@ -328,14 +332,11 @@ custody at the edges: the seller already holds the stablecoin, and cash-out is a
 explicitly authorized action. Flip to `inline` only with a licensed anchor relationship and
 a real compliance story — see the README's boundary note.
 
-**Why SEP-6 in `TestAnchorOffRamp`, not SEP-24.** SEP-24's interactive withdraw needs a
-redirect/popup concept somewhere upstream of the adapter — in the dashboard, in
-`LinkService`, in the API response shape. None of that existed when the reference adapter
-was built, and SEP-6 is fully field-driven (bank details go straight in the request body),
-so it needed zero changes anywhere else. `testanchor.ts`'s own header comment captures this
-rejection reasoning. The SEP-24 interactive diagram above is the shape that *would* need
-those changes — MAINTAINER.md's roadmap item 1 (`OffRampInitiation` union) is the first
-domino.
+**Why SEP-6 in `TestAnchorOffRamp`, not SEP-24.** Both protocols are supported —
+`OffRampInitiation`'s `interactive` arm, the API's `interactiveUrl`, and the dashboard's
+popup handling all exist — and the protocol is chosen per anchor from its SEP-1
+capabilities, preferring SEP-6 when both are declared. The full trade-offs and the
+decision live in [`docs/decisions/0001-sep6-vs-sep24.md`](decisions/0001-sep6-vs-sep24.md).
 
 **Why path-payment settlement is parked** (decided 2026-07-18, see `MAINTAINER.md`).
 Evaluated settling sellers in NGNC on-chain via Stellar path payments (buyer pays USDC,
