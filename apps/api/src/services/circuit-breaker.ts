@@ -5,7 +5,7 @@ import {
   type OffRampMode,
   type OffRampPort,
   type OffRampQuote,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
 } from "@checkout/core";
 import { metrics } from "../metrics";
 
@@ -64,7 +64,7 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     return this.call("status", () => this.inner.status(...args));
   }
 
-  offrampRequirements(...args: Parameters<OffRampPort["offrampRequirements"]>): Promise<PayoutFieldDescriptor[]> {
+  offrampRequirements(...args: Parameters<OffRampPort["offrampRequirements"]>): Promise<OfframpRequirementTypes> {
     return this.call("offrampRequirements", () => this.inner.offrampRequirements(...args));
   }
 
