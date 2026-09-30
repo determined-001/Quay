@@ -35,6 +35,7 @@ import {
   type PaymentPreflightResult,
 } from "../../lib/payment-preflight";
 import { useSellerWallet } from "./SessionGate";
+import { TransferOtherDevice } from "./TransferOtherDevice";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -699,6 +700,7 @@ export default function CashOutModal({
                   </>
                 )}
                 {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
+                <TransferOtherDevice transfer={transfer} wallet={wallet} onSent={setSentHash} />
               </>
             )}
           </div>
