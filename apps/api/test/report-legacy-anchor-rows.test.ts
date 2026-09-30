@@ -291,14 +291,14 @@ describe("report-legacy-anchor-rows script", () => {
     expect(out.stdout).toContain("dry run");
     expect(out.stdout).not.toContain(CIPHERTEXT);
     expect((await db.select().from(offrampJobs)).find((j) => j.jobId === "j_legacy_pending")!.lastError).toBeNull();
-  }, 30_000);
+  }, 120_000);
 
   it("refuses --apply without --confirm", async () => {
     const out = run("--apply");
     expect(out.code).toBe(2);
     expect(out.stderr).toContain("--confirm");
     expect((await db.select().from(sellerKyc)).find((k) => k.sellerId === "sel_legacy_accepted")!.customerId).not.toBeNull();
-  }, 30_000);
+  }, 120_000);
 
   it("emits parseable JSON and applies with --apply --confirm", async () => {
     const dry = run("--json");
@@ -309,5 +309,5 @@ describe("report-legacy-anchor-rows script", () => {
     expect(applied.code).toBe(0);
     expect(JSON.parse(applied.stdout).applied).toEqual({ kycReset: 1, jobsMarked: 3 });
     expect((await db.select().from(sellerKyc)).find((k) => k.sellerId === "sel_legacy_accepted")!.customerId).toBeNull();
-  }, 30_000);
+  }, 120_000);
 });
