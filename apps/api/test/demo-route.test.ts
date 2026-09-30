@@ -4,7 +4,7 @@ import { NOOP_LOGGER, type Seller, type SellerRepository, type TokenRevocationRe
 import { SessionIssuer } from "../src/services/session";
 import { demoRoutes } from "../src/routes/demo";
 
-const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLER", payoutFields: null, createdAt: Date.now() };
+const seller: Seller = { id: "sel_1", name: "Demo Seller", wallet: "GSELLER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
 
 function fakeContainer(
   deleteDemo: (sellerId?: string) => Promise<number>,
@@ -15,6 +15,7 @@ function fakeContainer(
     findByWallet: async () => null,
     createIfAbsent: async () => seller,
     savePayoutFields: async () => {},
+    saveProfileKind: async () => {},
   };
   const revocations: TokenRevocationRepository = {
     revoke: async () => {},
@@ -33,6 +34,13 @@ function fakeContainer(
     telemetry: {} as Container["telemetry"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: seller.wallet },
     kyc: {} as Container["kyc"],
+    kycConsents: {
+      async list(sellerId: string) { return []; },
+      async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+      async active(sellerId: string, anchorDomain: string) { return null; },
+      async revoke(sellerId: string, anchorDomain: string) { },
+    } as unknown as Container["kycConsents"],
+    anchorDomain: "testanchor.stellar.org",
     anchorAuth: null,
     db: {} as Container["db"],
     auth: { session, sellers, revocations } as unknown as Container["auth"],

@@ -45,6 +45,8 @@ async function seedSellerWithKycAndSession(
     status: "ACCEPTED",
     requiredFields: [{ name: "first_name", type: "string", optional: false }],
     providedFields: { first_name: "Alice", last_name: "Smith" },
+    providedFieldStatus: [],
+    sentFields: [],
     message: null,
     lastSyncedAt: createdAt,
     updatedAt: createdAt,

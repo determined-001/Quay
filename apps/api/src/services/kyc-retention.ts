@@ -27,7 +27,7 @@ export interface KycRetentionResult {
 export async function eraseSellerIdentityLocal(db: DB, sellerId: string): Promise<void> {
   await db.delete(sellerKyc).where(eq(sellerKyc.sellerId, sellerId));
   await db.delete(anchorSessions).where(eq(anchorSessions.sellerId, sellerId));
-  await db.update(sellers).set({ payoutFieldsJson: null }).where(eq(sellers.id, sellerId));
+  await db.update(sellers).set({ payoutFieldsJson: null, payoutFieldsEncrypted: null }).where(eq(sellers.id, sellerId));
 }
 
 /**

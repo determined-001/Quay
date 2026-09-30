@@ -368,6 +368,18 @@ corrupted data.
 
 ## Key rotation
 
+- **`KYC_ENCRYPTION_KEY`**: encrypts seller SEP-12 KYC field values at rest using AES-256-GCM.
+  Blob format is `v1:<keyId>:<base64(iv||authTag||ciphertext)>`, where `keyId` is the first 8 hex characters of the key's SHA-256 digest.
+  Zero-downtime rotation procedure:
+  1. Generate a new key: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+  2. Update environment variables in your deployment dashboard:
+     - `KYC_ENCRYPTION_KEY`: `<new_key>` (primary for all new writes)
+     - `KYC_ENCRYPTION_KEY_PREVIOUS`: `<old_key>` (or comma-separated list of previous keys for decrypting older records)
+  3. Redeploy the API. The service will immediately encrypt all new submissions under the new key while continuing to read older records seamlessly.
+  4. Run dry-run scan to verify: `pnpm kyc:rotate-key --dry-run`
+  5. Run the background re-encryption: `pnpm kyc:rotate-key`
+  6. Verify the Prometheus metric `kyc_non_primary_key_rows` drops to `0`.
+  7. Remove `KYC_ENCRYPTION_KEY_PREVIOUS` from the deployment environment.
 - **`BACKUP_ENCRYPTION_KEY`**: generate a new key, but **keep the old key
   available** (e.g. as `BACKUP_ENCRYPTION_KEY_PREVIOUS` in your secret store)
   until every backup encrypted under it has passed its retention window -
@@ -394,23 +406,202 @@ corrupted data.
 external anchor. When the anchor is down or erroring:
 
 - `triggerCashOut` (`apps/api/src/services/link-service.ts`) wraps the
-  quote/initiate calls and surfaces failures as an `HttpError(502, ...)` -
-  sellers attempting a new cash-out will see a clear 502, not a silent hang.
+  quote/initiate calls. Thrown failures normally become HTTP 502; an open
+  health breaker returns HTTP 503 `anchor_unavailable`. Hung upstream
+  requests can still delay the response.
 - `pollCashOuts` (used by `startCashOutPoller` in
-  `apps/api/src/worker/watcher-loop.ts`) swallows per-job status-check
-  errors (`catch { continue; }`) so one anchor outage doesn't crash the
-  poller loop or block other jobs - but it also means an outage is **silent**
-  from the poller's perspective. Check logs for an absence of
-  `offramp.settled`/`offramp.failed` webhook fires on links you'd expect to
-  have progressed, and check the anchor's own status page.
-- Links stuck in `offramp_pending` during an outage will resume polling
-  automatically once the anchor recovers - no manual intervention needed
-  unless the outage is prolonged (see "Stuck `offramp_pending` job" below for
-  the manual path if you don't want to wait).
-- If switching to `OFFRAMP=mock` temporarily to unblock new cash-outs during
-  a prolonged outage, remember `NEXT_PUBLIC_OFFRAMP_MODE` on the web app must
-  be kept in sync (per `.env.example`'s own note) so the UI doesn't claim a
-  real off-ramp is running.
+  `apps/api/src/worker/watcher-loop.ts`) catches each per-job status error,
+  stores the message against that link id in the in-memory
+  `lastPollErrorByLinkId` map, and logs
+  `[offramp] poll failed for link <id>: <message>`. Each failing link backs
+  off independently from 2 seconds to a 60-second cap, so one sick anchor
+  does not crash the loop or block healthy jobs. A successful poll clears
+  that link's stored error and backoff. The map is process-local, is not
+  persisted or exposed over HTTP, and is cleared by an API restart.
+- Links stuck in `offramp_pending` during an outage resume polling
+  automatically after their per-link backoff expires and the anchor recovers
+  - no manual intervention is needed unless the outage is prolonged (see
+  "Stuck `offramp_pending` job" below for the manual path if you don't want
+  to wait).
+- Do not switch an environment to `OFFRAMP=mock` during a live-anchor
+  incident. Production uses `OFFRAMP=anchor`; public-network guards reject
+  `mock`, and changing adapters while jobs exist can make real jobs settle
+  against the wrong state store. Keep the current adapter and let its
+  per-link retries resume; escalate a prolonged outage instead of replacing
+  the adapter.
+
+For failures that affect one seller or begin after an anchor configuration
+change, use the matching procedure under "Anchor incidents" below rather than
+the whole-anchor outage procedure.
+
+## Anchor incidents
+
+Use these procedures when the anchor is reachable but rejects one seller,
+refuses or fails a withdrawal, publishes a replacement SEP-1 key, or no
+longer recognises a seller's wallet identity. Do not repair any of these by
+editing seller or off-ramp state directly.
+
+### KYC rejected
+
+**Symptom:** `GET /seller/kyc` returns HTTP 200 with `status: "REJECTED"` and
+the anchor's `message`. A cash-out attempt is refused with HTTP 403
+`{"error":"kyc_required"}`. The route log contains
+`cashout.request.error`; there is no KYC-specific log event and no
+`cashout.error`, because the cash-out never reaches quote or initiate. The
+status and message come from `getSep12Customer` in
+`packages/offramp/src/sep12.ts`, are persisted by `TestAnchorKyc` in
+`packages/offramp/src/kyc.ts`, and trigger `assertKycAccepted` in
+`apps/api/src/services/link-service.ts`.
+
+**What Quay does automatically:** Before each quote or cash-out, Quay
+re-fetches SEP-12 state, saves the anchor's status and message, and refuses
+anything other than `ACCEPTED`. A corrected submission through
+`PUT /seller/kyc` is immediately re-synchronised with the anchor.
+
+**What the operator does:** Relay the anchor's message exactly. Ask the seller
+to correct the identity data and resubmit through `PUT /seller/kyc` as the
+anchor directs. Confirm `GET /seller/kyc` returns `ACCEPTED` before the seller
+retries the cash-out.
+
+**What the operator must not do:** Never change `seller_kyc.status`,
+`seller_kyc.customer_id`, or encrypted KYC fields by hand. Do not tell the
+seller to falsify identity data or bypass the KYC gate.
+
+**Who to contact:** The seller owns the submitted identity data; the
+configured anchor's compliance or support team owns the rejection and the
+required correction.
+
+### Customer frozen or withdrawal refused
+
+**Symptom:** The link becomes `offramp_failed`. If the seller has an active
+webhook registration, their endpoint receives `offramp.failed` with the
+anchor's `reason`; otherwise check the authenticated link detail. Logs contain
+`anchor.sep6.status.ok` with `status` equal to `error`, `refunded`, or
+`expired`, followed by `link.transition` from `offramp_pending` to
+`offramp_failed`. `mapSep6Status` and `TestAnchorOffRamp.status` in
+`packages/offramp/src/testanchor.ts` perform the mapping;
+`pollCashOuts` in `apps/api/src/services/link-service.ts` persists the
+transition and webhook.
+
+**What Quay does automatically:** Quay records the raw anchor status in
+`offramp_jobs.external_status`, stores the anchor message in
+`offramp_jobs.last_error` (or a generated withdrawal-failed message), and
+moves the link to `offramp_failed`. Quay never takes custody. If the cash-out
+returned transfer instructions and the seller confirms submission, the asset
+payment went directly from the seller's wallet to the anchor. Quay does not
+persist the seller's anchor-transfer hash, and it neither refunds nor
+reverses the payment. Any refund is the anchor's process.
+
+**What the operator does:**
+
+1. Find the job and preserve the anchor's evidence:
+   ```sql
+   SELECT job_id, link_id, seller_id, account, external_status,
+          last_error, created_at, updated_at
+   FROM offramp_jobs
+   WHERE job_id = '<anchor job id>' OR link_id = '<link id>';
+   ```
+   If there is no job row, stop. Preserve `cashout.error` and
+   `cashout.request.error`, determine whether quote/initiate was refused or
+   job state was lost, and contact anchor support. Do not create a job row.
+2. Ask the seller for the Stellar transaction hash of their payment to the
+   anchor. If they do not have it, search `offramp_jobs.account` on the
+   configured `HORIZON_URL` or a block explorer around `created_at`, and
+   verify the destination, asset, amount, memo, and successful status against
+   the cash-out instructions or the anchor's transaction record. Quay does not
+   store this hash; `links.tx_hash` is the buyer's payment, not the seller's
+   transfer to the anchor. If no transfer instructions were returned or the
+   seller cannot confirm submission, do not assume funds moved; reconcile the
+   account and ask the anchor.
+3. Give the seller, transaction hash, `job_id`, `external_status`,
+   `last_error`, and timestamps to anchor support. Ask the anchor to confirm
+   why the customer or withdrawal failed and whether it has refunded,
+   reversed, or still holds the funds. Do not ask the seller to send the
+   assets again until the anchor confirms that is safe.
+
+**What the operator must not do:** Do not edit `offramp_jobs`, `links`, or
+`seller_kyc` to retry or force settlement, and do not send a refund from a
+Quay-operated account. Do not treat a null `last_error` as proof that no
+failure occurred; preserve the raw `external_status` and ask the anchor.
+
+**Who to contact:** The seller for the transfer hash and payment history;
+the configured anchor's support or operations team for the customer hold,
+transaction disposition, and any refund.
+
+### SEP-1 `SIGNING_KEY` rotated
+
+**Symptom:** A seller requesting a new anchor session receives HTTP 502
+`{"error":"challenge_rejected","message":"Anchor SEP-10 challenge rejected:
+..."}` from `POST /seller/anchor-auth/challenge`, or HTTP 400
+`challenge_rejected` from `POST /seller/anchor-auth`. A successful new login
+would log `anchor.sep10.seller_auth.ok`; a rejected challenge does not emit
+that event or a separate rejection log. `SellerAnchorAuth.verify` in
+`packages/offramp/src/anchor-session.ts` rejects a challenge signed by any key
+other than the cached SEP-1 `SIGNING_KEY`, and the routes map that rejection
+in `apps/api/src/routes/anchor-auth.ts`.
+
+**What Quay does automatically:** Quay refuses to show or relay an
+unverified challenge, so the seller is never asked to sign a transaction that
+does not match the published key. Existing anchor sessions remain usable
+until their JWTs expire. `AnchorDiscovery` currently caches the successful
+SEP-1 response for the life of the process, so it does not learn a new key
+without an API restart.
+
+**What the operator does:**
+
+1. Fetch the current file and compare `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`, and
+   `NETWORK_PASSPHRASE` with the last trusted values:
+   ```sh
+   curl --fail --silent --show-error \
+     "https://<anchor-home-domain>/.well-known/stellar.toml"
+   ```
+2. **Before restarting the API, confirm the rotation out of band with the
+   anchor using previously verified contact details.** A changed key is also
+   what a compromised domain or TOML looks like; the fetched file alone is not
+   proof. Do not use contact details that appear only in the new TOML.
+3. Only after the anchor confirms the change, restart every API instance so
+   `AnchorDiscovery` reloads the SEP-1 file. Confirm the service is healthy
+   and have affected sellers reconnect. Issue 3.23 will remove this restart
+   requirement when live discovery refresh lands; until then, restart is part
+   of the verified procedure.
+
+**What the operator must not do:** Do not restart merely because the TOML
+changed, disable challenge verification, accept an unverified SEP-10
+transaction, or manually copy a new key into application state. Do not delete
+valid seller sessions as a substitute for discovery reload.
+
+**Who to contact:** The configured anchor's operations or security team for
+out-of-band key-rotation confirmation; the Quay incident lead if the key is
+genuine but verification or service recovery still fails.
+
+### Seller changed wallet
+
+**Symptom:** The new wallet is a different `sellers` row because
+`sellers.wallet` is unique. Until the new seller reconnects, SEP-12 calls
+return HTTP 403 `{"error":"anchor_auth_required"}`. A successful reconnect
+logs `anchor.sep10.seller_auth.ok`. `SellerAnchorAuth.live` in
+`packages/offramp/src/anchor-session.ts` ignores a session issued to the old
+account, and `reusableCustomerId` in `packages/offramp/src/kyc.ts` re-queries
+the anchor by the new account instead of reusing the old customer id.
+
+**What Quay does automatically:** Quay does not migrate the old session,
+customer id, or KYC profile to the new wallet. The anchor sees a new customer
+after the new wallet authenticates. Existing in-flight off-ramp jobs retain
+their stored seller id and account and continue to be polled under that
+identity while the old wallet's anchor session remains valid.
+
+**What the operator does:** Confirm the wallet change was intentional. Ask
+the seller to reconnect with the new wallet and submit KYC there; there is no
+operator database action for an ordinary wallet change.
+
+**What the operator must not do:** Do not overwrite the old seller's wallet,
+move `anchor_sessions`, `seller_kyc`, or anchor customer ids between sellers,
+or alter in-flight jobs. A new anchor customer is intentional, not evidence
+of data loss.
+
+**Who to contact:** The seller for confirmation and reconnection. Contact
+the anchor only if it does not treat the new wallet as a new customer or
+reports a customer-id conflict.
 
 ## Watcher stuck
 
@@ -441,6 +632,27 @@ Symptom: payments are landing on-chain but links aren't transitioning to
    free-tier instance down (see the `render.yaml` comment - starter plan is
    mandatory for this reason) - check the Render service's process status
    directly.
+
+## Telemetry rate-unit repair (one-off, issue 5.21)
+
+`offramp_telemetry.quoted_rate` written before the 5.21 fix stored the raw
+SEP-38 `price` (sell per buy) for real anchors, while every other rate in the
+dataset is target-per-source — which made the summary's spread meaningless
+for those rows. The adapters now write target-per-source; existing rows are
+repaired once with:
+
+```bash
+# Against the deployment's DATABASE_URL / DATABASE_AUTH_TOKEN:
+node apps/api/scripts/fix-telemetry-rate-units.mjs           # dry run (default)
+node apps/api/scripts/fix-telemetry-rate-units.mjs --apply   # write
+```
+
+Dry-run first, always: the script prints every row it would invert. Mock rows
+are never touched (they were already in the right unit). **Run `--apply` at
+most once per database** — the column carries no unit tag, so a second apply
+would invert the values back to wrong. Historical `fee_amount` on pre-fix
+non-mock rows was computed across the mixed units and stays unreliable; the
+script deliberately does not rewrite it.
 
 ## Stuck `offramp_pending` job
 
@@ -523,3 +735,71 @@ Copy this into a new incident doc/issue when something goes wrong:
 ### Follow-ups
 - [ ] <concrete action item>
 ```
+
+## PII Breach (NDPA 72-Hour Notification)
+
+If personal data (KYC fields, payout fields, session tokens, seller identity) is exposed, accessed without authorization, or lost:
+
+### 1. Detect & Contain (immediate)
+
+- **Rotate `KYC_ENCRYPTION_KEY`** (see issue 4.31):
+  1. Generate new key: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+  2. Add to `render.yaml` / Render dashboard as new `KYC_ENCRYPTION_KEY`
+  3. Re-encrypt all `seller_kyc.fields_encrypted` and `sellers.payout_fields_encrypted` with new key (one-off script)
+  4. Deploy with new key; old key invalidates all existing encrypted rows
+
+- **Revoke all anchor sessions** (issue 4.26):
+  - `DELETE FROM anchor_sessions;` (or call revocation endpoint per seller)
+  - Forces re-authentication; invalidates any stolen SEP-10 JWTs
+
+- **Assess scope**:
+  - Which tables/rows affected? (`seller_kyc`, `sellers`, `anchor_sessions`, `kyc_consents`, `link_payments`, `webhookQueue`)
+  - How many sellers?
+  - What data categories? (KYC fields = high risk; wallet addresses = medium; logs = low)
+
+### 2. Assess Risk (within 24 hours)
+
+- Likelihood of harm to data subjects (identity theft, financial fraud, privacy violation)
+- Types of data involved:
+  - **High risk**: KYC fields (name, address, ID numbers, financial), payout fields (bank details)
+  - **Medium risk**: Wallet addresses, payment history, API key metadata
+  - **Low risk**: Logs (already redacted per `docs/pr-27-logging.md`), analytics
+
+### 3. Notify (within 72 hours of awareness)
+
+Per NDPA Section 38, notify:
+
+1. **NDPC (Nigeria Data Protection Commission)**:
+   - Via breach portal: <https://ndpc.gov.ng>
+   - Include: nature of breach, categories of data, approximate number of subjects, likely consequences, measures taken, contact for more info
+
+2. **Affected Sellers** (if high risk):
+   - Email with: description of breach, likely consequences, measures taken/advise to mitigate, contact for more info
+   - Template: "We detected unauthorized access to your [data categories] on [date]. We have [actions taken]. You should [recommended steps]. Contact [email] for questions."
+
+3. **Anchor(s)** (if their data was involved):
+   - Notify anchor's security/contact per their DPA/agreement
+
+4. **Hosting/DB Providers** (Render, Turso):
+   - Per DPA obligations; they may have their own notification duties
+
+### 4. Document
+
+- Record in incident log (date, scope, root cause, actions, notifications sent)
+- Link to `docs/PRIVACY.md` breach handling section
+- Update `docs/PRIVACY.md` if material changes to data map or notice
+
+### 5. Rotate Related Secrets (as needed)
+
+- `WEBHOOK_SECRET_ENCRYPTION_KEY` (if webhook payloads exposed)
+- `JWT_SECRET` (if session tokens exposed)
+- `SERVER_SIGNING_SECRET` (if signing key exposed)
+- `WEBHOOK_SECRET_ENCRYPTION_KEY` rotation (issue 4.31) — 24h overlap window
+
+### 6. Follow-up
+
+- [ ] Root cause analysis
+- [ ] Implement mitigations (code, config, process)
+- [ ] Update `docs/PRIVACY.md` if data map changed
+- [ ] Conduct post-incident review within 14 days
+- [ ] Report to board/management per internal policy

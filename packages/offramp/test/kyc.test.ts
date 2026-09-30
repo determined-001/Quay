@@ -1,32 +1,170 @@
-import { describe, expect, it } from "vitest";
-import type { KycFieldSpec } from "@checkout/core";
-import { missingRequiredFields } from "../src/kyc";
+import { describe, expect, it, vi } from "vitest";
+import type { AnchorCustomer, KycFieldSpec, KycRecord, ProvidedFieldStatus } from "@checkout/core";
+import { TestAnchorKyc } from "../src/kyc";
+import { selectFieldsForAnchor } from "@checkout/core";
+import * as sep12 from "../src/sep12";
 
-const NAME: KycFieldSpec = { name: "first_name", type: "string", optional: false };
-const EMAIL: KycFieldSpec = { name: "email_address", type: "string", optional: false };
-const MIDDLE: KycFieldSpec = { name: "middle_name", type: "string", optional: true };
+describe("TestAnchorKyc.selectFieldsForAnchor", () => {
+  const requested: KycFieldSpec[] = [
+    { name: "first_name", type: "string", optional: false },
+    { name: "last_name", type: "string", optional: false },
+    { name: "email_address", type: "string", optional: true },
+    { name: "custom_field", type: "string", optional: false },
+  ];
 
-describe("missingRequiredFields", () => {
-  it("names exactly the missing required fields", () => {
-    expect(missingRequiredFields([NAME, EMAIL], {})).toEqual(["first_name", "email_address"]);
-    expect(missingRequiredFields([NAME, EMAIL], { first_name: "Ada" })).toEqual(["email_address"]);
+  it("selects only requested fields from profile", () => {
+    const result = selectFieldsForAnchor({
+      requested,
+      profile: {
+        fields: {
+          first_name: "Ada",
+          last_name: "Lovelace",
+          email_address: "ada@example.org",
+          mobile_number: "+15551234567",
+        },
+      },
+      overrides: {},
+    });
+
+    expect(result.send).toEqual({
+      first_name: "Ada",
+      last_name: "Lovelace",
+      email_address: "ada@example.org",
+    });
+    expect(result.missing).toEqual(["custom_field"]);
+    expect(result.unknown).toEqual(["custom_field"]);
   });
 
-  it("returns nothing once every required field has a non-blank value", () => {
-    expect(
-      missingRequiredFields([NAME, EMAIL], { first_name: "Ada", email_address: "ada@example.org" }),
-    ).toEqual([]);
+  it("maps family_name alias to last_name from profile", () => {
+    const result = selectFieldsForAnchor({
+      requested: [{ name: "family_name", type: "string", optional: false }],
+      profile: { fields: { last_name: "Lovelace" } },
+      overrides: {},
+    });
+
+    expect(result.send).toEqual({ family_name: "Lovelace" });
+  });
+});
+
+describe("TestAnchorKyc.submit field mapping", () => {
+  const mockAnchorCustomer: AnchorCustomer = {
+    sellerId: "sel_1",
+    account: "GSELLER",
+  };
+
+  const mockProfile = {
+    fields: {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      email_address: "ada@example.org",
+      mobile_number: "+15551234567",
+    },
+  };
+
+  const mockDiscovery = {
+    requiredFields: [
+      { name: "first_name", type: "string", optional: false },
+      { name: "last_name", type: "string", optional: false },
+      { name: "email_address", type: "string", optional: true },
+      { name: "custom_field", type: "string", optional: false },
+    ] as KycFieldSpec[],
+    customerId: "cus_1",
+    status: "NEEDS_INFO" as const,
+    message: null,
+  };
+
+  const mockRemote = {
+    ...mockDiscovery,
+    customerId: "cus_1",
+    status: "NEEDS_INFO" as const,
+    message: null,
+  };
+
+  const mockAfter = {
+    ...mockDiscovery,
+    customerId: "cus_1",
+    status: "ACCEPTED" as const,
+    providedFieldStatus: [
+      { name: "first_name", status: "ACCEPTED", error: null },
+      { name: "last_name", status: "ACCEPTED", error: null },
+      { name: "email_address", status: "ACCEPTED", error: null },
+    ] as ProvidedFieldStatus[],
+    message: null,
+  };
+
+  it("uses selectFieldsForAnchor to determine send body", async () => {
+    const profileRepo = {
+      get: vi.fn().mockResolvedValue(mockProfile),
+    };
+
+    const kyc = new TestAnchorKyc({
+      discovery: {
+        get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }),
+      },
+      auth: {
+        token: vi.fn().mockResolvedValue("jwt"),
+      } as any,
+      repo: {
+        get: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined),
+      },
+      profileRepo,
+    });
+
+    const putSep12CustomerSpy = vi.spyOn(sep12, "putSep12Customer");
+    const getSep12CustomerSpy = vi.spyOn(sep12, "getSep12Customer");
+
+    getSep12CustomerSpy
+      .mockResolvedValueOnce(mockDiscovery)  // discovery
+      .mockResolvedValueOnce(mockAfter);     // after
+
+    putSep12CustomerSpy.mockResolvedValue({ customerId: "cus_1" });
+
+    const result = await kyc.submit(mockAnchorCustomer, { custom_field: "override_value" });
+
+    // Verify selectFieldsForAnchor was called by checking what was sent to putSep12Customer
+    expect(putSep12CustomerSpy).toHaveBeenCalledWith(
+      "https://test.example",
+      "jwt",
+      expect.objectContaining({
+        fields: expect.objectContaining({
+          first_name: "Ada",
+          last_name: "Lovelace",
+          email_address: "ada@example.org",
+          custom_field: "override_value",
+        }),
+      })
+    );
+
+    // Verify sentFields recorded correctly
+    expect(result.sentFields).toEqual(["first_name", "last_name", "email_address", "custom_field"]);
   });
 
-  it("treats a whitespace-only value as missing, not fabricated", () => {
-    expect(missingRequiredFields([NAME], { first_name: "   " })).toEqual(["first_name"]);
-  });
+  it("throws KycRequiredError when required field is missing", async () => {
+    const kyc = new TestAnchorKyc({
+      discovery: {
+        get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }),
+      },
+      auth: {
+        token: vi.fn().mockResolvedValue("jwt"),
+      } as any,
+      repo: {
+        get: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined),
+      },
+      profileRepo: {
+        get: vi.fn().mockResolvedValue({ fields: {} }),
+      },
+    });
 
-  it("never requires an optional field", () => {
-    expect(missingRequiredFields([NAME, MIDDLE], { first_name: "Ada" })).toEqual([]);
-  });
+    const getSep12CustomerSpy = vi.spyOn(sep12, "getSep12Customer");
+    getSep12CustomerSpy.mockResolvedValue({
+      requiredFields: [{ name: "required_field", type: "string", optional: false }] as any,
+      customerId: null,
+      status: "NEEDS_INFO",
+      message: null,
+    });
 
-  it("returns nothing when there are no required fields (nothing known yet)", () => {
-    expect(missingRequiredFields([], { anything: "x" })).toEqual([]);
+    await expect(kyc.submit(mockAnchorCustomer, {})).rejects.toThrow("Missing required KYC fields");
   });
 });

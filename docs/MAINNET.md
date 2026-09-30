@@ -89,6 +89,8 @@ when you add the off-ramp.
 
 ## Phase 1 — Choose an anchor
 
+Share the [anchor due diligence brief](ANCHOR-DUE-DILIGENCE.md) with a prospective partner before enabling cash-out. It covers custody, credential authority, seller data, retention gaps, and incident contacts.
+
 Only if you are enabling cash-out. This is the one decision no configuration
 can make for you, and it gates everything else.
 

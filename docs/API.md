@@ -467,11 +467,19 @@ settled.
 ```json
 {
   "targetCurrency": "NGN",
-  "payoutFields": { "bank": "...", "accountNumber": "..." }
+  "payoutFields": { "bank": "...", "accountNumber": "..." },
+  "withdrawType": "bank_account"
 }
 ```
 - `targetCurrency` — 3-letter code, defaults to `NGN`.
 - `payoutFields` — opaque string map handed to the anchor adapter.
+- `withdrawType` — optional SEP-6 withdrawal type (`bank_account`, `cash`, …)
+  when the anchor offers several rails; the seller's choice, discovered from
+  `GET /links/:id/offramp-requirements`. Omitted, the adapter falls back to
+  the operator-wide `OFFRAMP_TYPE` default, or the anchor's only type.
+  An unknown type is **400** `{ "error": "unknown_withdraw_type",
+  "availableTypes": ["bank_account", "cash"] }` — the caller's mistake, never
+  the 502 a dead anchor gets.
 
 **200**
 ```json
@@ -530,6 +538,13 @@ anchor's JWT encrypted at rest so the cash-out poller can follow withdrawals.
 The JWT can read/update the seller's KYC and start a withdrawal; it cannot move
 funds. It is never returned to the client.
 
+The two `POST` routes below use the strict per-seller rate limit
+(`RATE_LIMIT_STRICT_WINDOW_MS` / `RATE_LIMIT_STRICT_MAX`, default 20 requests
+per 60 seconds). The bucket is keyed by the authenticated seller ID, so one
+seller cannot consume another seller's budget by changing IPs or API keys. When
+`REDIS_URL` is configured, the counters are shared across API instances. `GET`
+and `DELETE` remain on the global per-IP limit.
+
 - `GET /seller/anchor-auth` → `{ "required": true, "connected": false, "anchor": "testanchor.stellar.org", "expiresAt": null }`.
   `required: false` means the deployment has no real anchor (`mock`/`none`).
 - `POST /seller/anchor-auth/challenge` → `{ "transaction": "<XDR>", "networkPassphrase": "..." }` — sign it with the wallet, never submit it.
@@ -584,6 +599,101 @@ discovery before any fields are known.
 ```
 Returned when a field the anchor is already known to require is missing —
 naming exactly which ones, never silently substituting a placeholder.
+
+---
+
+## `GET /seller/kyc/consent`
+
+List all consent records (active and revoked) for the authenticated seller.
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**200**
+```json
+{
+  "consents": [
+    {
+      "id": "cnc_1",
+      "anchorDomain": "testanchor.stellar.org",
+      "fields": ["first_name", "last_name", "email_address"],
+      "grantedAt": 1750000000000,
+      "revokedAt": null,
+      "grantedVia": "session",
+      "noticeVersion": "1.0"
+    }
+  ]
+}
+```
+`revokedAt` is `null` for active consents, an epoch-ms timestamp when revoked.
+
+---
+
+## `POST /seller/kyc/consent`
+
+Grant consent to share specific identity fields with an anchor. The server
+re-derives the fields the anchor currently requires from the latest KYC record
+and refuses any mismatch — the UI cannot consent to fields the anchor did not
+ask for. All required fields must be covered; optional fields may be omitted.
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**Request**
+```json
+{ "anchorDomain": "testanchor.stellar.org", "fields": ["first_name", "last_name", "email_address"] }
+```
+
+**201** — consent granted
+```json
+{
+  "id": "cnc_2",
+  "anchorDomain": "testanchor.stellar.org",
+  "fields": ["first_name", "last_name", "email_address"],
+  "grantedAt": 1750000001000,
+  "revokedAt": null,
+  "grantedVia": "session",
+  "noticeVersion": "1.0"
+}
+```
+
+**400** — validation errors
+- `{ "error": "invalid_fields", "message": "Consent request includes fields the anchor does not currently require", "fields": ["phone_number"] }`
+- `{ "error": "missing_required_fields", "message": "Consent must cover all required fields", "fields": ["last_name"] }`
+
+---
+
+## `DELETE /seller/kyc/consent/:anchorDomain`
+
+Revoke the active consent for an anchor. Revocation stops future data sends to
+that anchor; it does not erase data already held by the anchor (see issue 4.28).
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**200**
+```json
+{
+  "revoked": true,
+  "anchorDomain": "testanchor.stellar.org",
+  "note": "Revocation stops future data sends to this anchor. It does not erase data already held by the anchor (see issue 4.28)."
+}
+```
+
+---
+
+## `PUT /seller/kyc` — consent enforcement
+
+Submit or update identity fields. **Before any field is sent to the anchor, the
+server checks that every field about to be sent is covered by an active consent
+for that anchor.** If any field lacks consent, the request is rejected with
+`403 consent_required`.
+
+**403**
+```json
+{ "error": "consent_required", "anchorDomain": "testanchor.stellar.org", "fields": ["last_name", "email_address"] }
+```
+The `fields` array names exactly which fields lack consent. The seller must
+grant consent via `POST /seller/kyc/consent` before retrying.
+
+**422** — same as before when a required field is missing from the request body.
 
 ---
 
@@ -735,14 +845,50 @@ registered URL.
 
 ### Events
 
-| Event             | Fired when                                  |
-| ----------------- | ------------------------------------------- |
-| `link.paid`       | a matching payment settled (exact or over)  |
-| `link.underpaid`  | a payment arrived for less than requested   |
-| `offramp.settled` | a cash-out job settled                       |
-| `offramp.failed`  | a cash-out job failed                        |
+| Event                   | Fired when                                          |
+| ----------------------- | --------------------------------------------------- |
+| `link.paid`             | a matching payment settled (exact or over)          |
+| `link.underpaid`        | a payment arrived for less than requested           |
+| `offramp.settled`       | a cash-out job settled                              |
+| `offramp.failed`        | a cash-out job failed                               |
+| `offramp.transfer_required` | anchor has published deposit instructions; the seller's wallet must send USDC to the anchor to fund the withdrawal |
+| `kyc.accepted`          | anchor accepted seller's KYC submission             |
+| `kyc.rejected`          | anchor rejected seller's KYC submission             |
+| `kyc.needs_info`        | anchor requested additional/missing fields          |
 
 ### Body
+
+#### Body for `offramp.transfer_required`
+```json
+{
+  "event": "offramp.transfer_required",
+  "data": {
+    "linkId": "lnk_...",
+    "reference": "...",
+    "status": "offramp_pending",
+    "amount": "10.50",
+    "paidAmount": "10.50",
+    "asset": { "code": "USDC", "issuer": "G..." },
+    "txHash": null,
+    "transfer": {
+      "destination": "GANCHOR...",
+      "amount": "10.50",
+      "asset": { "code": "USDC", "issuer": "G..." },
+      "memo": "withdrawal_123",
+      "memoType": "text"
+    },
+    "jobId": "job_..."
+  },
+  "id": "lnk_...",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+
+The `transfer` object contains the SEP-6 deposit instructions the seller's wallet must sign and submit. The integrator should display these to the seller or prompt their wallet to sign.
+
+**Note on sensitivity:** The transfer instructions contain no secrets — they are the public anchor account and memo the payer needs. However, integrators should not expose them to anyone but the seller.
+
+#### Payment link events (`link.*`, `offramp.settled`, `offramp.failed`)
 ```json
 {
   "event": "link.paid",
@@ -757,6 +903,23 @@ registered URL.
     "overpaid": false
   },
   "id": "lnk_...",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+
+#### KYC events (`kyc.*`)
+For seller-level KYC events, `id` is the seller ID and the payload contains **no PII** (only status metadata and field names). `message` is populated only on `kyc.rejected` and is `null` for all other events:
+```json
+{
+  "event": "kyc.needs_info",
+  "data": {
+    "anchorDomain": "testanchor.stellar.org",
+    "status": "NEEDS_INFO",
+    "previousStatus": "PROCESSING",
+    "missingFields": ["id_document_front", "id_document_back"],
+    "message": null
+  },
+  "id": "sel_...",
   "sentAt": "2026-06-19T12:00:00.000Z"
 }
 ```

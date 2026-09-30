@@ -279,6 +279,10 @@ const kycRetentionPurgedTotal = registry.counter(
   "quay_kyc_retention_purged_total",
   "Total number of inactive sellers whose KYC and identity data was purged under the retention policy.",
 );
+const kycNonPrimaryKeyRows = registry.gauge(
+  "kyc_non_primary_key_rows",
+  "Number of seller KYC rows encrypted with legacy or non-primary encryption keys.",
+);
 
 export const metrics = {
   registry,
@@ -297,4 +301,5 @@ export const metrics = {
   circuitBreakerState,
   watcherLagSeconds,
   kycRetentionPurgedTotal,
+  kycNonPrimaryKeyRows,
 };

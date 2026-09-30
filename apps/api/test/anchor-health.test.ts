@@ -16,7 +16,7 @@ import {
   type OffRampStateRepository,
   type OffRampTelemetryRepository,
   type PaymentLink,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type RailPort,
   type Seller,
   type StoredOffRampJob,
@@ -361,6 +361,7 @@ class FakeSellerRepoForAnchor {
     return this.s;
   }
   async savePayoutFields(): Promise<void> {}
+  async saveProfileKind(): Promise<void> {}
 }
 
 class FakeWebhookRepoForAnchor implements WebhookRepository {
@@ -457,7 +458,7 @@ class FakeOffRampStateForAnchor implements OffRampStateRepository {
   }
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
@@ -481,6 +482,8 @@ class FakeKycAlwaysAcceptedForAnchor implements KycPort {
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: Date.now(),
@@ -521,8 +524,8 @@ class FlakyOffRamp implements OffRampPort {
     }
     return { jobId, linkId: "lnk_1", status: this.opts.status ?? "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
   }
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return { types: [], defaultType: null };
   }
 }
 
@@ -543,7 +546,7 @@ interface Svc {
 
 function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
   const repo = new FakeLinkRepoForAnchor();
-  const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+  const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
   const webhooks = new FakeWebhookRepoForAnchor();
   void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
   const service = new LinkService({
@@ -601,8 +604,8 @@ describe("LinkService with AnchorHealth", () => {
         offrampCalls.push("status");
         throw new Error("should not be called when breaker is open");
       }
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       }
     }
 
@@ -733,7 +736,7 @@ describe("GET /health exposes anchor state", () => {
 describe("LinkService.pollCashOuts attribution", () => {
   it("records last_error per-link when status() throws and does NOT advance link status", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
     const offramp = new FlakyOffRamp({ statusShouldThrow: true, statusMessage: "anchor DNS resolution failed" });
@@ -769,7 +772,7 @@ describe("LinkService.pollCashOuts attribution", () => {
 
   it("clears last_error when a subsequent poll succeeds", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
 
@@ -786,8 +789,8 @@ describe("LinkService.pollCashOuts attribution", () => {
         if (fail) throw new Error("first attempt fails");
         return { jobId, linkId: "lnk_2", status: "settled", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
       },
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       },
     };
     const service = new LinkService({
@@ -833,7 +836,7 @@ describe("LinkService.pollCashOuts attribution", () => {
 
   it("a job whose status() returns `failed` is moved to offramp_failed and last_error stays null (the job self-reported)", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
     const offramp = new FlakyOffRamp({ status: "failed" });
@@ -862,7 +865,7 @@ describe("LinkService.pollCashOuts attribution", () => {
 
   it("backs off per job after consecutive poll failures (AC3 — does not hammer a downed anchor)", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
 
@@ -875,8 +878,8 @@ describe("LinkService.pollCashOuts attribution", () => {
         statusCalls++;
         throw new Error("anchor 502");
       },
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       },
     };
     const service = new LinkService({
