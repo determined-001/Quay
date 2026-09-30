@@ -2,6 +2,7 @@ import type { Keypair } from "@stellar/stellar-sdk";
 import type { AssetRef } from "@checkout/core";
 import { Sep10Client } from "./sep10";
 import { endpointUrl, fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
+import { isPrefillField } from "./sep9";
 
 export type { Sep1DiscoveryInfo };
 export { endpointUrl };
@@ -12,7 +13,21 @@ export interface Sep24WithdrawInteractiveInput {
   amount: string;
   account: string;
   quoteId?: string;
-  payoutFields?: Record<string, string>;
+  /**
+   * SEP-9 fields to pre-fill the anchor's hosted form with (issue 3.17).
+   *
+   * This REPLACED a `payoutFields` input that was copied into the body with a
+   * bare `Object.assign`. That handed every cash-out bank detail to the anchor
+   * whether or not the seller had agreed to share it, and mixed payout (where
+   * money goes) with identity (who you are) in one untyped bag. Payout fields
+   * are still the anchor's business — it collects them itself, in its own form,
+   * during this very interaction.
+   *
+   * Everything is filtered through the SEP-9 allowlist again below, so a caller
+   * that passes something else — a payout field, `id_number`, anything — has it
+   * dropped rather than forwarded.
+   */
+  prefill?: Record<string, string>;
 }
 
 export interface Sep24InteractiveResult {
@@ -80,8 +95,15 @@ export class Sep24Client {
     if (input.amount) bodyData.amount = input.amount;
     if (input.quoteId) bodyData.quote_id = input.quoteId;
 
-    if (input.payoutFields) {
-      Object.assign(bodyData, input.payoutFields);
+    // Allowlist, not trust (issue 3.17). `prefill` is already the intersection
+    // of the seller's profile and their per-anchor consent by the time it gets
+    // here; this second pass is what makes that guarantee hold even if a future
+    // caller skips those steps. Anything not on the SEP-9 allowlist — a payout
+    // field like `dest`, an id number, a stray key — is dropped here.
+    for (const [name, value] of Object.entries(input.prefill ?? {})) {
+      if (!isPrefillField(name)) continue;
+      if (typeof value !== "string" || value === "") continue;
+      bodyData[name] = value;
     }
 
     const res = await fetch(endpoint.toString(), {

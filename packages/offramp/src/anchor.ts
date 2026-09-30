@@ -1,6 +1,7 @@
 import { Asset, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
-import { OffRampJobNotFoundError } from "@checkout/core";
+import { NOOP_LOGGER, OffRampJobNotFoundError, type Logger, type PrefillConsent } from "@checkout/core";
 import type {
+  AnchorCustomer,
   AssetRef,
   OffRampInitiation,
   OffRampJob,
@@ -12,12 +13,31 @@ import type {
   SellerPayoutRef,
 } from "@checkout/core";
 import { getSep38Quote } from "./sep38";
+import { pickPrefill } from "./sep9";
 import { Sep24Client, type Sep24Transaction } from "./sep24";
+
+/**
+ * Where the SEP-24 adapter reads a seller's identity and their consent to
+ * share it (issue 3.17). Injected rather than imported so this package stays
+ * free of any database, and so a caller that has neither (no KYC on file, no
+ * anchor consent) simply sends no SEP-9 fields at all.
+ */
+export interface PrefillSource {
+  /**
+   * The seller's stored SEP-9 values, or null when nothing is on file. Values
+   * are PII: they are never logged, and only the field NAMES ever are.
+   */
+  loadProfile(sellerId: string): Promise<Record<string, string> | null>;
+  /** The seller's consent for `anchorDomain`, or null when none was granted. */
+  loadConsent(sellerId: string, anchorDomain: string): Promise<PrefillConsent | null>;
+}
 
 export interface AnchorOptions {
   homeDomain: string;
   sellerKeypair: Keypair;
   horizonUrl?: string;
+  /** Absent = never pre-fill. See {@link PrefillSource}. */
+  prefill?: PrefillSource;
   /**
    * Passphrase of the network the send-leg transaction is signed for.
    *
@@ -76,6 +96,7 @@ export class AnchorOffRamp implements OffRampPort {
   private readonly sellerKeypair: Keypair;
   private readonly horizonUrl: string;
   private readonly networkPassphrase: string;
+  private readonly prefillSource: PrefillSource | null;
   private readonly sep24: Sep24Client;
   private readonly quotes = new Map<string, StoredQuote>();
   private readonly jobs = new Map<string, StoredJob>();
@@ -85,6 +106,7 @@ export class AnchorOffRamp implements OffRampPort {
     this.sellerKeypair = opts.sellerKeypair;
     this.horizonUrl = opts.horizonUrl || "https://horizon-testnet.stellar.org";
     this.networkPassphrase = opts.networkPassphrase;
+    this.prefillSource = opts.prefill ?? null;
     this.sep24 = new Sep24Client(opts.sellerKeypair, opts.homeDomain);
   }
 
@@ -137,13 +159,19 @@ export class AnchorOffRamp implements OffRampPort {
     };
   }
 
-  async initiate(input: {
-    linkId: string;
-    quoteId: string;
-    payout: SellerPayoutRef;
-  }): Promise<OffRampInitiation> {
+  async initiate(
+    input: {
+      linkId: string;
+      quoteId: string;
+      payout: SellerPayoutRef;
+      customer: AnchorCustomer;
+    },
+    opts?: { logger?: Logger },
+  ): Promise<OffRampInitiation> {
     const q = this.quotes.get(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
+
+    const prefill = await this.resolvePrefill(input.customer.sellerId, opts?.logger ?? NOOP_LOGGER);
 
     const interactiveResult = await this.sep24.startInteractiveWithdraw({
       assetCode: q.sellAsset.code,
@@ -151,7 +179,7 @@ export class AnchorOffRamp implements OffRampPort {
       amount: q.sellAmount,
       account: this.sellerKeypair.publicKey(),
       quoteId: input.quoteId,
-      payoutFields: input.payout.fields,
+      prefill,
     });
 
     this.jobs.set(interactiveResult.id, {
@@ -167,6 +195,59 @@ export class AnchorOffRamp implements OffRampPort {
       jobId: interactiveResult.id,
       url: interactiveResult.url,
     };
+  }
+
+  /**
+   * The SEP-9 fields to pre-fill this anchor's hosted form with, or `undefined`
+   * for "send none" (issue 3.17).
+   *
+   * The order of the gates is the point. Consent is read FIRST: a seller with a
+   * full profile on file who never consented must produce no SEP-9 keys at all,
+   * not "the allowlisted subset that happens to be harmless". Only then is the
+   * profile intersected with that consent through the allowlist.
+   *
+   * `undefined` rather than `{}` on purpose — it keeps the key off the request
+   * body entirely instead of serialising an empty object into it.
+   *
+   * The log event records field NAMES only. A log line is not a place a seller's
+   * first name or bank account number belongs, and `logger-redaction.test.ts`
+   * treats these as the fields it would catch.
+   */
+  private async resolvePrefill(sellerId: string, logger: Logger): Promise<Record<string, string> | undefined> {
+    const source = this.prefillSource;
+    if (!source) {
+      logger.info(
+        { event: "anchor.sep24.withdraw.start", anchorDomain: this.homeDomain, prefillFields: [] },
+        "SEP-24 interactive withdraw starting (prefill not configured)",
+      );
+      return undefined;
+    }
+
+    let prefill: Record<string, string> = {};
+    try {
+      const consent = await source.loadConsent(sellerId, this.homeDomain);
+      if (consent && consent.fields.length > 0) {
+        const profile = await source.loadProfile(sellerId);
+        if (profile) prefill = pickPrefill(profile, consent.fields);
+      }
+    } catch (err) {
+      // Prefill is a convenience, never a precondition. A profile read or
+      // consent read that fails must not fail a cash-out: the anchor's own form
+      // is still there and the seller can type into it. Say so and carry on with
+      // no SEP-9 fields.
+      logger.warn(
+        { event: "anchor.sep24.withdraw.prefill_unavailable", error: err instanceof Error ? err.message : String(err) },
+        "could not resolve SEP-9 prefill; sending none",
+      );
+      prefill = {};
+    }
+
+    const fieldNames = Object.keys(prefill);
+    logger.info(
+      { event: "anchor.sep24.withdraw.start", anchorDomain: this.homeDomain, prefillFields: fieldNames },
+      "SEP-24 interactive withdraw starting",
+    );
+    return fieldNames.length > 0 ? prefill : undefined;
   }
 
   async status(jobId: string): Promise<OffRampJob> {

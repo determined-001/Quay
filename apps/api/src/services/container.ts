@@ -18,7 +18,15 @@ import {
   TestAnchorKyc,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
+import type {
+  KycPort,
+  KycRepository,
+  Logger,
+  OffRampPort,
+  OffRampStateRepository,
+  OffRampTelemetryRepository,
+  PrefillConsentRepository,
+} from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey, parsePiiKeyring } from "../crypto/pii";
@@ -35,6 +43,7 @@ import {
   DrizzleOfframpTelemetryRepository,
   DrizzleApiKeyRepository,
   DrizzleAnchorSessionRepository,
+  DrizzlePrefillConsentRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -64,6 +73,16 @@ export interface Container {
   apiKeys: DrizzleApiKeyRepository;
   db: DB;
   kyc: KycPort;
+  /** The seller's SEP-9 profile at rest, encrypted. Null with no real anchor
+   *  (OFFRAMP=mock|none) or no KYC_ENCRYPTION_KEY. Read directly by the
+   *  prefill-consent routes, which must work without a live anchor session. */
+  kycRepo: KycRepository | null;
+  /** Per-(seller, anchor) SEP-9 prefill consent — field NAMES only, never
+   *  values (issue 3.17). */
+  prefillConsent: PrefillConsentRepository | null;
+  /** The anchor this deployment cashes out through (stellar.toml home domain),
+   *  or null when there is none. Consent is recorded against this. */
+  anchorDomain: string | null;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
@@ -173,7 +192,16 @@ export async function createContainer(): Promise<Container> {
       : pollingWatcher;
   const anchor = createAnchor(db, logger, stellar.networkPassphrase);
   const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
+  // The KYC repo is created here rather than inside createKyc() so the
+  // prefill-consent routes can read the seller's profile directly — they must
+  // work without a live anchor session, and going through KycPort would require
+  // one (it re-syncs from the anchor). Same instance, same encryption key.
+  const kycRepo =
+    anchor && env.kycEncryptionKey ? new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey)) : null;
   const kyc = createKyc(anchor, db);
+  // Names only, no PII — safe to create unconditionally, so the consent API is
+  // consistent whether or not a real anchor is wired up.
+  const prefillConsent: PrefillConsentRepository = new DrizzlePrefillConsentRepository(db);
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
   // off-ramp the probe is disabled and short-circuits to "always available" so
@@ -261,6 +289,9 @@ export async function createContainer(): Promise<Container> {
     apiKeys: apiKeysRepo,
     db,
     kyc,
+    kycRepo,
+    prefillConsent,
+    anchorDomain: anchor?.discovery.homeDomain ?? null,
     anchorAuth: anchor?.auth ?? null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },

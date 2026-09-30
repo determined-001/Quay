@@ -594,6 +594,58 @@ naming exactly which ones, never silently substituting a placeholder.
 
 ---
 
+## `GET /seller/kyc/prefill-consent`
+
+Which SEP-9 field **names** this seller has agreed to share with this anchor, so
+the anchor can pre-fill its own hosted form on a SEP-24 interactive withdraw.
+
+**Names only, in both directions.** No value ever passes through this endpoint:
+the values live encrypted in the seller's KYC record, and only leave it at
+cash-out time, intersected with both this consent and the SEP-9 allowlist. Needs
+no anchor session — revoking consent should not require signing in to anything.
+
+**200**
+```json
+{
+  "anchorDomain": "testanchor.stellar.org",
+  "fields": ["first_name", "last_name"],
+  "grantedAt": 1750000000000,
+  "available": ["first_name", "last_name", "email_address"]
+}
+```
+- `fields` — the current grant, empty when there is no consent record.
+- `available` — allowlisted field names we hold a value for. Drives the
+  dashboard checklist, and is filtered server-side so the UI can never offer
+  something the cash-out path would then drop.
+
+**404** `{ "error": "no_anchor" }` on a deployment with no real anchor.
+
+The allowlist is `first_name`, `last_name`, `email_address`, `mobile_number`,
+`address`, `city`, `state_or_province`, `postal_code`, `address_country_code`,
+`birth_date`, `bank_account_number`, `bank_number`, `bank_branch_number`.
+`id_number` and binary documents (`photo_id_*`) are never pre-filled.
+
+---
+
+## `PUT /seller/kyc/prefill-consent`
+
+Replace this seller's consent for this anchor. Narrowing consent is a plain
+`PUT` with fewer names — revocation is `{"fields": []}`, not a separate call.
+
+**Request**
+```json
+{ "fields": ["first_name"] }
+```
+
+**200** — the stored grant: `{ "anchorDomain": "...", "fields": ["first_name"], "grantedAt": 1750000000000 }`.
+For `{"fields": []}`: `{ "anchorDomain": "...", "fields": [], "grantedAt": null }`.
+
+**400** `{ "error": "unknown_fields", "fields": ["dest"] }` when a name is not on
+the allowlist. Nothing is stored: a caller must not get a 200 implying it
+consented to something that would then be filtered out at cash-out time.
+
+---
+
 ## `POST /webhooks`
 
 Register a webhook endpoint. The signing secret is returned **once** — store it.

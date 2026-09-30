@@ -9,6 +9,8 @@ import type {
   KycRecord,
   KycRepository,
   KycStatus,
+  PrefillConsent,
+  PrefillConsentRepository,
   LinkPaymentRecord,
   LinkRepository,
   OffRampStateRepository,
@@ -43,6 +45,7 @@ import {
   offrampQuotes,
   offrampJobs,
   sellerKyc,
+  kycPrefillConsent,
   anchorSessions,
   revokedTokens,
   offrampTelemetry,
@@ -931,6 +934,58 @@ export class DrizzleKycRepository implements KycRepository {
       }
     }
     return count;
+  }
+}
+
+/**
+ * Per-(seller, anchor) record of which SEP-9 field NAMES the seller agreed to
+ * share with that anchor for SEP-24 prefill (issue 3.17).
+ *
+ * Holds names only. There is no encrypted blob here on purpose: nothing in this
+ * row is PII, so a support engineer can read it, and the values it authorises
+ * never leave `seller_kyc.fields_encrypted` except through the prefill path,
+ * which intersects it with the SEP-9 allowlist.
+ */
+export class DrizzlePrefillConsentRepository implements PrefillConsentRepository {
+  constructor(private readonly db: DB) {}
+
+  async get(sellerId: string, anchorDomain: string): Promise<PrefillConsent | null> {
+    const rows = await this.db
+      .select()
+      .from(kycPrefillConsent)
+      .where(and(eq(kycPrefillConsent.sellerId, sellerId), eq(kycPrefillConsent.anchorDomain, anchorDomain)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    let fields: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.fields);
+      // A hand-edited or corrupted row must not become a way to smuggle
+      // arbitrary names back into the prefill path.
+      if (Array.isArray(parsed)) fields = parsed.filter((f): f is string => typeof f === "string");
+    } catch {
+      fields = [];
+    }
+    return { sellerId: row.sellerId, anchorDomain: row.anchorDomain, fields, grantedAt: row.grantedAt };
+  }
+
+  async save(consent: PrefillConsent): Promise<void> {
+    const row = {
+      sellerId: consent.sellerId,
+      anchorDomain: consent.anchorDomain,
+      fields: JSON.stringify(consent.fields),
+      grantedAt: consent.grantedAt,
+    };
+    await this.db
+      .insert(kycPrefillConsent)
+      .values(row)
+      .onConflictDoUpdate({ target: [kycPrefillConsent.sellerId, kycPrefillConsent.anchorDomain], set: row });
+  }
+
+  async delete(sellerId: string, anchorDomain: string): Promise<void> {
+    await this.db
+      .delete(kycPrefillConsent)
+      .where(and(eq(kycPrefillConsent.sellerId, sellerId), eq(kycPrefillConsent.anchorDomain, anchorDomain)));
   }
 }
 

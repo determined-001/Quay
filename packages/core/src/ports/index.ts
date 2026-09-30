@@ -449,6 +449,34 @@ export interface KycRepository {
   save(record: KycRecord): Promise<void>;
 }
 
+/**
+ * Which SEP-9 field NAMES a seller agreed to share with one anchor, so the
+ * anchor can pre-fill its own hosted form on a SEP-24 interactive withdraw
+ * (issue 3.17).
+ *
+ * Deliberately a list of names, never values. The values live encrypted in
+ * `KycRecord.providedFields`; this row says only that the seller said yes, and
+ * to whom. Consent is per (seller, anchor) because agreeing to pre-fill one
+ * counterparty's form is not agreeing to hand the same identity to the next
+ * one — and `anchorDomain` is the anchor's own stellar.toml home domain, so the
+ * grant is bound to the entity that will receive it.
+ */
+export interface PrefillConsent {
+  sellerId: string;
+  anchorDomain: string;
+  /** Allowlisted SEP-9 field names. Revoking is a PUT with fewer names, not a
+   *  silent supersede: the newest row is what counts. */
+  fields: string[];
+  grantedAt: number; // epoch ms
+}
+
+export interface PrefillConsentRepository {
+  get(sellerId: string, anchorDomain: string): Promise<PrefillConsent | null>;
+  save(consent: PrefillConsent): Promise<void>;
+  /** Revoke everything this seller shared with this anchor. */
+  delete(sellerId: string, anchorDomain: string): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // Anchor sessions (SEP-10, per seller)
 // ---------------------------------------------------------------------------

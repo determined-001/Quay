@@ -185,6 +185,19 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+// Which SEP-9 field NAMES a seller agreed to share with one anchor so the
+// anchor can pre-fill its own SEP-24 form (issue 3.17). Primary key
+// (seller_id, anchor_domain) — consent is per counterparty, never global.
+// `fields` is a JSON array of names and NOTHING ELSE: no values live here. The
+// values stay encrypted in seller_kyc.fields_encrypted, so this row is safe to
+// read in a support query without exposing PII.
+export const kycPrefillConsent = sqliteTable("kyc_prefill_consent", {
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  fields: text("fields").notNull(), // JSON string[] — names only, not PII
+  grantedAt: integer("granted_at").notNull(),
+});
+
 // A seller's SEP-10 session with an anchor, issued to the seller's own wallet.
 // `tokenEncrypted` is a bearer credential for that seller at the anchor — it
 // can read their KYC and start a withdrawal, never move funds.

@@ -75,6 +75,20 @@ export interface KycView {
   lastSyncedAt: number | null;
 }
 
+/**
+ * SEP-24 prefill consent (issue 3.17).
+ *
+ * `fields` is what the seller has agreed to share with `anchorDomain`; `available`
+ * is the allowlisted names we hold a value for. Both are NAMES — the values stay
+ * in Quay and are only sent at cash-out time.
+ */
+export interface PrefillConsentView {
+  anchorDomain: string;
+  fields: string[];
+  grantedAt: number | null;
+  available: string[];
+}
+
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
 //
 // This has actually broken production once already (docs/FIXLOG.md, BUG-1.4,
@@ -492,6 +506,16 @@ export const api = {
 
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),
+
+  // Which SEP-9 field NAMES this seller shared with this anchor, so it can
+  // pre-fill its own SEP-24 form (issue 3.17). Names only, both directions.
+  getPrefillConsent: () => http<PrefillConsentView>("/seller/kyc/prefill-consent"),
+
+  setPrefillConsent: (fields: string[]) =>
+    http<PrefillConsentView>("/seller/kyc/prefill-consent", {
+      method: "PUT",
+      body: JSON.stringify({ fields }),
+    }),
 
   listWebhooks: () => http<{ webhooks: Webhook[] }>("/webhooks"),
 

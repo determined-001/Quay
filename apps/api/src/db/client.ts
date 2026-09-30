@@ -95,6 +95,14 @@ const BOOTSTRAP_SQL = [
      required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
      message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL
    )`,
+  // Which SEP-9 field NAMES a seller consented to share with one anchor for
+  // SEP-24 prefill (issue 3.17). Names only — values stay encrypted in
+  // seller_kyc, so this table never holds PII.
+  `CREATE TABLE IF NOT EXISTS kyc_prefill_consent (
+      seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+      fields TEXT NOT NULL, granted_at INTEGER NOT NULL,
+      PRIMARY KEY (seller_id, anchor_domain)
+    )`,
   `CREATE TABLE IF NOT EXISTS anchor_sessions (
      seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT NOT NULL,
      token_encrypted TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,

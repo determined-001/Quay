@@ -10,6 +10,7 @@ import {
   DrizzleOffRampStateRepository,
   DrizzleTokenRevocationRepository,
   DrizzleApiKeyRepository,
+  DrizzlePrefillConsentRepository,
 } from "../src/repos/index";
 import { SessionIssuer } from "../src/services/session";
 import type { Container } from "../src/services/container";
@@ -47,6 +48,9 @@ export function createTestDb(): { db: DB; client: Client } {
 /** Wallet the seeded test seller owns. Tests that need a *second* tenant should
  *  create one with `sellers.createIfAbsent(<another wallet>)`. */
 export const TEST_SELLER_WALLET = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+
+/** Anchor domain consent is recorded against (issue 3.17). */
+export const TEST_ANCHOR_DOMAIN = "anchor.test";
 
 export async function withTestDb(): Promise<{
   db: DB;
@@ -280,6 +284,12 @@ export async function createTestContainer(): Promise<TestContainer> {
     db: repos.db,
     client: repos.client,
     kyc: new NoKycRequired() as unknown as Container["kyc"],
+    // A real consent repository against the in-memory DB (names only, no
+    // encryption needed) so the prefill-consent routes are exercised end to end
+    // rather than against a fake that cannot catch a bad WHERE clause.
+    kycRepo: null,
+    prefillConsent: new DrizzlePrefillConsentRepository(repos.db),
+    anchorDomain: TEST_ANCHOR_DOMAIN,
     anchorAuth: null,
     telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
