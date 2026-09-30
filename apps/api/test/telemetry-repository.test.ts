@@ -53,6 +53,19 @@ describe("DrizzleOfframpTelemetryRepository", () => {
     expect(all[0]?.quotedRate).toBe("1650");
   });
 
+  it("get retrieves single row by id and returns null when not found", async () => {
+    const repo = await freshRepo();
+
+    expect(await repo.get("tel_nonexistent")).toBeNull();
+
+    await repo.upsert(row({ id: "tel_job_abc", status: "quoted", quotedRate: "1700" }));
+    const fetched = await repo.get("tel_job_abc");
+    expect(fetched).not.toBeNull();
+    expect(fetched?.id).toBe("tel_job_abc");
+    expect(fetched?.quotedRate).toBe("1700");
+    expect(fetched?.status).toBe("quoted");
+  });
+
   it("summary computes p50/p95 settlement latency and mean spread per (anchor, corridor)", async () => {
     const repo = await freshRepo();
 

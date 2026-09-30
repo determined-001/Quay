@@ -275,6 +275,10 @@ const watcherLagSeconds = registry.gauge(
   "watcher_lag_seconds",
   "Seconds since the watcher's last completed poll tick across all accounts.",
 );
+const kycNonPrimaryKeyRows = registry.gauge(
+  "kyc_non_primary_key_rows",
+  "Number of seller KYC rows encrypted with legacy or non-primary encryption keys.",
+);
 
 export const metrics = {
   registry,
@@ -292,4 +296,5 @@ export const metrics = {
   webhookQueueDepth,
   circuitBreakerState,
   watcherLagSeconds,
+  kycNonPrimaryKeyRows,
 };

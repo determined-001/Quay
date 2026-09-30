@@ -4,6 +4,7 @@ import {
   type AssetRef,
   type CreateLinkInput,
   type KycPort,
+  type AnchorCustomer,
   type KycRecord,
   type LinkPaymentRecord,
   type LinkRepository,
@@ -157,7 +158,7 @@ export class FakeWebhookRepository implements WebhookRepository {
   readonly deliveries: WebhookDelivery[] = [];
   /** Exposed so queue tests can assert on row state directly. */
   readonly queue: WebhookQueueEntry[] = [];
-  private readonly hooks: Webhook[] = [];
+  readonly hooks: Webhook[] = [];
 
   async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
     const hook: Webhook = {
@@ -241,6 +242,10 @@ export class FakeWebhookRepository implements WebhookRepository {
     return this.deliveries.filter((d) => d.linkId === linkId);
   }
 
+  getEnqueued(): WebhookQueueEntry[] {
+    return this.queue.map((q) => ({ ...q }));
+  }
+
   async listBySeller(sellerId: string): Promise<Webhook[]> {
     return this.hooks.filter((h) => h.sellerId === sellerId && h.deletedAt === null);
   }
@@ -311,7 +316,7 @@ export class FakeOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
@@ -347,19 +352,22 @@ export class ScriptedOffRamp implements OffRampPort {
 /** KYC gate that's always ACCEPTED — mirrors `NoKycRequired`, used by tests
  *  that aren't exercising the KYC gate itself. */
 export class AlwaysAcceptedKyc implements KycPort {
-  async status(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async status(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
-  async submit(sellerId: string): Promise<KycRecord> {
-    return this.accepted(sellerId);
+  async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
   }
-  private accepted(sellerId: string): KycRecord {
+  private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      account,
       customerId: null,
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: Date.now(),
@@ -369,14 +377,14 @@ export class AlwaysAcceptedKyc implements KycPort {
 
 /** Fully scripted KycPort for testing the cash-out gate itself. */
 export class ScriptedKyc implements KycPort {
-  statusImpl: (sellerId: string) => Promise<KycRecord> = () => {
+  statusImpl: (customer: AnchorCustomer) => Promise<KycRecord> = () => {
     throw new Error("statusImpl not configured");
   };
-  async status(sellerId: string): Promise<KycRecord> {
-    return this.statusImpl(sellerId);
+  async status(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.statusImpl(customer);
   }
-  async submit(sellerId: string): Promise<KycRecord> {
-    return this.statusImpl(sellerId);
+  async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.statusImpl(customer);
   }
 }
 
@@ -384,6 +392,11 @@ export class ScriptedKyc implements KycPort {
  *  so tests can assert on the passive telemetry trail without a database. */
 export class FakeTelemetryRepository implements OffRampTelemetryRepository {
   readonly rows: OffRampTelemetryRow[] = [];
+
+  async get(id: string): Promise<OffRampTelemetryRow | null> {
+    const found = this.rows.find((r) => r.id === id);
+    return found ? { ...found } : null;
+  }
 
   async upsert(row: OffRampTelemetryRow): Promise<void> {
     const existing = this.rows.findIndex((r) => r.id === row.id);

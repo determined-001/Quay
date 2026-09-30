@@ -1,4 +1,5 @@
-import type { KycFieldSpec, KycStatus } from "@checkout/core";
+import type { KycFieldSpec, KycStatus, ProvidedFieldStatus } from "@checkout/core";
+import { endpointUrl } from "./sep1";
 
 // SEP-12: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
 //
@@ -13,10 +14,16 @@ interface RawFieldSpec {
   choices?: string[];
 }
 
+interface RawProvidedField {
+  status?: string;
+  error?: string;
+}
+
 interface RawGetCustomerResponse {
   id?: string;
   status: string;
   fields?: Record<string, RawFieldSpec>;
+  provided_fields?: Record<string, RawProvidedField>;
   message?: string;
 }
 
@@ -24,6 +31,7 @@ export interface Sep12CustomerResult {
   customerId: string | null;
   status: KycStatus;
   requiredFields: KycFieldSpec[];
+  providedFieldStatus: ProvidedFieldStatus[];
   message: string | null;
 }
 
@@ -38,6 +46,15 @@ function toFieldSpecs(fields: Record<string, RawFieldSpec> | undefined): KycFiel
   }));
 }
 
+function toProvidedFieldStatus(fields: Record<string, RawProvidedField> | undefined): ProvidedFieldStatus[] {
+  if (!fields) return [];
+  return Object.entries(fields).map(([name, spec]) => ({
+    name,
+    status: spec.status ?? null,
+    error: spec.error ?? null,
+  }));
+}
+
 function toKycStatus(status: string): KycStatus {
   // ACCEPTED / REJECTED / NEEDS_INFO / PROCESSING are the SEP-12 statuses we
   // model; anything else (e.g. NEEDS_VERIFICATION) is treated as PROCESSING —
@@ -49,13 +66,14 @@ function toKycStatus(status: string): KycStatus {
 }
 
 /** Discovers required fields and current status for a customer, identified by
- *  the anchor-assigned `customerId` once one exists, else by `account`. */
+ *  the anchor-assigned `customerId` once one exists, else by `account`.
+ *  `kycServer` is the SEP-1 `KYC_SERVER`; paths are joined onto it, not over it. */
 export async function getSep12Customer(
-  baseUrl: string,
+  kycServer: string,
   jwt: string,
   params: { account: string; customerId?: string | null },
 ): Promise<Sep12CustomerResult> {
-  const url = new URL("/sep12/customer", baseUrl);
+  const url = endpointUrl(kycServer, "customer");
   if (params.customerId) {
     url.searchParams.set("id", params.customerId);
   } else {
@@ -65,7 +83,7 @@ export async function getSep12Customer(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (res.status === 404) {
     // No customer record yet — every field is required, nothing on file.
-    return { customerId: null, status: "unsubmitted" as KycStatus, requiredFields: [], message: null };
+    return { customerId: null, status: "unsubmitted" as KycStatus, requiredFields: [], providedFieldStatus: [], message: null };
   }
   if (!res.ok) {
     throw new Error(`SEP-12 customer GET failed: ${res.status} ${await res.text()}`);
@@ -75,17 +93,18 @@ export async function getSep12Customer(
     customerId: body.id ?? params.customerId ?? null,
     status: toKycStatus(body.status),
     requiredFields: toFieldSpecs(body.fields),
+    providedFieldStatus: toProvidedFieldStatus(body.provided_fields),
     message: body.message ?? null,
   };
 }
 
 /** Submits exactly the fields given — no defaults, no fabricated identity. */
 export async function putSep12Customer(
-  baseUrl: string,
+  kycServer: string,
   jwt: string,
   params: { account: string; customerId?: string | null; fields: Record<string, string> },
 ): Promise<{ customerId: string }> {
-  const res = await fetch(new URL("/sep12/customer", baseUrl), {
+  const res = await fetch(endpointUrl(kycServer, "customer"), {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({

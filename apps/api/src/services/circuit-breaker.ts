@@ -1,12 +1,11 @@
-import type {
-  AssetRef,
-  OffRampInitiation,
-  OffRampJob,
-  OffRampMode,
-  OffRampPort,
-  OffRampQuote,
-  PayoutFieldDescriptor,
-  SellerPayoutRef,
+import {
+  AnchorAuthRequiredError,
+  type OffRampInitiation,
+  type OffRampJob,
+  type OffRampMode,
+  type OffRampPort,
+  type OffRampQuote,
+  type PayoutFieldDescriptor,
 } from "@checkout/core";
 import { metrics } from "../metrics";
 
@@ -53,25 +52,20 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     return STATE_NUMBER[this.state];
   }
 
-  quote(input: {
-    linkId: string;
-    sourceAsset: AssetRef;
-    sourceAmount: string;
-    targetCurrency: string;
-  }): Promise<OffRampQuote> {
-    return this.call("quote", () => this.inner.quote(input));
+  quote(...args: Parameters<OffRampPort["quote"]>): Promise<OffRampQuote> {
+    return this.call("quote", () => this.inner.quote(...args));
   }
 
-  initiate(input: { linkId: string; quoteId: string; payout: SellerPayoutRef }): Promise<OffRampInitiation> {
-    return this.call("initiate", () => this.inner.initiate(input));
+  initiate(...args: Parameters<OffRampPort["initiate"]>): Promise<OffRampInitiation> {
+    return this.call("initiate", () => this.inner.initiate(...args));
   }
 
-  status(jobId: string): Promise<OffRampJob> {
-    return this.call("status", () => this.inner.status(jobId));
+  status(...args: Parameters<OffRampPort["status"]>): Promise<OffRampJob> {
+    return this.call("status", () => this.inner.status(...args));
   }
 
-  offrampRequirements(assetCode: string): Promise<PayoutFieldDescriptor[]> {
-    return this.call("offrampRequirements", () => this.inner.offrampRequirements(assetCode));
+  offrampRequirements(...args: Parameters<OffRampPort["offrampRequirements"]>): Promise<PayoutFieldDescriptor[]> {
+    return this.call("offrampRequirements", () => this.inner.offrampRequirements(...args));
   }
 
   private async call<T>(method: string, fn: () => Promise<T>): Promise<T> {
@@ -93,7 +87,10 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     } catch (err) {
       metrics.anchorCallDurationSeconds.observe({ method }, (Date.now() - start) / 1000);
       metrics.anchorCallsTotal.inc({ method, status: "error" });
-      this.onFailure();
+      // A seller without a live anchor session says nothing about the
+      // anchor's health; counting it would let one signed-out seller open the
+      // circuit for everybody.
+      if (!(err instanceof AnchorAuthRequiredError)) this.onFailure();
       throw err;
     }
   }
