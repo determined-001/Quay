@@ -368,6 +368,18 @@ corrupted data.
 
 ## Key rotation
 
+- **`KYC_ENCRYPTION_KEY`**: encrypts seller SEP-12 KYC field values at rest using AES-256-GCM.
+  Blob format is `v1:<keyId>:<base64(iv||authTag||ciphertext)>`, where `keyId` is the first 8 hex characters of the key's SHA-256 digest.
+  Zero-downtime rotation procedure:
+  1. Generate a new key: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+  2. Update environment variables in your deployment dashboard:
+     - `KYC_ENCRYPTION_KEY`: `<new_key>` (primary for all new writes)
+     - `KYC_ENCRYPTION_KEY_PREVIOUS`: `<old_key>` (or comma-separated list of previous keys for decrypting older records)
+  3. Redeploy the API. The service will immediately encrypt all new submissions under the new key while continuing to read older records seamlessly.
+  4. Run dry-run scan to verify: `pnpm kyc:rotate-key --dry-run`
+  5. Run the background re-encryption: `pnpm kyc:rotate-key`
+  6. Verify the Prometheus metric `kyc_non_primary_key_rows` drops to `0`.
+  7. Remove `KYC_ENCRYPTION_KEY_PREVIOUS` from the deployment environment.
 - **`BACKUP_ENCRYPTION_KEY`**: generate a new key, but **keep the old key
   available** (e.g. as `BACKUP_ENCRYPTION_KEY_PREVIOUS` in your secret store)
   until every backup encrypted under it has passed its retention window -
