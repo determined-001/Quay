@@ -1,13 +1,14 @@
 import type {
   KycFieldSpec,
   KycStatus,
+  OffRampQuote,
   PaymentLink,
   PaymentRequest,
   PayoutFieldDescriptor,
   WithdrawTransfer,
 } from "@checkout/core";
 
-export type { PaymentLink, PaymentRequest, PayoutFieldDescriptor };
+export type { OffRampQuote, PaymentLink, PaymentRequest, PayoutFieldDescriptor };
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -422,16 +423,11 @@ export const api = {
 
   health: () => http<HealthResponse>("/health"),
 
+  /** The route returns the whole OffRampQuote — including `expiresAt` (epoch
+   *  ms, the ANCHOR's own TTL) — so the type is the shared one rather than a
+   *  redeclaration that drops fields (issue 5.22 dropped exactly that one). */
   quoteCashOut: (id: string, targetCurrency: string) =>
-    http<{
-      quoteId: string;
-      sourceAmount: string;
-      targetCurrency: string;
-      targetAmount: string; // Gross
-      rate: string;
-      fee: { amount: string; currency: string; source: string };
-      netTargetAmount: string; // Net
-    }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+    http<OffRampQuote>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
 
   cashOut: (
     id: string,
@@ -440,7 +436,16 @@ export const api = {
     idempotencyKey?: string,
   ) =>
     http<{
-      job: { jobId: string; status: string; targetAmount: string; targetCurrency: string };
+      job: {
+        jobId: string;
+        status: string;
+        targetAmount: string;
+        targetCurrency: string;
+        /** When the anchor's firm quote expires — epoch ms on the SERVER's
+         *  clock; compare against serverNow(), never Date.now() (issue 5.22). */
+        quoteExpiresAt: number;
+        quoteExpiresInSeconds: number;
+      };
       interactiveUrl?: string;
       /** The anchor's deposit instructions — the seller's wallet signs and sends this. */
       transfer?: WithdrawTransfer;
