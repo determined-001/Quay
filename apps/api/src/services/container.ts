@@ -21,7 +21,7 @@ import {
 import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
-import { parsePiiKeyring } from "../crypto/pii";
+import { parsePiiKey, parsePiiKeyring } from "../crypto/pii";
 import { metrics } from "../metrics";
 import { createLogger } from "../logger";
 import {
