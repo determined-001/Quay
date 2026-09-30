@@ -15,6 +15,7 @@ export * from "./ports/index";
 // SEP-9 reusable KYC field catalogue and encoding validation
 export * from "./kyc/sep9";
 export * from "./kyc/validate";
+export * from "./kyc/select";
 
 // Validation schemas
 export * from "./schemas";

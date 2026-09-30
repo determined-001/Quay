@@ -458,7 +458,7 @@ class FakeOffRampStateForAnchor implements OffRampStateRepository {
   }
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
@@ -482,6 +482,8 @@ class FakeKycAlwaysAcceptedForAnchor implements KycPort {
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: Date.now(),

@@ -68,6 +68,13 @@ function fakeContainer(): Container {
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     apiKeys: {} as Container["apiKeys"],
     kyc: {} as Container["kyc"],
+    kycConsents: {
+      async list(sellerId: string) { return []; },
+      async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+      async active(sellerId: string, anchorDomain: string) { return null; },
+      async revoke(sellerId: string, anchorDomain: string) { },
+    } as unknown as Container["kycConsents"],
+    anchorDomain: "testanchor.stellar.org",
     anchorAuth: null,
     db: {} as Container["db"],
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],

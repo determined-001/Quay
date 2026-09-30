@@ -24,9 +24,11 @@ import {
   api,
   CheckoutError,
   describeError,
+  serverNow,
   type OfframpRequirements,
   type PayoutFieldDescriptor,
 } from "../../lib/api";
+import { fmtCountdown, quoteMsRemaining } from "../../lib/quote-countdown";
 import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
 import {
   checkPaymentPreflight,
@@ -96,13 +98,8 @@ function mask(v: string): string {
   return `${"*".repeat(v.length - 4)}${v.slice(-4)}`;
 }
 
-/** Format seconds as "m:ss". */
-function fmtCountdown(ms: number): string {
-  const s = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${String(sec).padStart(2, "0")}`;
-}
+// Countdown math lives in lib/quote-countdown.ts (issue 5.22), where the
+// node-environment tests can reach it.
 
 // ---------------------------------------------------------------------------
 // Component
@@ -203,9 +200,17 @@ export default function CashOutModal({
   }, [linkId]);
 
   // ---- countdown tick ------------------------------------------------------
-  const startCountdown = useCallback((expiresAt: number) => {
+  // `expiresAt` is the anchor's own TTL as a SERVER timestamp, so the clock it
+  // is measured against is serverNow(), not the phone's. `unknown` because an
+  // absent or malformed expiry must mean "no countdown", never a guessed one
+  // (issue 5.22).
+  const startCountdown = useCallback((expiresAt: unknown) => {
     if (countdownRef.current) clearInterval(countdownRef.current);
-    const tick = () => setCountdown(expiresAt - Date.now());
+    if (quoteMsRemaining(expiresAt, serverNow()) === null) {
+      setCountdown(null);
+      return;
+    }
+    const tick = () => setCountdown(quoteMsRemaining(expiresAt, serverNow()));
     tick();
     countdownRef.current = setInterval(tick, 500);
   }, []);
@@ -295,10 +300,9 @@ export default function CashOutModal({
         targetCurrency: j.targetCurrency,
       };
       setQuote(preview);
-      // Quote expiry not surfaced by the current API response; show a
-      // fixed 5-minute window matching the mock/testanchor default TTL.
-      const expiresAt = Date.now() + 5 * 60_000;
-      startCountdown(expiresAt);
+      // The anchor's real quote expiry, straight from the response. When the
+      // API sends none, startCountdown shows no countdown at all.
+      startCountdown(j.quoteExpiresAt);
       // Cash-out is already initiated at this point (quote+initiate are atomic
       // in the current API). If the anchor now needs the asset, keep the modal
       // open for the seller to send it; otherwise go straight to success.

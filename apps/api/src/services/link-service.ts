@@ -35,6 +35,7 @@ import {
   type IndicativePrice,
   type OffRampTelemetryRepository,
   type OffRampTelemetryRow,
+  type WithdrawTransfer,
 } from "@checkout/core";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
@@ -1030,6 +1031,17 @@ export class LinkService {
       rate: quote.rate,
     };
 
+    // Emit offramp.transfer_required if the initiation provides transfer instructions immediately.
+    // This is the "transfer" kind from SEP-6/SEP-24 where the anchor provides deposit instructions right away.
+    if (initiation.kind === "transfer") {
+      await this.fireWebhook(link, "offramp.transfer_required", {
+        transfer: initiation.transfer,
+        jobId,
+      }, opts);
+      // Mark the transfer as notified so we don't re-fire on subsequent polls.
+      await this.deps.offrampState.updateJob(jobId, { transferNotifiedAt: Date.now() });
+    }
+
     const now = Date.now();
     const quoteExpiresInSeconds = Math.max(0, Math.floor((quote.expiresAt - now) / 1000));
 
@@ -1089,6 +1101,22 @@ export class LinkService {
         this.nextPollAtByLinkId.set(link.id, Date.now() + next1);
         continue;
       }
+// If the anchor returned transfer instructions and we haven't notified yet,
+      // emit the offramp.transfer_required webhook now.
+      // This handles the case where the transfer instructions arrive late (e.g. after review).
+      // Some off-ramp implementations may return transfer instructions in status().
+      const transfer = (job as unknown as Record<string, unknown>).transfer as WithdrawTransfer | undefined;
+      if (transfer && link.offrampJobId) {
+        const storedJob = await this.deps.offrampState.getJob(link.offrampJobId);
+        if (storedJob && !storedJob.transferNotifiedAt) {
+          await this.fireWebhook(link, "offramp.transfer_required", {
+            transfer,
+            jobId: link.offrampJobId,
+          }, opts);
+          await this.deps.offrampState.updateJob(link.offrampJobId, { transferNotifiedAt: Date.now() });
+        }
+      }
+
       if (job.status === "settled") {
         const from = link.status;
         link.status = "offramp_settled";
@@ -1112,6 +1140,11 @@ export class LinkService {
           const existing = existingRows.find((r) => r.id === `tel_${link.offrampJobId}`);
           const quotedRate = existing?.quotedRate ?? job.rate;
           const sourceAmount = link.paidAmount ?? link.amount;
+          // Both rates are TARGET per source (issue 5.21): quote.rate is
+          // documented in that direction and every adapter now returns it so,
+          // which is what makes this fee (quoted gross minus actual target,
+          // in target units) and the summary's spread meaningful for real
+          // anchors, not just the mock.
           const effectiveRate = String(Number(job.targetAmount) / Number(sourceAmount));
           const feeAmount = (Number(quotedRate) * Number(sourceAmount) - Number(job.targetAmount)).toFixed(6);
           await this.recordTelemetry(link.offrampJobId!, {

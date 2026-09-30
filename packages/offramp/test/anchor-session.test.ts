@@ -85,7 +85,8 @@ function stubAnchor(opts: { signingKey?: Keypair; tokenSub?: (account: string) =
       const id = url.searchParams.get("id");
       // A real anchor never hands one account's customer to another's JWT.
       if (!c || (id && id !== c.id)) return new Response("not found", { status: 404 });
-      return Response.json({ id: c.id, status: "ACCEPTED" });
+      // Return required fields so the KYC field mapping knows what to send
+      return Response.json({ id: c.id, status: "ACCEPTED", fields: { first_name: { type: "string", optional: false } } });
     }
     if (url.pathname === "/sep6/info") {
       return Response.json({
@@ -188,7 +189,7 @@ describe("TestAnchorKyc — per seller", () => {
     const anchor = stubAnchor();
     const { discovery, auth } = setup();
     const repo = new InMemoryKycRepo();
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: () => Promise.resolve(null) } });
     await signIn(auth, ALICE, alice);
     await signIn(auth, BOB, bob);
 
@@ -215,7 +216,7 @@ describe("TestAnchorKyc — per seller", () => {
       lastSyncedAt: null,
       updatedAt: 0,
     });
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: () => Promise.resolve(null) } });
     await signIn(auth, ALICE, alice);
 
     // Looked up by Alice's own account: the anchor has never seen her, so she
