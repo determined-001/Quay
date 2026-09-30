@@ -19,6 +19,7 @@ import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
 import { requestContext } from "./request-context";
 import { buildAuthMiddleware, apiKeyRateLimitKey } from "./middleware/auth";
+import { installErrorHandler } from "./error-handler";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
 
@@ -27,6 +28,7 @@ async function main(): Promise<void> {
   const logger = container.logger;
 
   const app = new Hono();
+  installErrorHandler(app, logger);
   const rateLimitStore = env.redisUrl ? new RedisStore(env.redisUrl) : new MemoryStore();
   // MUST be installed before rate-limit (and everything else) so a 429 still
   // carries a requestId, and every route handler can call getLogger(ctx).

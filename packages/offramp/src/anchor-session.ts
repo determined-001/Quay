@@ -8,6 +8,7 @@ import {
   type Logger,
 } from "@checkout/core";
 import { fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
+import { anchorHttpError } from "./anchor-error";
 
 // ===========================================================================
 //  Per-seller anchor identity.
@@ -79,8 +80,28 @@ export class AnchorDiscovery {
 }
 
 /** The challenge failed verification, or the signed one came back for the wrong account. */
+export type AnchorChallengeErrorKind =
+  /** The challenge was built for a different Stellar network than ours. */
+  | "wrong_network"
+  /** The challenge or token belongs to a different account than the seller's. */
+  | "wrong_account"
+  /** The anchor answered the signed challenge with an error. */
+  | "refused"
+  /** We could not vouch for the anchor (no SIGNING_KEY / stellar.toml). */
+  | "unverifiable"
+  /** The challenge failed verification for any other reason. */
+  | "invalid";
+
 export class AnchorChallengeError extends Error {
-  constructor(reason: string) {
+  /**
+   * `reason` is for server-side logs. Callers building an HTTP response should
+   * branch on `kind` and use fixed text, never `message`: some reasons come from
+   * the anchor's own response.
+   */
+  constructor(
+    reason: string,
+    readonly kind: AnchorChallengeErrorKind = "invalid",
+  ) {
     super(`Anchor SEP-10 challenge rejected: ${reason}`);
     this.name = "AnchorChallengeError";
   }
@@ -132,14 +153,14 @@ export class SellerAnchorAuth {
 
     const res = await fetch(url);
     if (!res.ok) {
-      throw new Error(`SEP-10 challenge fetch failed: ${res.status} ${await res.text()}`);
+      throw await anchorHttpError("10", "challenge fetch", res);
     }
     const { transaction, network_passphrase } = (await res.json()) as {
       transaction: string;
       network_passphrase: string;
     };
     if (network_passphrase !== this.networkPassphrase) {
-      throw new AnchorChallengeError("challenge was built for a different network");
+      throw new AnchorChallengeError("challenge was built for a different network", "wrong_network");
     }
     this.verify(transaction, d, customer.account);
     return { transaction, networkPassphrase: network_passphrase };
@@ -161,14 +182,21 @@ export class SellerAnchorAuth {
       body: JSON.stringify({ transaction: signedTransaction }),
     });
     if (!res.ok) {
-      throw new AnchorChallengeError(`anchor refused the signed challenge (${res.status}): ${await res.text()}`);
+      // The anchor's body stays out of the error (and so out of any HTTP
+      // response); it is logged, truncated, for operators.
+      const refusal = await anchorHttpError("10", "auth submit", res);
+      this.logger?.warn(
+        { event: "anchor.error", sep: refusal.sep, op: refusal.op, statusCode: refusal.status, body: refusal.body },
+        "anchor refused the signed SEP-10 challenge",
+      );
+      throw new AnchorChallengeError(`anchor refused the signed challenge (${res.status})`, "refused");
     }
     const { token } = (await res.json()) as { token: string };
     const claims = decodeJwtClaims(token);
     // `sub` is the account, or `account:memo` for a shared account. Never
     // store a token the anchor issued to someone else.
     if (claims.sub && claims.sub.split(":")[0] !== customer.account) {
-      throw new AnchorChallengeError("anchor issued a token for a different account");
+      throw new AnchorChallengeError("anchor issued a token for a different account", "wrong_account");
     }
     const expiresAt = (claims.exp ?? Math.floor(Date.now() / 1000) + 300) * 1000;
     await this.sessions.save({
@@ -223,6 +251,7 @@ export class SellerAnchorAuth {
     if (d.fallback || !d.signingKey) {
       throw new AnchorChallengeError(
         `could not verify ${this.anchorDomain}: its stellar.toml was unreachable or declares no SIGNING_KEY`,
+        "unverifiable",
       );
     }
     return d;
@@ -242,7 +271,7 @@ export class SellerAnchorAuth {
       throw new AnchorChallengeError(err instanceof Error ? err.message : String(err));
     }
     if (clientAccountID !== account) {
-      throw new AnchorChallengeError("challenge is for a different account than the signed-in seller");
+      throw new AnchorChallengeError("challenge is for a different account than the signed-in seller", "wrong_account");
     }
   }
 }

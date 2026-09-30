@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getSep6Info } from "@checkout/offramp";
 import type { Container } from "../services/container";
 import { env } from "../env";
+import { anchorFailure } from "../services/link-service";
 
 // Base URL for the currently configured anchor — only meaningful when
 // OFFRAMP=testanchor.  Kept here so the route never imports testanchor internals.
@@ -35,8 +36,8 @@ export function offrampRoutes(c: Container): Hono {
       const info = await getSep6Info(TESTANCHOR_BASE_URL);
       return ctx.json({ mode: "testanchor" as const, withdraw: info.withdraw });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return ctx.json({ error: `Failed to fetch anchor info: ${message}` }, 502);
+      const failure = anchorFailure(err, c.logger);
+      return ctx.json({ error: failure.message, ...failure.extra }, 502);
     }
   });
 

@@ -1,6 +1,7 @@
 import type { Keypair } from "@stellar/stellar-sdk";
 import type { AssetRef } from "@checkout/core";
 import { Sep10Client } from "./sep10";
+import { anchorHttpError } from "./anchor-error";
 import { endpointUrl, fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
 
 export type { Sep1DiscoveryInfo };
@@ -94,7 +95,7 @@ export class Sep24Client {
     });
 
     if (!res.ok) {
-      throw new Error(`SEP-24 interactive withdraw failed: ${res.status} ${await res.text()}`);
+      throw await anchorHttpError("24", "interactive withdraw", res);
     }
 
     const data = (await res.json()) as { id: string; url: string; type: string };
@@ -117,7 +118,7 @@ export class Sep24Client {
     });
 
     if (!res.ok) {
-      throw new Error(`SEP-24 getTransaction failed: ${res.status} ${await res.text()}`);
+      throw await anchorHttpError("24", "getTransaction", res);
     }
 
     const data = (await res.json()) as {

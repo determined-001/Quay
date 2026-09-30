@@ -1,9 +1,23 @@
 import { Hono, type MiddlewareHandler } from "hono";
 import { z } from "zod";
-import { AnchorChallengeError } from "@checkout/offramp";
+import { AnchorChallengeError, AnchorHttpError, type AnchorChallengeErrorKind } from "@checkout/offramp";
+import { anchorFailure } from "../services/link-service";
+import { getLogger } from "../request-context";
 import type { Container } from "../services/container";
 import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
+
+/**
+ * Fixed text per failure kind. `AnchorChallengeError.message` can carry the
+ * anchor's own wording, so it is logged and never returned (issue 4.36).
+ */
+const CHALLENGE_MESSAGES: Record<AnchorChallengeErrorKind, string> = {
+  wrong_network: "The anchor's challenge was built for a different Stellar network.",
+  wrong_account: "The challenge or token belongs to a different account than your signed-in wallet.",
+  refused: "The anchor refused the signed challenge.",
+  unverifiable: "This anchor could not be verified, so no challenge was issued.",
+  invalid: "The anchor's challenge could not be verified.",
+};
 
 const completeSchema = z.object({ transaction: z.string().min(1) });
 
@@ -51,7 +65,14 @@ export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandle
     try {
       return ctx.json(await auth.challenge(customerOf(ctx.get("seller"))));
     } catch (err) {
-      if (err instanceof AnchorChallengeError) return ctx.json({ error: "challenge_rejected", message: err.message }, 502);
+      if (err instanceof AnchorChallengeError) {
+        getLogger(ctx).warn({ event: "anchor.challenge.rejected", kind: err.kind, reason: err.message }, "challenge rejected");
+        return ctx.json({ error: "challenge_rejected", message: CHALLENGE_MESSAGES[err.kind] }, 502);
+      }
+      if (err instanceof AnchorHttpError) {
+        const failure = anchorFailure(err, getLogger(ctx));
+        return ctx.json({ error: failure.message, ...failure.extra }, 502);
+      }
       throw err;
     }
   });
@@ -66,7 +87,14 @@ export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandle
       const { expiresAt } = await auth.complete(customerOf(ctx.get("seller")), parsed.data.transaction);
       return ctx.json({ connected: true, anchor: auth.anchorDomain, expiresAt });
     } catch (err) {
-      if (err instanceof AnchorChallengeError) return ctx.json({ error: "challenge_rejected", message: err.message }, 400);
+      if (err instanceof AnchorChallengeError) {
+        getLogger(ctx).warn({ event: "anchor.challenge.rejected", kind: err.kind, reason: err.message }, "challenge rejected");
+        return ctx.json({ error: "challenge_rejected", message: CHALLENGE_MESSAGES[err.kind] }, 400);
+      }
+      if (err instanceof AnchorHttpError) {
+        const failure = anchorFailure(err, getLogger(ctx));
+        return ctx.json({ error: failure.message, ...failure.extra }, 502);
+      }
       throw err;
     }
   });

@@ -1,5 +1,6 @@
 import type { KycFieldSpec, KycStatus, ProvidedFieldStatus } from "@checkout/core";
 import { endpointUrl } from "./sep1";
+import { anchorHttpError } from "./anchor-error";
 
 // SEP-12: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
 //
@@ -86,7 +87,7 @@ export async function getSep12Customer(
     return { customerId: null, status: "unsubmitted" as KycStatus, requiredFields: [], providedFieldStatus: [], message: null };
   }
   if (!res.ok) {
-    throw new Error(`SEP-12 customer GET failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("12", "customer GET", res);
   }
   const body = (await res.json()) as RawGetCustomerResponse;
   return {
@@ -113,7 +114,7 @@ export async function putSep12Customer(
     }),
   });
   if (!res.ok) {
-    throw new Error(`SEP-12 customer PUT failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("12", "customer PUT", res);
   }
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };

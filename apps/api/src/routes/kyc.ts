@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 import {
   AnchorAuthRequiredError,
@@ -7,7 +7,10 @@ import {
   type KycRecord,
   type KycConsent,
 } from "@checkout/core";
+import { AnchorHttpError } from "@checkout/offramp";
 import type { Container } from "../services/container";
+import { anchorFailure } from "../services/link-service";
+import { getLogger } from "../request-context";
 import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 
@@ -47,6 +50,23 @@ function consentToResponse(consent: KycConsent) {
  * Consent routes (GET/POST/DELETE /consent/*) reject API-key auth — only
  * session-authenticated sellers can grant or revoke consent.
  */
+/**
+ * An anchor that is down, unreachable or answering with an error is a 502 the
+ * dashboard can explain, not a 500. The anchor's own response text never
+ * reaches the client (issue 4.36); unknown errors are left to `app.onError`.
+ */
+function anchorFailureResponse(ctx: Context<{ Variables: AuthVariables }>, err: unknown) {
+  if (!(err instanceof AnchorHttpError) && !isNetworkError(err)) return null;
+  const failure = anchorFailure(err, getLogger(ctx));
+  return ctx.json({ error: failure.message, ...failure.extra }, 502);
+}
+
+/** `fetch` rejects with a TypeError on DNS, connection and TLS failures, and with an AbortError/TimeoutError on timeouts. */
+function isNetworkError(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  return err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+}
+
 export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
 
@@ -134,6 +154,8 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       return ctx.json(consentToResponse(consent), 201);
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      const failed = anchorFailureResponse(ctx, err);
+      if (failed) return failed;
       throw err;
     }
   });
@@ -159,6 +181,8 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       return ctx.json(toResponse(record));
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      const failed = anchorFailureResponse(ctx, err);
+      if (failed) return failed;
       throw err;
     }
   });
@@ -211,6 +235,8 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       if (err instanceof KycRequiredError) {
         return ctx.json({ error: "kyc_required", missingFields: err.missingFields }, 422);
       }
+      const failed = anchorFailureResponse(ctx, err);
+      if (failed) return failed;
       throw err;
     }
   });

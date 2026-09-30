@@ -1,6 +1,7 @@
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { endpointUrl } from "./sep1";
+import { anchorHttpError } from "./anchor-error";
 
 export interface Sep6WithdrawResult {
   id: string;
@@ -77,7 +78,7 @@ export async function getSep6Info(baseUrl: string, logger?: Logger): Promise<Sep
   const res = await fetch(endpointUrl(baseUrl, "info"));
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.info.fail", statusCode: res.status }, "SEP-6 /info failed");
-    throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("6", "/info", res);
   }
 
   const body = (await res.json()) as {
@@ -260,7 +261,7 @@ export async function startSep6Withdraw(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
-    throw new Error(`SEP-6 withdraw failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("6", "withdraw", res);
   }
   const body = (await res.json()) as { id: string; account_id?: string; memo?: string; memo_type?: string };
   const memoType = body.memo_type === "id" || body.memo_type === "hash" || body.memo_type === "text" ? body.memo_type : undefined;
@@ -286,7 +287,7 @@ export async function getSep6Transaction(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.status.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 transaction fetch failed");
-    throw new Error(`SEP-6 transaction fetch failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("6", "transaction fetch", res);
   }
   const body = (await res.json()) as {
     transaction: { id: string; status: string; amount_out?: string; message?: string };
