@@ -18,7 +18,7 @@ import {
   TestAnchorKyc,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository, WebhookRepository } from "@checkout/core";
+import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository, SellerProfileRepository, WebhookRepository } from "@checkout/core";
 import { KycConsentRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
@@ -39,6 +39,7 @@ import {
   DrizzleApiKeyRepository,
   DrizzleAnchorSessionRepository,
   DrizzleKycConsentRepository,
+  DrizzleSellerProfileRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -69,6 +70,9 @@ export interface Container {
   kyc: KycPort;
   /** Per-anchor KYC consent repository. */
   kycConsents: KycConsentRepository;
+  /** The seller's reusable SEP-9 profile (issue 4.23). Null unless a real anchor and
+   *  KYC_ENCRYPTION_KEY are configured, since values are encrypted with that key. */
+  sellerProfile?: SellerProfileRepository | null;
   /** The anchor's home domain (e.g. "testanchor.stellar.org") for consent tracking. Null when no real anchor. */
   anchorDomain: string | null;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
@@ -184,6 +188,7 @@ export async function createContainer(): Promise<Container> {
   const kycAnchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
   const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
   const kyc = createKyc(anchor, db, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain);
+  const sellerProfileRepo = await createSellerProfile(anchor, db, logger);
   const anchorDomain = anchor?.auth.anchorDomain ?? null;
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
@@ -273,6 +278,7 @@ export async function createContainer(): Promise<Container> {
     db,
     kyc,
     kycConsents: kycConsentsRepo,
+    sellerProfile: sellerProfileRepo,
     anchorDomain,
     anchorAuth: anchor?.auth ?? null,
     telemetry: telemetryRepo,
@@ -455,6 +461,28 @@ function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepositor
     preferredWithdrawType: env.offrampType,
     logger,
   });
+}
+
+/**
+ * The seller's reusable SEP-9 profile (issue 4.23). Only exists when a real
+ * anchor is configured, i.e. exactly when KYC_ENCRYPTION_KEY is guaranteed set
+ * (see env.ts). On boot it lifts existing `seller_kyc` values into the profile
+ * once; the migration is idempotent and logs counts, never values.
+ */
+async function createSellerProfile(
+  anchor: AnchorWiring | null,
+  db: DB,
+  logger: Logger,
+): Promise<DrizzleSellerProfileRepository | null> {
+  if (!anchor) return null;
+  const keyring = parsePiiKeyring(env.kycEncryptionKey as string, env.kycEncryptionKeyPrevious);
+  const repo = new DrizzleSellerProfileRepository(db, keyring);
+  const result = await repo.migrateFromSellerKyc();
+  logger.info(
+    { event: "seller_profile.migrated", ...result },
+    `seller profile migration: ${result.migrated} field(s) from ${result.rows} seller_kyc row(s), ${result.failed} unreadable`,
+  );
+  return repo;
 }
 
 function createKyc(

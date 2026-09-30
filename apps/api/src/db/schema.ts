@@ -315,3 +315,17 @@ export const kycConsents = sqliteTable("kyc_consents", {
   grantedVia: text("granted_via").notNull(), // 'session'
   noticeVersion: text("notice_version").notNull(),
 });
+
+/**
+ * A seller's reusable identity values, one row per (seller, field) (issue 4.23).
+ * Field names are canonical SEP-9 names and are not PII; `valueEncrypted` is an
+ * AES-256-GCM blob of exactly one value and never plaintext.
+ * Primary key (seller_id, field) comes from BOOTSTRAP_SQL, as for processed_tx.
+ */
+export const sellerProfile = sqliteTable("seller_profile", {
+  sellerId: text("seller_id").notNull(),
+  field: text("field").notNull(),
+  valueEncrypted: text("value_encrypted").notNull(),
+  source: text("source").notNull(), // 'seller' | 'migrated_from_seller_kyc'
+  updatedAt: integer("updated_at").notNull(),
+});

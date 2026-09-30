@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -15,9 +15,12 @@ import type {
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
+  ProfileField,
+  ProfileFieldSource,
   ProvidedFieldStatus,
   Seller,
   SellerProfileKind,
+  SellerProfileRepository,
   SellerRepository,
   TokenRevocationRepository,
   StoredOffRampJob,
@@ -51,8 +54,9 @@ import {
   offrampTelemetry,
   apiKeys,
   kycConsents,
+  sellerProfile,
 } from "../db/schema";
-import { fromStroops, toStroops } from "@checkout/core";
+import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { computeKeyId, decryptPii, encryptPii, getBlobKeyId, type PiiKeyring } from "../crypto/pii";
 import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
@@ -1016,6 +1020,143 @@ export class DrizzleKycRepository implements KycRepository {
       }
     }
     return count;
+  }
+}
+
+export interface KycProfileMigrationResult {
+  /** `seller_kyc` rows examined. */
+  rows: number;
+  /** Profile fields inserted by this run. */
+  migrated: number;
+  /** Rows whose blob could not be decrypted or parsed (skipped, never fatal). */
+  failed: number;
+}
+
+/**
+ * Reusable, anchor-independent profile (issue 4.23): one encrypted value per
+ * (seller, SEP-9 field). Field names are plaintext and are not PII; values are
+ * encrypted with the same keyring as {@link DrizzleKycRepository}.
+ *
+ * Unknown field names and binary-typed fields are refused at this boundary, so
+ * binary data is never persisted whatever the caller does (issue 3.13).
+ */
+export class DrizzleSellerProfileRepository implements SellerProfileRepository {
+  constructor(
+    private readonly db: DB,
+    private readonly keyring: Buffer | PiiKeyring,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /** Maps a caller's field name (canonical or alias) to the canonical name, or throws. */
+  private canonical(name: string): string {
+    const entry = sep9Field(name);
+    if (!entry) throw new ProfileFieldRejectedError(name, "unknown_field");
+    if (entry.type === "binary") throw new ProfileFieldRejectedError(name, "binary_field");
+    return entry.name;
+  }
+
+  async list(sellerId: string): Promise<ProfileField[]> {
+    const rows = await this.db
+      .select()
+      .from(sellerProfile)
+      .where(eq(sellerProfile.sellerId, sellerId))
+      .orderBy(asc(sellerProfile.field));
+    return rows.map((row) => ({
+      field: row.field,
+      value: decryptPii(row.valueEncrypted, this.keyring),
+      source: row.source as ProfileFieldSource,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  async upsert(
+    sellerId: string,
+    fields: Record<string, string>,
+    source: ProfileFieldSource,
+  ): Promise<void> {
+    // Resolve every name first: one bad field must not leave the rest half-written.
+    const wanted = new Map<string, string>();
+    for (const [name, value] of Object.entries(fields)) wanted.set(this.canonical(name), value);
+    if (wanted.size === 0) return;
+
+    const existing = new Map(
+      (await this.list(sellerId)).map((f) => [f.field, f.value] as const),
+    );
+    const now = this.now();
+    for (const [field, value] of wanted) {
+      if (existing.get(field) === value) continue; // unchanged: keep updated_at and source
+      const row = {
+        sellerId,
+        field,
+        valueEncrypted: encryptPii(value, this.keyring),
+        source,
+        updatedAt: now,
+      };
+      await this.db
+        .insert(sellerProfile)
+        .values(row)
+        .onConflictDoUpdate({ target: [sellerProfile.sellerId, sellerProfile.field], set: row });
+    }
+  }
+
+  async remove(sellerId: string, fields: string[]): Promise<void> {
+    const names = fields.map((name) => sep9Field(name)?.name ?? name);
+    if (names.length === 0) return;
+    await this.db
+      .delete(sellerProfile)
+      .where(and(eq(sellerProfile.sellerId, sellerId), inArray(sellerProfile.field, names)));
+  }
+
+  async removeAll(sellerId: string): Promise<void> {
+    await this.db.delete(sellerProfile).where(eq(sellerProfile.sellerId, sellerId));
+  }
+
+  /**
+   * One-time, idempotent boot migration: lifts the known SEP-9 keys out of each
+   * `seller_kyc.fields_encrypted` blob into the profile with source
+   * `migrated_from_seller_kyc`, but only for fields the seller has no profile row
+   * for yet, so it never overwrites a value the seller entered and a second run
+   * inserts nothing. Returns counts only; values are never logged or returned.
+   */
+  async migrateFromSellerKyc(): Promise<KycProfileMigrationResult> {
+    const kycRows = await this.db
+      .select({
+        sellerId: sellerKyc.sellerId,
+        fieldsEncrypted: sellerKyc.fieldsEncrypted,
+        updatedAt: sellerKyc.updatedAt,
+      })
+      .from(sellerKyc);
+
+    const result: KycProfileMigrationResult = { rows: kycRows.length, migrated: 0, failed: 0 };
+    for (const row of kycRows) {
+      let blob: unknown;
+      try {
+        blob = JSON.parse(decryptPii(row.fieldsEncrypted, this.keyring));
+      } catch {
+        result.failed++;
+        continue;
+      }
+      if (typeof blob !== "object" || blob === null || Array.isArray(blob)) {
+        result.failed++;
+        continue;
+      }
+      for (const [name, value] of Object.entries(blob as Record<string, unknown>)) {
+        const entry = sep9Field(name);
+        if (!entry || entry.type === "binary" || typeof value !== "string" || value === "") continue;
+        const inserted = await this.db
+          .insert(sellerProfile)
+          .values({
+            sellerId: row.sellerId,
+            field: entry.name,
+            valueEncrypted: encryptPii(value, this.keyring),
+            source: "migrated_from_seller_kyc",
+            updatedAt: row.updatedAt,
+          })
+          .onConflictDoNothing({ target: [sellerProfile.sellerId, sellerProfile.field] });
+        result.migrated += inserted.rowsAffected;
+      }
+    }
+    return result;
   }
 }
 

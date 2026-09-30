@@ -167,6 +167,17 @@ const BOOTSTRAP_SQL = [
      notice_version TEXT NOT NULL,
      UNIQUE(seller_id, anchor_domain)
    )`,
+  // Reusable, anchor-independent SEP-9 identity values (issue 4.23): one row
+  // per (seller, field). Field names are canonical SEP-9 names, not PII; every
+  // value is AES-256-GCM encrypted (encryptPii) and never stored in plaintext.
+  `CREATE TABLE IF NOT EXISTS seller_profile (
+     seller_id TEXT NOT NULL,
+     field TEXT NOT NULL,            -- canonical SEP-9 name
+     value_encrypted TEXT NOT NULL,  -- encryptPii(value)
+     source TEXT NOT NULL,           -- 'seller' | 'migrated_from_seller_kyc'
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (seller_id, field)
+   )`,
 ];
 
 // Additive column added after the initial release. `CREATE TABLE IF NOT EXISTS`

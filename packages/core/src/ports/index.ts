@@ -622,6 +622,59 @@ export interface LinkRepository {
   paymentLedger(txHash: string): Promise<number | null>;
 }
 
+/**
+ * Where a stored profile value came from. `seller` means the seller typed it;
+ * `migrated_from_seller_kyc` means it was lifted from the older single-blob
+ * `seller_kyc` row (issue 4.23). Anchor-echoed values are never written here.
+ */
+export type ProfileFieldSource = "seller" | "migrated_from_seller_kyc";
+
+/** One anchor-independent identity value the seller owns (issue 4.23). */
+export interface ProfileField {
+  /** Canonical SEP-9 field name (aliases are normalised on write). */
+  field: string;
+  /** PII. Encrypted at rest; never log it or put it on a webhook. */
+  value: string;
+  source: ProfileFieldSource;
+  /** Epoch ms of the last change to `value`. Unchanged by a re-save of the same value. */
+  updatedAt: number;
+}
+
+/** Thrown when a field cannot be stored: not a SEP-9 field, or binary-typed. */
+export class ProfileFieldRejectedError extends Error {
+  constructor(
+    readonly field: string,
+    readonly reason: "unknown_field" | "binary_field",
+  ) {
+    super(
+      reason === "unknown_field"
+        ? `"${field}" is not a SEP-9 field`
+        : `"${field}" is a binary field; binary data is never persisted`,
+    );
+    this.name = "ProfileFieldRejectedError";
+  }
+}
+
+/**
+ * The seller's reusable, anchor-independent profile: one encrypted value per
+ * (seller, SEP-9 field). Distinct from {@link KycRepository}, which holds the
+ * anchor's view of the seller.
+ */
+export interface SellerProfileRepository {
+  /** Every stored field for the seller, ordered by field name. */
+  list(sellerId: string): Promise<ProfileField[]>;
+  /**
+   * Insert or update fields. Only bumps `updatedAt` (and `source`) for fields
+   * whose value actually changed. Throws {@link ProfileFieldRejectedError}
+   * before writing anything if any field is unknown or binary-typed.
+   */
+  upsert(sellerId: string, fields: Record<string, string>, source: ProfileFieldSource): Promise<void>;
+  /** Delete the named fields (canonical names or aliases). Missing ones are ignored. */
+  remove(sellerId: string, fields: string[]): Promise<void>;
+  /** Delete everything stored for the seller. */
+  removeAll(sellerId: string): Promise<void>;
+}
+
 export type SellerProfileKind = "individual" | "organization";
 
 export interface Seller {

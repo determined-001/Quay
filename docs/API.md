@@ -689,6 +689,70 @@ grant consent via `POST /seller/kyc/consent` before retrying.
 
 ---
 
+## `GET /seller/profile`
+
+The seller's reusable identity profile: the values they own, independent of any
+anchor. One entry per SEP-9 field, using the canonical SEP-9 name (an alias such
+as `first_name` is stored as `given_name`).
+
+**Requires auth.** Session authentication only — API keys get `403`, because the
+profile is the seller's own identity data. Values are stored encrypted
+(AES-256-GCM, the same key as the SEP-12 KYC record) and are decrypted only to
+answer this request.
+
+**200**
+```json
+{
+  "fields": [
+    { "field": "birth_date", "value": "1815-12-10", "source": "seller", "updatedAt": 1750000000000 },
+    { "field": "given_name", "value": "Ada", "source": "migrated_from_seller_kyc", "updatedAt": 1749000000000 }
+  ]
+}
+```
+`source` is `seller` (typed by the seller) or `migrated_from_seller_kyc` (lifted
+from the older per-seller KYC record at boot). `updatedAt` is the last time the
+value changed; saving the same value again does not move it.
+
+**403** — `{ "error": "forbidden", ... }` for API-key auth.
+**503** — `{ "error": "profile_unavailable", ... }` when the deployment has no real
+anchor or no `KYC_ENCRYPTION_KEY`, so there is nowhere to keep encrypted values.
+
+---
+
+## `PUT /seller/profile`
+
+Store or update profile fields. The body is a flat map of SEP-9 field name to
+string value, the same shape as `PUT /seller/kyc`. Every value is validated with
+the SEP-9 validators (country codes, dates, phone numbers, email, choices, ...)
+and **nothing is written unless every field is valid**.
+
+**Requires auth.** Session authentication only — API keys get `403`.
+
+**Request**
+```json
+{ "given_name": "Ada", "birth_date": "1815-12-10", "address_country_code": "GBR" }
+```
+
+**200** — the full profile, same shape as `GET /seller/profile`.
+
+**422** — `invalid_fields`, with a reason for each rejected field:
+```json
+{
+  "error": "invalid_fields",
+  "fields": {
+    "birth_date": "expected a real YYYY-MM-DD date",
+    "favourite_colour": "not a SEP-9 field",
+    "photo_id_front": "binary fields are not accepted"
+  }
+}
+```
+Unknown field names, binary-typed fields (binary data is never persisted) and
+empty values are rejected alongside format errors.
+
+**400** — `invalid_body` when the body is not a map of strings.
+
+---
+
 ## `POST /webhooks`
 
 Register a webhook endpoint. The signing secret is returned **once** — store it.
