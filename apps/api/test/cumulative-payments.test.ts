@@ -56,8 +56,9 @@ function makeTestService(links: FakeLinkRepository): LinkService {
     sellers: {
       findById: async () => null,
       findByWallet: async () => null,
-      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", payoutFields: null, createdAt: 0 }),
+      createIfAbsent: async () => ({ id: "sel_1", name: "Seller", wallet: "GSELLER", profileKind: "individual", payoutFields: null, createdAt: 0 }),
       savePayoutFields: async () => {},
+      saveProfileKind: async () => {},
     },
     webhooks: new FakeWebhookRepository(),
     rail: UNUSED_RAIL,

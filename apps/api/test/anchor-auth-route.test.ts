@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { MiddlewareHandler } from "hono";
 import { AnchorChallengeError, type SellerAnchorAuth } from "@checkout/offramp";
 import type { AnchorCustomer } from "@checkout/core";
 import { anchorAuthRoutes } from "../src/routes/anchor-auth";
+import { MemoryStore, rateLimit } from "../src/middleware/rate-limit";
 import { generateApiKey, hashApiKey, type ApiKeyScope } from "../src/services/api-keys";
 import { createTestContainer, type TestContainer } from "./setup";
 import type { Container } from "../src/services/container";
@@ -11,9 +13,15 @@ import type { Container } from "../src/services/container";
  * from their own credentials, and are gated by the scope that moves money.
  */
 describe("anchorAuthRoutes", () => {
-  async function harness(scopes: ApiKeyScope[], anchorAuth: Partial<SellerAnchorAuth> | null = null) {
+  const passThroughLimiter: MiddlewareHandler = async (_ctx, next) => next();
+
+  async function harness(
+    scopes: ApiKeyScope[],
+    anchorAuth: Partial<SellerAnchorAuth> | null = null,
+    limiter: MiddlewareHandler = passThroughLimiter,
+  ) {
     const container = await createTestContainer();
-    const app = anchorAuthRoutes({ ...container, anchorAuth } as unknown as Container);
+    const app = anchorAuthRoutes({ ...container, anchorAuth } as unknown as Container, limiter);
     const { plaintext, prefix } = generateApiKey("test");
     await container.apiKeys.create({
       sellerId: container.seller.id,
@@ -108,6 +116,62 @@ describe("anchorAuthRoutes", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ transaction: "AAAA-challenge" });
       expect(calls[0]?.customer?.account).toBe(container.seller.wallet);
+      container.client.close();
+    });
+
+    it("rate-limits challenges per seller without affecting another seller", async () => {
+      const { auth } = fakeAuth();
+      const limiter = rateLimit({
+        windowMs: 60_000,
+        max: 1,
+        store: new MemoryStore(),
+        keyFor: (ctx) => `anchor-auth:${(ctx.get("seller") as { id: string }).id}`,
+      });
+      const { app, container, key } = await harness(["offramp:initiate"], auth, limiter);
+      const other = await container.sellers.createIfAbsent("GOTHER-SELLER");
+      const otherToken = await container.tokenFor(other.id, other.wallet);
+      const headers = { authorization: `Bearer ${key}` };
+
+      const first = await app.request("/challenge", { method: "POST", headers });
+      const limited = await app.request("/challenge", { method: "POST", headers });
+      const independent = await app.request("/challenge", {
+        method: "POST",
+        headers: { authorization: `Bearer ${otherToken}` },
+      });
+
+      expect(first.status).toBe(200);
+      expect(limited.status).toBe(429);
+      expect(await limited.json()).toMatchObject({ error: "rate_limited" });
+      expect(independent.status).toBe(200);
+      container.client.close();
+    });
+
+    it("rate-limits challenge completion per seller without affecting another seller", async () => {
+      const { auth } = fakeAuth();
+      const limiter = rateLimit({
+        windowMs: 60_000,
+        max: 1,
+        store: new MemoryStore(),
+        keyFor: (ctx) => `anchor-auth:${(ctx.get("seller") as { id: string }).id}`,
+      });
+      const { app, container, key } = await harness(["offramp:initiate"], auth, limiter);
+      const other = await container.sellers.createIfAbsent("GOTHER-SELLER");
+      const otherToken = await container.tokenFor(other.id, other.wallet);
+      const complete = (token: string, transaction: string) =>
+        app.request("/", {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ transaction }),
+        });
+
+      const first = await complete(key, "AAAA-first");
+      const limited = await complete(key, "AAAA-second");
+      const independent = await complete(otherToken, "AAAA-other");
+
+      expect(first.status).toBe(200);
+      expect(limited.status).toBe(429);
+      expect(await limited.json()).toMatchObject({ error: "rate_limited" });
+      expect(independent.status).toBe(200);
       container.client.close();
     });
 

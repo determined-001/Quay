@@ -530,6 +530,13 @@ anchor's JWT encrypted at rest so the cash-out poller can follow withdrawals.
 The JWT can read/update the seller's KYC and start a withdrawal; it cannot move
 funds. It is never returned to the client.
 
+The two `POST` routes below use the strict per-seller rate limit
+(`RATE_LIMIT_STRICT_WINDOW_MS` / `RATE_LIMIT_STRICT_MAX`, default 20 requests
+per 60 seconds). The bucket is keyed by the authenticated seller ID, so one
+seller cannot consume another seller's budget by changing IPs or API keys. When
+`REDIS_URL` is configured, the counters are shared across API instances. `GET`
+and `DELETE` remain on the global per-IP limit.
+
 - `GET /seller/anchor-auth` → `{ "required": true, "connected": false, "anchor": "testanchor.stellar.org", "expiresAt": null }`.
   `required: false` means the deployment has no real anchor (`mock`/`none`).
 - `POST /seller/anchor-auth/challenge` → `{ "transaction": "<XDR>", "networkPassphrase": "..." }` — sign it with the wallet, never submit it.

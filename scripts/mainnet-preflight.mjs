@@ -141,9 +141,9 @@ export function checkSellerWallet(env) {
     // Nothing reads it any more, in any mode: each seller's own wallet signs
     // the anchor's SEP-10 challenge and every on-chain leg of a withdrawal. A
     // seller key on the server is pure blast radius.
-    return warn(
+    return fail(
       "seller-wallet",
-      "DEFAULT_SELLER_SECRET is set, but the server never signs for a seller — each seller's wallet signs its own anchor login and withdrawals. Unset it.",
+      "DEFAULT_SELLER_SECRET is set on the public network. Quay never signs for a seller; each seller's wallet signs its own anchor login and withdrawals. Remove it from this deployment's environment.",
     );
   }
   if (!wallet) {

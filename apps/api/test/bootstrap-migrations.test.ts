@@ -139,6 +139,22 @@ describe("bootstrap() against a pre-existing database", () => {
     expect(Number(rows.rows[0]?.n)).toBe(1);
   });
 
+  it("defaults existing sellers to individual profiles", async () => {
+    const client = createClient({ url: "file::memory:" });
+    await client.execute(LEGACY_SELLERS);
+    await client.execute(
+      "INSERT INTO sellers (id,name,wallet,created_at) VALUES ('s1','a','GWALLET',1)",
+    );
+
+    await bootstrap(client);
+
+    const expected = getTableConfig(schema.sellers).columns.map((c) => c.name);
+    const actual = await columnsOf(client, "sellers");
+    expect(expected.filter((c) => !actual.includes(c))).toEqual([]);
+    const row = await client.execute("SELECT profile_kind FROM sellers WHERE id = 's1'");
+    expect(row.rows[0]?.profile_kind).toBe("individual");
+  });
+
   it("adds sellers.payout_fields_json to a legacy table", async () => {
     const client = createClient({ url: "file::memory:" });
     await client.execute(LEGACY_LINKS);
@@ -148,6 +164,17 @@ describe("bootstrap() against a pre-existing database", () => {
     await bootstrap(client);
 
     expect(await columnsOf(client, "sellers")).toContain("payout_fields_json");
+  });
+
+  it("adds sellers.payout_fields_encrypted to a legacy table (issue 4.34)", async () => {
+    const client = createClient({ url: "file::memory:" });
+    await client.execute(LEGACY_LINKS);
+    await client.execute(LEGACY_LINK_PAYMENTS);
+    await client.execute(LEGACY_SELLERS);
+
+    await bootstrap(client);
+
+    expect(await columnsOf(client, "sellers")).toContain("payout_fields_encrypted");
   });
 
   // Issue 4.11 rebuilds processed_tx and link_payments rather than ALTERing

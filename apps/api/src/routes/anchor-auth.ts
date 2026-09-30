@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { z } from "zod";
 import { AnchorChallengeError } from "@checkout/offramp";
 import type { Container } from "../services/container";
@@ -18,7 +18,7 @@ const completeSchema = z.object({ transaction: z.string().min(1) });
  * Gated by `offramp:initiate` for the same reason as /seller/kyc: this session
  * exists only to cash out, so the scope that moves money governs it.
  */
-export function anchorAuthRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
+export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandler): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
 
   app.use(
@@ -42,8 +42,10 @@ export function anchorAuthRoutes(c: Container): Hono<{ Variables: AuthVariables 
     return ctx.json({ required: true, connected: expiresAt !== null, anchor: auth.anchorDomain, expiresAt });
   });
 
+  // The limiter is attached per POST route below, after the auth middleware
+  // above has populated the seller used by its per-seller key.
   // A verified challenge for the seller's wallet to sign.
-  app.post("/challenge", async (ctx) => {
+  app.post("/challenge", anchorAuthLimit, async (ctx) => {
     const auth = c.anchorAuth;
     if (!auth) return ctx.json({ error: "no_anchor" }, 404);
     try {
@@ -55,7 +57,7 @@ export function anchorAuthRoutes(c: Container): Hono<{ Variables: AuthVariables 
   });
 
   // Relay the signed challenge; the anchor's JWT is kept, never returned.
-  app.post("/", async (ctx) => {
+  app.post("/", anchorAuthLimit, async (ctx) => {
     const auth = c.anchorAuth;
     if (!auth) return ctx.json({ error: "no_anchor" }, 404);
     const parsed = completeSchema.safeParse(await ctx.req.json().catch(() => ({})));

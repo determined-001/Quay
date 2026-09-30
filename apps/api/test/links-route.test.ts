@@ -4,8 +4,8 @@ import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
 
-const owner: Seller = { id: "sel_owner", name: "Owner", wallet: "GOWNER", payoutFields: null, createdAt: Date.now() };
-const other: Seller = { id: "sel_other", name: "Other", wallet: "GOTHER", payoutFields: null, createdAt: Date.now() };
+const owner: Seller = { id: "sel_owner", name: "Owner", wallet: "GOWNER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
+const other: Seller = { id: "sel_other", name: "Other", wallet: "GOTHER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
 
 const ownedLink: PaymentLink = {
   id: "lnk_1",
@@ -44,6 +44,7 @@ function fakeContainer(): Container {
     findByWallet: async () => null,
     createIfAbsent: async () => owner,
     savePayoutFields: async () => {},
+    saveProfileKind: async () => {},
   };
   const revocations: TokenRevocationRepository = {
     revoke: async () => {},

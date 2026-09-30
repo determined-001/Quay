@@ -361,6 +361,7 @@ class FakeSellerRepoForAnchor {
     return this.s;
   }
   async savePayoutFields(): Promise<void> {}
+  async saveProfileKind(): Promise<void> {}
 }
 
 class FakeWebhookRepoForAnchor implements WebhookRepository {
@@ -543,7 +544,7 @@ interface Svc {
 
 function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
   const repo = new FakeLinkRepoForAnchor();
-  const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+  const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
   const webhooks = new FakeWebhookRepoForAnchor();
   void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
   const service = new LinkService({
@@ -733,7 +734,7 @@ describe("GET /health exposes anchor state", () => {
 describe("LinkService.pollCashOuts attribution", () => {
   it("records last_error per-link when status() throws and does NOT advance link status", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
     const offramp = new FlakyOffRamp({ statusShouldThrow: true, statusMessage: "anchor DNS resolution failed" });
@@ -769,7 +770,7 @@ describe("LinkService.pollCashOuts attribution", () => {
 
   it("clears last_error when a subsequent poll succeeds", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
 
@@ -833,7 +834,7 @@ describe("LinkService.pollCashOuts attribution", () => {
 
   it("a job whose status() returns `failed` is moved to offramp_failed and last_error stays null (the job self-reported)", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
     const offramp = new FlakyOffRamp({ status: "failed" });
@@ -862,7 +863,7 @@ describe("LinkService.pollCashOuts attribution", () => {
 
   it("backs off per job after consecutive poll failures (AC3 — does not hammer a downed anchor)", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, payoutFields: null, createdAt: 1 });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
     void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
 

@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { fromStroops, toStroops } from "@checkout/core";
 import { api, CheckoutError, type LinkWithRequest } from "../../lib/api";
+import { checkPaymentPreflight } from "../../lib/payment-preflight";
 import {
   connectWallet,
   getWalletNetwork,
@@ -113,37 +115,25 @@ async function buildPaymentXdr(address: string, initial: LinkWithRequest): Promi
 
   const expected = initial.request.asset;
   const outstanding = initial.link.status === "underpaid"
-    ? decimalToStroops(initial.link.amount) - decimalToStroops(initial.link.paidAmount ?? "0")
-    : decimalToStroops(initial.request.amount);
+    ? toStroops(initial.link.amount) - toStroops(initial.link.paidAmount ?? "0")
+    : toStroops(initial.request.amount);
   if (outstanding <= 0n) {
     throw new WalletPaymentError("unavailable", "This payment link is already fully paid.");
   }
   const paymentAmount = fromStroops(outstanding);
-  const balance = account.balances.find((entry) =>
-    expected.issuer === null
-      ? entry.asset_type === "native"
-      : (entry.asset_type === "credit_alphanum4" || entry.asset_type === "credit_alphanum12") &&
-        entry.asset_code === expected.code &&
-        entry.asset_issuer === expected.issuer,
+
+  const preflight = checkPaymentPreflight(
+    account,
+    expected,
+    outstanding,
+    { feeStroops: BASE_FEE_STROOPS },
   );
 
-  if (!balance) {
-    if (expected.issuer !== null) {
+  if (!preflight.ok) {
+    if (preflight.reason === "missing_trustline") {
       throw new WalletPaymentError("missing_trustline", `This wallet has no ${expected.code} trustline.`);
     }
-    throw new WalletPaymentError("insufficient_balance", "This wallet has no XLM balance.");
-  }
-
-  const required = outstanding;
-  const available = decimalToStroops(balance.balance);
-  const nativeBalance = account.balances.find((entry) => entry.asset_type === "native");
-  const nativeAvailable = nativeBalance ? decimalToStroops(nativeBalance.balance) : 0n;
-  const totalRequired = expected.issuer === null ? required + BASE_FEE_STROOPS : required;
-  if (available < totalRequired) {
-    throw new WalletPaymentError("insufficient_balance", "This wallet does not have enough balance to pay.");
-  }
-  if (!nativeBalance || nativeAvailable < BASE_FEE_STROOPS) {
-    throw new WalletPaymentError("insufficient_balance", "This wallet does not have enough XLM for the network fee.");
+    throw new WalletPaymentError("insufficient_balance", preflight.message);
   }
 
   if (!account.sequence) {
@@ -166,23 +156,6 @@ async function buildPaymentXdr(address: string, initial: LinkWithRequest): Promi
 
   if (initial.request.memo) builder.addMemo(stellar.Memo.text(initial.request.memo));
   return builder.setTimeout(300).build().toXDR();
-}
-
-function fromStroops(value: bigint): string {
-  const whole = value / 10_000_000n;
-  const fraction = (value % 10_000_000n).toString().padStart(7, "0").replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : String(whole);
-}
-
-function decimalToStroops(value: string): bigint {
-  const parts = value.trim().split(".");
-  const whole = parts[0] ?? "";
-  const fraction = parts[1] ?? "";
-  const padded = fraction.padEnd(7, "0");
-  if (!/^\d+$/.test(whole) || !/^\d{1,7}$/.test(fraction) && fraction !== "") {
-    throw new WalletPaymentError("unavailable", "The payment amount is invalid.");
-  }
-  return BigInt(whole) * 10_000_000n + BigInt(padded || "0");
 }
 
 function walletErrorMessage(cause: unknown): string {

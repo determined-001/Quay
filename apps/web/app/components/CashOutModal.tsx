@@ -24,10 +24,16 @@ import {
   api,
   CheckoutError,
   describeError,
+  serverNow,
   type OfframpRequirements,
   type PayoutFieldDescriptor,
 } from "../../lib/api";
+import { fmtCountdown, quoteMsRemaining } from "../../lib/quote-countdown";
 import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
+import {
+  checkPaymentPreflight,
+  type PaymentPreflightResult,
+} from "../../lib/payment-preflight";
 import { useSellerWallet } from "./SessionGate";
 
 // ---------------------------------------------------------------------------
@@ -92,13 +98,8 @@ function mask(v: string): string {
   return `${"*".repeat(v.length - 4)}${v.slice(-4)}`;
 }
 
-/** Format seconds as "m:ss". */
-function fmtCountdown(ms: number): string {
-  const s = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${String(sec).padStart(2, "0")}`;
-}
+// Countdown math lives in lib/quote-countdown.ts (issue 5.22), where the
+// node-environment tests can reach it.
 
 // ---------------------------------------------------------------------------
 // Component
@@ -131,6 +132,52 @@ export default function CashOutModal({
   const [sending, setSending] = useState(false);
   const [sentHash, setSentHash] = useState<string | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
+  const [preflight, setPreflight] = useState<PaymentPreflightResult | null>(null);
+  const [checkingPreflight, setCheckingPreflight] = useState(false);
+
+  const runPreflight = useCallback(async () => {
+    if (!transfer || !wallet) return;
+    setCheckingPreflight(true);
+    setTransferError(null);
+    try {
+      const stellar = await import("@stellar/stellar-sdk");
+      const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
+      const horizonUrl =
+        process.env.NEXT_PUBLIC_HORIZON_URL ??
+        (network === "public" ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org");
+      const server = new stellar.Horizon.Server(horizonUrl);
+      let account: Awaited<ReturnType<typeof server.loadAccount>> | null = null;
+      try {
+        account = await server.loadAccount(wallet);
+      } catch {
+        account = null;
+      }
+      const result = checkPaymentPreflight(
+        account,
+        {
+          code: transfer.asset.code,
+          issuer: transfer.asset.issuer,
+        },
+        transfer.amount,
+        {
+          connectedAddress: wallet,
+          expectedAddress: wallet,
+          feeStroops: BigInt(stellar.BASE_FEE),
+        },
+      );
+      setPreflight(result);
+    } catch {
+      setPreflight(null);
+    } finally {
+      setCheckingPreflight(false);
+    }
+  }, [transfer, wallet]);
+
+  useEffect(() => {
+    if (step === "transfer" && transfer && wallet) {
+      void runPreflight();
+    }
+  }, [step, transfer, wallet, runPreflight]);
 
   // ---- fetch requirements on mount ----------------------------------------
   useEffect(() => {
@@ -153,9 +200,17 @@ export default function CashOutModal({
   }, [linkId]);
 
   // ---- countdown tick ------------------------------------------------------
-  const startCountdown = useCallback((expiresAt: number) => {
+  // `expiresAt` is the anchor's own TTL as a SERVER timestamp, so the clock it
+  // is measured against is serverNow(), not the phone's. `unknown` because an
+  // absent or malformed expiry must mean "no countdown", never a guessed one
+  // (issue 5.22).
+  const startCountdown = useCallback((expiresAt: unknown) => {
     if (countdownRef.current) clearInterval(countdownRef.current);
-    const tick = () => setCountdown(expiresAt - Date.now());
+    if (quoteMsRemaining(expiresAt, serverNow()) === null) {
+      setCountdown(null);
+      return;
+    }
+    const tick = () => setCountdown(quoteMsRemaining(expiresAt, serverNow()));
     tick();
     countdownRef.current = setInterval(tick, 500);
   }, []);
@@ -245,10 +300,9 @@ export default function CashOutModal({
         targetCurrency: j.targetCurrency,
       };
       setQuote(preview);
-      // Quote expiry not surfaced by the current API response; show a
-      // fixed 5-minute window matching the mock/testanchor default TTL.
-      const expiresAt = Date.now() + 5 * 60_000;
-      startCountdown(expiresAt);
+      // The anchor's real quote expiry, straight from the response. When the
+      // API sends none, startCountdown shows no countdown at all.
+      startCountdown(j.quoteExpiresAt);
       // Cash-out is already initiated at this point (quote+initiate are atomic
       // in the current API). If the anchor now needs the asset, keep the modal
       // open for the seller to send it; otherwise go straight to success.
@@ -269,7 +323,7 @@ export default function CashOutModal({
     setTransferError(null);
     setSending(true);
     try {
-      setSentHash(await sendAnchorTransfer(wallet, transfer));
+      setSentHash(await sendAnchorTransfer(wallet, transfer, wallet));
     } catch (e: unknown) {
       setTransferError(
         e instanceof Error && e.message ? `The payment was not sent: ${e.message}` : "The payment was not sent.",
@@ -525,14 +579,52 @@ export default function CashOutModal({
                   Keep this open until the payment is sent. The memo is how the anchor matches it to
                   your withdrawal.
                 </p>
-                <button
-                  className="btn btn--primary btn--block"
-                  onClick={() => void handleSendTransfer()}
-                  disabled={sending || !wallet}
-                >
-                  {sending ? "Waiting for wallet…" : "Send with my wallet"}
-                </button>
-                {transferError && <div className="err">{transferError}</div>}
+
+                {checkingPreflight && (
+                  <p className="muted" style={{ fontSize: 12 }}>
+                    Checking wallet balance…
+                  </p>
+                )}
+
+                {preflight && !preflight.ok && (
+                  <div className="err" role="alert" style={{ marginBottom: 12 }}>
+                    {preflight.message}
+                  </div>
+                )}
+
+                {preflight && !preflight.ok && preflight.reason === "missing_trustline" ? (
+                  <button
+                    type="button"
+                    className="btn btn--block"
+                    onClick={() => void runPreflight()}
+                    disabled={checkingPreflight}
+                  >
+                    {checkingPreflight ? "Checking…" : "Check again"}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      className="btn btn--primary btn--block"
+                      onClick={() => void handleSendTransfer()}
+                      disabled={sending || !wallet || checkingPreflight || (preflight !== null && !preflight.ok)}
+                      aria-disabled={preflight !== null && !preflight.ok}
+                    >
+                      {sending ? "Waiting for wallet…" : "Send with my wallet"}
+                    </button>
+                    {preflight && !preflight.ok && (
+                      <button
+                        type="button"
+                        className="btn btn--block"
+                        style={{ marginTop: 8 }}
+                        onClick={() => void runPreflight()}
+                        disabled={checkingPreflight}
+                      >
+                        {checkingPreflight ? "Checking…" : "Check again"}
+                      </button>
+                    )}
+                  </>
+                )}
+                {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
               </>
             )}
           </div>
