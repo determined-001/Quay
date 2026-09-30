@@ -98,7 +98,7 @@ export const webhooks = sqliteTable("webhooks", {
 export const webhookDeliveries = sqliteTable("webhook_deliveries", {
   id: text("id").primaryKey(),
   webhookId: text("webhook_id").notNull(),
-  linkId: text("link_id").notNull(),
+  linkId: text("link_id"),
   event: text("event").notNull(),
   /** Which attempt number this row records (1-based). */
   attempt: integer("attempt").notNull().default(1),
@@ -124,7 +124,7 @@ export const webhookDeliveries = sqliteTable("webhook_deliveries", {
 export const webhookQueue = sqliteTable("webhook_queue", {
   id: text("id").primaryKey(),
   webhookId: text("webhook_id").notNull(),
-  linkId: text("link_id").notNull(),
+  linkId: text("link_id"),
   event: text("event").notNull(),
   /** JSON-serialised event payload — the exact body that will be signed & sent. */
   payload: text("payload").notNull(),
@@ -164,6 +164,10 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   status: text("status").notNull(),
   externalStatus: text("external_status"),
   lastError: text("last_error"),
+  // When the offramp.transfer_required webhook was first sent for this job.
+  // Null means the transfer instructions haven't been surfaced yet; once set,
+  // the webhook is not re-fired on subsequent polls or restarts.
+  transferNotifiedAt: integer("transfer_notified_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -180,6 +184,10 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   status: text("status").notNull(),
   requiredFields: text("required_fields").notNull(), // JSON KycFieldSpec[] — not PII, just schema metadata
   fieldsEncrypted: text("fields_encrypted").notNull(), // AES-256-GCM blob of Record<string,string>
+  // Per-field status from the anchor's `provided_fields` (SEP-12). JSON array of ProvidedFieldStatus.
+  providedFieldStatus: text("provided_field_status"),
+  // Field names (not values) sent to the anchor in the last submission. JSON string[].
+  sentFields: text("sent_fields"),
   message: text("message"),
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),
@@ -290,4 +298,20 @@ export const apiKeys = sqliteTable("api_keys", {
   createdAt: integer("created_at").notNull(),
   /** Non-null when the key has been revoked. */
   revokedAt: integer("revoked_at"),
+});
+
+/**
+ * Per-anchor consent record for KYC field disclosure.
+ * No PII values in this table — only field names (from SEP-9 catalogue) and metadata.
+ * Primary key (seller_id, anchor_domain) enforced in BOOTSTRAP_SQL.
+ */
+export const kycConsents = sqliteTable("kyc_consents", {
+  id: text("id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  fields: text("fields").notNull(), // JSON string[] of SEP-9 field names
+  grantedAt: integer("granted_at").notNull(),
+  revokedAt: integer("revoked_at"),
+  grantedVia: text("granted_via").notNull(), // 'session'
+  noticeVersion: text("notice_version").notNull(),
 });

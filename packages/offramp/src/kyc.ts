@@ -5,9 +5,11 @@ import {
   type KycPort,
   type KycRecord,
   type KycRepository,
+  type ProvidedFieldStatus,
 } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import { getSep12Customer, putSep12Customer } from "./sep12";
+import { selectFieldsForAnchor } from "@checkout/core";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
  *  entry for. Exported for direct unit testing of the "name exactly which
@@ -21,6 +23,8 @@ export interface TestAnchorKycOptions {
   /** The seller's own SEP-10 session with the anchor — never a platform key. */
   auth: SellerAnchorAuth;
   repo: KycRepository;
+  /** Profile repository for reusable SEP-9 fields. */
+  profileRepo: { get(sellerId: string): Promise<{ fields: Record<string, string> } | null> };
 }
 
 /**
@@ -37,11 +41,13 @@ export class TestAnchorKyc implements KycPort {
   private readonly discovery: AnchorDiscovery;
   private readonly auth: SellerAnchorAuth;
   private readonly repo: KycRepository;
+  private readonly profileRepo: TestAnchorKycOptions["profileRepo"];
 
   constructor(opts: TestAnchorKycOptions) {
     this.discovery = opts.discovery;
     this.auth = opts.auth;
     this.repo = opts.repo;
+    this.profileRepo = opts.profileRepo;
   }
 
   async status(customer: AnchorCustomer): Promise<KycRecord> {
@@ -60,6 +66,8 @@ export class TestAnchorKyc implements KycPort {
       status: remote.status,
       requiredFields: remote.requiredFields,
       providedFields: existing?.providedFields ?? {},
+      providedFieldStatus: remote.providedFieldStatus,
+      sentFields: existing?.sentFields ?? [],
       message: remote.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -77,19 +85,42 @@ export class TestAnchorKyc implements KycPort {
       customerId: reusableCustomerId(existing, customer),
     });
 
-    const merged = { ...existing?.providedFields, ...fields };
+    // Get the reusable profile for this seller
+    const profile = await this.profileRepo.get(customer.sellerId);
 
-    // Fail fast on anything we already know the anchor needs — never submit a
-    // partial record and hope. If discovery hasn't happened yet (no customer
-    // record at all), there's nothing to check against; the anchor's response
-    // to this first PUT is what reveals the real requirements.
-    const missing = missingRequiredFields(discovery.requiredFields, merged);
-    if (missing.length > 0) throw new KycRequiredError(missing);
+    // If the anchor has no customer record yet (discovery returns empty requiredFields),
+    // send the fields directly to create the record, then re-read requirements.
+    // This matches the old behavior where the first PUT reveals the real requirements.
+    const isFirstSubmission = discovery.requiredFields.length === 0;
 
+    let selection: { send: Record<string, string>; missing: string[]; unknown: string[] };
+    if (isFirstSubmission) {
+      // First submission: send all provided fields to let the anchor tell us what it needs
+      selection = {
+        send: fields,
+        missing: [],
+        unknown: [],
+      };
+    } else {
+      // Get the reusable profile for this seller
+      const profile = await this.profileRepo.get(customer.sellerId);
+
+      // Use selectFieldsForAnchor to determine what to send
+      selection = selectFieldsForAnchor({
+        requested: discovery.requiredFields,
+        profile: profile ? { fields: profile.fields } : { fields: {} },
+        overrides: fields,
+      });
+    }
+
+    // Fail fast if required fields are missing (only for non-first submissions)
+    if (!isFirstSubmission && selection.missing.length > 0) throw new KycRequiredError(selection.missing);
+
+    // Send only the selected fields
     const put = await putSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: discovery.customerId,
-      fields: merged,
+      fields: selection.send,
     });
 
     // The anchor may reveal more required fields only after seeing this
@@ -99,13 +130,20 @@ export class TestAnchorKyc implements KycPort {
       customerId: put.customerId,
     });
 
+    // Merge the new fields into the existing providedFields for future submissions
+    // Values typed in this submission (overrides) are written back to the profile
+    // for SEP-9 fields so they can be reused
+    const mergedProvided = { ...existing?.providedFields, ...fields };
+
     const record: KycRecord = {
       sellerId: customer.sellerId,
       account: customer.account,
       customerId: put.customerId,
       status: after.status,
       requiredFields: after.requiredFields,
-      providedFields: merged,
+      providedFields: mergedProvided,
+      providedFieldStatus: after.providedFieldStatus,
+      sentFields: Object.keys(selection.send),
       message: after.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -144,6 +182,8 @@ export class NoKycRequired implements KycPort {
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: Date.now(),
