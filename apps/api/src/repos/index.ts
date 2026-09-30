@@ -2,16 +2,22 @@ import { and, desc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
+  AnchorSession,
+  AnchorSessionRepository,
   CreateLinkInput,
   KycFieldSpec,
   KycRecord,
   KycRepository,
+  KycConsent,
+  KycConsentRepository,
   KycStatus,
   LinkPaymentRecord,
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
+  ProvidedFieldStatus,
   Seller,
+  SellerProfileKind,
   SellerRepository,
   TokenRevocationRepository,
   StoredOffRampJob,
@@ -40,14 +46,17 @@ import {
   offrampQuotes,
   offrampJobs,
   sellerKyc,
+  anchorSessions,
   revokedTokens,
   offrampTelemetry,
   apiKeys,
+  kycConsents,
 } from "../db/schema";
 import { fromStroops, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
-import { decryptPii, encryptPii } from "../crypto/pii";
-import { encryptSecret, last4 } from "../services/secret-crypto";
+import { computeKeyId, decryptPii, encryptPii, getBlobKeyId, type PiiKeyring } from "../crypto/pii";
+import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
+import type { Logger } from "pino";
 
 type LinkRow = typeof links.$inferSelect;
 
@@ -268,20 +277,126 @@ export class DrizzleLinkRepository implements LinkRepository {
   }
 }
 
-function rowToSeller(row: typeof sellers.$inferSelect): Seller {
+function rowToSeller(
+  row: typeof sellers.$inferSelect,
+  piiKey?: Buffer | null,
+  logger?: Logger | null,
+): Seller {
   let payoutFields: Record<string, string> | null = null;
-  if (row.payoutFieldsJson) {
+  if (row.payoutFieldsEncrypted) {
+    if (piiKey) {
+      try {
+        payoutFields = JSON.parse(decryptPii(row.payoutFieldsEncrypted, piiKey)) as Record<string, string>;
+      } catch {
+        payoutFields = null;
+        const payload = { event: "seller.payout_fields.decrypt_failed", sellerId: row.id };
+        if (logger) {
+          logger.warn(payload, "failed to decrypt seller payout fields");
+        } else {
+          console.warn(JSON.stringify(payload));
+        }
+      }
+    } else {
+      payoutFields = null;
+    }
+  } else if (row.payoutFieldsJson) {
     try {
       payoutFields = JSON.parse(row.payoutFieldsJson) as Record<string, string>;
     } catch {
       payoutFields = null;
     }
   }
-  return { id: row.id, name: row.name, wallet: row.wallet, payoutFields, createdAt: row.createdAt };
+  return {
+    id: row.id,
+    name: row.name,
+    wallet: row.wallet,
+    profileKind: row.profileKind,
+    payoutFields,
+    createdAt: row.createdAt,
+  };
+}
+
+/**
+ * Per-anchor KYC consent repository.
+ * Records which fields a seller agreed to share with which anchor.
+ * No PII values stored — only field names from SEP-9 catalogue and metadata.
+ */
+export class DrizzleKycConsentRepository implements KycConsentRepository {
+  constructor(private readonly db: DB) {}
+
+  private rowToConsent(row: typeof kycConsents.$inferSelect): KycConsent {
+    return {
+      id: row.id,
+      sellerId: row.sellerId,
+      anchorDomain: row.anchorDomain,
+      fields: JSON.parse(row.fields) as string[],
+      grantedAt: row.grantedAt,
+      revokedAt: row.revokedAt ?? null,
+      grantedVia: "session",
+      noticeVersion: row.noticeVersion,
+    };
+  }
+
+  async grant(consent: Omit<KycConsent, "id">): Promise<KycConsent> {
+    const now = Date.now();
+    const row = {
+      id: newId("cnc"),
+      sellerId: consent.sellerId,
+      anchorDomain: consent.anchorDomain,
+      fields: JSON.stringify(consent.fields),
+      grantedAt: consent.grantedAt,
+      revokedAt: consent.revokedAt ?? null,
+      grantedVia: consent.grantedVia,
+      noticeVersion: consent.noticeVersion,
+    };
+    await this.db
+      .insert(kycConsents)
+      .values(row)
+      .onConflictDoUpdate({
+        target: [kycConsents.sellerId, kycConsents.anchorDomain],
+        set: row,
+      });
+    return this.rowToConsent(row);
+  }
+
+  async active(sellerId: string, anchorDomain: string): Promise<KycConsent | null> {
+    const rows = await this.db
+      .select()
+      .from(kycConsents)
+      .where(
+        and(
+          eq(kycConsents.sellerId, sellerId),
+          eq(kycConsents.anchorDomain, anchorDomain),
+          isNull(kycConsents.revokedAt),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? this.rowToConsent(rows[0]) : null;
+  }
+
+  async revoke(sellerId: string, anchorDomain: string): Promise<void> {
+    await this.db
+      .update(kycConsents)
+      .set({ revokedAt: Date.now() })
+      .where(and(eq(kycConsents.sellerId, sellerId), eq(kycConsents.anchorDomain, anchorDomain)));
+  }
+
+  async list(sellerId: string): Promise<KycConsent[]> {
+    const rows = await this.db
+      .select()
+      .from(kycConsents)
+      .where(eq(kycConsents.sellerId, sellerId))
+      .orderBy(desc(kycConsents.grantedAt));
+    return rows.map(this.rowToConsent);
+  }
 }
 
 export class DrizzleSellerRepository implements SellerRepository {
-  constructor(private readonly db: DB) {}
+  constructor(
+    private readonly db: DB,
+    private readonly piiKey: Buffer | null = null,
+    private readonly logger?: Logger | null,
+  ) {}
 
   /** Seed (once) and return the single demo seller. */
   async ensureDefault(wallet: string, name: string): Promise<Seller> {
@@ -291,39 +406,49 @@ export class DrizzleSellerRepository implements SellerRepository {
       if (existing[0].wallet !== wallet) {
         await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
       }
-      return rowToSeller({ ...existing[0], wallet });
+      return rowToSeller({ ...existing[0], wallet }, this.piiKey, this.logger);
     }
     const now = Date.now();
     const seller: typeof sellers.$inferSelect = {
       id: newId("sel"),
       name,
       wallet,
+      profileKind: "individual",
       payoutFieldsJson: null,
+      payoutFieldsEncrypted: null,
       createdAt: now,
     };
     await this.db.insert(sellers).values(seller);
-    return rowToSeller(seller);
+    return rowToSeller(seller, this.piiKey, this.logger);
   }
 
   async findById(id: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
-    return rows[0] ? rowToSeller(rows[0]) : null;
+    return rows[0] ? rowToSeller(rows[0], this.piiKey, this.logger) : null;
   }
 
   async savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void> {
+    if (!this.piiKey) {
+      return;
+    }
+    const encrypted = encryptPii(JSON.stringify(fields), this.piiKey);
     await this.db
       .update(sellers)
-      .set({ payoutFieldsJson: JSON.stringify(fields) })
+      .set({ payoutFieldsEncrypted: encrypted, payoutFieldsJson: null })
       .where(eq(sellers.id, sellerId));
+  }
+
+  async saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void> {
+    await this.db.update(sellers).set({ profileKind: kind }).where(eq(sellers.id, sellerId));
   }
 
   async findByWallet(wallet: string): Promise<Seller | null> {
     const rows = await this.db.select().from(sellers).where(eq(sellers.wallet, wallet)).limit(1);
-    // Must go through rowToSeller — the raw row carries payoutFieldsJson but
+    // Must go through rowToSeller — the raw row carries payoutFieldsEncrypted/payoutFieldsJson but
     // not the parsed payoutFields; every other read path already does this,
     // and this is the SEP-10 login path, so skipping it would make the payout
     // reuse feature silently do nothing for wallet-logged-in sellers.
-    return rows[0] ? rowToSeller(rows[0]) : null;
+    return rows[0] ? rowToSeller(rows[0], this.piiKey, this.logger) : null;
   }
 
   async createIfAbsent(wallet: string): Promise<Seller> {
@@ -334,6 +459,28 @@ export class DrizzleSellerRepository implements SellerRepository {
     const seller = await this.findByWallet(wallet);
     if (!seller) throw new Error(`failed to create or find seller for wallet ${wallet}`);
     return seller;
+  }
+
+  /**
+   * Backfill on boot: for each row with non-null payout_fields_json and a configured key,
+   * encrypt it into payout_fields_encrypted and null the plaintext.
+   * Idempotent and never logs values.
+   */
+  async backfillLegacyPayoutFields(): Promise<void> {
+    if (!this.piiKey) return;
+    const legacyRows = await this.db
+      .select({ id: sellers.id, payoutFieldsJson: sellers.payoutFieldsJson })
+      .from(sellers)
+      .where(isNotNull(sellers.payoutFieldsJson));
+
+    for (const row of legacyRows) {
+      if (!row.payoutFieldsJson) continue;
+      const encrypted = encryptPii(row.payoutFieldsJson, this.piiKey);
+      await this.db
+        .update(sellers)
+        .set({ payoutFieldsEncrypted: encrypted, payoutFieldsJson: null })
+        .where(eq(sellers.id, row.id));
+    }
   }
 }
 
@@ -731,12 +878,19 @@ function rowToJob(row: OffRampJobRow): StoredOffRampJob {
     jobId: row.jobId,
     linkId: row.linkId,
     anchor: row.anchor,
+    sellerId: row.sellerId ?? null,
+    account: row.account ?? null,
     targetCurrency: row.targetCurrency,
     targetAmount: row.targetAmount,
     rate: row.rate,
     status: row.status as StoredOffRampJob["status"],
     externalStatus: row.externalStatus ?? null,
     lastError: row.lastError ?? null,
+    sellerTxHash: row.sellerTxHash ?? null,
+    amountIn: row.amountIn ?? null,
+    amountFee: row.amountFee ?? null,
+    stellarTransactionId: row.stellarTransactionId ?? null,
+    transferNotifiedAt: row.transferNotifiedAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -770,12 +924,19 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       jobId: job.jobId,
       linkId: job.linkId,
       anchor: job.anchor,
+      sellerId: job.sellerId,
+      account: job.account,
       targetCurrency: job.targetCurrency,
       targetAmount: job.targetAmount,
       rate: job.rate,
       status: job.status,
       externalStatus: job.externalStatus,
       lastError: job.lastError,
+      sellerTxHash: job.sellerTxHash ?? null,
+      amountIn: job.amountIn ?? null,
+      amountFee: job.amountFee ?? null,
+      stellarTransactionId: job.stellarTransactionId ?? null,
+      transferNotifiedAt: job.transferNotifiedAt,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
     });
@@ -786,9 +947,19 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
     return rows[0] ? rowToJob(rows[0]) : null;
   }
 
+  async getJobByLinkId(linkId: string): Promise<StoredOffRampJob | null> {
+    const rows = await this.db.select().from(offrampJobs).where(eq(offrampJobs.linkId, linkId)).limit(1);
+    return rows[0] ? rowToJob(rows[0]) : null;
+  }
+
+  async listJobs(): Promise<StoredOffRampJob[]> {
+    const rows = await this.db.select().from(offrampJobs).orderBy(desc(offrampJobs.createdAt));
+    return rows.map(rowToJob);
+  }
+
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId" | "transferNotifiedAt">>,
   ): Promise<void> {
     await this.db
       .update(offrampJobs)
@@ -801,22 +972,25 @@ type SellerKycRow = typeof sellerKyc.$inferSelect;
 
 /**
  * Seller-level SEP-12 KYC state. `fieldsEncrypted` is the seller's submitted
- * PII (name, email, address, ...) — encrypted with `piiKey` before it ever
+ * PII (name, email, address, ...) — encrypted with `keyring` before it ever
  * touches the database, decrypted only in-process when read back.
  */
 export class DrizzleKycRepository implements KycRepository {
   constructor(
     private readonly db: DB,
-    private readonly piiKey: Buffer,
+    private readonly keyring: Buffer | PiiKeyring,
   ) {}
 
   private rowToRecord(row: SellerKycRow): KycRecord {
     return {
       sellerId: row.sellerId,
+      account: row.account ?? null,
       customerId: row.customerId ?? null,
       status: row.status as KycStatus,
       requiredFields: JSON.parse(row.requiredFields) as KycFieldSpec[],
-      providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.piiKey)) as Record<string, string>,
+      providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.keyring)) as Record<string, string>,
+      providedFieldStatus: row.providedFieldStatus ? JSON.parse(row.providedFieldStatus) as ProvidedFieldStatus[] : [],
+      sentFields: row.sentFields ? JSON.parse(row.sentFields) as string[] : [],
       message: row.message ?? null,
       lastSyncedAt: row.lastSyncedAt ?? null,
       updatedAt: row.updatedAt,
@@ -831,10 +1005,13 @@ export class DrizzleKycRepository implements KycRepository {
   async save(record: KycRecord): Promise<void> {
     const row = {
       sellerId: record.sellerId,
+      account: record.account,
       customerId: record.customerId,
       status: record.status,
       requiredFields: JSON.stringify(record.requiredFields),
-      fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.piiKey),
+      fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.keyring),
+      providedFieldStatus: record.providedFieldStatus?.length ? JSON.stringify(record.providedFieldStatus) : null,
+      sentFields: record.sentFields?.length ? JSON.stringify(record.sentFields) : null,
       message: record.message,
       lastSyncedAt: record.lastSyncedAt,
       updatedAt: record.updatedAt,
@@ -843,6 +1020,68 @@ export class DrizzleKycRepository implements KycRepository {
       .insert(sellerKyc)
       .values(row)
       .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
+  }
+
+  async countNonPrimaryRows(): Promise<number> {
+    const primaryId = Buffer.isBuffer(this.keyring)
+      ? computeKeyId(this.keyring)
+      : this.keyring.primary.id;
+    const rows = await this.db.select({ fieldsEncrypted: sellerKyc.fieldsEncrypted }).from(sellerKyc);
+    let count = 0;
+    for (const r of rows) {
+      if (getBlobKeyId(r.fieldsEncrypted) !== primaryId) {
+        count++;
+      }
+    }
+    return count;
+  }
+}
+
+/**
+ * Sellers' SEP-10 sessions with the anchor. The token is a bearer credential,
+ * so it is stored encrypted with the same key as webhook secrets and only
+ * decrypted in-process when a call to the anchor needs it.
+ */
+export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
+  constructor(private readonly db: DB) {}
+
+  async get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null> {
+    const rows = await this.db
+      .select()
+      .from(anchorSessions)
+      .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      sellerId: row.sellerId,
+      anchorDomain: row.anchorDomain,
+      account: row.account,
+      token: decryptSecret(row.tokenEncrypted),
+      expiresAt: row.expiresAt,
+      createdAt: row.createdAt,
+    };
+  }
+
+  async save(session: AnchorSession): Promise<void> {
+    const row = {
+      sellerId: session.sellerId,
+      anchorDomain: session.anchorDomain,
+      account: session.account,
+      tokenEncrypted: encryptSecret(session.token),
+      expiresAt: session.expiresAt,
+      createdAt: session.createdAt,
+    };
+    await this.db
+      .insert(anchorSessions)
+      .values(row)
+      .onConflictDoUpdate({ target: [anchorSessions.sellerId, anchorSessions.anchorDomain], set: row });
+  }
+
+  async delete(sellerId: string, anchorDomain: string): Promise<void> {
+    await this.db
+      .delete(anchorSessions)
+      .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
   }
 }
 

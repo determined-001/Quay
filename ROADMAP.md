@@ -90,6 +90,22 @@ than as a reason to choose this.
 
 ---
 
+## A measurement worth keeping
+
+The uptime workflow asks for `*/5` and gets between 30 minutes and 3 hours.
+That was assumed to be every 5 minutes for weeks, and the assumption was used
+to justify running mainnet on a free instance — the reasoning being that a ping
+under the 15-minute idle timeout keeps it awake. Measured, every observed gap
+exceeds that timeout, so it never did.
+
+Two lessons, both cheap to forget:
+
+- **A cron expression is a request, not a guarantee.** On a free public repo it
+  is heavily coalesced under load.
+- **Nothing in this repo should depend on that schedule.** Monitoring may lag;
+  the settlement watcher must not. It does not — it resumes from a persisted
+  cursor — but the reason it does not is worth protecting.
+
 ## The standing risk
 
 The engineering here is strong, and that is the trap. The temptation is to build

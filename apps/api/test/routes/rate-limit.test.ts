@@ -188,7 +188,7 @@ describe("GET /r/:reference rate limit", () => {
 // ---------------------------------------------------------------------------
 
 describe("index.ts route wiring", () => {
-  const source = readFileSync(new URL("../../src/index.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../src/index.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
   it("applies the strict limiter to /auth", () => {
     expect(source).toMatch(/app\.use\("\/auth",\s*strictRateLimit\)/);

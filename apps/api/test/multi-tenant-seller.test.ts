@@ -80,10 +80,10 @@ describe("seller wallet resolution", () => {
     expect(() => resolve()).toThrow(/not a valid Stellar G-address/);
   });
 
-  it("never holds a key it was not given: no wallet means no keypair", async () => {
+  it("never holds a key it was not given: no wallet means no publicKey", async () => {
     setPublic();
     const { resolve } = await resolveFresh();
-    expect(resolve().keypair).toBeNull();
+    expect(resolve().publicKey).toBeNull();
   });
 });
 

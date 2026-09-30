@@ -44,3 +44,8 @@ export const cashOutSchema = z.object({
   payoutFields: z.record(z.string(), z.string()).default({}),
 });
 export type CashOutBody = z.infer<typeof cashOutSchema>;
+
+export const transferSentSchema = z.object({
+  txHash: z.string().trim().min(1).max(128),
+});
+export type TransferSentBody = z.infer<typeof transferSentSchema>;

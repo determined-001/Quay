@@ -1,4 +1,10 @@
-import type { OffRampStateRepository, StoredOffRampJob, StoredOffRampQuote } from "@checkout/core";
+import type {
+  AnchorSession,
+  AnchorSessionRepository,
+  OffRampStateRepository,
+  StoredOffRampJob,
+  StoredOffRampQuote,
+} from "@checkout/core";
 
 /**
  * In-memory `OffRampStateRepository` for tests. Two adapter instances pointed
@@ -26,12 +32,40 @@ export class FakeOffRampStateRepository implements OffRampStateRepository {
     return this.jobs.get(jobId) ?? null;
   }
 
+  async getJobByLinkId(linkId: string): Promise<StoredOffRampJob | null> {
+    for (const job of this.jobs.values()) {
+      if (job.linkId === linkId) return job;
+    }
+    return null;
+  }
+
+  async listJobs(): Promise<StoredOffRampJob[]> {
+    return [...this.jobs.values()];
+  }
+
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
     this.jobs.set(jobId, { ...job, ...patch, updatedAt: Date.now() });
+  }
+}
+
+/** In-memory `AnchorSessionRepository`, keyed like the real table. */
+export class FakeAnchorSessionRepository implements AnchorSessionRepository {
+  readonly sessions = new Map<string, AnchorSession>();
+
+  async get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null> {
+    return this.sessions.get(`${sellerId} ${anchorDomain}`) ?? null;
+  }
+
+  async save(session: AnchorSession): Promise<void> {
+    this.sessions.set(`${session.sellerId} ${session.anchorDomain}`, session);
+  }
+
+  async delete(sellerId: string, anchorDomain: string): Promise<void> {
+    this.sessions.delete(`${sellerId} ${anchorDomain}`);
   }
 }

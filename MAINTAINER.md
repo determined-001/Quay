@@ -29,6 +29,61 @@
 
 ---
 
+## Branches and repository settings (current, set 2026-09-24)
+
+**`dev` is the default branch.** Contributors fork, branch from `dev` and open
+PRs against `dev`; `CONTRIBUTING.md` says so. `main` is production: it only
+moves when a maintainer promotes `dev` (see `docs/RUNBOOK.md`, "Promotion: dev to
+main").
+
+| Branch | Role | Deploys to |
+|---|---|---|
+| `dev` | default; every PR lands here | `quay-api` (testnet) |
+| `main` | production; promoted from `dev` | `quay-api-mainnet` (public) |
+| `status` | uptime history written by `.github/workflows/uptime.yml` — never delete | nothing |
+
+No other long-lived branches. Merged feature branches are deleted.
+
+**Protection — identical on `dev` and `main`:**
+
+- PR required; 0 approvals; stale approvals dismissed on new commits.
+- Required checks `build`, `docker`, `secret-scan`, and the branch must be up to
+  date with its base before merging (`strict`).
+- Linear history, so PRs merge by **rebase** (keeps a contributor's granular
+  commits, which is what `CONTRIBUTING.md` asks for) or squash. Merge
+  commits are enabled repo-wide but the linear-history rule blocks them here.
+- All review conversations resolved before merge.
+- No force-push, no deletion.
+- Admins are exempt. A maintainer can push to `dev` directly and can sync `main`
+  back into `dev` after a hotfix. That bypass is also what skips CI's gate, so
+  use it for maintenance, not for feature work.
+
+**CI** (`.github/workflows/ci.yml`) runs on every PR and on pushes to `dev` and
+`main`. The scheduled workflows (uptime, db-backup, anchor-probe) run from the
+default branch, so their `dev` copies are the ones that execute.
+
+**Acting as the repo owner from the CLI.** Several gh accounts can be logged in
+on the maintainer machine and the active one changes. For admin actions
+(protection, labels, issue batches) pass the owner's token per command instead
+of switching the global account:
+
+```bash
+GH_TOKEN=$(gh auth token -u determined-001) gh api user --jq .login   # expect determined-001
+```
+
+**Pending, as of 2026-09-24:** promote `dev` to `main`. `dev` carries the
+per-seller anchor identity fix (`fbd262f`) and the Next.js 16.3.6 / sharp 0.35.4
+upgrade that closes two critical RCE advisories (`082a846`). Production runs
+`main` and still has Next 16.3.0 until then.
+
+**Issue backlog.** #203–#287 (85 issues, 2026-09-24) cover follow-ups to the
+anchor identity fix, the reusable KYC profile, SEP-24, anchor readiness, bugs,
+docs and ops. Titles use `<area>.<n> - title`, continuing each area's numbering
+(1 core, 2 stellar, 3 offramp, 4 api, 5 web, 6 auth, 7 distribution, 8 ops).
+The `Stellar Wave` label is no longer applied.
+
+---
+
 ## Historical plan (as written, July 2026)
 
 Working plan around the Drips wave 7 entry (≈ **Jul 21–27, 2026**). Everything

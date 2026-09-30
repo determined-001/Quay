@@ -2,6 +2,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import {
   createLinkSchema,
   cashOutSchema,
+  transferSentSchema,
   submitPaymentSchema,
   OffRampDisabledError,
   type PaymentLink,
@@ -261,7 +262,10 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       const { job, initiation } = await c.service.triggerCashOut(linkId, parsed.data, { logger: log });
       log.info({ event: "cashout.request.ok", linkId, jobId: job.jobId }, "cash-out request succeeded");
       const interactiveUrl = initiation.kind === "interactive" ? initiation.url : undefined;
-      return ctx.json({ job, interactiveUrl });
+      // The anchor's deposit instructions for the seller's own wallet to sign
+      // and send. Quay cannot send it; the withdrawal waits until they do.
+      const transfer = initiation.kind === "transfer" ? initiation.transfer : undefined;
+      return ctx.json({ job, interactiveUrl, transfer });
     } catch (err) {
       if (err instanceof OffRampDisabledError) {
         log.warn({ event: "cashout.request.disabled", linkId }, "cash-out requested but off-ramp is disabled");
@@ -269,6 +273,39 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       if (err instanceof HttpError) {
         log.warn({ event: "cashout.request.error", linkId, error: err.message }, "cash-out request failed");
+        return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
+      }
+      throw err;
+    }
+  });
+
+  // Seller reports on-chain transfer to anchor has been sent
+  app.post("/:id/cash-out/transfer-sent", strictRateLimit, auth, requireScope("offramp:initiate"), async (ctx) => {
+    const log = getLogger(ctx);
+    const linkId = ctx.req.param("id");
+    const parsed = transferSentSchema.safeParse(await safeJson(ctx));
+    if (!parsed.success) {
+      log.warn({ event: "cashout.transfer_sent.invalid", linkId, issues: parsed.error.issues }, "invalid transfer-sent body");
+      return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+    }
+    try {
+      const existing = await c.service.getLink(linkId);
+      if (!existing) return ctx.json({ error: "not_found" }, 404);
+      if (existing.link.sellerId !== ctx.get("seller").id) {
+        return ctx.json({ error: "not_found" }, 404);
+      }
+      if (!existing.link.offrampJobId) {
+        return ctx.json({ error: "no_cashout_in_progress" }, 409);
+      }
+      if (c.offrampState) {
+        await c.offrampState.updateJob(existing.link.offrampJobId, {
+          sellerTxHash: parsed.data.txHash,
+        });
+      }
+      log.info({ event: "cashout.transfer_sent.recorded", linkId, jobId: existing.link.offrampJobId, txHash: parsed.data.txHash }, "seller transfer recorded");
+      return ctx.json({ ok: true, jobId: existing.link.offrampJobId, txHash: parsed.data.txHash });
+    } catch (err) {
+      if (err instanceof HttpError) {
         return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
       }
       throw err;
