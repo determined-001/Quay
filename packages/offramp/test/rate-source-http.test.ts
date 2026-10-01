@@ -1,0 +1,171 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseStellarToml } from "../src/sep1";
+import { HttpJsonRateSource, RateUnavailableError, readPath } from "../src/rates";
+
+/**
+ * Issue 3.22 — SEP-1 must be able to say "this anchor has no SEP-38", and the
+ * HTTP rate source must be as careful as the static one.
+ */
+describe("SEP-1 no longer invents a quote server", () => {
+  const NO_QUOTE_SERVER = `
+    WEB_AUTH_ENDPOINT = "https://cowrie.exchange/auth"
+    TRANSFER_SERVER = "https://api.cowrie.exchange/sep6"
+    KYC_SERVER = "https://api.cowrie.exchange/sep12"
+    DIRECT_PAYMENT_SERVER = "https://api.cowrie.exchange/sep31"
+    SIGNING_KEY = "GSIGNINGKEY"
+  `;
+
+  it("leaves anchorQuoteServer null when the TOML does not declare one", () => {
+    // The bug this fixes: an undeclared key kept its guessed default of
+    // https://<domain>/sep38, so quote() called a URL the anchor never published.
+    const info = parseStellarToml(NO_QUOTE_SERVER, "cowrie.exchange");
+    expect(info.anchorQuoteServer).toBeNull();
+  });
+
+  it("still parses a declared ANCHOR_QUOTE_SERVER", () => {
+    const info = parseStellarToml(
+      NO_QUOTE_SERVER.replace("WEB_AUTH_ENDPOINT", 'ANCHOR_QUOTE_SERVER = "https://api.cowrie.exchange/sep38"\n  WEB_AUTH_ENDPOINT'),
+      "cowrie.exchange",
+    );
+    expect(info.anchorQuoteServer).toBe("https://api.cowrie.exchange/sep38");
+  });
+
+  it("falls back to null rather than a guess when the TOML fetch fails", async () => {
+    // The real fallback path: fetchStellarToml cannot read the document, so it
+    // substitutes a documented default layout. That layout includes a SEP-6
+    // path (the common shape) and deliberately excludes SEP-38 — there is no
+    // such thing as a default quote endpoint.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    const { fetchStellarToml } = await import("../src/sep1");
+    const info = await fetchStellarToml("cowrie.example");
+
+    expect(info.fallback).toBe(true);
+    expect(info.anchorQuoteServer).toBeNull();
+    expect(info.transferServer).toBe("https://cowrie.example/sep6");
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("HttpJsonRateSource", () => {
+  const base = {
+    url: "https://anchor.example/api/rates.json",
+    jsonPath: "data.rate",
+    anchorDomain: "anchor.example",
+    targetCurrency: "NGN",
+  };
+
+  it("reads the rate at the configured JSON path", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ data: { rate: "1610" } }), { status: 200 })),
+    );
+    const source = new HttpJsonRateSource(base);
+    const fx = await source.rate({
+      anchorDomain: "anchor.example",
+      sourceAsset: { code: "USDC" },
+      targetCurrency: "NGN",
+    });
+    expect(fx.rate).toBe("1610");
+    expect(fx.expiresAt).toBeGreaterThan(Date.now());
+  });
+
+  it("prefers an expiry the payload publishes over its own default", async () => {
+    const expires = Date.now() + 120_000;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ data: { rate: "1610" }, expiresAt: expires }), { status: 200 })),
+    );
+    const fx = await new HttpJsonRateSource(base).rate({
+      anchorDomain: "anchor.example",
+      sourceAsset: { code: "USDC" },
+      targetCurrency: "NGN",
+    });
+    expect(fx.expiresAt).toBe(expires);
+  });
+
+  it("refuses a payload whose published expiry has passed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ data: { rate: "1610" }, expiresAt: Date.now() - 1 }), { status: 200 }),
+      ),
+    );
+    await expect(
+      new HttpJsonRateSource(base).rate({
+        anchorDomain: "anchor.example",
+        sourceAsset: { code: "USDC" },
+        targetCurrency: "NGN",
+      }),
+    ).rejects.toThrow(/expired/);
+  });
+
+  it("refuses a missing path rather than quoting NaN", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: {} }), { status: 200 })));
+    await expect(
+      new HttpJsonRateSource(base).rate({
+        anchorDomain: "anchor.example",
+        sourceAsset: { code: "USDC" },
+        targetCurrency: "NGN",
+      }),
+    ).rejects.toThrow(/no value at JSON path/);
+  });
+
+  it("refuses a non-https URL at construction", () => {
+    expect(() => new HttpJsonRateSource({ ...base, url: "http://anchor.example/rates.json" })).toThrow(
+      /must be https/,
+    );
+  });
+
+  it("refuses a URL the SSRF guard rejects, at configuration time", async () => {
+    const source = new HttpJsonRateSource({
+      ...base,
+      guard: async () => ({ ok: false, reason: "resolves into a private range" }),
+    });
+    await expect(source.assertConfigured()).rejects.toThrow(/rejected by the SSRF guard/);
+  });
+
+  it("passes configuration when the guard approves the URL", async () => {
+    const guard = vi.fn(async () => ({ ok: true as const }));
+    await new HttpJsonRateSource({ ...base, guard }).assertConfigured();
+    expect(guard).toHaveBeenCalledWith(base.url);
+  });
+
+  it("refuses a rate for another anchor or currency", async () => {
+    const source = new HttpJsonRateSource(base);
+    await expect(
+      source.rate({ anchorDomain: "other.example", sourceAsset: { code: "USDC" }, targetCurrency: "NGN" }),
+    ).rejects.toThrow(/configured for anchor.example/);
+    await expect(
+      source.rate({ anchorDomain: "anchor.example", sourceAsset: { code: "USDC" }, targetCurrency: "USD" }),
+    ).rejects.toThrow(/configured for NGN/);
+  });
+
+  it("surfaces a non-2xx from the endpoint as a typed refusal", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 503 })));
+    await expect(
+      new HttpJsonRateSource(base).rate({
+        anchorDomain: "anchor.example",
+        sourceAsset: { code: "USDC" },
+        targetCurrency: "NGN",
+      }),
+    ).rejects.toBeInstanceOf(RateUnavailableError);
+  });
+});
+
+describe("readPath", () => {
+  it("walks dotted paths and numeric indices", () => {
+    const body = { a: { b: [{ c: "deep" }] }, rate: "5" };
+    expect(readPath(body, "rate")).toBe("5");
+    expect(readPath(body, "a.b.0.c")).toBe("deep");
+    expect(readPath(body, "a.missing.c")).toBeUndefined();
+    expect(readPath(body, "rate.deeper")).toBeUndefined();
+  });
+});

@@ -485,6 +485,10 @@ export const api = {
          *  clock; compare against serverNow(), never Date.now() (issue 5.22). */
         quoteExpiresAt: number;
         quoteExpiresInSeconds: number;
+        /** Whether the anchor quoted this or we computed it (issue 3.22). The
+         *  dashboard must say so: an indicative figure means the anchor sets
+         *  the final amount, not that we promise one. */
+        quoteKind?: "firm" | "indicative";
       };
       interactiveUrl?: string;
       /** The anchor's deposit instructions — the seller's wallet signs and sends this. */

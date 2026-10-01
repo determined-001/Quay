@@ -12,6 +12,7 @@ import {
   type IndicativePrice,
   type OffRampStateRepository,
   type OfframpRequirementTypes,
+  type RateSourcePort,
   type SellerPayoutRef,
   type WithdrawTypeRequirements,
 } from "@checkout/core";
@@ -20,6 +21,16 @@ import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import { listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
 import { getSep6Info, getSep6Transaction, resolveWithdrawType, startSep6Withdraw } from "./sep6";
+import { randomBytes } from "node:crypto";
+
+/**
+ * A local quote id for the no-SEP-38 path (issue 3.22). `apps/api` owns the
+ * shared `newId` helper, and this package deliberately does not depend on it, so
+ * the id shape is reproduced here rather than reaching across the workspace.
+ */
+function newQuoteId(): string {
+  return `q_${randomBytes(10).toString("hex")}`;
+}
 
 // ===========================================================================
 //  REAL ANCHOR — SEP-10 (auth) -> SEP-38 (quote) -> SEP-6 (withdraw).
@@ -67,6 +78,13 @@ export interface TestAnchorOptions {
    * Maps to the OFFRAMP_TYPE env var.
    */
   preferredWithdrawType?: string;
+  /**
+   * Where the FX rate comes from when the anchor has no SEP-38 quote server
+   * (issue 3.22). Unset and the adapter refuses to quote rather than inventing
+   * a rate: an anchor with neither ANCHOR_QUOTE_SERVER nor a configured rate
+   * source is a configuration error, not something to paper over.
+   */
+  rateSource?: RateSourcePort;
   /** Optional logger; if absent, all anchor.* events are dropped (NOOP_LOGGER). */
   logger?: Logger;
 }
@@ -85,6 +103,7 @@ export class TestAnchorOffRamp implements OffRampPort {
   private readonly homeDomain: string;
   private readonly state: OffRampStateRepository;
   private readonly logger: Logger;
+  private readonly rateSource: RateSourcePort | undefined;
   /** Operator's chosen SEP-6 withdraw type; undefined means "infer, and refuse
    *  if the anchor offers more than one". See resolveWithdrawType. */
   private readonly preferredWithdrawType: string | undefined;
@@ -105,6 +124,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     this.state = opts.state;
     this.preferredWithdrawType = opts.preferredWithdrawType;
     this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.anchor", anchor: this.anchorName });
+    this.rateSource = opts.rateSource;
   }
 
   private discover(): Promise<Sep1DiscoveryInfo> {
@@ -127,12 +147,19 @@ export class TestAnchorOffRamp implements OffRampPort {
   /**
    * Indicative prices via SEP-38 GET /prices — unauthenticated, no quote consumed.
    * Safe to call on every dashboard load without burning a firm quote (issue 3.5).
+   *
+   * An anchor with no ANCHOR_QUOTE_SERVER has no indicative prices either, and
+   * an empty list is the honest answer: the dashboard shows nothing until a
+   * rate source is configured. It must NOT guess `/sep38` and fetch it
+   * (issue 3.22) — that request cannot succeed, so it is a wasted round trip to
+   * a URL the anchor never published.
    */
   async indicativePrices(input: {
     sourceAsset: AssetRef;
     sourceAmount: string;
   }): Promise<IndicativePrice[]> {
     const d = await this.discover();
+    if (!d.anchorQuoteServer) return [];
     const entries = await getSep38Prices(d.anchorQuoteServer, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
@@ -214,47 +241,155 @@ export class TestAnchorOffRamp implements OffRampPort {
     );
 
     const jwt = await this.auth.token(input.customer);
-    const q = await getSep38Quote(d.anchorQuoteServer, jwt, {
-      sellAsset: input.sourceAsset,
-      sellAmount: input.sourceAmount,
-      buyCurrency: input.targetCurrency,
-      // Use the delivery method matching the resolved withdraw type when the
-      // anchor publishes one; fall back to omitting it so the anchor chooses.
-      buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
-    }, log);
 
-    const expiresAt = Date.parse(q.expiresAt);
+    // ─── Which quote path (issue 3.22) ───────────────────────────────────────
+    // An anchor either implements SEP-38 or it does not, and there is no third
+    // case worth guessing at: this used to call SEP-38 unconditionally, so
+    // every quote against an anchor that declares no ANCHOR_QUOTE_SERVER died
+    // on a 404 from a URL that anchor never published — and tripped the
+    // circuit breaker on the way out.
+    if (d.anchorQuoteServer) {
+      const q = await getSep38Quote(d.anchorQuoteServer, jwt, {
+        sellAsset: input.sourceAsset,
+        sellAmount: input.sourceAmount,
+        buyCurrency: input.targetCurrency,
+        // Use the delivery method matching the resolved withdraw type when the
+        // anchor publishes one; fall back to omitting it so the anchor chooses.
+        buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
+      }, log);
+
+      const expiresAt = Date.parse(q.expiresAt);
+      await this.state.saveQuote({
+        quoteId: q.id,
+        linkId: input.linkId,
+        sellAsset: input.sourceAsset,
+        sellAmount: input.sourceAmount,
+        buyCurrency: input.targetCurrency,
+        price: q.price,
+        // Persisted so initiate() withdraws on the rail this price was quoted
+        // for, rather than re-deriving it and possibly landing on another.
+        withdrawType,
+        expiresAt,
+        createdAt: Date.now(),
+      });
+
+      const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
+      const netTargetAmount = q.buyAmount;
+      const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+
+      return {
+        quoteId: q.id,
+        sourceAsset: input.sourceAsset,
+        sourceAmount: input.sourceAmount,
+        targetCurrency: input.targetCurrency,
+        targetAmount: grossTargetAmount,
+        // OffRampQuote.rate is TARGET per source (issue 5.21); SEP-38's price
+        // is the inverse. The raw price stays on the stored quote above —
+        // this is a unit conversion at the boundary, not a loss of data.
+        rate: targetPerSourceRate(q.price),
+        expiresAt,
+        fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
+        netTargetAmount,
+        // The anchor quoted this number, so it is a promise rather than a guess.
+        quoteKind: "firm",
+      };
+    }
+
+    return this.quoteWithoutSep38({ input, withdrawType, feeFixed, feePercent, log });
+  }
+
+  /**
+   * The no-SEP-38 quote path (issue 3.22).
+   *
+   * The FX rate comes from a configured {@link RateSourcePort}; the fees come
+   * from the anchor's own published /sep6/info, which `resolveWithdrawType`
+   * already returned and this adapter previously discarded. The arithmetic:
+   *
+   *   gross = amount × rate
+   *   fee   = (feeFixed + amount × feePercent/100) × rate
+   *   net   = gross − fee
+   *
+   * The fee is published in the SELL asset — that is what /sep6/info's
+   * feeFixed/feePercent mean — so it is converted at the same rate rather than
+   * added in the target currency. Both the quote and its fee are marked
+   * indicative/estimated, because the anchor, not us, decides the final amount.
+   */
+  private async quoteWithoutSep38(args: {
+    input: {
+      linkId: string;
+      sourceAsset: AssetRef;
+      sourceAmount: string;
+      targetCurrency: string;
+      customer: AnchorCustomer;
+    };
+    withdrawType: string;
+    feeFixed: number | undefined;
+    feePercent: number | undefined;
+    log: Logger;
+  }): Promise<OffRampQuote> {
+    const { input, withdrawType, feeFixed, feePercent, log } = args;
+    if (!this.rateSource) {
+      throw new Error(
+        `Anchor ${this.anchorName} declares no ANCHOR_QUOTE_SERVER and no rate source is configured ` +
+          `(OFFRAMP_RATE_SOURCE). Refusing to quote rather than inventing a rate.`,
+      );
+    }
+
+    const fx = await this.rateSource.rate({
+      anchorDomain: this.anchorName,
+      sourceAsset: input.sourceAsset,
+      targetCurrency: input.targetCurrency,
+    });
+    const rate = Number(fx.rate);
+    const amount = Number(input.sourceAmount);
+
+    const gross = amount * rate;
+    // Absent fee fields mean no fee, not NaN.
+    const feeInSellAsset = (feeFixed ?? 0) + amount * ((feePercent ?? 0) / 100);
+    const fee = feeInSellAsset * rate;
+    const net = gross - fee;
+
+    // Locally generated: there is no anchor quote id to persist, and initiate()
+    // never sends this to the anchor, where it would mean nothing.
+    const quoteId = newQuoteId();
     await this.state.saveQuote({
-      quoteId: q.id,
+      quoteId,
       linkId: input.linkId,
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
-      price: q.price,
-      // Persisted so initiate() withdraws on the rail this price was quoted
-      // for, rather than re-deriving it and possibly landing on another.
+      // Persisted in the same units the SEP-38 path uses (source per target) so
+      // every existing reader — telemetry, the job row — stays consistent.
+      price: String(1 / rate),
       withdrawType,
-      expiresAt,
+      expiresAt: fx.expiresAt,
       createdAt: Date.now(),
     });
 
-    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
-    const netTargetAmount = q.buyAmount;
-    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+    log.info(
+      {
+        event: "anchor.quote.indicative",
+        anchor: this.anchorName,
+        quoteId,
+        rateSource: fx.source,
+        rate: fx.rate,
+        feeFixed: feeFixed ?? null,
+        feePercent: feePercent ?? null,
+      },
+      "no SEP-38 on this anchor; quoted indicatively from a configured rate source",
+    );
 
     return {
-      quoteId: q.id,
+      quoteId,
       sourceAsset: input.sourceAsset,
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
-      targetAmount: grossTargetAmount,
-      // OffRampQuote.rate is TARGET per source (issue 5.21); SEP-38's price
-      // is the inverse. The raw price stays on the stored quote above —
-      // this is a unit conversion at the boundary, not a loss of data.
-      rate: targetPerSourceRate(q.price),
-      expiresAt,
-      fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
-      netTargetAmount,
+      targetAmount: gross.toFixed(4),
+      rate: String(fx.rate),
+      expiresAt: fx.expiresAt,
+      fee: { amount: fee.toFixed(4), currency: input.targetCurrency, source: "estimated" },
+      netTargetAmount: net.toFixed(4),
+      quoteKind: "indicative",
     };
   }
 
@@ -278,6 +413,11 @@ export class TestAnchorOffRamp implements OffRampPort {
       (await resolveWithdrawType(dsc.transferServer, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
         .type;
 
+    // Deliberately no quote_id here, on both paths (issue 3.22). SEP-6 has no
+    // quote_id parameter, and on the no-SEP-38 path the stored quote id is one
+    // WE generated — sending it to the anchor would be handing it an id it
+    // never issued and never agreed to. What the anchor does quote is the
+    // amount and the type, both of which are below.
     const withdraw = await startSep6Withdraw(dsc.transferServer, jwt, {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,

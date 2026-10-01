@@ -64,7 +64,11 @@ export class AnchorDiscovery {
               webAuthEndpoint: `${this.fallbackBaseUrl}/auth`,
               transferServer: `${this.fallbackBaseUrl}/sep6`,
               transferServerSep24: `${this.fallbackBaseUrl}/sep24`,
-              anchorQuoteServer: `${this.fallbackBaseUrl}/sep38`,
+              // Left null (issue 3.19/3.22): the other paths are a documented
+              // fallback layout, but there is no such thing as a default SEP-38
+              // endpoint. Guessing one makes a broken TOML look like an anchor
+              // without SEP-38, and quotes a URL nobody published.
+              anchorQuoteServer: null,
               kycServer: `${this.fallbackBaseUrl}/sep12`,
               homeDomain: this.homeDomain,
             }

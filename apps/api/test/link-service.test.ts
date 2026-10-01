@@ -307,6 +307,7 @@ describe("LinkService.triggerCashOut — discriminated union return", () => {
       expiresAt: Date.now() + 60_000,
       fee: { amount: "16.50", currency: input.targetCurrency, source: "anchor" },
       netTargetAmount: "1633.50",
+      quoteKind: "indicative",
     });
     offramp.initiateImpl = async () => ({
       kind: "interactive",
@@ -442,6 +443,7 @@ describe("offramp.transfer_required webhook (4.22)", () => {
       expiresAt: Date.now() + 300000,
       fee: { amount: "0", currency: "NGN", source: "estimated" },
       netTargetAmount: "16500",
+      quoteKind: "indicative",
     });
     offramp.initiateImpl = async () => ({ kind: "transfer", jobId: "job_1", transfer });
 
@@ -483,6 +485,7 @@ describe("offramp.transfer_required webhook (4.22)", () => {
       expiresAt: Date.now() + 300000,
       fee: { amount: "0", currency: "NGN", source: "estimated" },
       netTargetAmount: "16500",
+      quoteKind: "indicative",
     });
     offramp.initiateImpl = async () => ({ kind: "fields", jobId: "job_1" });
 

@@ -880,7 +880,11 @@ export class LinkService {
     body: CashOutBody,
     opts: ServiceCallOptions = {},
   ): Promise<{
-    job: OffRampJob & { quoteExpiresAt: number; quoteExpiresInSeconds: number };
+    job: OffRampJob & {
+      quoteExpiresAt: number;
+      quoteExpiresInSeconds: number;
+      quoteKind: OffRampQuote["quoteKind"];
+    };
     initiation: OffRampInitiation;
   }> {
     const baseLog = (opts.logger ?? this.deps.logger!);
@@ -1061,7 +1065,10 @@ export class LinkService {
     const quoteExpiresInSeconds = Math.max(0, Math.floor((quote.expiresAt - now) / 1000));
 
     return {
-      job: { ...job, quoteExpiresAt: quote.expiresAt, quoteExpiresInSeconds },
+      // quoteKind rides along so the dashboard can tell the seller whether this
+      // number is the anchor's promise or our own arithmetic (issue 3.22). An
+      // indicative quote is a real quote; it is just not the anchor's word.
+      job: { ...job, quoteExpiresAt: quote.expiresAt, quoteExpiresInSeconds, quoteKind: quote.quoteKind },
       initiation,
     };
   }

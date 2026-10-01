@@ -110,6 +110,18 @@ export interface PayoutFieldDescriptor {
 
 export type OffRampMode = "seller_initiated" | "inline";
 
+/**
+ * Whether a quote is a promise by the anchor or our own arithmetic (issue 3.22).
+ *
+ * `firm` — the anchor quoted it (SEP-38 POST /quote). The number is what the
+ * seller receives unless the anchor breaks it.
+ *
+ * `indicative` — we computed it from a configured rate source plus the fees the
+ * anchor published in /sep6/info. The anchor sets the final amount, so the
+ * seller must be told the figure is an estimate before they commit, not after.
+ */
+export type OffRampQuoteKind = "firm" | "indicative";
+
 export interface OffRampQuote {
   quoteId: string;
   sourceAsset: AssetRef;
@@ -129,6 +141,55 @@ export interface OffRampQuote {
   expiresAt: number; // epoch ms — after this the quote is void
   fee: { amount: string; currency: string; source: "anchor" | "estimated" };
   netTargetAmount: string; // what the seller actually receives
+  /**
+   * Required, not optional: every adapter must state which kind of number it is
+   * handing a seller, and the dashboard renders the disclaimer from it (3.22).
+   */
+  quoteKind: OffRampQuoteKind;
+}
+
+/**
+ * One FX rate observation. The direction is stated once, here, because this
+ * codebase has historically mixed two (issue 5.21): SEP-38's `price` is SOURCE
+ * per TARGET, while {@link OffRampQuote.rate} is TARGET per SOURCE.
+ */
+export interface FxRate {
+  /** TARGET units per 1 SOURCE unit. Multiply sourceAmount by this for the
+   *  gross target amount. */
+  rate: string;
+  /** Where it came from, e.g. "sep38", "static", "https://anchor.example/rates".
+   *  Logged and persisted; never assumed to be authoritative. */
+  source: string;
+  asOf: number; // epoch ms the rate was observed
+  /** Epoch ms. A rate source must be willing to say when it stops being true —
+   *  an open-ended rate is a guess wearing a timestamp. */
+  expiresAt: number;
+}
+
+/**
+ * Where an FX rate comes from when the anchor has no SEP-38 quote server.
+ *
+ * Real anchors overwhelmingly do not implement `ANCHOR_QUOTE_SERVER` (see
+ * ROADMAP.md), and there is no standard alternative: the rate is the product's
+ * unsolved problem, not a configuration detail. So it is a port — an anchor
+ * integration plugs in here and nothing in the engine has to know which.
+ *
+ * Implementations must refuse rather than guess. A stale rate quoted as though
+ * it were live is worse than no quote at all, because the seller commits to a
+ * number the anchor never agreed to.
+ */
+export interface RateSourcePort {
+  /**
+   * Units of `targetCurrency` per 1 unit of `sourceAsset` (see {@link FxRate}).
+   *
+   * Throws when no rate is available, when the rate it holds has expired, or
+   * when it is not configured for this anchor.
+   */
+  rate(input: {
+    anchorDomain: string;
+    sourceAsset: AssetRef;
+    targetCurrency: string;
+  }): Promise<FxRate>;
 }
 
 /** Thrown when a quote's expiresAt has passed or is unparsable (NaN). */

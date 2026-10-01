@@ -514,6 +514,7 @@ class FlakyOffRamp implements OffRampPort {
       expiresAt: Date.now() + 60_000,
       fee: { amount: "165", currency: "NGN", source: "estimated" },
       netTargetAmount: "16335",
+      quoteKind: "indicative",
     };
   }
   async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampInitiation> {

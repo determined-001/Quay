@@ -59,6 +59,10 @@ interface QuotePreview {
   targetCurrency: string;
   /** epoch ms when this quote expires on the anchor side */
   expiresAt?: number;
+  /** The anchor quoted this number, or we computed it (issue 3.22). Absent is
+   *  treated as firm: responses from before this field existed were always the
+   *  anchor's own quote. */
+  quoteKind?: "firm" | "indicative";
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +327,7 @@ export default function CashOutModal({
         sourceAmount: linkAmount,
         targetAmount: j.targetAmount,
         targetCurrency: j.targetCurrency,
+        quoteKind: j.quoteKind,
       };
       setQuote(preview);
       // The anchor's real quote expiry, straight from the response. When the
@@ -907,6 +912,23 @@ function QuoteSummary({
 
       <Row label="You send" value={`${quote.sourceAmount} USDC`} mono />
       <Row label={`You receive (~${targetCurrency})`} value={`${quote.targetAmount} ${targetCurrency}`} mono accent />
+
+      {/* Issue 3.22: when the anchor has no SEP-38, this number is our
+          arithmetic on a configured rate plus the anchor's published fees, not
+          the anchor's promise. The seller hears that here, at the moment they
+          commit — not when the payout lands at a different figure. */}
+      {quote.quoteKind === "indicative" && (
+        <div
+          style={{
+            marginTop: 10,
+            fontSize: 12,
+            color: "var(--amber)",
+          }}
+          role="status"
+        >
+          Indicative rate — the anchor sets the final amount.
+        </div>
+      )}
 
       {countdown !== null && (
         <div

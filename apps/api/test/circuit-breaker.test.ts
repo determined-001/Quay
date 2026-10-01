@@ -21,6 +21,7 @@ const fakeQuote: OffRampQuote = {
   expiresAt: Date.now() + 60_000,
   fee: { amount: "0", currency: "USD", source: "estimated" },
   netTargetAmount: "1",
+  quoteKind: "indicative",
 };
 
 const fakeJob: OffRampJob = {

@@ -8,10 +8,32 @@ import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-
 
 // ---------------------------------------------------------------------------
 //  Issue 5.24 — seller-chosen SEP-6 withdrawal type. Offline: every anchor
-//  response is a stubbed fetch, keyed by URL. The stellar.toml fetch is made
-//  to fail so AnchorDiscovery falls back to the configured base URL, which
-//  keeps each test's endpoints unique and stubbable.
+//  response is a stubbed fetch, keyed by URL. Each test gets its own domain and
+//  base URL so the module-level SEP-1 and SEP-6 /info caches stay keyed apart.
+//
+//  The TOML is served (not failed) and declares ANCHOR_QUOTE_SERVER, because
+//  these tests are about the SEP-38 quote path. Since issue 3.22 an anchor that
+//  declares no quote server is not quoted at all rather than having one guessed
+//  at it, and SEP-1 stopped inventing `https://<domain>/sep38` on fallback.
 // ---------------------------------------------------------------------------
+
+/** Base URL of the anchor the current test is standing in for. */
+let currentBase = "";
+
+/** A SEP-1 TOML declaring what this suite exercises, pointed at `base`. */
+function tomlFor(base: string): string {
+  return [
+    'VERSION = "2.0.0"',
+    `NETWORK_PASSPHRASE = "${Networks.TESTNET}"`,
+    `WEB_AUTH_ENDPOINT = "${base}/auth"`,
+    `TRANSFER_SERVER = "${base}/sep6"`,
+    `TRANSFER_SERVER_SEP0024 = "${base}/sep24"`,
+    `KYC_SERVER = "${base}/sep12"`,
+    `ANCHOR_QUOTE_SERVER = "${base}/sep38"`,
+    'SIGNING_KEY = "GSIGNINGKEY"',
+    "",
+  ].join("\n");
+}
 
 /** testanchor's live /sep6/info shape for USDC — two withdrawal types with
  *  per-type fields — PLUS a decoy asset-level `fields` map. SEP-6 does not
@@ -53,8 +75,8 @@ const SEP38_QUOTE_BODY = {
   expires_at: new Date(Date.now() + 300_000).toISOString(),
 };
 
-/** Fetch stub: toml → network failure (forces discovery fallback), /info and
- *  the SEP endpoints → canned JSON. Records every requested URL. */
+/** Fetch stub: toml → a declared SEP-1 document, /info and the SEP endpoints →
+ *  canned JSON. Records every requested URL. */
 function stubAnchorFetch(): string[] {
   const requested: string[] = [];
   vi.stubGlobal(
@@ -63,7 +85,12 @@ function stubAnchorFetch(): string[] {
       const url = String(input);
       requested.push(url);
       if (url.includes("/.well-known/stellar.toml")) {
-        throw new Error("offline test: no toml");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({}),
+          text: async () => tomlFor(currentBase),
+        } as Response;
       }
       const body = url.includes("/info")
         ? INFO_BODY
@@ -90,7 +117,9 @@ function wiring(preferredWithdrawType?: string) {
   // /info cache are module-level and keyed by domain/URL.
   const n = ++counter;
   const homeDomain = `withdraw-type-${n}.test`;
-  const discovery = new AnchorDiscovery({ homeDomain, fallbackBaseUrl: `https://anchor-wt-${n}.test` });
+  const fallbackBaseUrl = `https://anchor-wt-${n}.test`;
+  currentBase = fallbackBaseUrl;
+  const discovery = new AnchorDiscovery({ homeDomain, fallbackBaseUrl });
   const sessions = new FakeAnchorSessionRepository();
   const auth = new SellerAnchorAuth({ discovery, sessions, networkPassphrase: Networks.TESTNET });
   const state = new FakeOffRampStateRepository();

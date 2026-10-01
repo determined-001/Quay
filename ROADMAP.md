@@ -29,6 +29,18 @@ shape production does not have. Fees are available from `/sep6/info`
 **That unsolved FX quote is the product.** Payment links, memo correlation, the
 watcher, the widget, the receipts — all of it is scaffolding around that hole.
 
+> **Partial answer landed in 3.22 (#219).** `RateSourcePort` in `@checkout/core`
+> is where an anchor's rate plugs in, with three implementations
+> (`Sep38RateSource`, `StaticRateSource`, `HttpJsonRateSource`) and fees taken
+> from the anchor's own `/sep6/info`. An anchor with no `ANCHOR_QUOTE_SERVER`
+> is now quotable — indicatively, and labelled as such to the seller — instead of
+> being quoted against a guessed `/sep38` URL that 404s.
+>
+> What is *not* solved: which production anchor, and whose rate, an operator
+> should trust. That is an integration and commercial question. A stale rate
+> quoted as live is worse than no quote at all, so every rate source is required
+> to say when it expires, and refuses rather than guesses.
+
 ---
 
 ## The reframe

@@ -189,6 +189,7 @@ export class FakeOffRampPort implements OffRampPort {
       expiresAt: Date.now() + 300_000,
       fee: { amount: "0", currency: input.targetCurrency, source: "estimated" },
       netTargetAmount: targetAmount,
+      quoteKind: "indicative",
     };
   }
 

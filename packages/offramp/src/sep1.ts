@@ -27,8 +27,17 @@ export interface Sep1DiscoveryInfo {
   transferServer: string;
   /** SEP-24 interactive transfer server. */
   transferServerSep24: string;
-  /** SEP-38 quote server. */
-  anchorQuoteServer: string;
+  /**
+   * SEP-38 quote server, or null when the anchor declares none.
+   *
+   * Nullable since issue 3.19/3.22, and the nullability is the point: this
+   * used to fall back to a guessed `https://<homeDomain>/sep38`, so an anchor
+   * with no SEP-38 looked like it had one and every quote died on an opaque
+   * 404 from a URL the anchor never published. "The anchor does not quote" is
+   * information; a fabricated URL is not. Callers that need a quote either use
+   * a configured RateSourcePort or refuse.
+   */
+  anchorQuoteServer: string | null;
   /** SEP-12 KYC server. Anchors that omit it serve KYC from the transfer server. */
   kycServer: string;
   /** The account that signs SEP-10 challenges. Null when the anchor omits it. */
@@ -158,7 +167,10 @@ function fallbackInfo(homeDomain: string): Sep1DiscoveryInfo {
     webAuthEndpoint: `https://${homeDomain}/auth`,
     transferServer: `https://${homeDomain}/sep6`,
     transferServerSep24: `https://${homeDomain}/sep24`,
-    anchorQuoteServer: `https://${homeDomain}/sep38`,
+    // NOT guessed (issue 3.19/3.22). An undeclared SEP-38 endpoint is absent,
+    // not "https://<domain>/sep38" — the guess produced a 404 on every quote
+    // for every real anchor, and tripped the circuit breaker on top of it.
+    anchorQuoteServer: null,
     kycServer: `https://${homeDomain}/sep12`,
     signingKey: null,
     networkPassphrase: null,
