@@ -106,14 +106,14 @@ Not a blind flag flip, though — some older wallets and exchanges reject `M...`
 destinations, and a buyer who cannot pay at all is worse off than one whose
 payment lands unattributed.
 
-- [ ] Set `CORRELATION=muxed` on the testnet service and pay a link from
+- [x] Set `CORRELATION=muxed` on the testnet service and pay a link from
       Freighter, Lobstr, xBull, and one exchange withdrawal. Record what
       accepts `M...`. This is the first real use of the dev/main split.
-- [ ] Decide from that evidence: muxed default, memo default with muxed opt-in,
-      or per-link choice.
-- [ ] Separately: a buyer can always pay the bare `G...` by hand, so the
+- [x] Decide from that evidence: muxed default, memo default with muxed opt-in,
+      or per-link choice (see `docs/MUXED-CORRELATION-EVALUATION.md`).
+- [x] Separately: a buyer can always pay the bare `G...` by hand, so the
       unmatched state survives any scheme. Decide whether the seller should be
-      shown payments Quay could not attribute.
+      shown payments Quay could not attribute (reconciliation schema designed in `docs/MUXED-CORRELATION-EVALUATION.md`).
 
 - [ ] **USDC is still untested on mainnet.** The first payment was native XLM,
       which needs no trustline. USDC exercises `resolveAsset` with an issuer and

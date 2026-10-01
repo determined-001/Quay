@@ -42,5 +42,8 @@ export const cashOutSchema = z.object({
   targetCurrency: z.string().trim().length(3).toUpperCase().default("NGN"),
   // Opaque payout fields handed to the anchor adapter (e.g. bank, account number).
   payoutFields: z.record(z.string(), z.string()).default({}),
+  // SEP-6 withdrawal type the seller chose (issue 5.24). Optional: adapters
+  // fall back to the operator default, and a single-type anchor needs none.
+  withdrawType: z.string().trim().min(1).optional(),
 });
 export type CashOutBody = z.infer<typeof cashOutSchema>;
