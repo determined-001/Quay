@@ -18,11 +18,23 @@ import {
   TestAnchorKyc,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository } from "@checkout/core";
+import type {
+  KycPort,
+  Logger,
+  OffRampPort,
+  OffRampStateRepository,
+  OffRampTelemetryRepository,
+  RailPort,
+  WebhookRepository,
+} from "@checkout/core";
+import { KycConsentRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
-import { parsePiiKey } from "../crypto/pii";
+import { parsePiiKey, parsePiiKeyring } from "../crypto/pii";
+import { metrics } from "../metrics";
 import { createLogger } from "../logger";
+import { WebhookSender } from "./webhook-sender";
+import { KycEvents } from "./kyc-events";
 import {
   DrizzleLinkRepository,
   DrizzleSellerRepository,
@@ -34,6 +46,7 @@ import {
   DrizzleOfframpTelemetryRepository,
   DrizzleApiKeyRepository,
   DrizzleAnchorSessionRepository,
+  DrizzleKycConsentRepository,
 } from "../repos/index";
 import { LinkService, AnchorHealth } from "./link-service";
 import {
@@ -51,8 +64,8 @@ import { SessionIssuer } from "./session";
 import type { StellarTomlConfig } from "../routes/well-known";
 import { CircuitBreakerOffRamp } from "./circuit-breaker";
 import { WebhookWorker } from "../worker/webhook-worker";
-import { WebhookSender } from "./webhook-sender";
 import { assertKeyConfigured } from "./secret-crypto";
+import { runKycRetentionSweep } from "./kyc-retention";
 
 export interface Container {
   service: LinkService;
@@ -63,6 +76,10 @@ export interface Container {
   apiKeys: DrizzleApiKeyRepository;
   db: DB;
   kyc: KycPort;
+  /** Per-anchor KYC consent repository. */
+  kycConsents: KycConsentRepository;
+  /** The anchor's home domain (e.g. "testanchor.stellar.org") for consent tracking. Null when no real anchor. */
+  anchorDomain: string | null;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
@@ -121,7 +138,14 @@ export async function createContainer(): Promise<Container> {
   });
 
   const { db, client } = createDb(env.databaseUrl, env.databaseAuthToken);
-  await bootstrap(client);
+  // A real anchor's home domain attributes pre-4.24 seller_kyc rows to it; with
+  // none configured they stay "legacy" and are never reused for a customer id.
+  await bootstrap(client, {
+    kycAnchorDomain:
+      env.offramp === "testanchor" || env.offramp === "anchor"
+        ? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN
+        : null,
+  });
 
   const piiKey = env.kycEncryptionKey ? parsePiiKey(env.kycEncryptionKey) : null;
   if (!piiKey) {
@@ -140,6 +164,7 @@ export async function createContainer(): Promise<Container> {
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
+  const kycConsentsRepo = new DrizzleKycConsentRepository(db);
 
   // Optional. Quay is multi-tenant: a seller signs in with their own wallet
   // over SEP-10, that address becomes their identity AND their payout
@@ -157,7 +182,19 @@ export async function createContainer(): Promise<Container> {
   const sellerWallet = seller.publicKey;
   if (sellerWallet) await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
 
-  const rail = new StellarRail(stellar);
+  const realRail = new StellarRail(stellar);
+  // E2E test mode runs with no network at all (issue 5.7): keep the pure
+  // parts of the rail (SEP-7 building, address validation) and skip only the
+  // Horizon account/trustline preflight. The preflight's own behavior is
+  // covered by unit tests; env.ts guarantees this branch cannot be reached
+  // in production or on the public network.
+  const rail: RailPort = env.e2eTestMode
+    ? {
+        buildRequest: (input) => realRail.buildRequest(input),
+        isValidDestination: (address) => realRail.isValidDestination(address),
+        assertCanReceive: async () => {},
+      }
+    : realRail;
   // Polling watcher gets the retry / fallback / degraded-tracking wrapper
   // (issue #10). The streaming path has its own reconnect handling.
   const pollingWatcher = new HorizonWatcher({
@@ -172,7 +209,10 @@ export async function createContainer(): Promise<Container> {
       : pollingWatcher;
   const anchor = createAnchor(db, logger, stellar.networkPassphrase);
   const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
-  const kyc = createKyc(anchor, db);
+  const kycAnchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
+  const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
+  const kyc = createKyc(anchor, db, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain);
+  const anchorDomain = anchor?.auth.anchorDomain ?? null;
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
   // off-ramp the probe is disabled and short-circuits to "always available" so
@@ -225,7 +265,7 @@ export async function createContainer(): Promise<Container> {
   // leaves retry scheduling to the queue, so its maxAttempts is deliberately 1.
   const webhookWorker = new WebhookWorker(
     webhooksRepo,
-    new WebhookSender(webhooksRepo, { maxAttempts: 1, logger }),
+    webhookSender,
     { log: (m) => console.log(`[webhook] ${m}`) },
   );
   const metricsToken = resolveMetricsToken();
@@ -249,6 +289,7 @@ export async function createContainer(): Promise<Container> {
 
   let stopPoller: (() => void) | null = null;
   let stopRevocationSweep: (() => void) | null = null;
+  let stopRetentionSweep: (() => void) | null = null;
   let stopProbe: (() => void) | null = null;
 
   return {
@@ -260,6 +301,8 @@ export async function createContainer(): Promise<Container> {
     apiKeys: apiKeysRepo,
     db,
     kyc,
+    kycConsents: kycConsentsRepo,
+    anchorDomain,
     anchorAuth: anchor?.auth ?? null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
@@ -276,8 +319,17 @@ export async function createContainer(): Promise<Container> {
       allowedOrigins: env.corsOrigins,
     },
     start() {
-      logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
-      loop.start();
+      if (env.e2eTestMode) {
+        // The watcher is the one component that reaches out to Horizon on its
+        // own; in e2e mode payments are injected through /__test__/pay at the
+        // same applyMatch boundary, so the loop never starts and the process
+        // makes no outbound calls. Everything downstream of a matched payment
+        // (state machine, webhooks, mock off-ramp settlement) still runs.
+        logger.warn({ event: "watcher.skipped.e2e" }, "E2E_TEST_MODE=1 - ledger watcher not started");
+      } else {
+        logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
+        loop.start();
+      }
       webhookWorker.start();
       // With no off-ramp there is nothing to advance: no link can reach
       // offramp_pending, so the poller would query an always-empty set on
@@ -293,12 +345,28 @@ export async function createContainer(): Promise<Container> {
         60 * 60 * 1000, // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
       );
       stopRevocationSweep = () => clearInterval(sweepTimer);
+
+      if (env.kycRetentionDays > 0) {
+        const sweepKyc = () => {
+          void runKycRetentionSweep({
+            db,
+            retentionDays: env.kycRetentionDays,
+            logger,
+          }).catch((err) => {
+            logger.error({ err }, "kyc retention sweep error");
+          });
+        };
+        // Daily sweep interval (24 hours)
+        const retentionTimer = setInterval(sweepKyc, 24 * 60 * 60 * 1000);
+        stopRetentionSweep = () => clearInterval(retentionTimer);
+      }
     },
     async stop() {
       await loop.stop();
       webhookWorker.stop();
       stopPoller?.();
       stopRevocationSweep?.();
+      stopRetentionSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();
       stopProbe?.();
       stopPoller = null;
@@ -443,15 +511,52 @@ function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepositor
   });
 }
 
-function createKyc(anchor: AnchorWiring | null, db: DB): KycPort {
+function createKyc(
+  anchor: AnchorWiring | null,
+  db: DB,
+  sellersRepo: DrizzleSellerRepository,
+  webhooks?: WebhookRepository,
+  sender?: WebhookSender,
+  anchorDomain?: string,
+): KycPort {
   if (!anchor) {
     // No real anchor, nothing to be compliant with. For "none" there is no
     // cash-out to gate at all; for "mock" it never gates the simulated one.
     return new NoKycRequired();
   }
   // env.kycEncryptionKey is guaranteed set whenever OFFRAMP is testanchor/anchor (see env.ts).
-  const repo = new DrizzleKycRepository(db, parsePiiKey(env.kycEncryptionKey as string));
-  return new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo });
+  const keyring = parsePiiKeyring(
+    env.kycEncryptionKey as string,
+    env.kycEncryptionKeyPrevious,
+  );
+  const repo = new DrizzleKycRepository(db, keyring);
+  repo
+    .countNonPrimaryRows()
+    .then((count) => {
+      metrics.kycNonPrimaryKeyRows.set(count);
+    })
+    .catch(() => {
+      // ignore DB errors during initial metric probe if tables are not yet migrated
+    });
+  // Profile repository for reusable SEP-9 fields — uses the seller's payout fields
+  const profileRepo = {
+    async get(sellerId: string) {
+      const seller = await sellersRepo.findById(sellerId);
+      if (!seller || !seller.payoutFields) return null;
+      return { fields: seller.payoutFields };
+    },
+  };
+  const baseKyc = new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo, profileRepo });
+  if (webhooks && sender && anchorDomain) {
+    return new KycEvents({
+      inner: baseKyc,
+      repo,
+      webhooks,
+      sender,
+      anchorDomain,
+    });
+  }
+  return baseKyc;
 }
 
 /**

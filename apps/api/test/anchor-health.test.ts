@@ -16,7 +16,7 @@ import {
   type OffRampStateRepository,
   type OffRampTelemetryRepository,
   type PaymentLink,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type RailPort,
   type Seller,
   type StoredOffRampJob,
@@ -536,7 +536,7 @@ class FakeOffRampStateForAnchor implements OffRampStateRepository {
     patch: Partial<
       Pick<
         StoredOffRampJob,
-        "targetAmount" | "status" | "externalStatus" | "lastError"
+        "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt"
       >
     >,
   ): Promise<void> {
@@ -557,11 +557,14 @@ class FakeKycAlwaysAcceptedForAnchor implements KycPort {
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      anchorDomain: "testanchor.stellar.org",
       account,
       customerId: null,
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: Date.now(),
@@ -613,8 +616,8 @@ class FlakyOffRamp implements OffRampPort {
       rate: "1650",
     };
   }
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return { types: [], defaultType: null };
   }
 }
 
@@ -715,8 +718,8 @@ describe("LinkService with AnchorHealth", () => {
         offrampCalls.push("status");
         throw new Error("should not be called when breaker is open");
       }
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       }
     }
 
@@ -968,8 +971,8 @@ describe("LinkService.pollCashOuts attribution", () => {
           rate: "1650",
         };
       },
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       },
     };
     const service = new LinkService({
@@ -1104,8 +1107,8 @@ describe("LinkService.pollCashOuts attribution", () => {
         statusCalls++;
         throw new Error("anchor 502");
       },
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       },
     };
     const service = new LinkService({

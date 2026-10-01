@@ -24,9 +24,11 @@ import {
   api,
   CheckoutError,
   describeError,
+  serverNow,
   type OfframpRequirements,
   type PayoutFieldDescriptor,
 } from "../../lib/api";
+import { fmtCountdown, quoteMsRemaining } from "../../lib/quote-countdown";
 import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
 import {
   checkPaymentPreflight,
@@ -96,12 +98,20 @@ function mask(v: string): string {
   return `${"*".repeat(v.length - 4)}${v.slice(-4)}`;
 }
 
-/** Format seconds as "m:ss". */
-function fmtCountdown(ms: number): string {
-  const s = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${String(sec).padStart(2, "0")}`;
+// Countdown math lives in lib/quote-countdown.ts (issue 5.22), where the
+// node-environment tests can reach it.
+
+/** Human labels for the SEP-6 withdrawal types we know; anything else shows
+ *  the anchor's raw name rather than pretending to know what it means. */
+function withdrawTypeLabel(name: string): string {
+  switch (name) {
+    case "bank_account":
+      return "Bank transfer";
+    case "cash":
+      return "Cash pickup";
+    default:
+      return name;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +129,10 @@ export default function CashOutModal({
 }: Props) {
   const [step, setStep] = useState<ModalStep>("loading");
   const [requirements, setRequirements] = useState<OfframpRequirements | null>(null);
+  // The seller's chosen SEP-6 withdrawal rail (issue 5.24). Preselected from
+  // the API's defaultType; null when the anchor offers several and the
+  // operator set no default — then choosing is part of the form.
+  const [withdrawType, setWithdrawType] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [quote, setQuote] = useState<QuotePreview | null>(null);
@@ -190,6 +204,7 @@ export default function CashOutModal({
       .then((r) => {
         if (cancelled) return;
         setRequirements(r);
+        setWithdrawType(r.defaultType);
         setStep("form");
       })
       .catch((e: unknown) => {
@@ -203,9 +218,17 @@ export default function CashOutModal({
   }, [linkId]);
 
   // ---- countdown tick ------------------------------------------------------
-  const startCountdown = useCallback((expiresAt: number) => {
+  // `expiresAt` is the anchor's own TTL as a SERVER timestamp, so the clock it
+  // is measured against is serverNow(), not the phone's. `unknown` because an
+  // absent or malformed expiry must mean "no countdown", never a guessed one
+  // (issue 5.22).
+  const startCountdown = useCallback((expiresAt: unknown) => {
     if (countdownRef.current) clearInterval(countdownRef.current);
-    const tick = () => setCountdown(expiresAt - Date.now());
+    if (quoteMsRemaining(expiresAt, serverNow()) === null) {
+      setCountdown(null);
+      return;
+    }
+    const tick = () => setCountdown(quoteMsRemaining(expiresAt, serverNow()));
     tick();
     countdownRef.current = setInterval(tick, 500);
   }, []);
@@ -275,7 +298,8 @@ export default function CashOutModal({
 
   async function handleSubmit() {
     if (!requirements) return;
-    const errs = validate(requirements.descriptors, values, requirements.savedFields);
+    if (types.length > 1 && !withdrawType) return; // the picker gates submit
+    const errs = validate(descriptors, values, requirements.savedFields);
     if (Object.keys(errs).length > 0) {
       setFieldErrors(errs);
       return;
@@ -283,7 +307,13 @@ export default function CashOutModal({
     setStep("confirming");
     setErrorMsg(null);
     try {
-      const result = await api.cashOut(linkId, targetCurrency, buildPayoutFields());
+      const result = await api.cashOut(
+        linkId,
+        targetCurrency,
+        buildPayoutFields(),
+        undefined,
+        withdrawType ?? undefined,
+      );
       if (result.interactiveUrl) {
         openInteractive(result.interactiveUrl);
       }
@@ -295,10 +325,9 @@ export default function CashOutModal({
         targetCurrency: j.targetCurrency,
       };
       setQuote(preview);
-      // Quote expiry not surfaced by the current API response; show a
-      // fixed 5-minute window matching the mock/testanchor default TTL.
-      const expiresAt = Date.now() + 5 * 60_000;
-      startCountdown(expiresAt);
+      // The anchor's real quote expiry, straight from the response. When the
+      // API sends none, startCountdown shows no countdown at all.
+      startCountdown(j.quoteExpiresAt);
       // Cash-out is already initiated at this point (quote+initiate are atomic
       // in the current API). If the anchor now needs the asset, keep the modal
       // open for the seller to send it; otherwise go straight to success.
@@ -330,8 +359,12 @@ export default function CashOutModal({
   }
 
   // ---- derived state -------------------------------------------------------
-  const descriptors = requirements?.descriptors ?? [];
+  const types = requirements?.types ?? [];
+  // Descriptors follow the chosen rail: each SEP-6 type carries its own field
+  // set (issue 5.24), so switching the radio re-renders the form.
+  const descriptors = types.find((t) => t.name === withdrawType)?.descriptors ?? [];
   const savedFields = requirements?.savedFields ?? null;
+  const needsTypeChoice = types.length > 1 && !withdrawType;
 
   // Determine which required fields are unmet to show the disabled explanation.
   const unmetRequired = descriptors.filter((d) => {
@@ -340,7 +373,7 @@ export default function CashOutModal({
     const hasSaved = savedFields && savedFields[d.name];
     return !typed && !hasSaved;
   });
-  const canSubmit = unmetRequired.length === 0;
+  const canSubmit = unmetRequired.length === 0 && !needsTypeChoice;
 
   // ---- render --------------------------------------------------------------
   return (
@@ -464,8 +497,53 @@ export default function CashOutModal({
               → {targetCurrency}
             </div>
 
+            {/* Rail picker: which SEP-6 withdrawal type the money leaves on is
+                the seller's choice, not the operator's (issue 5.24). Only
+                rendered when the anchor actually offers more than one. */}
+            {types.length > 1 && (
+              <fieldset
+                style={{
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  padding: "10px 14px 12px",
+                  marginBottom: 16,
+                }}
+              >
+                <legend style={{ fontSize: 12, color: "var(--muted)", padding: "0 6px" }}>
+                  How should the money arrive?
+                </legend>
+                {types.map((t) => (
+                  <label
+                    key={t.name}
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 14, cursor: "pointer" }}
+                  >
+                    <input
+                      type="radio"
+                      name="withdrawType"
+                      value={t.name}
+                      checked={withdrawType === t.name}
+                      onChange={() => {
+                        setWithdrawType(t.name);
+                        // The new rail has its own fields; stale per-field
+                        // errors from the old one would point at inputs that
+                        // no longer exist.
+                        setFieldErrors({});
+                      }}
+                      disabled={step === "confirming" || step === "submitting"}
+                    />
+                    {withdrawTypeLabel(t.name)}
+                  </label>
+                ))}
+                {needsTypeChoice && (
+                  <p style={{ fontSize: 12, color: "var(--muted)", margin: "6px 0 0" }}>
+                    Choose one to see the details this payout needs.
+                  </p>
+                )}
+              </fieldset>
+            )}
+
             {/* Dynamic fields from descriptors */}
-            {descriptors.length === 0 && (
+            {descriptors.length === 0 && !needsTypeChoice && (
               <p style={{ color: "var(--muted)", fontSize: 13 }}>
                 No payout fields required by this anchor.
               </p>
@@ -483,7 +561,7 @@ export default function CashOutModal({
             ))}
 
             {/* Disabled explanation */}
-            {!canSubmit && step === "form" && (
+            {unmetRequired.length > 0 && step === "form" && (
               <div
                 role="status"
                 style={{

@@ -78,6 +78,17 @@ jobs:
           # The copies in $tmp are the payload. The working tree is scratch.
           git checkout -- docs/
 
+          # `checkout -- docs/` above only restores *tracked* files (this
+          # branch's own committed docs/uptime-*). A badge for a check this
+          # branch has never tracked (e.g. mainnet's, the first run after
+          # UPTIME_MAINNET_API_URL is set) is untracked here but already
+          # exists on `status`, so it hits the same "would be overwritten by
+          # checkout" refusal one level up, on the branch switch below —
+          # silently freezing every badge again, not just the new one. Safe
+          # to remove: it is scratch the check script just wrote, already
+          # captured in $tmp above.
+          git clean -fd docs/
+
           git fetch origin status --depth=1 || true
           if git rev-parse --verify origin/status >/dev/null 2>&1; then
             git checkout -B status origin/status

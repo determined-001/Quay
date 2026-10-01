@@ -232,7 +232,7 @@ const webhookAttemptsTotal = registry.counter(
 const anchorCallsTotal = registry.counter(
   "anchor_calls_total",
   'Off-ramp adapter calls by method (quote~SEP-38, initiate/status~SEP-6) and result.',
-  ["method", "status"], // status: "ok" | "error"
+  ["method", "status"], // status: "ok" | "error" | "rejected"
 );
 
 const watcherTickDurationSeconds = registry.histogram(
@@ -275,6 +275,14 @@ const watcherLagSeconds = registry.gauge(
   "watcher_lag_seconds",
   "Seconds since the watcher's last completed poll tick across all accounts.",
 );
+const kycRetentionPurgedTotal = registry.counter(
+  "quay_kyc_retention_purged_total",
+  "Total number of inactive sellers whose KYC and identity data was purged under the retention policy.",
+);
+const kycNonPrimaryKeyRows = registry.gauge(
+  "kyc_non_primary_key_rows",
+  "Number of seller KYC rows encrypted with legacy or non-primary encryption keys.",
+);
 
 export const metrics = {
   registry,
@@ -292,4 +300,6 @@ export const metrics = {
   webhookQueueDepth,
   circuitBreakerState,
   watcherLagSeconds,
+  kycRetentionPurgedTotal,
+  kycNonPrimaryKeyRows,
 };
