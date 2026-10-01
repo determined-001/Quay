@@ -176,8 +176,11 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
 // Keyed by seller (never by link) — identity is submitted once and reused
 // across every link. `fieldsEncrypted` is the only PII column: an AES-256-GCM
 // blob of the seller's submitted field values, opaque without KYC_ENCRYPTION_KEY.
+// Primary key (seller_id, anchor_domain) comes from BOOTSTRAP_SQL, as for anchor_sessions.
 export const sellerKyc = sqliteTable("seller_kyc", {
-  sellerId: text("seller_id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  // The anchor home domain this state belongs to; "legacy" for unattributable old rows.
+  anchorDomain: text("anchor_domain").notNull(),
   // The Stellar account `customer_id` belongs to at the anchor. Null on rows
   // written when every seller shared the platform's account.
   account: text("account"),

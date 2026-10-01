@@ -1,5 +1,5 @@
 import type { Logger } from "@checkout/core";
-import { NOOP_LOGGER } from "@checkout/core";
+import { NOOP_LOGGER, OffRampRejectedError } from "@checkout/core";
 import { endpointUrl } from "./sep1";
 
 export interface Sep6WithdrawResult {
@@ -50,13 +50,9 @@ export interface Sep6Info {
  * limits so the caller can tell the seller what would be accepted rather than
  * just that this wasn't.
  */
-export class Sep6ValidationError extends Error {
-  constructor(
-    message: string,
-    readonly limits: { minAmount?: number; maxAmount?: number } = {},
-    readonly availableTypes: string[] = [],
-  ) {
-    super(message);
+export class Sep6ValidationError extends OffRampRejectedError {
+  constructor(message: string, limits: { minAmount?: number; maxAmount?: number } = {}, availableTypes: string[] = []) {
+    super(message, limits, availableTypes);
     this.name = "Sep6ValidationError";
   }
 }

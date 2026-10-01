@@ -93,9 +93,12 @@ const BOOTSTRAP_SQL = [
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS seller_kyc (
-     seller_id TEXT PRIMARY KEY, account TEXT, customer_id TEXT, status TEXT NOT NULL,
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+     account TEXT, customer_id TEXT, status TEXT NOT NULL,
      required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
-     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL
+     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL,
+     provided_field_status TEXT, sent_fields TEXT,
+     PRIMARY KEY (seller_id, anchor_domain)
    )`,
   `CREATE TABLE IF NOT EXISTS anchor_sessions (
      seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT NOT NULL,
@@ -418,8 +421,57 @@ async function migrateLegacyWebhookDeliveriesTable(client: Client): Promise<void
   }
 }
 
-export async function bootstrap(client: Client): Promise<void> {
+/** Marks a `seller_kyc` row that predates per-anchor keys and cannot be attributed to an anchor. */
+export const LEGACY_KYC_ANCHOR = "legacy";
+
+/**
+ * Issue 4.24: `seller_kyc` was keyed by seller alone, so a second anchor would
+ * overwrite the first's state and inherit its customer id. SQLite cannot change
+ * a primary key in place, so rebuild: create `seller_kyc_v2` keyed by
+ * (seller_id, anchor_domain), copy every row, drop, rename.
+ *
+ * Existing rows are attributed to `anchorDomain` (the currently configured
+ * anchor's home domain). With no real anchor configured they cannot be
+ * attributed and keep {@link LEGACY_KYC_ANCHOR}, whose rows are never reused for
+ * a customer id. Idempotent: a table that already has `anchor_domain` is left alone.
+ */
+async function migrateLegacySellerKycTable(client: Client, anchorDomain: string | null): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(seller_kyc)");
+  const columns = new Set(info.rows.map((r) => String(r.name)));
+  if (columns.size === 0 || columns.has("anchor_domain")) return; // fresh table, or already migrated
+
+  await client.execute("DROP TABLE IF EXISTS seller_kyc_v2");
+  await client.execute(`CREATE TABLE seller_kyc_v2 (
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+     account TEXT, customer_id TEXT, status TEXT NOT NULL,
+     required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
+     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL,
+     provided_field_status TEXT, sent_fields TEXT,
+     PRIMARY KEY (seller_id, anchor_domain)
+   )`);
+  // Older tables may lack columns that were added later by ALTER TABLE.
+  const opt = (name: string) => (columns.has(name) ? name : "NULL");
+  await client.execute({
+    sql: `INSERT INTO seller_kyc_v2
+       (seller_id, anchor_domain, account, customer_id, status, required_fields, fields_encrypted,
+        message, last_synced_at, updated_at, provided_field_status, sent_fields)
+     SELECT seller_id, ?, ${opt("account")}, customer_id, status, required_fields, fields_encrypted,
+        message, last_synced_at, updated_at, ${opt("provided_field_status")}, ${opt("sent_fields")}
+     FROM seller_kyc`,
+    args: [anchorDomain ?? LEGACY_KYC_ANCHOR],
+  });
+  await client.execute("DROP TABLE seller_kyc");
+  await client.execute("ALTER TABLE seller_kyc_v2 RENAME TO seller_kyc");
+}
+
+export interface BootstrapOptions {
+  /** Home domain of the configured real anchor, used to attribute pre-4.24 `seller_kyc` rows. */
+  kycAnchorDomain?: string | null;
+}
+
+export async function bootstrap(client: Client, opts: BootstrapOptions = {}): Promise<void> {
   await migrateLegacyWebhooksTable(client);
+  await migrateLegacySellerKycTable(client, opts.kycAnchorDomain ?? null);
   await migrateLegacyProcessedTxTable(client);
   await migrateLegacyLinkPaymentsTable(client);
   await migrateLegacyWebhookQueueTable(client);

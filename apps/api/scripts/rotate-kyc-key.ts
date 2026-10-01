@@ -13,7 +13,7 @@
  *   Never logs or prints decrypted PII / plaintext.
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { loadEnvFile, envValue, envValueOptional } from "./lib/env";
 import { createDb, bootstrap } from "../src/db/client";
 import { sellerKyc } from "../src/db/schema";
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
           fieldsEncrypted: newEncrypted,
           updatedAt: Date.now(),
         })
-        .where(eq(sellerKyc.sellerId, row.sellerId));
+        .where(and(eq(sellerKyc.sellerId, row.sellerId), eq(sellerKyc.anchorDomain, row.anchorDomain)));
     }
     reencrypted++;
   }

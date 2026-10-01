@@ -213,7 +213,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
       if (err instanceof HttpError) {
-        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 502);
+        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 422 | 502);
       }
       throw err;
     }
@@ -280,7 +280,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       if (err instanceof HttpError) {
         log.warn({ event: "cashout.request.error", linkId, error: err.message }, "cash-out request failed");
         // `extra` carries availableTypes on unknown_withdraw_type (issue 5.24).
-        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 502);
+        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 422 | 502);
       }
       throw err;
     }

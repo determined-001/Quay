@@ -211,6 +211,25 @@ export class AnchorAuthRequiredError extends Error {
 }
 
 /**
+ * The anchor refused the request because of what the caller asked for (an amount
+ * outside its published limits, an unsupported withdraw type), not because the
+ * anchor is unhealthy. The API maps it to `422 offramp_rejected` and it must not
+ * count towards the circuit breaker.
+ */
+export class OffRampRejectedError extends Error {
+  constructor(
+    message: string,
+    /** The anchor's published amount limits, when it named them. */
+    readonly limits: { minAmount?: number; maxAmount?: number } = {},
+    /** Withdraw types the anchor would accept, when relevant. */
+    readonly availableTypes: string[] = [],
+  ) {
+    super(message);
+    this.name = "OffRampRejectedError";
+  }
+}
+
+/**
  * The on-chain leg of a withdrawal: the seller sends `amount` of `asset` to the
  * anchor's account with this memo, signed by the seller's own wallet. Quay only
  * relays the instructions; it cannot send it, which is the point.
@@ -458,6 +477,10 @@ export interface KycFieldSpec {
 
 export interface KycRecord {
   sellerId: string;
+  /** The anchor this record is about (its home domain). `customerId`, `status`
+   *  and `requiredFields` are that anchor's decision; `"legacy"` marks a row
+   *  that predates per-anchor keys and could not be attributed. */
+  anchorDomain: string;
   /** The Stellar account the anchor's customer record belongs to. A stored
    *  `customerId` is only reused while this still matches the seller's wallet;
    *  null on rows written when every seller shared the platform's account. */
@@ -507,18 +530,14 @@ export interface KycPort {
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
 }
 
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
+/** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
+ *  to one anchor, so two anchors never share or overwrite a record.
+ *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
+  get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
-}
-
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
-export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
-  save(record: KycRecord): Promise<void>;
+  /** Removes the seller's record for one anchor, or for every anchor when omitted. */
+  delete(sellerId: string, anchorDomain?: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

@@ -174,7 +174,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `link_status_transitions_total` | `to` |
 | `wallet_submissions_total` | `outcome` (`submitted`, `invalid_xdr`, `rejected`) |
 | `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
-| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
+| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` (`ok`, `error`, `rejected`) |
 
 **Histograms**
 | Metric | Labels |
@@ -520,6 +520,11 @@ settled.
 **403** — `{ "error": "anchor_auth_required" }`. Only possible with a real anchor
 (`OFFRAMP=testanchor|anchor`): the seller has no live SEP-10 session with the
 anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
+**422** — `{ "error": "offramp_rejected", "message", "limits": { "minAmount", "maxAmount" }, "availableTypes": [] }`.
+The anchor refused the request on its merits: the amount is outside the limits it publishes
+(SEP-6 `/info`), the asset is not withdrawable, or a withdraw type is needed. This is the
+seller's to fix (change the amount), it is not an anchor outage, and it does not count towards the
+circuit breaker. The same 422 is returned by `GET /links/:id/cash-out/quote`.
 **403** — `{ "error": "kyc_required" }`. Only possible with a real anchor: the
 seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
 bank/routing info only — it is never used as a source of identity data.

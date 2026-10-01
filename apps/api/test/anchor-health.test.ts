@@ -477,6 +477,7 @@ class FakeKycAlwaysAcceptedForAnchor implements KycPort {
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      anchorDomain: "testanchor.stellar.org",
       account,
       customerId: null,
       status: "ACCEPTED",

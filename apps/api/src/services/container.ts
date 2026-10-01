@@ -138,7 +138,14 @@ export async function createContainer(): Promise<Container> {
   });
 
   const { db, client } = createDb(env.databaseUrl, env.databaseAuthToken);
-  await bootstrap(client);
+  // A real anchor's home domain attributes pre-4.24 seller_kyc rows to it; with
+  // none configured they stay "legacy" and are never reused for a customer id.
+  await bootstrap(client, {
+    kycAnchorDomain:
+      env.offramp === "testanchor" || env.offramp === "anchor"
+        ? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN
+        : null,
+  });
 
   const piiKey = env.kycEncryptionKey ? parsePiiKey(env.kycEncryptionKey) : null;
   if (!piiKey) {

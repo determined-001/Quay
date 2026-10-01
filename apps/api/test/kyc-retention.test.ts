@@ -41,6 +41,7 @@ async function seedSellerWithKycAndSession(
   await kycRepo.save({
     sellerId: opts.sellerId,
     account: opts.wallet,
+    anchorDomain: "anchor.example.com",
     customerId: "cust_123",
     status: "ACCEPTED",
     requiredFields: [{ name: "first_name", type: "string", optional: false }],

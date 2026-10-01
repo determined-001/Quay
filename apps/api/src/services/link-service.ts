@@ -10,6 +10,7 @@ import {
   normalizeAmount,
   OffRampJobNotFoundError,
   AnchorAuthRequiredError,
+  OffRampRejectedError,
   NOOP_LOGGER,
   type AnchorCustomer,
   type AssetRef,
@@ -867,6 +868,7 @@ export class LinkService {
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       throwIfUnknownWithdrawType(err, withdrawType);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       const message = err instanceof Error ? err.message : String(err);
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
@@ -977,6 +979,7 @@ export class LinkService {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
       throwIfUnknownWithdrawType(err, body.withdrawType);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
 
@@ -1337,6 +1340,15 @@ export function customerOf(seller: Seller): AnchorCustomer {
 /** Only the seller's wallet can open an anchor session, so this is theirs to fix. */
 function anchorAuthRequired(): HttpError {
   return new HttpError(403, "anchor_auth_required");
+}
+
+/** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */
+function offRampRejected(err: OffRampRejectedError): HttpError {
+  return new HttpError(422, "offramp_rejected", {
+    message: err.message,
+    limits: err.limits,
+    availableTypes: err.availableTypes,
+  });
 }
 
 export class HttpError extends Error {

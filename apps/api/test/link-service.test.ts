@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type RailPort, type WithdrawTransfer } from "@checkout/core";
-import { MockAnchorOffRamp } from "@checkout/offramp";
+import { MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
 import {
@@ -219,6 +219,7 @@ describe("LinkService.triggerCashOut — KYC gate", () => {
     const kyc = new ScriptedKyc();
     kyc.statusImpl = async ({ sellerId, account }) => ({
       sellerId,
+      anchorDomain: "testanchor.stellar.org",
       account,
       customerId: null,
       status: "NEEDS_INFO",
@@ -628,5 +629,34 @@ describe("offramp.transfer_required webhook (4.22)", () => {
     const enqueued = webhooks.getEnqueued();
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0]!.event).toBe("offramp.settled");
+  });
+});
+
+describe("LinkService cash-out — anchor rejections", () => {
+  function rejecting(): ScriptedOffRamp {
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async () => {
+      throw new Sep6ValidationError("above max", { minAmount: 1, maxAmount: 10 }, ["bank_account"]);
+    };
+    return offramp;
+  }
+
+  it("quoteCashOut maps an out-of-range amount to 422 offramp_rejected with limits", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const service = makeService({ links, offramp: rejecting(), offrampState: new FakeOffRampStateRepository() });
+    await expect(service.quoteCashOut("lnk_1", "NGN")).rejects.toMatchObject({
+      status: 422,
+      message: "offramp_rejected",
+      extra: { limits: { minAmount: 1, maxAmount: 10 }, availableTypes: ["bank_account"] },
+    });
+  });
+
+  it("triggerCashOut maps it the same way and leaves the link paid", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const service = makeService({ links, offramp: rejecting(), offrampState: new FakeOffRampStateRepository() });
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 422, message: "offramp_rejected", extra: { limits: { maxAmount: 10 } } });
+    expect(links.get("lnk_1")?.status).toBe("paid");
   });
 });

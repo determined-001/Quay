@@ -8,6 +8,7 @@ import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord, type KycC
 describe("kycRoutes — consent endpoints (issue 4.26)", () => {
   const record: KycRecord = {
     sellerId: "sel_x",
+    anchorDomain: "testanchor.stellar.org",
     account: "GSELLER",
     customerId: "cus_1",
     status: "NEEDS_INFO",
