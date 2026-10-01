@@ -38,6 +38,40 @@ export function telemetryRoutes(c: Container): Hono {
     return ctx.json({ summary: rows });
   });
 
+  // Anonymised recent rows for the operator view's per-corridor table
+  // (issue 5.21). Same guard as the rest; the row id is stripped because it
+  // embeds the off-ramp job id — the export.csv column set already
+  // established that no link/seller/job identifier leaves this surface.
+  app.get("/rows", async (ctx) => {
+    const denied = guard(ctx);
+    if (denied) return denied;
+
+    const corridor = ctx.req.query("corridor") ?? "";
+    const rawLimit = Number(ctx.req.query("limit") ?? 20);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 100) : 20;
+
+    const rows = (await c.telemetry.all())
+      .filter((r) => (corridor ? r.corridor === corridor : true))
+      .sort((a, b) => b.quotedAt - a.quotedAt)
+      .slice(0, limit)
+      .map((r) => ({
+        anchorDomain: r.anchorDomain,
+        corridor: r.corridor,
+        sellAsset: r.sellAsset,
+        sellAmount: r.sellAmount,
+        quotedRate: r.quotedRate,
+        effectiveRate: r.effectiveRate,
+        feeAmount: r.feeAmount,
+        quotedAt: r.quotedAt,
+        initiatedAt: r.initiatedAt,
+        settledAt: r.settledAt,
+        status: r.status,
+        failureReason: r.failureReason,
+      }));
+
+    return ctx.json({ rows });
+  });
+
   app.get("/export.csv", async (ctx) => {
     const denied = guard(ctx);
     if (denied) return denied;

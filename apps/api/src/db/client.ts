@@ -2,6 +2,7 @@ import { createClient, type Client } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 import * as schema from "./schema";
 import { encryptSecret, last4 } from "../services/secret-crypto";
+import { newId } from "../services/ids";
 
 export type DB = LibSQLDatabase<typeof schema>;
 
@@ -53,7 +54,7 @@ const BOOTSTRAP_SQL = [
      created_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS webhook_deliveries (
-     id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT NOT NULL,
+     id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT,
      event TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
      queue_entry_id TEXT,
      status_code INTEGER, ok INTEGER NOT NULL,
@@ -64,7 +65,7 @@ const BOOTSTRAP_SQL = [
   `CREATE TABLE IF NOT EXISTS webhook_queue (
      id TEXT PRIMARY KEY,
      webhook_id TEXT NOT NULL,
-     link_id TEXT NOT NULL,
+     link_id TEXT,
      event TEXT NOT NULL,
      payload TEXT NOT NULL,
      attempts INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +89,7 @@ const BOOTSTRAP_SQL = [
      job_id TEXT PRIMARY KEY, link_id TEXT NOT NULL, anchor TEXT NOT NULL,
      seller_id TEXT, account TEXT, target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
      status TEXT NOT NULL, external_status TEXT, last_error TEXT,
+     transfer_notified_at INTEGER,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS seller_kyc (
@@ -151,6 +153,20 @@ const BOOTSTRAP_SQL = [
      created_at INTEGER NOT NULL,
      revoked_at INTEGER
    )`,
+  // Per-anchor consent record for KYC field disclosure.
+  // No PII values — only field names from SEP-9 catalogue and metadata.
+  // Primary key (seller_id, anchor_domain) for one active consent per anchor.
+  `CREATE TABLE IF NOT EXISTS kyc_consents (
+     id TEXT PRIMARY KEY,
+     seller_id TEXT NOT NULL,
+     anchor_domain TEXT NOT NULL,
+     fields TEXT NOT NULL, -- JSON string[] of SEP-9 field names
+     granted_at INTEGER NOT NULL,
+     revoked_at INTEGER,
+     granted_via TEXT NOT NULL, -- 'session'
+     notice_version TEXT NOT NULL,
+     UNIQUE(seller_id, anchor_domain)
+   )`,
 ];
 
 // Additive column added after the initial release. `CREATE TABLE IF NOT EXISTS`
@@ -182,6 +198,9 @@ const ADDITIVE_MIGRATIONS = [
   `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
+  // Track whether the offramp.transfer_required webhook has been sent for a job.
+  // Null means not yet sent; epoch-ms when sent.
+  `ALTER TABLE offramp_jobs ADD COLUMN transfer_notified_at INTEGER`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
   // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never
   // upgrades an existing table. `createIfAbsent` uses ON CONFLICT (wallet),
@@ -196,6 +215,10 @@ const ADDITIVE_MIGRATIONS = [
   // wallets already present, and "logins stay broken forever" is not an
   // acceptable answer to that.
   `CREATE UNIQUE INDEX IF NOT EXISTS sellers_wallet_unique ON sellers (wallet)`,
+  // Per-field status from the anchor's `provided_fields` (SEP-12). JSON array.
+  `ALTER TABLE seller_kyc ADD COLUMN provided_field_status TEXT`,
+  // Field names (not values) sent to the anchor in the last submission. JSON string[].
+  `ALTER TABLE seller_kyc ADD COLUMN sent_fields TEXT`,
 ];
 
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {
@@ -315,10 +338,61 @@ async function migrateLegacyLinkPaymentsTable(client: Client): Promise<void> {
   await client.execute("DROP TABLE link_payments_legacy_4_11");
 }
 
+/**
+ * Rebuilds `webhook_queue` so `link_id` is nullable (allowing seller-level events).
+ */
+async function migrateLegacyWebhookQueueTable(client: Client): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(webhook_queue)");
+  const linkIdCol = info.rows.find((r) => String(r.name) === "link_id");
+  if (linkIdCol && Number(linkIdCol.notnull) === 1) {
+    await client.execute("ALTER TABLE webhook_queue RENAME TO webhook_queue_legacy_4_30");
+    await client.execute(`CREATE TABLE webhook_queue (
+      id TEXT PRIMARY KEY,
+      webhook_id TEXT NOT NULL,
+      link_id TEXT,
+      event TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      last_status_code INTEGER,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`);
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_webhook_queue_due ON webhook_queue (status, next_attempt_at)");
+    await client.execute("INSERT INTO webhook_queue SELECT * FROM webhook_queue_legacy_4_30");
+    await client.execute("DROP TABLE webhook_queue_legacy_4_30");
+  }
+}
+
+/**
+ * Rebuilds `webhook_deliveries` so `link_id` is nullable (allowing seller-level events).
+ */
+async function migrateLegacyWebhookDeliveriesTable(client: Client): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(webhook_deliveries)");
+  const linkIdCol = info.rows.find((r) => String(r.name) === "link_id");
+  if (linkIdCol && Number(linkIdCol.notnull) === 1) {
+    await client.execute("ALTER TABLE webhook_deliveries RENAME TO webhook_deliveries_legacy_4_30");
+    await client.execute(`CREATE TABLE webhook_deliveries (
+      id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT,
+      event TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+      queue_entry_id TEXT,
+      status_code INTEGER, ok INTEGER NOT NULL,
+      error TEXT, created_at INTEGER NOT NULL
+    )`);
+    await client.execute("CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_created_at_idx ON webhook_deliveries (webhook_id, created_at DESC)");
+    await client.execute("INSERT INTO webhook_deliveries SELECT * FROM webhook_deliveries_legacy_4_30");
+    await client.execute("DROP TABLE webhook_deliveries_legacy_4_30");
+  }
+}
+
 export async function bootstrap(client: Client): Promise<void> {
   await migrateLegacyWebhooksTable(client);
   await migrateLegacyProcessedTxTable(client);
   await migrateLegacyLinkPaymentsTable(client);
+  await migrateLegacyWebhookQueueTable(client);
+  await migrateLegacyWebhookDeliveriesTable(client);
   for (const sql of BOOTSTRAP_SQL) {
     try {
       await client.execute(sql);
