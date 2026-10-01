@@ -118,3 +118,14 @@ export async function putSep12Customer(
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };
 }
+
+/** Ask one anchor to erase the authenticated seller's SEP-12 customer data. */
+export async function deleteSep12Customer(kycServer: string, jwt: string, account: string): Promise<"deleted" | "not_found"> {
+  const res = await fetch(endpointUrl(kycServer, `customer/${encodeURIComponent(account)}`), {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${jwt}` },
+  });
+  if (res.status === 404) return "not_found";
+  if (!res.ok) throw new Error(`SEP-12 customer DELETE failed: ${res.status}`);
+  return "deleted";
+}

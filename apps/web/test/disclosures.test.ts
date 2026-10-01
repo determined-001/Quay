@@ -15,7 +15,7 @@ afterEach(() => {
 describe("DisclosuresPanel", () => {
   it("shows the required empty state", () => {
     const html = renderToStaticMarkup(createElement(DisclosuresPanel, { disclosures: [] }));
-    expect(html).toContain("No identity data has been sent to any anchor.");
+    expect(html).toContain("No identity disclosures recorded yet.");
   });
 
   it("shows one anchor, field labels, send date, status, error and actions without values", () => {

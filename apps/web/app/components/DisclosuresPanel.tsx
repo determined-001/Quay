@@ -28,6 +28,7 @@ export default function DisclosuresPanel({
   onRetry,
   onRevoke,
   onAskDelete,
+  deletableAnchorDomain,
 }: {
   disclosures: KycDisclosure[];
   loading?: boolean;
@@ -35,6 +36,7 @@ export default function DisclosuresPanel({
   onRetry?: () => void;
   onRevoke?: (anchorDomain: string) => void;
   onAskDelete?: (anchorDomain: string) => void;
+  deletableAnchorDomain?: string | null;
 }) {
   return (
     <section className="panel" aria-label="Identity disclosures">
@@ -47,7 +49,7 @@ export default function DisclosuresPanel({
         </div>
       )}
       {!loading && disclosures.length === 0 && !error && (
-        <p className="muted">No identity data has been sent to any anchor.</p>
+        <p className="muted">No identity disclosures recorded yet. Earlier sends may not appear here.</p>
       )}
       {disclosures.map((disclosure) => (
         <article key={disclosure.anchorDomain} style={{ borderTop: "1px solid var(--border)", paddingTop: 14, marginTop: 14 }}>
@@ -66,7 +68,7 @@ export default function DisclosuresPanel({
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button className="btn btn--ghost" disabled={!onRevoke || !!disclosure.consent?.revokedAt}
               onClick={() => onRevoke?.(disclosure.anchorDomain)}>Revoke consent</button>
-            <button className="btn btn--ghost" disabled={!onAskDelete}
+            <button className="btn btn--ghost" disabled={!onAskDelete || disclosure.anchorDomain !== deletableAnchorDomain}
               onClick={() => onAskDelete?.(disclosure.anchorDomain)}>Ask anchor to delete</button>
           </div>
         </article>

@@ -534,6 +534,9 @@ export const api = {
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: () => http<KycView>("/seller/kyc"),
   getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
+  deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
+    `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },
+  ),
 
   // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
   // sign with the wallet -> completeAnchorAuth(). Quay never signs it.

@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const sellers = sqliteTable("sellers", {
   id: text("id").primaryKey(),
@@ -196,6 +196,16 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),
 });
+
+/** Last successful send of each field to an anchor. Contains names and times only. */
+export const kycDisclosureFields = sqliteTable("kyc_disclosure_fields", {
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  fieldName: text("field_name").notNull(),
+  sentAt: integer("sent_at").notNull(),
+}, (table) => [
+  uniqueIndex("kyc_disclosure_field_unique").on(table.sellerId, table.anchorDomain, table.fieldName),
+]);
 
 // A seller's SEP-10 session with an anchor, issued to the seller's own wallet.
 // `tokenEncrypted` is a bearer credential for that seller at the anchor — it
