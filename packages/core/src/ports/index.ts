@@ -237,6 +237,13 @@ export interface OffRampPort {
       sourceAmount: string;
       targetCurrency: string;
       customer: AnchorCustomer;
+      /**
+       * SEP-6 withdrawal type the SELLER chose (`bank_account`, `cash`, …).
+       * Which rail the money leaves on is their call, not the operator's:
+       * adapters fall back to the operator-wide default (OFFRAMP_TYPE) only
+       * when this is absent (issue 5.24).
+       */
+      withdrawType?: string;
     },
     opts?: { logger?: Logger },
   ): Promise<OffRampQuote>;
@@ -258,12 +265,29 @@ export interface OffRampPort {
     sourceAmount: string;
   }): Promise<IndicativePrice[]>;
   /**
-   * Field descriptors the anchor requires before it will initiate a payout —
-   * SEP-6 GET /info for a real anchor, a fixed set for the mock. Drives the
-   * dynamic cash-out form (issue #32) so the dashboard never hardcodes bank
-   * fields.
+   * The withdrawal types the anchor offers for this asset and each type's
+   * field descriptors — SEP-6 GET /info `types[].fields` for a real anchor, a
+   * single fixed type for the mock. Drives the dynamic cash-out form (issue
+   * #32) and its rail picker (issue 5.24) so the dashboard never hardcodes
+   * bank fields or the rail.
    */
-  offrampRequirements(assetCode: string, customer?: AnchorCustomer): Promise<PayoutFieldDescriptor[]>;
+  offrampRequirements(assetCode: string, customer?: AnchorCustomer): Promise<OfframpRequirementTypes>;
+}
+
+/** One SEP-6 withdrawal type and the payout fields it needs (issue 5.24). */
+export interface WithdrawTypeRequirements {
+  /** The anchor's type name, e.g. `bank_account`, `cash`. */
+  name: string;
+  descriptors: PayoutFieldDescriptor[];
+}
+
+/** What {@link OffRampPort.offrampRequirements} returns: every offered type,
+ *  plus the type to preselect — the operator default (OFFRAMP_TYPE) when it is
+ *  actually offered, or the only type when there is exactly one, else null and
+ *  the seller must choose. */
+export interface OfframpRequirementTypes {
+  types: WithdrawTypeRequirements[];
+  defaultType: string | null;
 }
 
 /** One indicative price entry from SEP-38 GET /prices (issue 3.5). */
@@ -635,6 +659,8 @@ export interface Seller {
    * sensitive — never logged or included in webhook payloads.
    */
   payoutFields: Record<string, string> | null;
+  /** Timestamp (epoch ms) of the seller's most recent activity. */
+  lastActiveAt?: number | null;
   createdAt: number;
 }
 
@@ -652,6 +678,8 @@ export interface SellerRepository {
   /** Persist the seller's last-used payout destination fields for reuse on the
    *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
   savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
+  /** Update last active timestamp with hourly throttling. */
+  touchLastActive?(sellerId: string, now?: number, throttleMs?: number): Promise<void>;
   /** Select the kind of reusable KYC profile this merchant needs. */
   saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void>;
 }

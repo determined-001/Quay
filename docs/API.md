@@ -467,11 +467,19 @@ settled.
 ```json
 {
   "targetCurrency": "NGN",
-  "payoutFields": { "bank": "...", "accountNumber": "..." }
+  "payoutFields": { "bank": "...", "accountNumber": "..." },
+  "withdrawType": "bank_account"
 }
 ```
 - `targetCurrency` — 3-letter code, defaults to `NGN`.
 - `payoutFields` — opaque string map handed to the anchor adapter.
+- `withdrawType` — optional SEP-6 withdrawal type (`bank_account`, `cash`, …)
+  when the anchor offers several rails; the seller's choice, discovered from
+  `GET /links/:id/offramp-requirements`. Omitted, the adapter falls back to
+  the operator-wide `OFFRAMP_TYPE` default, or the anchor's only type.
+  An unknown type is **400** `{ "error": "unknown_withdraw_type",
+  "availableTypes": ["bank_account", "cash"] }` — the caller's mistake, never
+  the 502 a dead anchor gets.
 
 **200**
 ```json

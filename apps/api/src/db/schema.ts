@@ -14,6 +14,7 @@ export const sellers = sqliteTable("sellers", {
    * completes their first cash-out. Deprecated in favor of payoutFieldsEncrypted.
    */
   payoutFieldsJson: text("payout_fields_json"),
+  lastActiveAt: integer("last_active_at"),
   /**
    * AES-256-GCM encrypted blob (iv || authTag || ciphertext) of the seller's
    * last-used payout fields at rest (issue 4.34).

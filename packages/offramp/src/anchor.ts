@@ -8,7 +8,7 @@ import type {
   OffRampMode,
   OffRampPort,
   OffRampQuote,
-  PayoutFieldDescriptor,
+  OfframpRequirementTypes,
   SellerPayoutRef,
 } from "@checkout/core";
 import { getSep38Quote } from "./sep38";
@@ -90,11 +90,11 @@ export class AnchorOffRamp implements OffRampPort {
 
   /**
    * SEP-24 is interactive — the anchor's own hosted UI collects payout details
-   * directly from the seller during `initiate()`, so there are no descriptors
-   * to fetch up front (issue #32).
+   * (and any rail choice) directly from the seller during `initiate()`, so
+   * there are no descriptors and no types to pick up front (issues #32, 5.24).
    */
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return { types: [], defaultType: null };
   }
 
   async quote(input: {

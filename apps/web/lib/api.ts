@@ -15,11 +15,23 @@ export interface LinkWithRequest {
   request: PaymentRequest;
 }
 
-/** Anchor field descriptors + the seller's previously-saved (masked) payout
- *  fields for the cash-out form (issue #32). */
-export interface OfframpRequirements {
-  /** Anchor's field descriptors — drives the dynamic form. */
+/** One SEP-6 withdrawal type and the payout fields it needs (issue 5.24). */
+export interface WithdrawTypeOption {
+  /** The anchor's type name, e.g. "bank_account", "cash". */
+  name: string;
   descriptors: PayoutFieldDescriptor[];
+}
+
+/** Anchor withdrawal types (each with its field descriptors) + the seller's
+ *  previously-saved (masked) payout fields for the cash-out form (issues #32,
+ *  5.24). */
+export interface OfframpRequirements {
+  /** Every withdrawal type the anchor offers — drives the rail picker and,
+   *  per selected type, the dynamic form. */
+  types: WithdrawTypeOption[];
+  /** The type to preselect: the operator default when offered, or the only
+   *  type when there is exactly one, else null and the seller must choose. */
+  defaultType: string | null;
   /**
    * Previously-saved values, masked to last 4 chars server-side. Null on first
    * cash-out. The form uses these to show "already on file" and skips fields
@@ -433,14 +445,19 @@ export const api = {
   /** The route returns the whole OffRampQuote — including `expiresAt` (epoch
    *  ms, the ANCHOR's own TTL) — so the type is the shared one rather than a
    *  redeclaration that drops fields (issue 5.22 dropped exactly that one). */
-  quoteCashOut: (id: string, targetCurrency: string) =>
-    http<OffRampQuote>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+  quoteCashOut: (id: string, targetCurrency: string, withdrawType?: string) =>
+    http<OffRampQuote>(
+      `/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}${
+        withdrawType ? `&withdrawType=${encodeURIComponent(withdrawType)}` : ""
+      }`,
+    ),
 
   cashOut: (
     id: string,
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
+    withdrawType?: string,
   ) =>
     http<{
       job: {
@@ -458,7 +475,11 @@ export const api = {
       transfer?: WithdrawTransfer;
     }>(
       `/links/${id}/cash-out`,
-      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
+      {
+        method: "POST",
+        body: JSON.stringify({ targetCurrency, payoutFields, ...(withdrawType ? { withdrawType } : {}) }),
+        idempotencyKey,
+      },
     ),
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
