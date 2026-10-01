@@ -205,6 +205,7 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       // (handled by the UI calling the consent endpoint first)
 
       const updatedRecord = await c.kyc.submit(customer, fields);
+      await c.sellers.touchLastActive?.(seller.id);
       return ctx.json(toResponse(updatedRecord));
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);

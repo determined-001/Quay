@@ -312,6 +312,7 @@ function rowToSeller(
     wallet: row.wallet,
     profileKind: row.profileKind,
     payoutFields,
+    lastActiveAt: row.lastActiveAt ?? null,
     createdAt: row.createdAt,
   };
 }
@@ -415,6 +416,7 @@ export class DrizzleSellerRepository implements SellerRepository {
       wallet,
       profileKind: "individual",
       payoutFieldsJson: null,
+      lastActiveAt: now,
       payoutFieldsEncrypted: null,
       createdAt: now,
     };
@@ -452,13 +454,33 @@ export class DrizzleSellerRepository implements SellerRepository {
   }
 
   async createIfAbsent(wallet: string): Promise<Seller> {
+    const now = Date.now();
     await this.db
       .insert(sellers)
-      .values({ id: newId("sel"), name: shortWallet(wallet), wallet, createdAt: Date.now() })
+      .values({ id: newId("sel"), name: shortWallet(wallet), wallet, lastActiveAt: now, createdAt: now })
       .onConflictDoNothing({ target: sellers.wallet });
     const seller = await this.findByWallet(wallet);
     if (!seller) throw new Error(`failed to create or find seller for wallet ${wallet}`);
     return seller;
+  }
+
+  /**
+   * Update seller's last_active_at timestamp. Throttled to at most once per hour
+   * (throttleMs, default 3600_000) to keep high-frequency calls cheap.
+   */
+  async touchLastActive(sellerId: string, now = Date.now(), throttleMs = 3600_000): Promise<void> {
+    await this.db
+      .update(sellers)
+      .set({ lastActiveAt: now })
+      .where(
+        and(
+          eq(sellers.id, sellerId),
+          or(
+            isNull(sellers.lastActiveAt),
+            lt(sellers.lastActiveAt, now - throttleMs),
+          ),
+        ),
+      );
   }
 
   /**
