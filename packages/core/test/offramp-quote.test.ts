@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isQuoteExpired, QuoteExpiredError } from "../src/ports/index";
+import { isQuoteExpired, QuoteExpiredError, targetPerSourceRate } from "../src/ports/index";
 import type { OffRampQuote } from "../src/ports/index";
 import type { AssetRef } from "../src/domain/payment-link";
 
@@ -72,5 +72,18 @@ describe("QuoteExpiredError", () => {
 
   it("has name QuoteExpiredError", () => {
     expect(new QuoteExpiredError("x").name).toBe("QuoteExpiredError");
+  });
+});
+
+describe("targetPerSourceRate (issue 5.21)", () => {
+  it("inverts a SEP-38 sell-per-buy price into target-per-source at fixed precision", () => {
+    expect(targetPerSourceRate("1.02")).toBe((1 / 1.02).toFixed(8));
+    expect(targetPerSourceRate("0.5")).toBe("2.00000000");
+  });
+
+  it("refuses a non-positive or non-numeric price rather than emitting Infinity", () => {
+    for (const bad of ["0", "-1", "abc", ""]) {
+      expect(() => targetPerSourceRate(bad)).toThrow(/Cannot derive a rate/);
+    }
   });
 });

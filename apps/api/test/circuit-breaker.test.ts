@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OffRampInitiation, OffRampJob, OffRampPort, OffRampQuote, PayoutFieldDescriptor } from "@checkout/core";
+import {
+  AnchorAuthRequiredError,
+  OffRampRejectedError,
+  type OffRampInitiation,
+  type OffRampJob,
+  type OffRampPort,
+  type OffRampQuote,
+  type OfframpRequirementTypes,
+} from "@checkout/core";
+import { Sep6ValidationError } from "@checkout/offramp";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 
 const fakeQuote: OffRampQuote = {
@@ -31,7 +40,7 @@ function fakePort(overrides: Partial<OffRampPort> = {}): OffRampPort {
     quote: vi.fn(async () => fakeQuote),
     initiate: vi.fn(async () => fakeInitiation),
     status: vi.fn(async () => fakeJob),
-    offrampRequirements: vi.fn(async (): Promise<PayoutFieldDescriptor[]> => []),
+    offrampRequirements: vi.fn(async (): Promise<OfframpRequirementTypes> => ({ types: [], defaultType: null })),
     ...overrides,
   };
 }
@@ -41,7 +50,7 @@ describe("CircuitBreakerOffRamp", () => {
     const inner = fakePort();
     const breaker = new CircuitBreakerOffRamp(inner);
 
-    await breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" });
+    await breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD", customer: { sellerId: "sel_1", account: "G" } });
     expect(breaker.getState()).toBe("closed");
     expect(inner.quote).toHaveBeenCalledTimes(1);
   });
@@ -89,7 +98,62 @@ describe("CircuitBreakerOffRamp", () => {
     });
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
     expect(breaker.getStateNumeric()).toBe(0);
-    await expect(breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD" })).rejects.toThrow();
+    await expect(breaker.quote({ linkId: "lnk_1", sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "1", targetCurrency: "USD", customer: { sellerId: "sel_1", account: "G" } })).rejects.toThrow();
     expect(breaker.getStateNumeric()).toBe(2);
+  });
+
+  it("does not count a seller without an anchor session as an anchor failure", async () => {
+    const inner = fakePort({ quote: vi.fn(async () => Promise.reject(new AnchorAuthRequiredError("anchor.example"))) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
+    const input = {
+      linkId: "lnk_1",
+      sourceAsset: { code: "USDC", issuer: "G" },
+      sourceAmount: "1",
+      targetCurrency: "USD",
+      customer: { sellerId: "sel_1", account: "G" },
+    };
+
+    await expect(breaker.quote(input)).rejects.toBeInstanceOf(AnchorAuthRequiredError);
+    // One signed-out seller must not pause cash-outs for everyone else.
+    expect(breaker.getState()).toBe("closed");
+  });
+});
+
+describe("CircuitBreakerOffRamp — rejected requests", () => {
+  const input = {
+    linkId: "lnk_1",
+    sourceAsset: { code: "USDC", issuer: "G" },
+    sourceAmount: "25",
+    targetCurrency: "USD",
+    customer: { sellerId: "sel_1", account: "G" },
+  };
+
+  it("never opens on out-of-range amounts (OffRampRejectedError)", async () => {
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(new OffRampRejectedError("above max", { maxAmount: 10 }))),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+
+    for (let i = 0; i < 10; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(OffRampRejectedError);
+    }
+    expect(breaker.getState()).toBe("closed");
+    expect(inner.quote).toHaveBeenCalledTimes(10);
+  });
+
+  it("does not count Sep6ValidationError, which extends the generic rejection", async () => {
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(new Sep6ValidationError("above max", { maxAmount: 10 }))),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
+    await expect(breaker.quote(input)).rejects.toBeInstanceOf(Sep6ValidationError);
+    expect(breaker.getState()).toBe("closed");
+  });
+
+  it("still opens on genuine anchor failures", async () => {
+    const inner = fakePort({ quote: vi.fn(async () => Promise.reject(new Error("502 from anchor"))) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+    for (let i = 0; i < 3; i++) await expect(breaker.quote(input)).rejects.toThrow("502");
+    expect(breaker.getState()).toBe("open");
   });
 });

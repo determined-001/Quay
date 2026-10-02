@@ -45,12 +45,13 @@ const stellar: StellarConfig = {
   usdcIssuer: ISSUER,
 };
 
-const seller: Seller = { id: "sel_1", name: "S", wallet: DEST, payoutFields: null, createdAt: 0 };
+const seller: Seller = { id: "sel_1", name: "S", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 0 };
 const sellers: SellerRepository = {
   async findById() { return seller; },
   async findByWallet() { return seller; },
   async createIfAbsent() { return seller; },
   async savePayoutFields() {},
+  async saveProfileKind() {},
 };
 const rail: RailPort = {
   buildRequest: () => ({ uri: "web+stellar:pay", destination: DEST, amount: "10", asset: { code: "USDC", issuer: ISSUER }, memo: "r" }),

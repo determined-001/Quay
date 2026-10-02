@@ -151,47 +151,56 @@ payment operation, and each dedupes independently (issue 4.11).
 
 ### 3. Cash-out — SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, today's real adapter)
 
+For security boundaries, attack paths and the failure branches of this flow, see the [seller-signed anchor threat model](THREAT-MODEL.md).
+
+The anchor's customer is always the **seller**, identified by their own wallet.
+Nothing in this flow is signed by a key the server holds: the seller's wallet
+signs the anchor's SEP-10 challenge (once, ahead of time) and the USDC transfer
+that funds the withdrawal. `SellerAnchorAuth` (`packages/offramp/src/anchor-session.ts`)
+verifies and relays the challenge and keeps the resulting JWT per seller in
+`anchor_sessions`, encrypted at rest. Sensitive seller payout fields (`sellers.payout_fields_encrypted`)
+and SEP-12 KYC records (`seller_kyc.fields_encrypted`) are likewise encrypted at rest using AES-256-GCM
+via `KYC_ENCRYPTION_KEY`.
+
 ```mermaid
 sequenceDiagram
-  participant Seller
-  participant API as apps/api (POST /links/:id/cash-out)
+  participant Wallet as Seller's wallet (browser)
+  participant API as apps/api
+  participant Auth as SellerAnchorAuth
   participant LS as LinkService
-  participant CB as CircuitBreakerOffRamp
   participant Anchor as TestAnchorOffRamp (OffRampPort)
-  participant Sep10 as Sep10Client
-  participant Testanchor as testanchor.stellar.org
+  participant Testanchor as anchor (SEP-10/12/38/6)
 
-  Seller->>API: POST /links/:id/cash-out { targetCurrency, payoutFields }
+  Note over Wallet,Testanchor: Once per seller (dashboard → Connect to anchor)
+  Wallet->>API: POST /seller/anchor-auth/challenge
+  API->>Auth: challenge({ sellerId, account: seller.wallet })
+  Auth->>Testanchor: GET /auth?account=seller.wallet
+  Auth->>Auth: readChallengeTx: anchor SIGNING_KEY, our network, this account
+  API-->>Wallet: challenge XDR
+  Wallet->>Wallet: sign (never submitted)
+  Wallet->>API: POST /seller/anchor-auth { transaction }
+  API->>Auth: complete(customer, signed)
+  Auth->>Testanchor: POST /auth { transaction }
+  Testanchor-->>Auth: { token } (sub = seller.wallet)
+  Auth->>Auth: anchor_sessions.save(sellerId, token encrypted)
+
+  Note over Wallet,Testanchor: Cash-out
+  Wallet->>API: POST /links/:id/cash-out { targetCurrency, payoutFields }
   API->>LS: triggerCashOut(linkId, body)
-  LS->>CB: quote({ sourceAsset, sourceAmount, targetCurrency })
-  CB->>Anchor: quote(...)
-  Anchor->>Sep10: token()  // cached JWT, or...
-  Sep10->>Testanchor: GET /auth?account=...  (SEP-10 challenge)
-  Testanchor-->>Sep10: challenge transaction (unsigned)
-  Sep10->>Sep10: sign with seller keypair
-  Sep10->>Testanchor: POST /auth { transaction: signed }
-  Testanchor-->>Sep10: { token }  // SEP-10 JWT
-  Anchor->>Testanchor: POST /sep38/quote  (Bearer token)
-  Testanchor-->>Anchor: { id, price, buy_amount, expires_at }
-  Anchor-->>CB: OffRampQuote
-  CB-->>LS: OffRampQuote
-  LS->>CB: initiate({ linkId, quoteId, payout })
-  CB->>Anchor: initiate(...)
-  Anchor->>Testanchor: PUT /sep12/customer  (KYC fields)
-  Anchor->>Testanchor: POST /sep6/withdraw
-  Testanchor-->>Anchor: { id: jobId }
-  Anchor-->>CB: OffRampJob { status: "pending" }
-  CB-->>LS: OffRampJob
-  LS->>LS: link.status = "offramp_pending", links.save()
-  LS-->>API: job
+  LS->>Anchor: kyc.status(customer) → must be ACCEPTED
+  LS->>Anchor: quote({ ..., customer })
+  Anchor->>Testanchor: POST /sep38/quote (seller's JWT)
+  LS->>Anchor: initiate({ linkId, quoteId, payout, customer })
+  Anchor->>Testanchor: GET /sep6/withdraw?account=seller.wallet (seller's JWT)
+  Testanchor-->>Anchor: { id, account_id, memo_type, memo }
+  Anchor-->>LS: { kind: "transfer", jobId, transfer }
+  API-->>Wallet: { job, transfer }
+  Wallet->>Wallet: build + sign payment to account_id with memo
+  Wallet->>Testanchor: submit to Horizon (from the seller's account)
 
   loop cash-out poller (startCashOutPoller)
-    LS->>CB: status(jobId)
-    CB->>Anchor: status(jobId)
-    Anchor->>Testanchor: GET /sep6/transaction?id=jobId
-    Testanchor-->>Anchor: { status: "completed" | "pending_*" | "error" }
-    Anchor-->>CB: OffRampJob
-    CB-->>LS: OffRampJob
+    LS->>Anchor: status(jobId)  // job row carries sellerId + account
+    Anchor->>Testanchor: GET /sep6/transaction?id=jobId (seller's JWT)
     alt settled
       LS->>LS: link.status = "offramp_settled", fireWebhook("offramp.settled")
     else failed
@@ -200,12 +209,15 @@ sequenceDiagram
   end
 ```
 
+A seller with no live anchor session gets `403 anchor_auth_required` (and the
+circuit breaker does not count it — it says nothing about the anchor's health).
+
 Every `CircuitBreakerOffRamp` call is instrumented (`anchor_calls_total`,
 `anchor_call_duration_seconds` — see `docs/API.md#get-metrics`) and trips open after 3
 consecutive failures, so a down anchor gets a 30s cooldown instead of being hit by every
 poll tick.
 
-### 4. Cash-out — SEP-24 interactive variant (not implemented — MAINTAINER.md roadmap item 1)
+### 4. Cash-out — SEP-24 interactive variant (per-anchor selection tracked in [#216](https://github.com/determined-001/Quay/issues/216); quote gaps in [#217](https://github.com/determined-001/Quay/issues/217)/[#219](https://github.com/determined-001/Quay/issues/219))
 
 ```mermaid
 sequenceDiagram
@@ -269,6 +281,13 @@ stateDiagram-v2
 Note the CI check only catches drift between `status.ts` and the `.mmd` file — it can't
 verify you also updated *this* pasted copy. If you touch `TRANSITIONS`, update both.
 
+The cash-out sub-state is **not** part of this diagram. While a link is `offramp_pending`,
+`link.offrampStatus` (typed `OffRampLinkStatus`) says what the anchor is waiting for:
+`awaiting_transfer` (the seller has not yet sent the USDC leg; SEP-6 `pending_user_transfer_start`
+or `incomplete`), `pending` (the anchor has it and is paying out), then `settled` or `failed`.
+`pollCashOuts()` refreshes it on every poll, not only on a terminal state, and the dashboard pill,
+the link timeline and the CSV export (`offramp_status`) all read it. No extra link transition is needed.
+
 ---
 
 ## How to add a new chain / anchor / rail
@@ -320,14 +339,11 @@ custody at the edges: the seller already holds the stablecoin, and cash-out is a
 explicitly authorized action. Flip to `inline` only with a licensed anchor relationship and
 a real compliance story — see the README's boundary note.
 
-**Why SEP-6 in `TestAnchorOffRamp`, not SEP-24.** SEP-24's interactive withdraw needs a
-redirect/popup concept somewhere upstream of the adapter — in the dashboard, in
-`LinkService`, in the API response shape. None of that existed when the reference adapter
-was built, and SEP-6 is fully field-driven (bank details go straight in the request body),
-so it needed zero changes anywhere else. `testanchor.ts`'s own header comment captures this
-rejection reasoning. The SEP-24 interactive diagram above is the shape that *would* need
-those changes — MAINTAINER.md's roadmap item 1 (`OffRampInitiation` union) is the first
-domino.
+**Why SEP-6 in `TestAnchorOffRamp`, not SEP-24.** Both protocols are supported —
+`OffRampInitiation`'s `interactive` arm, the API's `interactiveUrl`, and the dashboard's
+popup handling all exist — and the protocol is chosen per anchor from its SEP-1
+capabilities, preferring SEP-6 when both are declared. The full trade-offs and the
+decision live in [`docs/decisions/0001-sep6-vs-sep24.md`](decisions/0001-sep6-vs-sep24.md).
 
 **Why path-payment settlement is parked** (decided 2026-07-18, see `MAINTAINER.md`).
 Evaluated settling sellers in NGNC on-chain via Stellar path payments (buyer pays USDC,

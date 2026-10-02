@@ -9,7 +9,10 @@ import {
   QuoteExpiredError,
   normalizeAmount,
   OffRampJobNotFoundError,
+  AnchorAuthRequiredError,
+  OffRampRejectedError,
   NOOP_LOGGER,
+  type AnchorCustomer,
   type AssetRef,
   type CashOutBody,
   type CreateLinkBody,
@@ -25,7 +28,7 @@ import {
   type OffRampStateRepository,
   type PaymentLink,
   type PaymentRequest,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type RailPort,
   type Seller,
   type SellerRepository,
@@ -33,7 +36,9 @@ import {
   type IndicativePrice,
   type OffRampTelemetryRepository,
   type OffRampTelemetryRow,
+  type WithdrawTransfer,
 } from "@checkout/core";
+import { Sep6ValidationError } from "@checkout/offramp";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -363,6 +368,7 @@ export class LinkService {
       isDemo: body.isDemo ?? false,
     });
     metrics.linkStatusTransitionsTotal.inc({ to: link.status });
+    await this.deps.sellers.touchLastActive?.(seller.id);
 
     log.info(
       {
@@ -470,13 +476,15 @@ export class LinkService {
   }
 
   /**
-   * Returns the field descriptors for the off-ramp form, plus any payout
-   * fields the seller has already saved. Saved values are masked to the last 4
-   * chars server-side so the form can pre-fill / indicate "already on file"
-   * without ever leaking the raw bank account number to the browser (issue #32).
+   * Returns every withdrawal type the anchor offers (with each type's field
+   * descriptors) and the type to preselect, plus any payout fields the seller
+   * has already saved. Saved values are masked to the last 4 chars
+   * server-side so the form can pre-fill / indicate "already on file" without
+   * ever leaking the raw bank account number to the browser (issues #32, 5.24).
    */
   async getOfframpRequirements(linkId: string): Promise<{
-    descriptors: PayoutFieldDescriptor[];
+    types: OfframpRequirementTypes["types"];
+    defaultType: string | null;
     savedFields: Record<string, string> | null;
   }> {
     const link = await this.deps.links.findById(linkId);
@@ -485,9 +493,9 @@ export class LinkService {
     const seller = await this.deps.sellers.findById(link.sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
 
-    let descriptors: PayoutFieldDescriptor[];
+    let requirements: OfframpRequirementTypes;
     try {
-      descriptors = await this.deps.offramp.offrampRequirements(link.asset.code);
+      requirements = await this.deps.offramp.offrampRequirements(link.asset.code, customerOf(seller));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new HttpError(502, `Off-ramp requirements error: ${message}`);
@@ -502,7 +510,7 @@ export class LinkService {
         )
       : null;
 
-    return { descriptors, savedFields };
+    return { types: requirements.types, defaultType: requirements.defaultType, savedFields };
   }
 
   /**
@@ -808,13 +816,35 @@ export class LinkService {
   }
 
   /**
+   * KYC is keyed by seller, never by link — a live cash-out is impossible
+   * until the anchor has actually accepted this seller's identity. `status()`
+   * re-syncs rather than trusting a cached value, since paying out against
+   * stale/rejected KYC is exactly the failure this gate exists to prevent.
+   */
+  private async assertKycAccepted(customer: AnchorCustomer): Promise<void> {
+    let status: string;
+    try {
+      status = (await this.deps.kyc.status(customer)).status;
+    } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      throw err;
+    }
+    if (status !== "ACCEPTED") throw new HttpError(403, "kyc_required");
+  }
+
+  /**
    * Fetch a firm quote for a cash-out — gross, fee, and net — without
    * initiating anything (issue 1.5). Same gates as `triggerCashOut` up to
    * the quote step, so the seller sees exactly the numbers they'd get by
    * actually committing, but nothing state-changing happens here: no quote
    * is initiated, no job is created, the link is left untouched.
    */
-  async quoteCashOut(linkId: string, targetCurrency: string, opts: ServiceCallOptions = {}): Promise<OffRampQuote> {
+  async quoteCashOut(
+    linkId: string,
+    targetCurrency: string,
+    withdrawType?: string,
+    opts: ServiceCallOptions = {},
+  ): Promise<OffRampQuote> {
     const log = (opts.logger ?? this.deps.logger!);
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
@@ -824,18 +854,21 @@ export class LinkService {
     if (!this.health.isAvailable()) {
       throw new HttpError(503, "anchor_unavailable");
     }
-    const kyc = await this.deps.kyc.status(link.sellerId);
-    if (kyc.status !== "ACCEPTED") {
-      throw new HttpError(403, "kyc_required");
-    }
+    const seller = await this.deps.sellers.findById(link.sellerId);
+    if (!seller) throw new HttpError(404, "seller_not_found");
+    const customer = customerOf(seller);
+    await this.assertKycAccepted(customer);
 
     const sourceAmount = link.paidAmount ?? link.amount;
     try {
       return await this.deps.offramp.quote(
-        { linkId: link.id, sourceAsset: link.asset, sourceAmount, targetCurrency },
+        { linkId: link.id, sourceAsset: link.asset, sourceAmount, targetCurrency, customer, withdrawType },
         { logger: log },
       );
     } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      throwIfUnknownWithdrawType(err, withdrawType);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       const message = err instanceof Error ? err.message : String(err);
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
@@ -874,14 +907,8 @@ export class LinkService {
       throw new HttpError(503, "anchor_unavailable");
     }
 
-    // KYC is keyed by seller, never by link — a live cash-out is impossible
-    // until the anchor has actually accepted this seller's identity. `status()`
-    // re-syncs rather than trusting a cached value, since paying out against
-    // stale/rejected KYC is exactly the failure this gate exists to prevent.
-    const kyc = await this.deps.kyc.status(link.sellerId);
-    if (kyc.status !== "ACCEPTED") {
-      throw new HttpError(403, "kyc_required");
-    }
+    const customer = customerOf(seller);
+    await this.assertKycAccepted(customer);
 
     const sourceAmount = link.paidAmount ?? link.amount;
 
@@ -893,40 +920,79 @@ export class LinkService {
         sourceAsset: link.asset,
         sourceAmount,
         targetCurrency: body.targetCurrency,
+        customer,
+        withdrawType: body.withdrawType,
       }, { logger: child });
 
     let quote: OffRampQuote;
     let initiation: OffRampInitiation;
     const t0 = Date.now();
     try {
-      quote = await fetchFreshQuote();
-
-      // Guard: reject quotes with unparsable or already-expired expiresAt.
-      if (isQuoteExpired(quote)) {
-        // One automatic re-quote in case of clock skew or a very short TTL.
-        quote = await fetchFreshQuote();
-        if (isQuoteExpired(quote)) {
-          throw new QuoteExpiredError(quote.quoteId);
+      if (body.quoteId) {
+        const stored = await this.deps.offrampState.getQuote(body.quoteId);
+        if (!stored) {
+          throw new HttpError(409, "quote_mismatch");
         }
+        if (
+          stored.linkId !== link.id ||
+          stored.buyCurrency !== body.targetCurrency ||
+          stored.sellAmount !== sourceAmount
+        ) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+        if (Number.isNaN(stored.expiresAt) || Date.now() >= stored.expiresAt) {
+          throw new HttpError(409, `quote_expired: Quote ${stored.quoteId} has expired`);
+        }
+        // Replay exactly what the seller was shown. A row saved before the
+        // amounts were persisted cannot be confirmed by id: recomputing them
+        // here would record figures the seller never agreed to.
+        const quoted = stored.quotedAmounts;
+        if (!quoted) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+
+        quote = {
+          quoteId: stored.quoteId,
+          sourceAsset: stored.sellAsset,
+          sourceAmount: stored.sellAmount,
+          targetCurrency: stored.buyCurrency,
+          targetAmount: quoted.targetAmount,
+          rate: quoted.rate,
+          expiresAt: stored.expiresAt,
+          fee: { amount: quoted.feeAmount, currency: stored.buyCurrency, source: quoted.feeSource },
+          netTargetAmount: quoted.netTargetAmount,
+        };
+      } else {
+        quote = await fetchFreshQuote();
+
+        // Guard: reject quotes with unparsable or already-expired expiresAt.
+        if (isQuoteExpired(quote)) {
+          // One automatic re-quote in case of clock skew or a very short TTL.
+          quote = await fetchFreshQuote();
+          if (isQuoteExpired(quote)) {
+            throw new QuoteExpiredError(quote.quoteId);
+          }
+        }
+        child.info(
+          {
+            event: "cashout.quote",
+            anchor: this.deps.offramp.mode,
+            quoteId: quote.quoteId,
+            targetCurrency: quote.targetCurrency,
+            targetAmount: quote.targetAmount,
+            rate: quote.rate,
+            durationMs: Date.now() - t0,
+          },
+          "cash-out quoted",
+        );
       }
-      child.info(
-        {
-          event: "cashout.quote",
-          anchor: this.deps.offramp.mode,
-          quoteId: quote.quoteId,
-          targetCurrency: quote.targetCurrency,
-          targetAmount: quote.targetAmount,
-          rate: quote.rate,
-          durationMs: Date.now() - t0,
-        },
-        "cash-out quoted",
-      );
 
       const t1 = Date.now();
       initiation = await this.deps.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
         payout: { currency: body.targetCurrency, fields: mergedFields },
+        customer,
       }, { logger: child });
       child.info(
         {
@@ -944,9 +1010,12 @@ export class LinkService {
         "cash-out failed",
       );
       if (err instanceof HttpError) throw err;
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       if (err instanceof QuoteExpiredError) {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
+      throwIfUnknownWithdrawType(err, body.withdrawType);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw new HttpError(502, `Off-ramp error: ${message}`);
     }
 
@@ -957,10 +1026,11 @@ export class LinkService {
 
     const from = link.status;
     const jobId = initiation.jobId;
+    const initialOfframpStatus = initiation.kind === "transfer" ? "awaiting_transfer" : "pending";
     link.status = "offramp_pending";
     link.offrampJobId = jobId;
     link.offrampTargetCurrency = quote.targetCurrency;
-    link.offrampStatus = "pending";
+    link.offrampStatus = initialOfframpStatus;
 
     // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
     // offrampIndicativeRate may already be set if the seller visited the preview
@@ -1007,11 +1077,22 @@ export class LinkService {
     const job: OffRampJob = {
       jobId,
       linkId: link.id,
-      status: "pending",
+      status: initialOfframpStatus,
       targetCurrency: quote.targetCurrency,
       targetAmount: quote.targetAmount,
       rate: quote.rate,
     };
+
+    // Emit offramp.transfer_required if the initiation provides transfer instructions immediately.
+    // This is the "transfer" kind from SEP-6/SEP-24 where the anchor provides deposit instructions right away.
+    if (initiation.kind === "transfer") {
+      await this.fireWebhook(link, "offramp.transfer_required", {
+        transfer: initiation.transfer,
+        jobId,
+      }, opts);
+      // Mark the transfer as notified so we don't re-fire on subsequent polls.
+      await this.deps.offrampState.updateJob(jobId, { transferNotifiedAt: Date.now() });
+    }
 
     const now = Date.now();
     const quoteExpiresInSeconds = Math.max(0, Math.floor((quote.expiresAt - now) / 1000));
@@ -1072,6 +1153,22 @@ export class LinkService {
         this.nextPollAtByLinkId.set(link.id, Date.now() + next1);
         continue;
       }
+// If the anchor returned transfer instructions and we haven't notified yet,
+      // emit the offramp.transfer_required webhook now.
+      // This handles the case where the transfer instructions arrive late (e.g. after review).
+      // Some off-ramp implementations may return transfer instructions in status().
+      const transfer = (job as unknown as Record<string, unknown>).transfer as WithdrawTransfer | undefined;
+      if (transfer && link.offrampJobId) {
+        const storedJob = await this.deps.offrampState.getJob(link.offrampJobId);
+        if (storedJob && !storedJob.transferNotifiedAt) {
+          await this.fireWebhook(link, "offramp.transfer_required", {
+            transfer,
+            jobId: link.offrampJobId,
+          }, opts);
+          await this.deps.offrampState.updateJob(link.offrampJobId, { transferNotifiedAt: Date.now() });
+        }
+      }
+
       if (job.status === "settled") {
         const from = link.status;
         link.status = "offramp_settled";
@@ -1095,6 +1192,11 @@ export class LinkService {
           const existing = existingRows.find((r) => r.id === `tel_${link.offrampJobId}`);
           const quotedRate = existing?.quotedRate ?? job.rate;
           const sourceAmount = link.paidAmount ?? link.amount;
+          // Both rates are TARGET per source (issue 5.21): quote.rate is
+          // documented in that direction and every adapter now returns it so,
+          // which is what makes this fee (quoted gross minus actual target,
+          // in target units) and the summary's spread meaningful for real
+          // anchors, not just the mock.
           const effectiveRate = String(Number(job.targetAmount) / Number(sourceAmount));
           const feeAmount = (Number(quotedRate) * Number(sourceAmount) - Number(job.targetAmount)).toFixed(6);
           await this.recordTelemetry(link.offrampJobId!, {
@@ -1122,6 +1224,15 @@ export class LinkService {
           status: "failed",
           failureReason: job.reason ?? null,
         });
+      } else {
+        if (link.offrampStatus !== job.status) {
+          link.offrampStatus = job.status;
+          await this.deps.links.save(link);
+          child.info(
+            { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
+            "cash-out offrampStatus updated",
+          );
+        }
       }
     }
   }
@@ -1267,6 +1378,25 @@ function horizonPaymentReason(err: unknown): "insufficient_balance" | "missing_t
   return "payment_rejected";
 }
 
+/** The anchor's customer for this seller: always their own wallet. */
+export function customerOf(seller: Seller): AnchorCustomer {
+  return { sellerId: seller.id, account: seller.wallet };
+}
+
+/** Only the seller's wallet can open an anchor session, so this is theirs to fix. */
+function anchorAuthRequired(): HttpError {
+  return new HttpError(403, "anchor_auth_required");
+}
+
+/** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */
+function offRampRejected(err: OffRampRejectedError): HttpError {
+  return new HttpError(422, "offramp_rejected", {
+    message: err.message,
+    limits: err.limits,
+    availableTypes: err.availableTypes,
+  });
+}
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -1274,5 +1404,23 @@ export class HttpError extends Error {
     readonly extra?: Record<string, unknown>,
   ) {
     super(message);
+  }
+}
+
+/**
+ * A withdrawType the caller chose that the anchor does not offer is the
+ * caller's mistake, not an anchor outage: 400 with the anchor's own list, so
+ * a client can re-render the picker — never the 502 a dead anchor gets
+ * (issue 5.24). Only fires when the caller actually sent a type; the
+ * operator-default and single-type paths keep their existing behavior.
+ */
+function throwIfUnknownWithdrawType(err: unknown, requested: string | undefined): void {
+  if (
+    requested &&
+    err instanceof Sep6ValidationError &&
+    err.availableTypes.length > 0 &&
+    !err.availableTypes.includes(requested)
+  ) {
+    throw new HttpError(400, "unknown_withdraw_type", { availableTypes: err.availableTypes });
   }
 }
