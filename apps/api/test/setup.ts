@@ -13,18 +13,19 @@ import {
 } from "../src/repos/index";
 import { SessionIssuer } from "../src/services/session";
 import type { Container } from "../src/services/container";
-import { NoKycRequired } from "@checkout/offramp";
+import { NoKycRequired, Sep6ValidationError } from "@checkout/offramp";
 import { LinkService } from "../src/services/link-service";
 import { NOOP_LOGGER } from "@checkout/core";
 import type {
   AssetRef,
   Seller,
   PaymentRequest,
-  PayoutFieldDescriptor,
+  OfframpRequirementTypes,
   RailPort,
   WatcherPort,
   NormalizedPayment,
   OffRampPort,
+  OffRampStateRepository,
   OffRampQuote,
   OffRampJob,
   OffRampInitiation,
@@ -157,14 +158,29 @@ export class FakeOffRampPort implements OffRampPort {
   private nextQuoteId = 1;
   private nextJobId = 1;
 
-  constructor(private readonly state?: { saveQuote(q: any): Promise<void> }) {}
+  /** Persists quotes the way the real adapters do, so a confirm-by-quoteId can find them. */
+  constructor(private readonly state?: OffRampStateRepository) {}
+  /** The withdrawal types this fake "anchor" offers — two, like the live
+   *  testanchor's USDC, so routes can exercise the rail picker (issue 5.24). */
+  readonly withdrawTypes = ["bank_account", "cash"] as const;
+  /** Captured by quote() so route tests can assert the pass-through. */
+  lastQuoteWithdrawType: string | undefined;
 
   async quote(input: {
     linkId: string;
     sourceAsset: AssetRef;
     sourceAmount: string;
     targetCurrency: string;
+    withdrawType?: string;
   }): Promise<OffRampQuote> {
+    this.lastQuoteWithdrawType = input.withdrawType;
+    if (input.withdrawType && !(this.withdrawTypes as readonly string[]).includes(input.withdrawType)) {
+      throw new Sep6ValidationError(
+        `Anchor does not offer withdraw type "${input.withdrawType}" for ${input.sourceAsset.code}`,
+        {},
+        [...this.withdrawTypes],
+      );
+    }
     const rate = input.targetCurrency === "NGN" ? 1650 : 1;
     const targetAmount = (Number(input.sourceAmount) * rate).toFixed(2);
     const quoteId = `quote_${this.nextQuoteId++}`;
@@ -178,6 +194,13 @@ export class FakeOffRampPort implements OffRampPort {
         sellAmount: input.sourceAmount,
         buyCurrency: input.targetCurrency,
         price: String(rate),
+        quotedAmounts: {
+          rate: String(rate),
+          targetAmount,
+          feeAmount: "0",
+          feeSource: "estimated",
+          netTargetAmount: targetAmount,
+        },
         expiresAt,
         createdAt: Date.now(),
       });
@@ -215,8 +238,20 @@ export class FakeOffRampPort implements OffRampPort {
     };
   }
 
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return {
+      types: [
+        {
+          name: "bank_account",
+          descriptors: [
+            { name: "dest", label: "Bank account number", optional: false },
+            { name: "dest_extra", label: "Routing number", optional: true },
+          ],
+        },
+        { name: "cash", descriptors: [{ name: "dest", label: "Pickup location", optional: true }] },
+      ],
+      defaultType: "bank_account",
+    };
   }
 }
 
@@ -299,6 +334,14 @@ export async function createTestContainer(): Promise<TestContainer> {
     db: repos.db,
     client: repos.client,
     kyc: new NoKycRequired() as unknown as Container["kyc"],
+    kycConsents: {
+      async list(sellerId: string) { return []; },
+      async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+      async active(sellerId: string, anchorDomain: string) { return null; },
+      async revoke(sellerId: string, anchorDomain: string) { },
+    } as unknown as Container["kycConsents"],
+    anchorDomain: "testanchor.stellar.org",
+    anchorAuth: null,
     telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),

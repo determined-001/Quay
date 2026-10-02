@@ -16,8 +16,9 @@ Welcome! If you are looking for your first contribution:
 
 1. **Find a starter issue**: browse the [`good-first-issue`](https://github.com/determined-001/Quay/issues?q=is%3Aissue+is%3Aopen+label%3Agood-first-issue) label. The newcomer-gated set is backlog items 1.6, 5.5, 7.4, 7.6, 8.5 and 8.7 — property-based money tests, SEP-7 builder tests, the FIXLOG regression index, README repositioning, dependency/secret scanning in CI, and uptime monitoring.
 2. **Comment on the Issue**: Express interest so maintainers can assign it to you.
-3. **Fork & Branch**: Fork the repo and create a descriptive branch from `main`:
+3. **Fork & Branch**: Fork the repo and create a descriptive branch from `dev`, the default branch:
    ```bash
+   git checkout dev && git pull
    git checkout -b feature/issue-8.7-qr-copy-toast
    ```
 4. **Make Granular Commits**: Write clean code and make regular, logical commits using conventional prefixes (`feat:`, `fix:`, `docs:`, `test:`). **Do not squash your commits** into a single blob — commit history and velocity are legible and valuable to reviewers (`MAINTAINER.md:120`).
@@ -121,7 +122,9 @@ worker, or adapters should come with tests where practical. If you change
 
 ## Pull Request Guidelines
 
-- Branch from `main`; keep PRs focused on a single concern.
+- Branch from `dev` and open the PR against `dev`; keep PRs focused on a single concern.
+  `main` is what mainnet deploys from and only moves when a maintainer promotes `dev`
+  (see `docs/RUNBOOK.md` "Promotion: dev to main").
 - Write a clear description of **what** changed and **why**. Link any related issue.
 - **Do not squash commits**: Maintainers and contributors preserve granular commit history on merge. Commit velocity and history demonstrate development progression.
 - Match the surrounding code style — comments explain intent, money is compared in integer stroops (never floats), and illegal status transitions must stay rejected.
