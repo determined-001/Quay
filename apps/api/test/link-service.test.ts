@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type RailPort, type WithdrawTransfer } from "@checkout/core";
 import { MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
@@ -132,18 +132,111 @@ describe("LinkService.pollCashOuts", () => {
     expect(links.get("lnk_1")?.offrampStatus).toBe("failed");
   });
 
-  it("leaves the link pending on a transient (non-typed) error, to retry next tick", async () => {
+  it("leaves the link pending on a transient error, records classified error on offrampState, and clears it on success", async () => {
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_1",
+      linkId: "lnk_1",
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
+      transferNotifiedAt: null,
+    });
     const links = new FakeLinkRepository([
       makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
     ]);
     const offramp = new ScriptedOffRamp();
     offramp.statusImpl = async () => {
-      throw new Error("ECONNRESET");
+      throw new Error("ECONNRESET: failed to connect to anchor.stellar.org/sep6");
     };
 
-    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() }).pollCashOuts();
+    const service = makeService({ links, offramp, offrampState });
+    await service.pollCashOuts();
 
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    const jobAfterError = await offrampState.getJob("job_1");
+    expect(jobAfterError?.lastPollReason).toBe("anchor_unreachable");
+    expect(jobAfterError?.lastPollError).toBe("The anchor could not be reached. We will keep trying.");
+    expect(jobAfterError?.lastPollErrorAt).toBeGreaterThan(0);
+
+    const status = await service.getOfframpPollStatus(links.get("lnk_1")!);
+    expect(status).toEqual({
+      reason: "anchor_unreachable",
+      message: "The anchor could not be reached. We will keep trying.",
+      at: jobAfterError!.lastPollErrorAt!,
+    });
+
+    // Now make statusImpl succeed
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "settled",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
+
+    const realNow = Date.now.bind(Date);
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 10_000);
+    await service.pollCashOuts();
+    nowSpy.mockRestore();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_settled");
+    const jobAfterSuccess = await offrampState.getJob("job_1");
+    expect(jobAfterSuccess?.lastPollReason).toBeNull();
+    expect(jobAfterSuccess?.lastPollError).toBeNull();
+    expect(jobAfterSuccess?.lastPollErrorAt).toBeNull();
+
+    const statusAfterSettled = await service.getOfframpPollStatus(links.get("lnk_1")!);
+    expect(statusAfterSettled).toBeNull();
+  });
+
+  it("classifies anchor auth required errors accurately", async () => {
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_auth",
+      linkId: "lnk_1",
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
+      transferNotifiedAt: null,
+    });
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_auth", offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async () => {
+      throw new AnchorAuthRequiredError("testanchor.stellar.org");
+    };
+
+    const service = makeService({ links, offramp, offrampState });
+    await service.pollCashOuts();
+
+    const job = await offrampState.getJob("job_auth");
+    expect(job?.lastPollReason).toBe("anchor_auth_required");
+    expect(job?.lastPollError).toBe("Anchor session expired or required. Please reconnect your anchor session in settings.");
   });
 
   it("fails a link stuck at offramp_pending with no job id at all (can never resolve)", async () => {

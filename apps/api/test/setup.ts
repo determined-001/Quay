@@ -250,6 +250,7 @@ export interface TestContainer extends Container {
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
+  offrampState: DrizzleOffRampStateRepository;
   state: DrizzleWatcherStateRepository;
   rail: FakeRailPort;
   watcher: FakeWatcherPort;
@@ -300,6 +301,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     sellers: repos.sellers,
     webhooks: repos.webhooks,
     apiKeys,
+    offrampState,
     state: repos.state,
     rail,
     watcher,

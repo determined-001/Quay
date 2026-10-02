@@ -908,6 +908,9 @@ function rowToJob(row: OffRampJobRow): StoredOffRampJob {
     status: row.status as StoredOffRampJob["status"],
     externalStatus: row.externalStatus ?? null,
     lastError: row.lastError ?? null,
+    lastPollError: row.lastPollError ?? null,
+    lastPollErrorAt: row.lastPollErrorAt ?? null,
+    lastPollReason: row.lastPollReason ?? null,
     transferNotifiedAt: row.transferNotifiedAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -950,6 +953,9 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       status: job.status,
       externalStatus: job.externalStatus,
       lastError: job.lastError,
+      lastPollError: job.lastPollError ?? null,
+      lastPollErrorAt: job.lastPollErrorAt ?? null,
+      lastPollReason: job.lastPollReason ?? null,
       transferNotifiedAt: job.transferNotifiedAt,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
@@ -963,7 +969,7 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
   ): Promise<void> {
     await this.db
       .update(offrampJobs)

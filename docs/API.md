@@ -363,6 +363,57 @@ behind `GET /links/:id/detail`.
 
 ---
 
+## `GET /links/:id/detail`
+
+**Requires auth.** Fetch full link details for the merchant/dashboard, including payment
+request, webhook delivery history, and the current cash-out poll status. Scoped to the
+authenticated seller (returns 404 for links belonging to other sellers).
+
+**200**
+```json
+{
+  "link": {
+    "id": "lnk_...",
+    "reference": "...",
+    "status": "offramp_pending",
+    "title": "T-shirt",
+    "amount": "10.50",
+    "asset": { "code": "USDC", "issuer": "G..." },
+    "destination": "G...",
+    "expiresAt": 1750000000000
+  },
+  "request": {
+    "uri": "web+stellar:pay?destination=...&amount=...&memo=...",
+    "memo": "...",
+    "memoType": "text"
+  },
+  "deliveries": [
+    {
+      "webhookId": "whk_...",
+      "linkId": "lnk_...",
+      "event": "link.paid",
+      "statusCode": 200,
+      "ok": true,
+      "error": null,
+      "createdAt": 1750000000000
+    }
+  ],
+  "offrampPoll": {
+    "reason": "anchor_unreachable",
+    "message": "The anchor service is temporarily unavailable or returned an error.",
+    "at": 1750000005000
+  }
+}
+```
+- `offrampPoll` — present when the link is in `offramp_pending` and the background cash-out
+  poller encountered an error during its last poll attempt (e.g. `anchor_unreachable`,
+  `circuit_open`, `anchor_auth_required`, `unknown`). It is `null` when no error occurred or once
+  a subsequent poll succeeds. Never leaks raw anchor response bodies, tokens, or payout fields.
+
+**404** — `{ "error": "not_found" }`
+
+---
+
 ## `POST /links/:id/submit`
 
 **Public — no auth.** The buyer submits a transaction signed by their own wallet.

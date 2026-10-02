@@ -1088,10 +1088,17 @@ export class LinkService {
       let job: OffRampJob;
       try {
         job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
-        // Successful poll clears any prior in-memory last_error + backoff.
+        // Successful poll clears any prior in-memory last_error + backoff + persisted poll error.
         this.lastPollErrorByLinkId.delete(link.id);
         this.consecutivePollErrorsByLinkId.delete(link.id);
         this.nextPollAtByLinkId.delete(link.id);
+        if (link.offrampJobId) {
+          await this.deps.offrampState.updateJob(link.offrampJobId, {
+            lastPollError: null,
+            lastPollErrorAt: null,
+            lastPollReason: null,
+          });
+        }
       } catch (err) {
         if (err instanceof OffRampJobNotFoundError) {
           // The adapter has no state for this job id at all — not a transient
@@ -1101,14 +1108,27 @@ export class LinkService {
           this.lastPollErrorByLinkId.delete(link.id);
           this.consecutivePollErrorsByLinkId.delete(link.id);
           this.nextPollAtByLinkId.delete(link.id);
+          if (link.offrampJobId) {
+            await this.deps.offrampState.updateJob(link.offrampJobId, {
+              lastPollError: null,
+              lastPollErrorAt: null,
+              lastPollReason: null,
+            });
+          }
           continue;
         }
-        // ATTRIBUTABLE: record the error against the link id so it can be
-        // exposed in a follow-up PR (and is logged now). Without this catch
-        // the swallowed error meant a downed anchor's failures evaporated.
-        const message = err instanceof Error ? err.message : String(err);
-        this.lastPollErrorByLinkId.set(link.id, message);
-        console.warn(`[offramp] poll failed for link ${link.id}: ${message}`);
+        // Classify the poll error into a sanitized, seller-safe reason and message.
+        const { reason, message: safeMessage } = classifyPollError(err);
+        if (link.offrampJobId) {
+          await this.deps.offrampState.updateJob(link.offrampJobId, {
+            lastPollError: safeMessage,
+            lastPollErrorAt: Date.now(),
+            lastPollReason: reason,
+          });
+        }
+        const rawMessage = err instanceof Error ? err.message : String(err);
+        this.lastPollErrorByLinkId.set(link.id, rawMessage);
+        console.warn(`[offramp] poll failed for link ${link.id}: ${rawMessage}`);
         // Exponential backoff per job (in-memory). Capped so a long-lived
         // pending job doesn't end up wedged for hours.
         const prev = this.consecutivePollErrorsByLinkId.get(link.id) ?? 0;
@@ -1243,11 +1263,24 @@ export class LinkService {
   }
 
   /**
-   * Read the in-memory last poll error for a single link, if any. Surface this
-   * in a follow-up PR; for now it's the attribution trail the issue asked for.
+   * Read the in-memory last poll error for a single link, if any.
    */
   lastPollErrorFor(linkId: string): string | null {
     return this.lastPollErrorByLinkId.get(linkId) ?? null;
+  }
+
+  /**
+   * Returns the persisted poll error details for an offramp_pending link, or null.
+   */
+  async getOfframpPollStatus(link: PaymentLink): Promise<{ reason: string; message: string; at: number } | null> {
+    if (link.status !== "offramp_pending" || !link.offrampJobId) return null;
+    const job = await this.deps.offrampState.getJob(link.offrampJobId);
+    if (!job || !job.lastPollReason || !job.lastPollError || !job.lastPollErrorAt) return null;
+    return {
+      reason: job.lastPollReason,
+      message: job.lastPollError,
+      at: job.lastPollErrorAt,
+    };
   }
 
   /**
@@ -1369,6 +1402,45 @@ export class HttpError extends Error {
   ) {
     super(message);
   }
+}
+
+export function classifyPollError(err: unknown): { reason: string; message: string } {
+  if (err instanceof AnchorAuthRequiredError || (err instanceof Error && err.message.includes("anchor_auth_required"))) {
+    return {
+      reason: "anchor_auth_required",
+      message: "Anchor session expired or required. Please reconnect your anchor session in settings.",
+    };
+  }
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  if (rawMsg.toLowerCase().includes("circuit open")) {
+    return {
+      reason: "circuit_open",
+      message: "Anchor calls are temporarily paused due to upstream service degradation. We will retry shortly.",
+    };
+  }
+  if (
+    rawMsg.includes("fetch failed") ||
+    rawMsg.includes("ECONNREFUSED") ||
+    rawMsg.includes("ECONNRESET") ||
+    rawMsg.includes("ETIMEDOUT") ||
+    rawMsg.includes("ENOTFOUND") ||
+    rawMsg.includes("DNS") ||
+    rawMsg.includes("timeout") ||
+    rawMsg.includes("anchor down") ||
+    rawMsg.includes("502") ||
+    rawMsg.includes("503") ||
+    rawMsg.includes("504") ||
+    rawMsg.includes("anchor unavailable")
+  ) {
+    return {
+      reason: "anchor_unreachable",
+      message: "The anchor could not be reached. We will keep trying.",
+    };
+  }
+  return {
+    reason: "unknown",
+    message: "A transient error occurred while checking cash-out status. We will keep trying.",
+  };
 }
 
 /**
