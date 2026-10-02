@@ -1,5 +1,5 @@
 import { Asset, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
-import { OffRampJobNotFoundError, targetPerSourceRate } from "@checkout/core";
+import { OffRampJobNotFoundError } from "@checkout/core";
 import type {
   AssetRef,
   OffRampInitiation,
@@ -8,7 +8,7 @@ import type {
   OffRampMode,
   OffRampPort,
   OffRampQuote,
-  OfframpRequirementTypes,
+  PayoutFieldDescriptor,
   SellerPayoutRef,
 } from "@checkout/core";
 import { getSep38Quote } from "./sep38";
@@ -90,11 +90,11 @@ export class AnchorOffRamp implements OffRampPort {
 
   /**
    * SEP-24 is interactive — the anchor's own hosted UI collects payout details
-   * (and any rail choice) directly from the seller during `initiate()`, so
-   * there are no descriptors and no types to pick up front (issues #32, 5.24).
+   * directly from the seller during `initiate()`, so there are no descriptors
+   * to fetch up front (issue #32).
    */
-  async offrampRequirements(): Promise<OfframpRequirementTypes> {
-    return { types: [], defaultType: null };
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 
   async quote(input: {
@@ -130,9 +130,7 @@ export class AnchorOffRamp implements OffRampPort {
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
       targetAmount: grossTargetAmount,
-      // TARGET per source (issue 5.21) — SEP-38's price inverted; the raw
-      // price stays on the stored quote above.
-      rate: targetPerSourceRate(q.price),
+      rate: q.price,
       expiresAt: Date.parse(q.expiresAt),
       fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
       netTargetAmount,
@@ -161,7 +159,7 @@ export class AnchorOffRamp implements OffRampPort {
       sellAsset: q.sellAsset,
       targetCurrency: q.buyCurrency,
       targetAmount: "",
-      rate: targetPerSourceRate(q.price),
+      rate: q.price,
     });
 
     return {

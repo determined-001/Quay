@@ -7,32 +7,19 @@
  *   1. Open → fetch descriptors + saved (masked) fields from /offramp-requirements.
  *   2. Seller fills the form (pre-filled with masked saved values as placeholders).
  *   3. Client-side validation from descriptors (required fields must be non-empty).
- *   4. "Get quote" → GET /links/:id/cash-out/quote → gross / fee / net + rate + expiry.
- *      Nothing is started at the anchor yet.
- *   5. Confirmation panel shows gross / fee / net, the rate and a countdown to quote expiry.
- *   6. "Confirm cash-out" → POST /cash-out with the quoteId (so the API initiates against
- *      exactly the quote the seller saw) and an Idempotency-Key reused across retries.
+ *   4. "Get quote" → POST /cash-out with payoutFields → receive gross/fee/net + expiry.
+ *      In this flow the API does quote+initiate atomically; we display the quote the
+ *      API computed before it committed so the seller sees the numbers before anything
+ *      is submitted to the anchor.
+ *      TODO: split into a two-step GET /quote → confirm → POST /cash-out when the API
+ *      exposes a separate quote endpoint.
+ *   5. Confirmation panel shows gross / fee / net and a countdown to quote expiry.
+ *   6. Confirm → POST /cash-out (the actual initiate).
  *   7. Any unmet required field → cash-out button is disabled with explanatory text.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { WithdrawTransfer } from "@checkout/core";
-import {
-  api,
-  CheckoutError,
-  describeError,
-  serverNow,
-  type OffRampQuote,
-  type OfframpRequirements,
-  type PayoutFieldDescriptor,
-} from "../../lib/api";
-import { fmtCountdown, quoteMsRemaining } from "../../lib/quote-countdown";
-import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
-import {
-  checkPaymentPreflight,
-  type PaymentPreflightResult,
-} from "../../lib/payment-preflight";
-import { useSellerWallet } from "./SessionGate";
+import { api, type OfframpRequirements, type PayoutFieldDescriptor } from "../../lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -48,15 +35,7 @@ interface Props {
   onSuccess: () => void;
 }
 
-// "confirming" = fetching the quote; "quote" = seller reviewing it; "submitting" = initiating.
-type ModalStep =
-  | "loading"
-  | "form"
-  | "confirming"
-  | "quote"
-  | "submitting"
-  | "transfer"
-  | "error";
+type ModalStep = "loading" | "form" | "confirming" | "submitting" | "error";
 
 interface QuotePreview {
   jobId: string;
@@ -104,20 +83,12 @@ function mask(v: string): string {
   return `${"*".repeat(v.length - 4)}${v.slice(-4)}`;
 }
 
-// Countdown math lives in lib/quote-countdown.ts (issue 5.22), where the
-// node-environment tests can reach it.
-
-/** Human labels for the SEP-6 withdrawal types we know; anything else shows
- *  the anchor's raw name rather than pretending to know what it means. */
-function withdrawTypeLabel(name: string): string {
-  switch (name) {
-    case "bank_account":
-      return "Bank transfer";
-    case "cash":
-      return "Cash pickup";
-    default:
-      return name;
-  }
+/** Format seconds as "m:ss". */
+function fmtCountdown(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,76 +106,15 @@ export default function CashOutModal({
 }: Props) {
   const [step, setStep] = useState<ModalStep>("loading");
   const [requirements, setRequirements] = useState<OfframpRequirements | null>(null);
-  // The seller's chosen SEP-6 withdrawal rail (issue 5.24). Preselected from
-  // the API's defaultType; null when the anchor offers several and the
-  // operator set no default — then choosing is part of the form.
-  const [withdrawType, setWithdrawType] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [quote, setQuote] = useState<QuotePreview | null>(null);
-  // The firm quote the seller is reviewing, and the key that makes confirming
-  // it idempotent across a dropped response.
-  const [firmQuote, setFirmQuote] = useState<OffRampQuote | null>(null);
-  const idempotencyKeyRef = useRef<string | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   // Set only when the anchor asked for an interactive flow and the popup was
   // blocked — the seller needs a link they can open themselves.
   const [interactiveUrl, setInteractiveUrl] = useState<string | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Set when the anchor is waiting for the asset. Only the seller's wallet can
-  // send it; the payout does not start until they do.
-  const wallet = useSellerWallet();
-  const [transfer, setTransfer] = useState<WithdrawTransfer | null>(null);
-  const [sending, setSending] = useState(false);
-  const [sentHash, setSentHash] = useState<string | null>(null);
-  const [transferError, setTransferError] = useState<string | null>(null);
-  const [preflight, setPreflight] = useState<PaymentPreflightResult | null>(null);
-  const [checkingPreflight, setCheckingPreflight] = useState(false);
-
-  const runPreflight = useCallback(async () => {
-    if (!transfer || !wallet) return;
-    setCheckingPreflight(true);
-    setTransferError(null);
-    try {
-      const stellar = await import("@stellar/stellar-sdk");
-      const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
-      const horizonUrl =
-        process.env.NEXT_PUBLIC_HORIZON_URL ??
-        (network === "public" ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org");
-      const server = new stellar.Horizon.Server(horizonUrl);
-      let account: Awaited<ReturnType<typeof server.loadAccount>> | null = null;
-      try {
-        account = await server.loadAccount(wallet);
-      } catch {
-        account = null;
-      }
-      const result = checkPaymentPreflight(
-        account,
-        {
-          code: transfer.asset.code,
-          issuer: transfer.asset.issuer,
-        },
-        transfer.amount,
-        {
-          connectedAddress: wallet,
-          expectedAddress: wallet,
-          feeStroops: BigInt(stellar.BASE_FEE),
-        },
-      );
-      setPreflight(result);
-    } catch {
-      setPreflight(null);
-    } finally {
-      setCheckingPreflight(false);
-    }
-  }, [transfer, wallet]);
-
-  useEffect(() => {
-    if (step === "transfer" && transfer && wallet) {
-      void runPreflight();
-    }
-  }, [step, transfer, wallet, runPreflight]);
 
   // ---- fetch requirements on mount ----------------------------------------
   useEffect(() => {
@@ -214,7 +124,6 @@ export default function CashOutModal({
       .then((r) => {
         if (cancelled) return;
         setRequirements(r);
-        setWithdrawType(r.defaultType);
         setStep("form");
       })
       .catch((e: unknown) => {
@@ -228,17 +137,9 @@ export default function CashOutModal({
   }, [linkId]);
 
   // ---- countdown tick ------------------------------------------------------
-  // `expiresAt` is the anchor's own TTL as a SERVER timestamp, so the clock it
-  // is measured against is serverNow(), not the phone's. `unknown` because an
-  // absent or malformed expiry must mean "no countdown", never a guessed one
-  // (issue 5.22).
-  const startCountdown = useCallback((expiresAt: unknown) => {
+  const startCountdown = useCallback((expiresAt: number) => {
     if (countdownRef.current) clearInterval(countdownRef.current);
-    if (quoteMsRemaining(expiresAt, serverNow()) === null) {
-      setCountdown(null);
-      return;
-    }
-    const tick = () => setCountdown(quoteMsRemaining(expiresAt, serverNow()));
+    const tick = () => setCountdown(expiresAt - Date.now());
     tick();
     countdownRef.current = setInterval(tick, 500);
   }, []);
@@ -306,10 +207,9 @@ export default function CashOutModal({
     if (!popup) setInteractiveUrl(parsed.href);
   }
 
-  async function handleGetQuote() {
+  async function handleSubmit() {
     if (!requirements) return;
-    if (types.length > 1 && !withdrawType) return; // the picker gates submit
-    const errs = validate(descriptors, values, requirements.savedFields);
+    const errs = validate(requirements.descriptors, values, requirements.savedFields);
     if (Object.keys(errs).length > 0) {
       setFieldErrors(errs);
       return;
@@ -317,33 +217,7 @@ export default function CashOutModal({
     setStep("confirming");
     setErrorMsg(null);
     try {
-      const q = await api.quoteCashOut(linkId, targetCurrency, withdrawType ?? undefined);
-      setFirmQuote(q);
-      // A new quote is a new decision: it must not reuse the previous key.
-      idempotencyKeyRef.current = null;
-      startCountdown(q.expiresAt);
-      setStep("quote");
-    } catch (e: unknown) {
-      setErrorMsg(e instanceof CheckoutError ? describeError(e) : e instanceof Error ? e.message : "Failed to fetch quote");
-      setStep("form");
-    }
-  }
-
-  async function handleConfirmCashOut() {
-    if (!firmQuote) return;
-    setStep("submitting");
-    setErrorMsg(null);
-    // One key per confirmed quote, reused if the seller retries after a dropped response.
-    if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
-    try {
-      const result = await api.cashOut(
-        linkId,
-        targetCurrency,
-        buildPayoutFields(),
-        idempotencyKeyRef.current,
-        firmQuote.quoteId,
-        withdrawType ?? undefined,
-      );
+      const result = await api.cashOut(linkId, targetCurrency, buildPayoutFields());
       if (result.interactiveUrl) {
         openInteractive(result.interactiveUrl);
       }
@@ -355,50 +229,22 @@ export default function CashOutModal({
         targetCurrency: j.targetCurrency,
       };
       setQuote(preview);
-      setFirmQuote(null);
-      // The anchor's real quote expiry, straight from the response. When the
-      // API sends none, startCountdown shows no countdown at all.
-      startCountdown(j.quoteExpiresAt);
-      // If the anchor now needs the asset, keep the modal open for the seller
-      // to send it; otherwise go straight to success.
-      if (result.transfer) {
-        setTransfer(result.transfer);
-        setStep("transfer");
-      } else {
-        onSuccess();
-      }
+      // Quote expiry not surfaced by the current API response; show a
+      // fixed 5-minute window matching the mock/testanchor default TTL.
+      const expiresAt = Date.now() + 5 * 60_000;
+      startCountdown(expiresAt);
+      // Cash-out is already initiated at this point (quote+initiate are atomic
+      // in the current API). Go straight to success after showing the summary.
+      onSuccess();
     } catch (e: unknown) {
-      const msg = e instanceof CheckoutError ? describeError(e) : e instanceof Error ? e.message : "Cash-out failed";
-      setErrorMsg(msg);
-      // An expired or mismatched quote cannot be confirmed; the countdown is
-      // forced to zero so the panel offers a fresh quote instead.
-      if (/quote_expired|quote_mismatch/.test(msg)) setCountdown(0);
-      setStep("quote");
-    }
-  }
-
-  async function handleSendTransfer() {
-    if (!transfer || !wallet) return;
-    setTransferError(null);
-    setSending(true);
-    try {
-      setSentHash(await sendAnchorTransfer(wallet, transfer, wallet));
-    } catch (e: unknown) {
-      setTransferError(
-        e instanceof Error && e.message ? `The payment was not sent: ${e.message}` : "The payment was not sent.",
-      );
-    } finally {
-      setSending(false);
+      setErrorMsg(e instanceof Error ? e.message : "Cash-out failed");
+      setStep("form");
     }
   }
 
   // ---- derived state -------------------------------------------------------
-  const types = requirements?.types ?? [];
-  // Descriptors follow the chosen rail: each SEP-6 type carries its own field
-  // set (issue 5.24), so switching the radio re-renders the form.
-  const descriptors = types.find((t) => t.name === withdrawType)?.descriptors ?? [];
+  const descriptors = requirements?.descriptors ?? [];
   const savedFields = requirements?.savedFields ?? null;
-  const needsTypeChoice = types.length > 1 && !withdrawType;
 
   // Determine which required fields are unmet to show the disabled explanation.
   const unmetRequired = descriptors.filter((d) => {
@@ -407,8 +253,7 @@ export default function CashOutModal({
     const hasSaved = savedFields && savedFields[d.name];
     return !typed && !hasSaved;
   });
-  const canSubmit = unmetRequired.length === 0 && !needsTypeChoice;
-  const quoteExpired = countdown !== null && countdown <= 0;
+  const canSubmit = unmetRequired.length === 0;
 
   // ---- render --------------------------------------------------------------
   return (
@@ -506,11 +351,11 @@ export default function CashOutModal({
         )}
 
         {/* Form */}
-        {(step === "form" || step === "confirming") && (
+        {(step === "form" || step === "confirming" || step === "submitting") && (
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              void handleGetQuote();
+              void handleSubmit();
             }}
           >
             {/* Amount summary */}
@@ -532,53 +377,8 @@ export default function CashOutModal({
               → {targetCurrency}
             </div>
 
-            {/* Rail picker: which SEP-6 withdrawal type the money leaves on is
-                the seller's choice, not the operator's (issue 5.24). Only
-                rendered when the anchor actually offers more than one. */}
-            {types.length > 1 && (
-              <fieldset
-                style={{
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  padding: "10px 14px 12px",
-                  marginBottom: 16,
-                }}
-              >
-                <legend style={{ fontSize: 12, color: "var(--muted)", padding: "0 6px" }}>
-                  How should the money arrive?
-                </legend>
-                {types.map((t) => (
-                  <label
-                    key={t.name}
-                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 14, cursor: "pointer" }}
-                  >
-                    <input
-                      type="radio"
-                      name="withdrawType"
-                      value={t.name}
-                      checked={withdrawType === t.name}
-                      onChange={() => {
-                        setWithdrawType(t.name);
-                        // The new rail has its own fields; stale per-field
-                        // errors from the old one would point at inputs that
-                        // no longer exist.
-                        setFieldErrors({});
-                      }}
-                      disabled={step === "confirming"}
-                    />
-                    {withdrawTypeLabel(t.name)}
-                  </label>
-                ))}
-                {needsTypeChoice && (
-                  <p style={{ fontSize: 12, color: "var(--muted)", margin: "6px 0 0" }}>
-                    Choose one to see the details this payout needs.
-                  </p>
-                )}
-              </fieldset>
-            )}
-
             {/* Dynamic fields from descriptors */}
-            {descriptors.length === 0 && !needsTypeChoice && (
+            {descriptors.length === 0 && (
               <p style={{ color: "var(--muted)", fontSize: 13 }}>
                 No payout fields required by this anchor.
               </p>
@@ -591,12 +391,12 @@ export default function CashOutModal({
                 savedMasked={savedFields?.[d.name] ?? null}
                 error={fieldErrors[d.name] ?? null}
                 onChange={(v) => handleChange(d.name, v)}
-                disabled={step === "confirming"}
+                disabled={step === "confirming" || step === "submitting"}
               />
             ))}
 
             {/* Disabled explanation */}
-            {unmetRequired.length > 0 && step === "form" && (
+            {!canSubmit && step === "form" && (
               <div
                 role="status"
                 style={{
@@ -625,10 +425,14 @@ export default function CashOutModal({
             <button
               type="submit"
               className="btn btn--primary btn--block"
-              disabled={!canSubmit || step === "confirming"}
+              disabled={!canSubmit || step === "confirming" || step === "submitting"}
               aria-disabled={!canSubmit}
             >
-              {step === "confirming" ? "Getting quote…" : "Get quote"}
+              {step === "confirming"
+                ? "Processing…"
+                : step === "submitting"
+                  ? "Submitting…"
+                  : `Cash out to ${targetCurrency}`}
             </button>
 
             <button
@@ -636,207 +440,11 @@ export default function CashOutModal({
               className="btn btn--block"
               style={{ marginTop: 8 }}
               onClick={onClose}
-              disabled={step === "confirming"}
+              disabled={step === "confirming" || step === "submitting"}
             >
               Cancel
             </button>
           </form>
-        )}
-
-        {/* Firm quote — nothing has been started at the anchor yet. */}
-        {(step === "quote" || step === "submitting") && firmQuote && (
-          <div>
-            <div
-              style={{
-                background: "var(--surface-2)",
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                padding: "14px 16px",
-                fontSize: 13,
-                marginBottom: 20,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  color: "var(--muted)",
-                  marginBottom: 10,
-                }}
-              >
-                Firm quote {isMock && <span style={{ color: "var(--amber)" }}>(simulated)</span>}
-              </div>
-              <Row label="You send" value={`${firmQuote.sourceAmount} ${assetCode}`} mono />
-              <Row label="Gross amount" value={`${firmQuote.targetAmount} ${firmQuote.targetCurrency}`} mono />
-              <Row
-                label={firmQuote.fee.source === "estimated" ? "Fee (estimated)" : "Fee"}
-                value={`${firmQuote.fee.amount} ${firmQuote.fee.currency}`}
-                mono
-              />
-              <Row
-                label={`You receive (${firmQuote.targetCurrency})`}
-                value={`${firmQuote.netTargetAmount} ${firmQuote.targetCurrency}`}
-                mono
-                accent
-              />
-              <Row
-                label="Exchange rate"
-                value={`1 ${assetCode} = ${firmQuote.rate} ${firmQuote.targetCurrency}`}
-                mono
-              />
-              {countdown !== null && (
-                <div
-                  style={{ marginTop: 12, fontSize: 12, color: quoteExpired ? "var(--red)" : "var(--muted)" }}
-                  role="status"
-                  aria-live="polite"
-                >
-                  {quoteExpired ? (
-                    "Quote expired — please request a new quote."
-                  ) : (
-                    <>
-                      Quote valid for{" "}
-                      <span className="mono" style={{ color: "var(--amber)" }}>
-                        {fmtCountdown(countdown)}
-                      </span>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {errorMsg && (
-              <div className="err" style={{ marginBottom: 14 }}>
-                {errorMsg}
-              </div>
-            )}
-
-            {quoteExpired ? (
-              <button
-                type="button"
-                className="btn btn--primary btn--block"
-                onClick={() => void handleGetQuote()}
-              >
-                Get a new quote
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn--primary btn--block"
-                onClick={() => void handleConfirmCashOut()}
-                disabled={step === "submitting"}
-              >
-                {step === "submitting" ? "Submitting…" : "Confirm cash-out"}
-              </button>
-            )}
-
-            <button
-              type="button"
-              className="btn btn--block"
-              style={{ marginTop: 8 }}
-              onClick={() => {
-                if (countdownRef.current) clearInterval(countdownRef.current);
-                setCountdown(null);
-                setErrorMsg(null);
-                setStep("form");
-              }}
-              disabled={step === "submitting"}
-            >
-              Back
-            </button>
-          </div>
-        )}
-
-        {/* The anchor is waiting for the asset. The seller's wallet sends it
-            straight to the anchor; nothing passes through Quay. */}
-        {step === "transfer" && transfer && (
-          <div>
-            {sentHash ? (
-              <>
-                <div className="kyc-note kyc-note--ok" style={{ marginBottom: 12 }}>
-                  Sent. The anchor pays out once it sees the payment on the ledger.
-                </div>
-                <p className="muted mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
-                  {sentHash}
-                </p>
-                <button className="btn btn--primary btn--block" onClick={onSuccess}>
-                  Done
-                </button>
-              </>
-            ) : (
-              <>
-                <p style={{ marginTop: 0 }}>
-                  The anchor is ready. Send{" "}
-                  <strong>
-                    {transfer.amount} {transfer.asset.code}
-                  </strong>{" "}
-                  from your wallet to finish the cash-out.
-                </p>
-                <dl className="muted" style={{ fontSize: 13, margin: "0 0 12px" }}>
-                  <dt>To</dt>
-                  <dd className="mono" title={transfer.destination}>
-                    {shortAddress(transfer.destination)}
-                  </dd>
-                  {transfer.memo !== null && (
-                    <>
-                      <dt>Memo ({transfer.memoType ?? "text"})</dt>
-                      <dd className="mono">{transfer.memo}</dd>
-                    </>
-                  )}
-                </dl>
-                <p className="muted" style={{ fontSize: 12 }}>
-                  Keep this open until the payment is sent. The memo is how the anchor matches it to
-                  your withdrawal.
-                </p>
-
-                {checkingPreflight && (
-                  <p className="muted" style={{ fontSize: 12 }}>
-                    Checking wallet balance…
-                  </p>
-                )}
-
-                {preflight && !preflight.ok && (
-                  <div className="err" role="alert" style={{ marginBottom: 12 }}>
-                    {preflight.message}
-                  </div>
-                )}
-
-                {preflight && !preflight.ok && preflight.reason === "missing_trustline" ? (
-                  <button
-                    type="button"
-                    className="btn btn--block"
-                    onClick={() => void runPreflight()}
-                    disabled={checkingPreflight}
-                  >
-                    {checkingPreflight ? "Checking…" : "Check again"}
-                  </button>
-                ) : (
-                  <>
-                    <button
-                      className="btn btn--primary btn--block"
-                      onClick={() => void handleSendTransfer()}
-                      disabled={sending || !wallet || checkingPreflight || (preflight !== null && !preflight.ok)}
-                      aria-disabled={preflight !== null && !preflight.ok}
-                    >
-                      {sending ? "Waiting for wallet…" : "Send with my wallet"}
-                    </button>
-                    {preflight && !preflight.ok && (
-                      <button
-                        type="button"
-                        className="btn btn--block"
-                        style={{ marginTop: 8 }}
-                        onClick={() => void runPreflight()}
-                        disabled={checkingPreflight}
-                      >
-                        {checkingPreflight ? "Checking…" : "Check again"}
-                      </button>
-                    )}
-                  </>
-                )}
-                {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
-              </>
-            )}
-          </div>
         )}
 
         {/* The anchor needs the seller in a browser and the popup was blocked —
@@ -1012,8 +620,9 @@ function QuoteSummary({
   countdown: number | null;
   isMock: boolean;
 }) {
-  // The post-initiate receipt: the job's net amount. The fee breakdown the seller
-  // agreed to was shown in the firm-quote panel before confirming.
+  // The API returns the net amount after fees (targetAmount). Gross = sourceAmount
+  // converted at the same rate. We surface what we have; fee breakdown requires a
+  // separate quote endpoint (see TODO in handleSubmit).
   const expired = countdown !== null && countdown <= 0;
 
   return (

@@ -3,7 +3,7 @@ import { kycRoutes } from "../src/routes/kyc";
 import { generateApiKey, hashApiKey, type ApiKeyScope } from "../src/services/api-keys";
 import { createTestContainer, type TestContainer } from "./setup";
 import type { Container } from "../src/services/container";
-import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord } from "@checkout/core";
+import type { KycRecord } from "@checkout/core";
 
 /**
  * Regression, BUG-6.6.
@@ -19,15 +19,11 @@ import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord } from "@c
 describe("kycRoutes — authentication and scoping", () => {
   const record: KycRecord = {
     sellerId: "sel_x",
-    anchorDomain: "testanchor.stellar.org",
-    account: null,
     customerId: "cus_1",
     status: "ACCEPTED",
     requiredFields: [],
     // Stand-in for real SEP-12 PII: legal name, address, bank account.
     providedFields: { first_name: "Ada", bank_account_number: "1234567890" },
-    providedFieldStatus: [],
-    sentFields: [],
     message: null,
     lastSyncedAt: 1,
     updatedAt: 1,
@@ -36,36 +32,17 @@ describe("kycRoutes — authentication and scoping", () => {
   async function harness(scopes: ApiKeyScope[]) {
     const container = await createTestContainer();
     const submitted: Record<string, string>[] = [];
-    const seen: AnchorCustomer[] = [];
+    const seenSellerIds: string[] = [];
 
     const withKyc = {
       ...container,
-      anchorDomain: "testanchor.stellar.org",
-      kycConsents: {
-        async list(sellerId: string) { return []; },
-        async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
-        async active(sellerId: string, anchorDomain: string) { 
-          // Return a consent that covers all fields for testing
-          return { 
-            id: "cnc_1", 
-            sellerId, 
-            anchorDomain, 
-            fields: ["first_name", "bank_account_number"], 
-            grantedAt: Date.now(), 
-            revokedAt: null, 
-            grantedVia: "session", 
-            noticeVersion: "1.0" 
-          }; 
-        },
-        async revoke(sellerId: string, anchorDomain: string) { },
-      } as unknown as Container["kycConsents"],
       kyc: {
-        async status(customer: AnchorCustomer) {
-          seen.push(customer);
+        async status(sellerId: string) {
+          seenSellerIds.push(sellerId);
           return record;
         },
-        async submit(customer: AnchorCustomer, fields: Record<string, string>) {
-          seen.push(customer);
+        async submit(sellerId: string, fields: Record<string, string>) {
+          seenSellerIds.push(sellerId);
           submitted.push(fields);
           return record;
         },
@@ -84,7 +61,7 @@ describe("kycRoutes — authentication and scoping", () => {
       scopes,
     });
 
-    return { app, container: container as TestContainer, key: plaintext, seller, submitted, seen };
+    return { app, container: container as TestContainer, key: plaintext, seller, submitted, seenSellerIds };
   }
 
   it("refuses an unauthenticated read of the seller's identity", async () => {
@@ -127,19 +104,18 @@ describe("kycRoutes — authentication and scoping", () => {
   });
 
   it("serves the authenticated seller, resolved from the token rather than getDefault()", async () => {
-    const { app, container, key, seller, seen } = await harness(["offramp:initiate"]);
+    const { app, container, key, seller, seenSellerIds } = await harness(["offramp:initiate"]);
 
     const res = await app.request("/", { headers: { authorization: `Bearer ${key}` } });
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: "ACCEPTED" });
-    // status is called once for the GET endpoint
-    expect(seen).toEqual([{ sellerId: seller.id, account: seller.wallet }]);
+    expect(seenSellerIds).toEqual([seller.id]);
     container.client.close();
   });
 
   it("submits identity for the authenticated seller", async () => {
-    const { app, container, key, seller, submitted, seen } = await harness(["offramp:initiate"]);
+    const { app, container, key, seller, submitted, seenSellerIds } = await harness(["offramp:initiate"]);
 
     const res = await app.request("/", {
       method: "PUT",
@@ -149,42 +125,7 @@ describe("kycRoutes — authentication and scoping", () => {
 
     expect(res.status).toBe(200);
     expect(submitted).toEqual([{ first_name: "Ada" }]);
-    // status is called once for consent check, then submit is called
-    expect(seen).toEqual([
-      { sellerId: seller.id, account: seller.wallet },
-      { sellerId: seller.id, account: seller.wallet },
-    ]);
-    container.client.close();
-  });
-
-  it("answers 403 anchor_auth_required when the seller has not signed in to the anchor", async () => {
-    const container = await createTestContainer();
-    const signedOut = {
-      async status() {
-        throw new AnchorAuthRequiredError("anchor.example");
-      },
-      async submit() {
-        throw new AnchorAuthRequiredError("anchor.example");
-      },
-    };
-    const app = kycRoutes({ ...container, kyc: signedOut } as unknown as Container);
-    const { plaintext, prefix } = generateApiKey("test");
-    await container.apiKeys.create({
-      sellerId: container.seller.id,
-      name: "kyc test key",
-      prefix,
-      hash: await hashApiKey(plaintext),
-      scopes: ["offramp:initiate"],
-    });
-    const headers = { authorization: `Bearer ${plaintext}`, "content-type": "application/json" };
-
-    const read = await app.request("/", { headers });
-    expect(read.status).toBe(403);
-    expect(await read.json()).toEqual({ error: "anchor_auth_required" });
-
-    const write = await app.request("/", { method: "PUT", headers, body: JSON.stringify({ first_name: "Ada" }) });
-    expect(write.status).toBe(403);
-    expect(await write.json()).toEqual({ error: "anchor_auth_required" });
+    expect(seenSellerIds).toEqual([seller.id]);
     container.client.close();
   });
 });

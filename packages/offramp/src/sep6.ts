@@ -1,28 +1,74 @@
 import type { Logger } from "@checkout/core";
-import { NOOP_LOGGER, OffRampRejectedError } from "@checkout/core";
+import { NOOP_LOGGER } from "@checkout/core";
 import { endpointUrl } from "./sep1";
 
 export interface Sep6WithdrawResult {
   id: string;
-  /** Where the seller sends the asset. Absent when the anchor has more to do
-   *  first (e.g. KYC review) and will publish it on the transaction later. */
   accountId?: string;
-  memo?: string;
-  memoType?: "text" | "id" | "hash";
+}
+
+/**
+ * A single field descriptor as returned by SEP-6 GET /info for a withdraw type.
+ * See SEP-6 §3.4 — the anchor returns an `fields` map keyed by field name.
+ */
+export interface Sep6FieldInfo {
+  name: string;
+  description: string;
+  optional?: boolean;
+  choices?: string[];
+}
+
+/**
+ * GET /sep6/info — returns the withdraw field requirements for a given asset code.
+ * The anchor may or may not require authentication for /info; we send the JWT if
+ * provided so authenticated anchors can return KYC-aware field sets.
+ */
+export async function getSep6WithdrawInfo(
+  baseUrl: string,
+  assetCode: string,
+  jwt?: string,
+): Promise<Sep6FieldInfo[]> {
+  const url = endpointUrl(baseUrl, "info");
+  const headers: Record<string, string> = {};
+  if (jwt) headers["authorization"] = `Bearer ${jwt}`;
+
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
+  }
+
+  const body = (await res.json()) as {
+    withdraw?: Record<
+      string,
+      {
+        enabled?: boolean;
+        fields?: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
+      }
+    >;
+  };
+
+  const assetInfo = body.withdraw?.[assetCode];
+  if (!assetInfo?.enabled) {
+    throw new Error(`SEP-6 anchor does not support withdrawing ${assetCode}`);
+  }
+
+  const rawFields = assetInfo.fields ?? {};
+  return Object.entries(rawFields).map(([name, meta]) => ({
+    name,
+    description: meta.description ?? name,
+    optional: meta.optional ?? false,
+    choices: meta.choices,
+  }));
 }
 
 // ---------------------------------------------------------------------------
 // SEP-6 /info capability discovery
 // ---------------------------------------------------------------------------
-// `getSep6Info` below is the ONE /info parser (issue 5.24). It answers both
-// questions the flow needs: what fields does each withdrawal type's form
-// need (SEP-6 puts withdraw fields under `types[].fields` — an asset-level
-// `fields` map is not where the spec keeps them, and a parser that read it
-// there meant the form never changed with the rail), and the questions that
-// have to be settled *before* a quote is requested: which withdrawal type
-// are we doing, and will the anchor accept this amount at all. Asking after
-// quoting means burning a firm quote to discover a limit the anchor
-// published all along.
+// `getSep6WithdrawInfo` above answers "what fields does the form need". This
+// pair answers the questions that have to be settled *before* a quote is
+// requested: which withdrawal type are we doing, and will the anchor accept
+// this amount at all. Asking after quoting means burning a firm quote to
+// discover a limit the anchor published all along.
 
 /** One withdrawal type (`bank_account`, `cash`, …) under an asset. */
 export interface Sep6WithdrawType {
@@ -50,9 +96,13 @@ export interface Sep6Info {
  * limits so the caller can tell the seller what would be accepted rather than
  * just that this wasn't.
  */
-export class Sep6ValidationError extends OffRampRejectedError {
-  constructor(message: string, limits: { minAmount?: number; maxAmount?: number } = {}, availableTypes: string[] = []) {
-    super(message, limits, availableTypes);
+export class Sep6ValidationError extends Error {
+  constructor(
+    message: string,
+    readonly limits: { minAmount?: number; maxAmount?: number } = {},
+    readonly availableTypes: string[] = [],
+  ) {
+    super(message);
     this.name = "Sep6ValidationError";
   }
 }
@@ -178,7 +228,7 @@ export async function resolveWithdrawType(
     throw new Sep6ValidationError(
       typeNames.length === 0
         ? `Anchor lists no withdraw types for ${assetCode}`
-        : `Anchor offers ${typeNames.length} withdraw types for ${assetCode} (${typeNames.join(", ")}); choose one with withdrawType, or set OFFRAMP_TYPE as the operator default`,
+        : `Anchor offers ${typeNames.length} withdraw types for ${assetCode}; set OFFRAMP_TYPE to choose one`,
       { minAmount: asset.minAmount, maxAmount: asset.maxAmount },
       typeNames,
     );
@@ -258,9 +308,8 @@ export async function startSep6Withdraw(
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
     throw new Error(`SEP-6 withdraw failed: ${res.status} ${await res.text()}`);
   }
-  const body = (await res.json()) as { id: string; account_id?: string; memo?: string; memo_type?: string };
-  const memoType = body.memo_type === "id" || body.memo_type === "hash" || body.memo_type === "text" ? body.memo_type : undefined;
-  const out: Sep6WithdrawResult = { id: body.id, accountId: body.account_id, memo: body.memo, memoType };
+  const body = (await res.json()) as { id: string; account_id?: string };
+  const out: Sep6WithdrawResult = { id: body.id, accountId: body.account_id };
   log.info(
     { event: "anchor.sep6.withdraw.ok", withdrawId: out.id, accountId: out.accountId, durationMs: Date.now() - t0 },
     "SEP-6 withdraw started",

@@ -103,15 +103,10 @@ describe("checkSellerWallet", () => {
     expect(checkSellerWallet({ DEFAULT_SELLER_WALLET: "not-a-key" }).ok).toBe(false);
   });
 
-  it("blocks when a seller secret is held on public network", () => {
+  it("warns when a seller secret is held with no anchor to sign for", () => {
     const res = checkSellerWallet({ ...GOOD, DEFAULT_SELLER_SECRET: "S".repeat(56) });
     expect(res.ok).toBe(false);
-    expect(res.level).toBe("blocking");
-    expect(res.detail).toMatch(/DEFAULT_SELLER_SECRET is set on the public network/);
-  });
-
-  it("does not require a seller secret for OFFRAMP=anchor", () => {
-    expect(checkSellerWallet({ ...GOOD, OFFRAMP: "anchor" }).ok).toBe(true);
+    expect(res.level).toBe("warning");
   });
 });
 

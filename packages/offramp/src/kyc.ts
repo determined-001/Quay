@@ -1,15 +1,7 @@
-import {
-  KycRequiredError,
-  type AnchorCustomer,
-  type KycFieldSpec,
-  type KycPort,
-  type KycRecord,
-  type KycRepository,
-  type ProvidedFieldStatus,
-} from "@checkout/core";
-import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
+import type { Keypair } from "@stellar/stellar-sdk";
+import { KycRequiredError, type KycFieldSpec, type KycPort, type KycRecord, type KycRepository } from "@checkout/core";
+import { Sep10Client } from "./sep10";
 import { getSep12Customer, putSep12Customer } from "./sep12";
-import { selectFieldsForAnchor } from "@checkout/core";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
  *  entry for. Exported for direct unit testing of the "name exactly which
@@ -18,57 +10,50 @@ export function missingRequiredFields(required: KycFieldSpec[], values: Record<s
   return required.filter((f) => !f.optional && !(values[f.name] ?? "").trim()).map((f) => f.name);
 }
 
+const DEFAULT_BASE_URL = "https://testanchor.stellar.org";
+const DEFAULT_HOME_DOMAIN = "testanchor.stellar.org";
+
 export interface TestAnchorKycOptions {
-  discovery: AnchorDiscovery;
-  /** The seller's own SEP-10 session with the anchor — never a platform key. */
-  auth: SellerAnchorAuth;
+  /** Same seller keypair used for the SEP-10/SEP-6 off-ramp adapter. */
+  sellerKeypair: Keypair;
   repo: KycRepository;
-  /** Profile repository for reusable SEP-9 fields. */
-  profileRepo: { get(sellerId: string): Promise<{ fields: Record<string, string> } | null> };
+  baseUrl?: string;
+  homeDomain?: string;
 }
 
 /**
- * SEP-12 KYC lifecycle against a real anchor, kept separate from a cash-out
+ * SEP-12 KYC lifecycle for the real testanchor, kept separate from a cash-out
  * request: identity is submitted once (or updated) and reused across links,
  * never re-derived from whatever happened to be in a cash-out form.
- *
- * The anchor's customer is the seller's own account, authenticated by the
- * seller's own wallet. Values already on file are reused (the seller's
- * reusable profile); the anchor still decides what it needs and whether it
- * accepts them.
  */
 export class TestAnchorKyc implements KycPort {
-  private readonly discovery: AnchorDiscovery;
-  private readonly auth: SellerAnchorAuth;
+  private readonly baseUrl: string;
+  private readonly auth: Sep10Client;
   private readonly repo: KycRepository;
-  private readonly profileRepo: TestAnchorKycOptions["profileRepo"];
 
   constructor(opts: TestAnchorKycOptions) {
-    this.discovery = opts.discovery;
-    this.auth = opts.auth;
+    this.baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
     this.repo = opts.repo;
-    this.profileRepo = opts.profileRepo;
+    this.auth = new Sep10Client(opts.sellerKeypair, {
+      baseUrl: this.baseUrl,
+      homeDomain: opts.homeDomain ?? DEFAULT_HOME_DOMAIN,
+    });
   }
 
-  async status(customer: AnchorCustomer): Promise<KycRecord> {
-    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
-    const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
-    const remote = await getSep12Customer(kycServer, jwt, {
-      account: customer.account,
-      customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
+  async status(sellerId: string): Promise<KycRecord> {
+    const existing = await this.repo.get(sellerId);
+    const jwt = await this.auth.token();
+    const remote = await getSep12Customer(this.baseUrl, jwt, {
+      account: this.auth.publicKey,
+      customerId: existing?.customerId,
     });
 
     const record: KycRecord = {
-      sellerId: customer.sellerId,
-      anchorDomain: this.auth.anchorDomain,
-      account: customer.account,
+      sellerId,
       customerId: remote.customerId,
       status: remote.status,
       requiredFields: remote.requiredFields,
       providedFields: existing?.providedFields ?? {},
-      providedFieldStatus: remote.providedFieldStatus,
-      sentFields: existing?.sentFields ?? [],
       message: remote.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -77,75 +62,42 @@ export class TestAnchorKyc implements KycPort {
     return record;
   }
 
-  async submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord> {
-    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
-    const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
-    const discovery = await getSep12Customer(kycServer, jwt, {
-      account: customer.account,
-      customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
+  async submit(sellerId: string, fields: Record<string, string>): Promise<KycRecord> {
+    const existing = await this.repo.get(sellerId);
+    const jwt = await this.auth.token();
+    const discovery = await getSep12Customer(this.baseUrl, jwt, {
+      account: this.auth.publicKey,
+      customerId: existing?.customerId,
     });
 
-    // Get the reusable profile for this seller
-    const profile = await this.profileRepo.get(customer.sellerId);
+    const merged = { ...existing?.providedFields, ...fields };
 
-    // If the anchor has no customer record yet (discovery returns empty requiredFields),
-    // send the fields directly to create the record, then re-read requirements.
-    // This matches the old behavior where the first PUT reveals the real requirements.
-    const isFirstSubmission = discovery.requiredFields.length === 0;
+    // Fail fast on anything we already know the anchor needs — never submit a
+    // partial record and hope. If discovery hasn't happened yet (no customer
+    // record at all), there's nothing to check against; the anchor's response
+    // to this first PUT is what reveals the real requirements.
+    const missing = missingRequiredFields(discovery.requiredFields, merged);
+    if (missing.length > 0) throw new KycRequiredError(missing);
 
-    let selection: { send: Record<string, string>; missing: string[]; unknown: string[] };
-    if (isFirstSubmission) {
-      // First submission: send all provided fields to let the anchor tell us what it needs
-      selection = {
-        send: fields,
-        missing: [],
-        unknown: [],
-      };
-    } else {
-      // Get the reusable profile for this seller
-      const profile = await this.profileRepo.get(customer.sellerId);
-
-      // Use selectFieldsForAnchor to determine what to send
-      selection = selectFieldsForAnchor({
-        requested: discovery.requiredFields,
-        profile: profile ? { fields: profile.fields } : { fields: {} },
-        overrides: fields,
-      });
-    }
-
-    // Fail fast if required fields are missing (only for non-first submissions)
-    if (!isFirstSubmission && selection.missing.length > 0) throw new KycRequiredError(selection.missing);
-
-    // Send only the selected fields
-    const put = await putSep12Customer(kycServer, jwt, {
-      account: customer.account,
+    const put = await putSep12Customer(this.baseUrl, jwt, {
+      account: this.auth.publicKey,
       customerId: discovery.customerId,
-      fields: selection.send,
+      fields: merged,
     });
 
     // The anchor may reveal more required fields only after seeing this
     // submission (SEP-12 is progressive) — re-sync rather than assume ACCEPTED.
-    const after = await getSep12Customer(kycServer, jwt, {
-      account: customer.account,
+    const after = await getSep12Customer(this.baseUrl, jwt, {
+      account: this.auth.publicKey,
       customerId: put.customerId,
     });
 
-    // Merge the new fields into the existing providedFields for future submissions
-    // Values typed in this submission (overrides) are written back to the profile
-    // for SEP-9 fields so they can be reused
-    const mergedProvided = { ...existing?.providedFields, ...fields };
-
     const record: KycRecord = {
-      sellerId: customer.sellerId,
-      anchorDomain: this.auth.anchorDomain,
-      account: customer.account,
+      sellerId,
       customerId: put.customerId,
       status: after.status,
       requiredFields: after.requiredFields,
-      providedFields: mergedProvided,
-      providedFieldStatus: after.providedFieldStatus,
-      sentFields: Object.keys(selection.send),
+      providedFields: merged,
       message: after.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -155,47 +107,24 @@ export class TestAnchorKyc implements KycPort {
   }
 }
 
-/**
- * An anchor customer id belongs to the anchor that assigned it and to the
- * account it was created for. A record
- * with no account, or another one, dates from when every seller shared the
- * platform's account (or the seller changed wallet): its id points at somebody
- * else's customer, so look the seller up by their own account instead.
- */
-function reusableCustomerId(
-  existing: KycRecord | null,
-  customer: AnchorCustomer,
-  anchorDomain: string,
-): string | null {
-  if (!existing) return null;
-  // The id is assigned by one anchor: never send it to another (issue 4.24).
-  // A "legacy" row has no attributable anchor, so it never matches.
-  if (existing.anchorDomain !== anchorDomain) return null;
-  return existing.account === customer.account ? existing.customerId : null;
-}
-
 /** `OFFRAMP=mock` has no real anchor and nothing to be compliant with — never
  *  gates the (simulated) cash-out path. */
 export class NoKycRequired implements KycPort {
-  async status(customer: AnchorCustomer): Promise<KycRecord> {
-    return this.accepted(customer);
+  async status(sellerId: string): Promise<KycRecord> {
+    return this.accepted(sellerId);
   }
 
-  async submit(customer: AnchorCustomer): Promise<KycRecord> {
-    return this.accepted(customer);
+  async submit(sellerId: string): Promise<KycRecord> {
+    return this.accepted(sellerId);
   }
 
-  private accepted(customer: AnchorCustomer): KycRecord {
+  private accepted(sellerId: string): KycRecord {
     return {
-      sellerId: customer.sellerId,
-      anchorDomain: "mock",
-      account: customer.account,
+      sellerId,
       customerId: null,
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: {},
-      providedFieldStatus: [],
-      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: Date.now(),

@@ -17,14 +17,11 @@
     "docs:check-status-diagram": "node scripts/gen-status-diagram.mjs --check",
     "docs:check-domain-boundary": "node scripts/check-domain-boundary.mjs",
     "docs:check-env-docs": "node scripts/check-env-docs.mjs",
-    "e2e": "pnpm --filter @checkout/web e2e",
-    "e2e:live": "pnpm --filter @checkout/web e2e:live",
-    "sweep": "node scripts/uptime-check.mjs && pnpm e2e:live",
+    "sweep": "node scripts/uptime-check.mjs",
     "preflight:mainnet": "node scripts/mainnet-preflight.mjs",
     "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
     "demo:seed": "pnpm --filter @checkout/api exec tsx scripts/demo-seed.ts",
     "demo:reset": "pnpm --filter @checkout/api exec tsx scripts/demo-reset.ts",
-    "kyc:rotate-key": "pnpm --filter @checkout/api exec tsx scripts/rotate-kyc-key.ts",
     "test:coverage": "turbo run test:coverage"
   },
   "dependencies": {
@@ -42,7 +39,7 @@
       "axios": ">=1.18.0",
       "nanoid": "^3.3.18",
       "postcss": ">=8.5.18",
-      "sharp": ">=0.35.4",
+      "sharp": ">=0.35.0",
       "@stellar/stellar-sdk@14.2.0": "16.2.0",
       "protobufjs": "^7.6.1"
     }

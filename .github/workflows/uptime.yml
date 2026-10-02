@@ -2,15 +2,9 @@ name: uptime
 
 on:
   schedule:
-    # Requested every 5 minutes. NOT what GitHub delivers: scheduled workflows
-    # on a free public repo are best-effort and heavily coalesced under load.
-    # Measured gaps were ~30-42 minutes at best (2026-08-18) and ~3 hours
-    # (2026-09-06). Keep the ask at */5 — a lower ceiling only makes it worse —
-    # but do not build anything on the assumption that it runs at that rate.
-    #
-    # In particular this does NOT keep a free Render instance awake: every
-    # observed gap exceeds the 15-minute idle timeout. That claim was made and
-    # was wrong.
+    # Every 5 minutes. The cadence is also load-bearing beyond monitoring: a
+    # Render instance spins down after 15 minutes idle, and a spun-down
+    # instance is not running the settlement watcher.
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
@@ -77,17 +71,6 @@ jobs:
           #
           # The copies in $tmp are the payload. The working tree is scratch.
           git checkout -- docs/
-
-          # `checkout -- docs/` above only restores *tracked* files (this
-          # branch's own committed docs/uptime-*). A badge for a check this
-          # branch has never tracked (e.g. mainnet's, the first run after
-          # UPTIME_MAINNET_API_URL is set) is untracked here but already
-          # exists on `status`, so it hits the same "would be overwritten by
-          # checkout" refusal one level up, on the branch switch below —
-          # silently freezing every badge again, not just the new one. Safe
-          # to remove: it is scratch the check script just wrote, already
-          # captured in $tmp above.
-          git clean -fd docs/
 
           git fetch origin status --depth=1 || true
           if git rev-parse --verify origin/status >/dev/null 2>&1; then

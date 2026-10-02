@@ -112,13 +112,6 @@ if (!OFFRAMP_KINDS.includes(offramp)) {
 // refuses to start is loud; one that silently settles into a sandbox anchor is
 // not. Nothing here is reachable when STELLAR_NETWORK=testnet.
 if (network === "public") {
-  if (process.env.DEFAULT_SELLER_SECRET) {
-    throw new Error(
-      "DEFAULT_SELLER_SECRET is set on the public network. Quay never signs for a seller; " +
-        "each seller's wallet signs its own anchor login and withdrawals. Remove it from " +
-        "this deployment's environment.",
-    );
-  }
   // "anchor" and "none" are the two valid pubnet settings. "none" is in fact
   // the safest configuration this service has: with no cash-out leg there is
   // no anchor to trust, no SEP-12 PII to hold, and no seller secret key on the
@@ -247,8 +240,8 @@ export const env = {
   // Preferred SEP-6 withdrawal type (e.g. "bank_account"). Unset means "read
   // /sep6/info and use the only enabled type, or refuse if there are several".
   offrampType: process.env.OFFRAMP_TYPE || undefined,
-  // Testnet-only convenience secret for demo scripts (pnpm demo:seed / pnpm demo:reset).
-  // Never set on public network.
+  // Required only when a real anchor is configured and DEFAULT_SELLER_WALLET is set (SEP-10
+  // needs the seller's secret key to sign the auth challenge). Never persisted.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
   // Bearer token required to read GET /metrics. Auto-generates an ephemeral one
   // (printed once at boot) if unset — the endpoint is always gated.
@@ -283,32 +276,4 @@ export const env = {
   // and "none" has no KYC lifecycle to store PII for.
   kycEncryptionKey:
     offramp === "testanchor" || offramp === "anchor" ? req("KYC_ENCRYPTION_KEY") : undefined,
-  // Retention window (days) for inactive seller KYC & identity data (NDPA compliance).
-  // Purges seller KYC and payout fields after N days without activity. Default 730 (2 years).
-  // Set to 0 to disable the retention purge.
-  kycRetentionDays: num("KYC_RETENTION_DAYS", 730),
-  // E2E harness mode (issue 5.7). "1" makes the API runnable with no network:
-  // the ledger watcher never starts, the link-creation Horizon preflight is
-  // skipped, and /__test__ routes are mounted that can mint a session and
-  // inject a synthetic payment. Everything else — auth, the matcher, the
-  // status machine, webhooks, the mock off-ramp — runs for real. See
-  // routes/test-only.ts for exactly what the synthetic payment does and does
-  // not verify.
-  e2eTestMode: process.env.E2E_TEST_MODE === "1",
-  // Optional comma-separated list of previous 32-byte hex keys used for decrypting
-  // older KYC records during key rotation.
-  kycEncryptionKeyPrevious: process.env.KYC_ENCRYPTION_KEY_PREVIOUS || undefined,
 } as const;
-
-// A production process with the e2e backdoors mounted would accept
-// unauthenticated session minting and payments conjured from nothing. There
-// is no configuration in which that is intended, so refuse to boot rather
-// than trust deployment hygiene.
-if (env.e2eTestMode && (process.env.NODE_ENV === "production" || network === "public")) {
-  throw new Error(
-    "E2E_TEST_MODE=1 with NODE_ENV=production or STELLAR_NETWORK=public: refusing to start. " +
-      "The e2e test mode mounts routes that mint sessions and mark links paid " +
-      "without authentication or a ledger; it exists for the local Playwright " +
-      "suite only and must never reach a production deployment.",
-  );
-}
