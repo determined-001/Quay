@@ -4,7 +4,6 @@ import {
   type AssetRef,
   type CreateLinkInput,
   type KycPort,
-  type AnchorCustomer,
   type KycRecord,
   type LinkPaymentRecord,
   type LinkRepository,
@@ -18,7 +17,7 @@ import {
   type OffRampTelemetryRow,
   type OffRampTelemetrySummary,
   type PaymentLink,
-  type OfframpRequirementTypes,
+  type PayoutFieldDescriptor,
   type SellerPayoutRef,
   type StoredOffRampJob,
   type StoredOffRampQuote,
@@ -158,7 +157,7 @@ export class FakeWebhookRepository implements WebhookRepository {
   readonly deliveries: WebhookDelivery[] = [];
   /** Exposed so queue tests can assert on row state directly. */
   readonly queue: WebhookQueueEntry[] = [];
-  readonly hooks: Webhook[] = [];
+  private readonly hooks: Webhook[] = [];
 
   async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
     const hook: Webhook = {
@@ -242,10 +241,6 @@ export class FakeWebhookRepository implements WebhookRepository {
     return this.deliveries.filter((d) => d.linkId === linkId);
   }
 
-  getEnqueued(): WebhookQueueEntry[] {
-    return this.queue.map((q) => ({ ...q }));
-  }
-
   async listBySeller(sellerId: string): Promise<Webhook[]> {
     return this.hooks.filter((h) => h.sellerId === sellerId && h.deletedAt === null);
   }
@@ -316,7 +311,7 @@ export class FakeOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
@@ -344,31 +339,27 @@ export class ScriptedOffRamp implements OffRampPort {
   async status(jobId: string): Promise<OffRampJob> {
     return this.statusImpl(jobId);
   }
-  async offrampRequirements(): Promise<OfframpRequirementTypes> {
-    return { types: [], defaultType: null };
+  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+    return [];
   }
 }
 
 /** KYC gate that's always ACCEPTED — mirrors `NoKycRequired`, used by tests
  *  that aren't exercising the KYC gate itself. */
 export class AlwaysAcceptedKyc implements KycPort {
-  async status(customer: AnchorCustomer): Promise<KycRecord> {
-    return this.accepted(customer);
+  async status(sellerId: string): Promise<KycRecord> {
+    return this.accepted(sellerId);
   }
-  async submit(customer: AnchorCustomer): Promise<KycRecord> {
-    return this.accepted(customer);
+  async submit(sellerId: string): Promise<KycRecord> {
+    return this.accepted(sellerId);
   }
-  private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
+  private accepted(sellerId: string): KycRecord {
     return {
       sellerId,
-      anchorDomain: "mock",
-      account,
       customerId: null,
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: {},
-      providedFieldStatus: [],
-      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: Date.now(),
@@ -378,14 +369,14 @@ export class AlwaysAcceptedKyc implements KycPort {
 
 /** Fully scripted KycPort for testing the cash-out gate itself. */
 export class ScriptedKyc implements KycPort {
-  statusImpl: (customer: AnchorCustomer) => Promise<KycRecord> = () => {
+  statusImpl: (sellerId: string) => Promise<KycRecord> = () => {
     throw new Error("statusImpl not configured");
   };
-  async status(customer: AnchorCustomer): Promise<KycRecord> {
-    return this.statusImpl(customer);
+  async status(sellerId: string): Promise<KycRecord> {
+    return this.statusImpl(sellerId);
   }
-  async submit(customer: AnchorCustomer): Promise<KycRecord> {
-    return this.statusImpl(customer);
+  async submit(sellerId: string): Promise<KycRecord> {
+    return this.statusImpl(sellerId);
   }
 }
 

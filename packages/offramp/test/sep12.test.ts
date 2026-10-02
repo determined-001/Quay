@@ -66,7 +66,7 @@ describe("getSep12Customer", () => {
   it("reports unsubmitted (no fields known yet) on a 404", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
     const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
-    expect(result).toEqual({ customerId: null, status: "unsubmitted", requiredFields: [], providedFieldStatus: [], message: null });
+    expect(result).toEqual({ customerId: null, status: "unsubmitted", requiredFields: [], message: null });
   });
 
   it("parses required fields, status, and message verbatim", async () => {
@@ -99,7 +99,6 @@ describe("getSep12Customer", () => {
         choices: undefined,
       },
     ]);
-    expect(result.providedFieldStatus).toEqual([]);
   });
 
   it("queries by id when a customerId is known, else by account", async () => {

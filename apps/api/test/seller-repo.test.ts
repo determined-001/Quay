@@ -15,7 +15,6 @@ describe("DrizzleSellerRepository wallet-native signup", () => {
 
     const first = await repo.createIfAbsent(wallet);
     expect(first.wallet).toBe(wallet);
-    expect(first.profileKind).toBe("individual");
 
     const second = await repo.createIfAbsent(wallet);
     expect(second.id).toBe(first.id); // same seller, not a duplicate
@@ -24,15 +23,5 @@ describe("DrizzleSellerRepository wallet-native signup", () => {
   it("findByWallet returns null for an unregistered wallet", async () => {
     const repo = await freshRepo();
     expect(await repo.findByWallet("GUNKNOWN")).toBeNull();
-  });
-
-  it("persists an organization profile kind for the seller", async () => {
-    const repo = await freshRepo();
-    const seller = await repo.createIfAbsent("GORGANIZATIONWALLET");
-
-    await repo.saveProfileKind(seller.id, "organization");
-
-    expect((await repo.findById(seller.id))?.profileKind).toBe("organization");
-    expect((await repo.findByWallet(seller.wallet))?.profileKind).toBe("organization");
   });
 });

@@ -48,23 +48,13 @@ function buildTimeline(link: PaymentLink, deliveries: WebhookDelivery[]): Timeli
       id: "offramp_quoted",
       time: firstOfframp?.createdAt ?? link.updatedAt,
       type: "offramp_pending",
-      label: link.offrampStatus === "awaiting_transfer" ? "Awaiting seller transfer" : "Off-ramp initiated",
+      label: "Off-ramp initiated",
       detail: link.offrampTargetCurrency
         ? `Cash-out to ${link.offrampTargetCurrency}`
         : undefined,
     });
 
-    if (link.offrampStatus === "pending") {
-      events.push({
-        id: "offramp_processing",
-        time: link.updatedAt,
-        type: "offramp_pending",
-        label: "Anchor processing payment",
-        detail: link.offrampTargetCurrency
-          ? `Processing payout to ${link.offrampTargetCurrency}`
-          : undefined,
-      });
-    } else if (link.offrampStatus === "settled") {
+    if (link.offrampStatus === "settled") {
       events.push({
         id: "offramp_settled",
         time: link.updatedAt,

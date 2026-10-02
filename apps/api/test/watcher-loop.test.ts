@@ -4,7 +4,7 @@ import type {
   LinkRepository,
   NormalizedPayment,
   PaymentLink,
-  OfframpRequirementTypes,
+  PayoutFieldDescriptor,
   SellerRepository,
   WatcherPort,
   WebhookRepository,
@@ -188,7 +188,6 @@ function makeUnusedSellerRepo(): SellerRepository {
       return null;
     },
     async savePayoutFields(): Promise<void> {},
-    async saveProfileKind(): Promise<void> {},
   };
 }
 
@@ -216,8 +215,8 @@ function makeUnusedOffRampPort(): OffRampPort {
     async status(): Promise<never> {
       throw new Error("not used in this test");
     },
-    async offrampRequirements(): Promise<OfframpRequirementTypes> {
-      return { types: [], defaultType: null };
+    async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
+      return [];
     },
   };
 }
