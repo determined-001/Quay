@@ -366,6 +366,18 @@ export interface StoredOffRampQuote {
   sellAmount: string;
   buyCurrency: string;
   price: string;
+  /** What the seller was shown at quote time. A later `quoteId` confirm replays
+   *  these verbatim — it must never recompute them, or the job would record
+   *  figures the seller never agreed to. Absent on rows saved before they were
+   *  persisted; those cannot be confirmed by id. */
+  quotedAmounts?: {
+    /** OffRampQuote.rate — target per source, which is not always `price`. */
+    rate: string;
+    targetAmount: string;
+    feeAmount: string;
+    feeSource: "anchor" | "estimated";
+    netTargetAmount: string;
+  };
   expiresAt: number;
   createdAt: number;
 }

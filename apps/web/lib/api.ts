@@ -473,6 +473,7 @@ export const api = {
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
+    quoteId?: string,
     withdrawType?: string,
   ) =>
     http<{
@@ -493,10 +494,16 @@ export const api = {
       `/links/${id}/cash-out`,
       {
         method: "POST",
-        body: JSON.stringify({ targetCurrency, payoutFields, ...(withdrawType ? { withdrawType } : {}) }),
+        body: JSON.stringify({
+          targetCurrency,
+          payoutFields,
+          ...(quoteId ? { quoteId } : {}),
+          ...(withdrawType ? { withdrawType } : {}),
+        }),
         idempotencyKey,
       },
     ),
+
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
