@@ -358,6 +358,9 @@ export class AlwaysAcceptedKyc implements KycPort {
   async submit(customer: AnchorCustomer): Promise<KycRecord> {
     return this.accepted(customer);
   }
+  async submitFiles(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
+  }
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
@@ -385,6 +388,9 @@ export class ScriptedKyc implements KycPort {
     return this.statusImpl(customer);
   }
   async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.statusImpl(customer);
+  }
+  async submitFiles(customer: AnchorCustomer): Promise<KycRecord> {
     return this.statusImpl(customer);
   }
 }

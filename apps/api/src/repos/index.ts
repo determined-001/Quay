@@ -87,7 +87,7 @@ function rowToLink(row: LinkRow): PaymentLink {
     overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
-    offrampStatus: row.offrampStatus ?? null,
+    offrampStatus: (row.offrampStatus ?? null) as PaymentLink["offrampStatus"],
     offrampIndicativeRate: row.offrampIndicativeRate ?? null,
     offrampRate: row.offrampRate ?? null,
     offrampRateDelta: row.offrampRateDelta ?? null,
@@ -1028,6 +1028,15 @@ export class DrizzleKycRepository implements KycRepository {
   }
 
   async save(record: KycRecord): Promise<void> {
+    const binaryFieldNames = new Set(
+      record.requiredFields.filter((f) => f.type === "binary").map((f) => f.name),
+    );
+    for (const key of Object.keys(record.providedFields)) {
+      if (binaryFieldNames.has(key)) {
+        throw new Error(`Binary field ${key} must never be persisted in KYC providedFields`);
+      }
+    }
+
     const row = {
       sellerId: record.sellerId,
       anchorDomain: record.anchorDomain,
