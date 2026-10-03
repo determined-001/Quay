@@ -16,6 +16,10 @@
  *   5. Confirmation panel shows gross / fee / net and a countdown to quote expiry.
  *   6. Confirm → POST /cash-out (the actual initiate).
  *   7. Any unmet required field → cash-out button is disabled with explanatory text.
+ *   8. Anchor interactive flow (SEP-24) → "interactive" step: the seller opens
+ *      the anchor's page from a real click, and the modal polls
+ *      GET /links/:id/detail until the link settles/fails or is dismissed.
+ *      The modal never auto-closes on a (possibly blocked) popup.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -31,10 +35,18 @@ import {
 import { fmtCountdown, quoteMsRemaining } from "../../lib/quote-countdown";
 import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
 import {
+  anchorLabelForUrl,
+  describeInteractiveStatus,
+  interactivePollDelayMs,
+  isInteractiveTerminalStatus,
+  parseInteractiveUrl,
+} from "../../lib/interactive-cashout";
+import {
   checkPaymentPreflight,
   type PaymentPreflightResult,
 } from "../../lib/payment-preflight";
 import { useSellerWallet } from "./SessionGate";
+import { TransferOtherDevice } from "./TransferOtherDevice";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -50,7 +62,7 @@ interface Props {
   onSuccess: () => void;
 }
 
-type ModalStep = "loading" | "form" | "confirming" | "submitting" | "transfer" | "error";
+type ModalStep = "loading" | "form" | "confirming" | "submitting" | "transfer" | "interactive" | "error";
 
 interface QuotePreview {
   jobId: string;
@@ -138,9 +150,14 @@ export default function CashOutModal({
   const [quote, setQuote] = useState<QuotePreview | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  // Set only when the anchor asked for an interactive flow and the popup was
-  // blocked — the seller needs a link they can open themselves.
+  // Set when the anchor asked for an interactive flow — the seller opens it
+  // from the "interactive" step's click-to-open button, never from a popup
+  // fired after `await` (browsers block those outside the click gesture).
   const [interactiveUrl, setInteractiveUrl] = useState<string | null>(null);
+  // Plain-words rendering of the anchor-reported status while polling.
+  const [interactiveStatus, setInteractiveStatus] = useState<string | null>(null);
+  const interactivePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const interactiveOpenedAtRef = useRef<number>(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Set when the anchor is waiting for the asset. Only the seller's wallet can
   // send it; the payout does not start until they do.
@@ -239,6 +256,39 @@ export default function CashOutModal({
     };
   }, []);
 
+  // ---- interactive polling -------------------------------------------------
+  // While the interactive step is open, poll the link detail for the
+  // anchor-reported status. Steady 5 s cadence, backing off to 30 s after
+  // 2 minutes. Closes with onSuccess() only on terminal offrampStatus —
+  // completion is detected by polling, never by watching a popup (noopener
+  // popups are unobservable by design).
+  useEffect(() => {
+    if (step !== "interactive") return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const detail = await api.getDetail(linkId);
+        if (cancelled) return;
+        setInteractiveStatus(describeInteractiveStatus(detail.offrampExternalStatus));
+        if (isInteractiveTerminalStatus(detail.link.offrampStatus)) {
+          onSuccess();
+          return;
+        }
+      } catch {
+        // A failed poll must not close the step or strand the seller — the
+        // next tick retries, and the server-side poller settles the link.
+      }
+      if (cancelled) return;
+      const delay = interactivePollDelayMs(Date.now() - interactiveOpenedAtRef.current);
+      interactivePollRef.current = setTimeout(() => void poll(), delay);
+    };
+    interactivePollRef.current = setTimeout(() => void poll(), interactivePollDelayMs(0));
+    return () => {
+      cancelled = true;
+      if (interactivePollRef.current) clearTimeout(interactivePollRef.current);
+    };
+  }, [step, linkId, onSuccess]);
+
   // ---- form interactions ---------------------------------------------------
   function handleChange(name: string, value: string) {
     setValues((prev) => ({ ...prev, [name]: value }));
@@ -260,40 +310,24 @@ export default function CashOutModal({
   }
 
   /**
-   * Opens the anchor's SEP-24 interactive flow.
+   * Opens the anchor's SEP-24 interactive flow from a real click, inside the
+   * user gesture — popups fired after `await api.cashOut(...)` land outside
+   * the gesture window and browsers routinely block them.
    *
-   * Two things this deliberately does not do naively:
-   *
-   * `url` is third-party data — it comes from the anchor, through our API, and
-   * lands in a DOM sink. Anything but https is refused: `javascript:` in
-   * `window.open` would execute against this page, and plain http would
-   * downgrade a flow the seller is about to enter bank details into.
-   *
-   * The call also happens after `await api.cashOut(...)`, so it is outside the
-   * click's user-gesture window and browsers routinely block it. A blocked
-   * popup must not silently swallow the URL — the seller would be left on a
-   * link stuck in `offramp_pending` with nothing to act on — so we keep it and
-   * render it as a link they can click themselves.
+   * Best-effort only: per the HTML spec `window.open` with `noopener` always
+   * returns null, so opened vs. blocked cannot be told apart and the return
+   * value is ignored entirely. The plain link below the button is the real
+   * fallback, and status polling (not popup watching) detects completion.
+   * `noopener` also keeps the anchor's page from reaching back through
+   * window.opener to navigate this one.
    */
-  function openInteractive(url: string): void {
-    let parsed: URL;
+  function handleContinueClick(): void {
+    if (!interactiveUrl) return;
     try {
-      parsed = new URL(url);
+      window.open(interactiveUrl, "_blank", "width=600,height=700,noopener,noreferrer");
     } catch {
-      setInteractiveUrl(null);
-      setErrorMsg("The anchor returned an unusable interactive URL. Contact support before retrying.");
-      return;
+      // A throwing opener changes nothing — the plain link stays usable.
     }
-    if (parsed.protocol !== "https:") {
-      setInteractiveUrl(null);
-      setErrorMsg("The anchor returned a non-HTTPS interactive URL, which was refused.");
-      return;
-    }
-
-    // `noopener` also keeps the anchor's page from reaching back through
-    // window.opener to navigate this one.
-    const popup = window.open(parsed.href, "_blank", "width=600,height=700,noopener,noreferrer");
-    if (!popup) setInteractiveUrl(parsed.href);
   }
 
   async function handleSubmit() {
@@ -314,9 +348,6 @@ export default function CashOutModal({
         undefined,
         withdrawType ?? undefined,
       );
-      if (result.interactiveUrl) {
-        openInteractive(result.interactiveUrl);
-      }
       const j = result.job;
       const preview: QuotePreview = {
         jobId: j.jobId,
@@ -329,9 +360,25 @@ export default function CashOutModal({
       // API sends none, startCountdown shows no countdown at all.
       startCountdown(j.quoteExpiresAt);
       // Cash-out is already initiated at this point (quote+initiate are atomic
-      // in the current API). If the anchor now needs the asset, keep the modal
-      // open for the seller to send it; otherwise go straight to success.
-      if (result.transfer) {
+      // in the current API). An interactive anchor URL is a modal state, not a
+      // success: the seller must finish in the anchor's window, and the modal
+      // must stay open (a blocked-popup fallback rendered after onSuccess
+      // would unmount with the modal in the same tick). If the anchor now
+      // needs the asset, keep the modal open for the seller to send it;
+      // otherwise go straight to success.
+      if (result.interactiveUrl) {
+        const parsed = parseInteractiveUrl(result.interactiveUrl);
+        if (!parsed.ok) {
+          setInteractiveUrl(null);
+          setErrorMsg(parsed.error);
+          setStep("form");
+          return;
+        }
+        setInteractiveUrl(parsed.href);
+        setInteractiveStatus(null);
+        interactiveOpenedAtRef.current = Date.now();
+        setStep("interactive");
+      } else if (result.transfer) {
         setTransfer(result.transfer);
         setStep("transfer");
       } else {
@@ -699,26 +746,46 @@ export default function CashOutModal({
                   </>
                 )}
                 {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
+                <TransferOtherDevice transfer={transfer} wallet={wallet} onSent={setSentHash} />
               </>
             )}
           </div>
         )}
 
-        {/* The anchor needs the seller in a browser and the popup was blocked —
-            give them the link rather than stranding the withdrawal. */}
-        {interactiveUrl && (
-          <div className="banner banner--warn" style={{ marginTop: 12 }}>
-            <p style={{ margin: "0 0 8px" }}>
-              Your anchor needs one more step in a browser window, which this browser blocked.
+        {/* The anchor needs the seller in its own window. Opened from a real
+            click (inside the user gesture); the plain link below covers
+            blocked popups. Completion is detected by polling, never by
+            watching the popup. */}
+        {step === "interactive" && interactiveUrl && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              Your anchor needs one more step in its own window. Continue there, then come back —
+              this closes itself once the payout settles.
             </p>
-            <a
-              className="btn btn--primary"
-              href={interactiveUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              className="btn btn--primary btn--block"
+              onClick={handleContinueClick}
             >
-              Continue with the anchor
-            </a>
+              Continue with {anchorLabelForUrl(interactiveUrl)}
+            </button>
+            <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+              Popup blocked?{" "}
+              <a href={interactiveUrl} target="_blank" rel="noopener noreferrer">
+                Open the anchor page directly
+              </a>
+            </p>
+            <p className="muted" style={{ fontSize: 12 }} role="status" aria-live="polite">
+              {interactiveStatus ?? "Waiting for the anchor…"}
+            </p>
+            <button
+              type="button"
+              className="btn btn--block"
+              style={{ marginTop: 8 }}
+              onClick={onClose}
+            >
+              Dismiss
+            </button>
           </div>
         )}
 

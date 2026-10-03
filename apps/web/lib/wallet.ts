@@ -15,6 +15,7 @@
 
 import type { WithdrawTransfer } from "@checkout/core";
 import { checkPaymentPreflight, horizonPaymentReason } from "./payment-preflight";
+import { paymentMatchesTransfer } from "./transfer-uri";
 
 const NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
 
@@ -221,6 +222,30 @@ export async function sendAnchorTransfer(
     }
     throw err;
   }
+}
+
+/**
+ * Looks on the ledger for the payment the anchor asked for, sent from
+ * `address` (for example from a phone wallet after scanning the SEP-7 QR).
+ * Returns the transaction hash once Horizon shows a matching payment, else
+ * null. Read-only: nothing is signed or submitted.
+ */
+export async function findAnchorTransfer(address: string, transfer: WithdrawTransfer): Promise<string | null> {
+  const stellar = await import("@stellar/stellar-sdk");
+  const server = new stellar.Horizon.Server(HORIZON_URL);
+  const page = await server.payments().forAccount(address).order("desc").limit(20).call();
+  for (const record of page.records) {
+    const payment = record as unknown as Parameters<typeof paymentMatchesTransfer>[0] & {
+      transaction_successful?: boolean;
+      from?: string;
+      transaction_hash: string;
+    };
+    if (payment.transaction_successful === false || payment.from !== address) continue;
+    if (payment.type !== "payment" || payment.to !== transfer.destination) continue;
+    const tx = await server.transactions().transaction(payment.transaction_hash).call();
+    if (paymentMatchesTransfer(payment, tx, transfer)) return payment.transaction_hash;
+  }
+  return null;
 }
 
 /** SEP-6 sends a hash memo base64-encoded; the SDK wants hex. */

@@ -74,7 +74,8 @@ export interface TestAnchorOptions {
 function mapSep6Status(status: string): OffRampJobStatus {
   if (status === "completed") return "settled";
   if (status === "error" || status === "refunded" || status === "expired") return "failed";
-  return "pending"; // pending_anchor, pending_user_transfer_start, pending_external, ...
+  if (status === "pending_user_transfer_start" || status === "incomplete") return "awaiting_transfer";
+  return "pending"; // pending_anchor, pending_external, ...
 }
 
 export class TestAnchorOffRamp implements OffRampPort {
@@ -289,6 +290,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     }, baseLog);
 
     const now = Date.now();
+    const initialStatus: OffRampJobStatus = withdraw.accountId ? "awaiting_transfer" : "pending";
     await this.state.saveJob({
       jobId: withdraw.id,
       linkId: input.linkId,
@@ -301,7 +303,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       // job.rate at settlement, so a sell-per-buy value here would poison
       // the spread exactly the way issue 5.21 describes.
       rate: targetPerSourceRate(q.price),
-      status: "pending",
+      status: initialStatus,
       externalStatus: null,
       lastError: null,
       transferNotifiedAt: null,
