@@ -1,4 +1,4 @@
-import type { KycFieldSpec, KycStatus } from "@checkout/core";
+import type { KycFieldSpec, KycStatus, ProvidedFieldStatus } from "@checkout/core";
 import { endpointUrl } from "./sep1";
 
 // SEP-12: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
@@ -14,10 +14,16 @@ interface RawFieldSpec {
   choices?: string[];
 }
 
+interface RawProvidedField {
+  status?: string;
+  error?: string;
+}
+
 interface RawGetCustomerResponse {
   id?: string;
   status: string;
   fields?: Record<string, RawFieldSpec>;
+  provided_fields?: Record<string, RawProvidedField>;
   message?: string;
 }
 
@@ -25,6 +31,7 @@ export interface Sep12CustomerResult {
   customerId: string | null;
   status: KycStatus;
   requiredFields: KycFieldSpec[];
+  providedFieldStatus: ProvidedFieldStatus[];
   message: string | null;
 }
 
@@ -36,6 +43,15 @@ function toFieldSpecs(fields: Record<string, RawFieldSpec> | undefined): KycFiel
     description: spec.description,
     optional: spec.optional ?? false,
     choices: spec.choices,
+  }));
+}
+
+function toProvidedFieldStatus(fields: Record<string, RawProvidedField> | undefined): ProvidedFieldStatus[] {
+  if (!fields) return [];
+  return Object.entries(fields).map(([name, spec]) => ({
+    name,
+    status: spec.status ?? null,
+    error: spec.error ?? null,
   }));
 }
 
@@ -67,7 +83,7 @@ export async function getSep12Customer(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (res.status === 404) {
     // No customer record yet — every field is required, nothing on file.
-    return { customerId: null, status: "unsubmitted" as KycStatus, requiredFields: [], message: null };
+    return { customerId: null, status: "unsubmitted" as KycStatus, requiredFields: [], providedFieldStatus: [], message: null };
   }
   if (!res.ok) {
     throw new Error(`SEP-12 customer GET failed: ${res.status} ${await res.text()}`);
@@ -77,6 +93,7 @@ export async function getSep12Customer(
     customerId: body.id ?? params.customerId ?? null,
     status: toKycStatus(body.status),
     requiredFields: toFieldSpecs(body.fields),
+    providedFieldStatus: toProvidedFieldStatus(body.provided_fields),
     message: body.message ?? null,
   };
 }
@@ -101,3 +118,51 @@ export async function putSep12Customer(
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };
 }
+
+export interface Sep12FileField {
+  name: string;
+  blob: Blob;
+  filename: string;
+}
+
+/**
+ * Submits multipart/form-data with non-binary fields first, followed by binary
+ * file fields, exactly as specified in SEP-12.
+ */
+export async function putSep12CustomerMultipart(
+  kycServer: string,
+  jwt: string,
+  params: {
+    account: string;
+    customerId?: string | null;
+    fields?: Record<string, string>;
+    files: Sep12FileField[];
+  },
+): Promise<{ customerId: string }> {
+  const formData = new FormData();
+  if (params.customerId) {
+    formData.append("id", params.customerId);
+  } else {
+    formData.append("account", params.account);
+  }
+  if (params.fields) {
+    for (const [key, value] of Object.entries(params.fields)) {
+      formData.append(key, value);
+    }
+  }
+  for (const file of params.files) {
+    formData.append(file.name, file.blob, file.filename);
+  }
+
+  const res = await fetch(endpointUrl(kycServer, "customer"), {
+    method: "PUT",
+    headers: { authorization: `Bearer ${jwt}` },
+    body: formData,
+  });
+  if (!res.ok) {
+    throw new Error(`SEP-12 customer PUT failed: ${res.status} ${await res.text()}`);
+  }
+  const body = (await res.json()) as { id: string };
+  return { customerId: body.id };
+}
+

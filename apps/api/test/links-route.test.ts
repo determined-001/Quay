@@ -3,6 +3,7 @@ import { NOOP_LOGGER, type PaymentLink, type Seller, type SellerRepository, type
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
+import { HttpError } from "../src/services/link-service";
 
 const owner: Seller = { id: "sel_owner", name: "Owner", wallet: "GOWNER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
 const other: Seller = { id: "sel_other", name: "Other", wallet: "GOTHER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
@@ -56,6 +57,7 @@ function fakeContainer(): Container {
   return {
     service: {
       getLink: async (id: string) => (id === ownedLink.id ? { link: ownedLink, request: {} as any } : null),
+      getOffRampExternalStatus: async () => "incomplete",
       createLink: async () => ({ link: ownedLink, request: {} as any }),
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
@@ -63,11 +65,18 @@ function fakeContainer(): Container {
     logger: NOOP_LOGGER,
     links: {} as Container["links"],
     sellers: sellers as unknown as Container["sellers"],
-    webhooks: {} as Container["webhooks"],
+    webhooks: { listDeliveriesByLinkId: async () => [] } as unknown as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: owner.wallet },
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     apiKeys: {} as Container["apiKeys"],
     kyc: {} as Container["kyc"],
+    kycConsents: {
+      async list(sellerId: string) { return []; },
+      async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+      async active(sellerId: string, anchorDomain: string) { return null; },
+      async revoke(sellerId: string, anchorDomain: string) { },
+    } as unknown as Container["kycConsents"],
+    anchorDomain: "testanchor.stellar.org",
     anchorAuth: null,
     db: {} as Container["db"],
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
@@ -164,6 +173,31 @@ describe("POST /links/:id/cancel — ownership", () => {
   });
 });
 
+describe("GET /links/:id/detail — seller reconciliation view", () => {
+  it("includes the anchor-reported external status for the owner", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/detail`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>).offrampExternalStatus).toBe("incomplete");
+  });
+
+  it("returns 404 when a different seller requests the detail view", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, other.id);
+
+    const res = await app.request(`/${ownedLink.id}/detail`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("POST /links/:id/submit — public wallet relay", () => {
   it("returns 400 for a malformed submit payload without invoking the service", async () => {
     const app = linkRoutes(fakeContainer(), async (_c, next) => next());
@@ -186,5 +220,48 @@ describe("POST /links/:id/submit — public wallet relay", () => {
     });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe("cash-out routes — offramp_rejected", () => {
+  const rejection = () =>
+    new HttpError(422, "offramp_rejected", {
+      message: "above max",
+      limits: { minAmount: 1, maxAmount: 10 },
+      availableTypes: [],
+    });
+
+  function appThatRejects() {
+    const container = fakeContainer();
+    const service = container.service as unknown as Record<string, unknown>;
+    service.quoteCashOut = async () => {
+      throw rejection();
+    };
+    service.triggerCashOut = async () => {
+      throw rejection();
+    };
+    return { container, app: linkRoutes(container, async (_c, next) => next()) };
+  }
+
+  it("GET /:id/cash-out/quote returns 422 with limits", async () => {
+    const { container, app } = appThatRejects();
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=NGN`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ error: "offramp_rejected", limits: { minAmount: 1, maxAmount: 10 } });
+  });
+
+  it("POST /:id/cash-out returns 422 with limits", async () => {
+    const { container, app } = appThatRejects();
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(`/${ownedLink.id}/cash-out`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ error: "offramp_rejected", limits: { maxAmount: 10 } });
   });
 });

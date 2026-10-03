@@ -15,6 +15,7 @@ import { kycRoutes } from "./routes/kyc";
 import { anchorAuthRoutes } from "./routes/anchor-auth";
 import { demoRoutes } from "./routes/demo";
 import { telemetryRoutes } from "./routes/telemetry";
+import { testOnlyRoutes } from "./routes/test-only";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
 import { requestContext } from "./request-context";
@@ -38,13 +39,17 @@ async function main(): Promise<void> {
   // matters more here than in a typical API: the settlement watcher runs in
   // this same process, so an OOM does not merely return 502 for a minute — it
   // stops payments being marked paid until the instance comes back.
-  app.use(
-    "*",
-    bodyLimit({
-      maxSize: 64 * 1024,
-      onError: (ctx) => ctx.json({ error: "payload_too_large" }, 413),
-    }),
-  );
+  const defaultBodyLimit = bodyLimit({
+    maxSize: 64 * 1024,
+    onError: (ctx) => ctx.json({ error: "payload_too_large" }, 413),
+  });
+  app.use("*", async (ctx, next) => {
+    // /seller/kyc/files enforces its own configurable KYC_MAX_UPLOAD_BYTES limit
+    if (ctx.req.path === "/seller/kyc/files") {
+      return next();
+    }
+    return defaultBodyLimit(ctx, next);
+  });
   app.use(
     "*",
     cors({
@@ -189,6 +194,18 @@ async function main(): Promise<void> {
   // themselves on TELEMETRY_TOKEN (404 when unset), so mounting them
   // unconditionally is safe.
   app.route("/telemetry", telemetryRoutes(container));
+
+  // E2E harness backdoors (issue 5.7): session minting and synthetic payment
+  // injection for the Playwright suite. Mounted ONLY under E2E_TEST_MODE=1,
+  // which env.ts refuses to combine with NODE_ENV=production or the public
+  // network — see routes/test-only.ts for the full disclosure.
+  if (env.e2eTestMode) {
+    logger.warn(
+      { event: "e2e.test_mode.active" },
+      "E2E_TEST_MODE=1 - /__test__ routes mounted, ledger watcher disabled, Horizon preflight skipped",
+    );
+    app.route("/__test__", testOnlyRoutes(container));
+  }
 
   container.start();
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getSep12Customer, putSep12Customer } from "../src/sep12";
+import { getSep12Customer, putSep12Customer, putSep12CustomerMultipart } from "../src/sep12";
 
 const BASE_URL = "https://testanchor.stellar.org";
 const JWT = "jwt-token";
@@ -66,7 +66,7 @@ describe("getSep12Customer", () => {
   it("reports unsubmitted (no fields known yet) on a 404", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
     const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
-    expect(result).toEqual({ customerId: null, status: "unsubmitted", requiredFields: [], message: null });
+    expect(result).toEqual({ customerId: null, status: "unsubmitted", requiredFields: [], providedFieldStatus: [], message: null });
   });
 
   it("parses required fields, status, and message verbatim", async () => {
@@ -99,6 +99,7 @@ describe("getSep12Customer", () => {
         choices: undefined,
       },
     ]);
+    expect(result.providedFieldStatus).toEqual([]);
   });
 
   it("queries by id when a customerId is known, else by account", async () => {
@@ -117,3 +118,53 @@ describe("getSep12Customer", () => {
     expect(urlWithAccount.searchParams.get("account")).toBe(ACCOUNT);
   });
 });
+
+describe("putSep12CustomerMultipart", () => {
+  it("orders text fields before binary file fields as specified in SEP-12", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_mult" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fileBlob = new Blob(["fake-image-bytes"], { type: "image/jpeg" });
+    await putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      fields: { first_name: "Ada", last_name: "Lovelace" },
+      files: [{ name: "photo_id_front", blob: fileBlob, filename: "id_front.jpg" }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe("https://testanchor.stellar.org/customer");
+    expect(init.method).toBe("PUT");
+    expect(init.headers).toEqual({ authorization: `Bearer ${JWT}` });
+
+    const formData = init.body as FormData;
+    expect(formData).toBeInstanceOf(FormData);
+    const keys = Array.from(formData.keys());
+    expect(keys).toEqual(["account", "first_name", "last_name", "photo_id_front"]);
+    expect(formData.get("account")).toBe(ACCOUNT);
+    expect(formData.get("first_name")).toBe("Ada");
+    expect(formData.get("last_name")).toBe("Lovelace");
+    const file = formData.get("photo_id_front") as File;
+    expect(file).toBeDefined();
+    expect(file.name).toBe("id_front.jpg");
+  });
+
+  it("addresses by customerId when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_mult_id" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fileBlob = new Blob(["fake-image-bytes"], { type: "image/png" });
+    const res = await putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      customerId: "cust_existing",
+      files: [{ name: "photo_id_back", blob: fileBlob, filename: "back.png" }],
+    });
+
+    expect(res.customerId).toBe("cust_mult_id");
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const formData = init.body as FormData;
+    expect(formData.get("id")).toBe("cust_existing");
+    expect(formData.get("account")).toBeNull();
+  });
+});
+

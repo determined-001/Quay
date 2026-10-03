@@ -368,6 +368,18 @@ corrupted data.
 
 ## Key rotation
 
+- **`KYC_ENCRYPTION_KEY`**: encrypts seller SEP-12 KYC field values at rest using AES-256-GCM.
+  Blob format is `v1:<keyId>:<base64(iv||authTag||ciphertext)>`, where `keyId` is the first 8 hex characters of the key's SHA-256 digest.
+  Zero-downtime rotation procedure:
+  1. Generate a new key: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+  2. Update environment variables in your deployment dashboard:
+     - `KYC_ENCRYPTION_KEY`: `<new_key>` (primary for all new writes)
+     - `KYC_ENCRYPTION_KEY_PREVIOUS`: `<old_key>` (or comma-separated list of previous keys for decrypting older records)
+  3. Redeploy the API. The service will immediately encrypt all new submissions under the new key while continuing to read older records seamlessly.
+  4. Run dry-run scan to verify: `pnpm kyc:rotate-key --dry-run`
+  5. Run the background re-encryption: `pnpm kyc:rotate-key`
+  6. Verify the Prometheus metric `kyc_non_primary_key_rows` drops to `0`.
+  7. Remove `KYC_ENCRYPTION_KEY_PREVIOUS` from the deployment environment.
 - **`BACKUP_ENCRYPTION_KEY`**: generate a new key, but **keep the old key
   available** (e.g. as `BACKUP_ENCRYPTION_KEY_PREVIOUS` in your secret store)
   until every backup encrypted under it has passed its retention window -
@@ -621,6 +633,27 @@ Symptom: payments are landing on-chain but links aren't transitioning to
    mandatory for this reason) - check the Render service's process status
    directly.
 
+## Telemetry rate-unit repair (one-off, issue 5.21)
+
+`offramp_telemetry.quoted_rate` written before the 5.21 fix stored the raw
+SEP-38 `price` (sell per buy) for real anchors, while every other rate in the
+dataset is target-per-source — which made the summary's spread meaningless
+for those rows. The adapters now write target-per-source; existing rows are
+repaired once with:
+
+```bash
+# Against the deployment's DATABASE_URL / DATABASE_AUTH_TOKEN:
+node apps/api/scripts/fix-telemetry-rate-units.mjs           # dry run (default)
+node apps/api/scripts/fix-telemetry-rate-units.mjs --apply   # write
+```
+
+Dry-run first, always: the script prints every row it would invert. Mock rows
+are never touched (they were already in the right unit). **Run `--apply` at
+most once per database** — the column carries no unit tag, so a second apply
+would invert the values back to wrong. Historical `fee_amount` on pre-fix
+non-mock rows was computed across the mixed units and stays unreliable; the
+script deliberately does not rewrite it.
+
 ## Stuck `offramp_pending` job
 
 Symptom: a link has been `offramp_pending` far longer than the anchor's
@@ -644,6 +677,34 @@ typical settlement time.
    `packages/core/src/domain/status.ts`'s allowed transitions) to match
    reality. `offramp_failed` can transition back to `offramp_pending` to
    retry.
+
+## KYC and Identity Data Retention Policy (NDPA Compliance)
+
+The Nigeria Data Protection Act 2023 (NDPA) requires that personal identity data is not kept longer than necessary for its purpose. To minimize exposure in the event of credential compromise, Quay implements an automated data retention policy for inactive sellers.
+
+### Retention Inactivity Tracking & Purge Schedule
+- **Activity tracking**: A seller's `last_active_at` is updated on wallet login (`POST /auth`), link creation (`POST /links`), and KYC submissions (`PUT /seller/kyc`). Database writes are throttled to at most once per hour per seller.
+- **Retention period**: Controlled via `KYC_RETENTION_DAYS` (default `730` days / 2 years). Setting `KYC_RETENTION_DAYS=0` disables the sweep entirely.
+- **In-flight protection**: Sellers with links currently in `offramp_pending` status are excluded from purging to avoid disrupting live cash-outs.
+- **Purged data**:
+  - `seller_kyc` rows (AES-256-GCM encrypted SEP-12 PII fields and customer IDs).
+  - `anchor_sessions` rows (encrypted anchor auth tokens).
+  - `sellers.payout_fields_json` (last-used payout bank/account details are cleared to `NULL`).
+  - Anchor contact is not attempted (recorded as `anchor_not_contacted`).
+- **Telemetry & Metrics**:
+  - Metrics counter: `quay_kyc_retention_purged_total` tracks total purged sellers.
+  - Logs structured event: `{"event": "privacy.retention.purged", "count": N}` with strictly zero PII.
+
+### Operator CLI Usage
+Operators can manually trigger or preview the retention sweep using the retention CLI script:
+
+```bash
+# Dry run: preview counts of eligible inactive sellers without modifying the database
+pnpm --filter @checkout/api exec tsx scripts/kyc-retention.ts --dry-run
+
+# Live run: execute retention purge against configured DATABASE_URL
+pnpm --filter @checkout/api exec tsx scripts/kyc-retention.ts
+```
 
 ## Incident template
 
@@ -674,3 +735,71 @@ Copy this into a new incident doc/issue when something goes wrong:
 ### Follow-ups
 - [ ] <concrete action item>
 ```
+
+## PII Breach (NDPA 72-Hour Notification)
+
+If personal data (KYC fields, payout fields, session tokens, seller identity) is exposed, accessed without authorization, or lost:
+
+### 1. Detect & Contain (immediate)
+
+- **Rotate `KYC_ENCRYPTION_KEY`** (see issue 4.31):
+  1. Generate new key: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+  2. Add to `render.yaml` / Render dashboard as new `KYC_ENCRYPTION_KEY`
+  3. Re-encrypt all `seller_kyc.fields_encrypted` and `sellers.payout_fields_encrypted` with new key (one-off script)
+  4. Deploy with new key; old key invalidates all existing encrypted rows
+
+- **Revoke all anchor sessions** (issue 4.26):
+  - `DELETE FROM anchor_sessions;` (or call revocation endpoint per seller)
+  - Forces re-authentication; invalidates any stolen SEP-10 JWTs
+
+- **Assess scope**:
+  - Which tables/rows affected? (`seller_kyc`, `sellers`, `anchor_sessions`, `kyc_consents`, `link_payments`, `webhookQueue`)
+  - How many sellers?
+  - What data categories? (KYC fields = high risk; wallet addresses = medium; logs = low)
+
+### 2. Assess Risk (within 24 hours)
+
+- Likelihood of harm to data subjects (identity theft, financial fraud, privacy violation)
+- Types of data involved:
+  - **High risk**: KYC fields (name, address, ID numbers, financial), payout fields (bank details)
+  - **Medium risk**: Wallet addresses, payment history, API key metadata
+  - **Low risk**: Logs (already redacted per `docs/pr-27-logging.md`), analytics
+
+### 3. Notify (within 72 hours of awareness)
+
+Per NDPA Section 38, notify:
+
+1. **NDPC (Nigeria Data Protection Commission)**:
+   - Via breach portal: <https://ndpc.gov.ng>
+   - Include: nature of breach, categories of data, approximate number of subjects, likely consequences, measures taken, contact for more info
+
+2. **Affected Sellers** (if high risk):
+   - Email with: description of breach, likely consequences, measures taken/advise to mitigate, contact for more info
+   - Template: "We detected unauthorized access to your [data categories] on [date]. We have [actions taken]. You should [recommended steps]. Contact [email] for questions."
+
+3. **Anchor(s)** (if their data was involved):
+   - Notify anchor's security/contact per their DPA/agreement
+
+4. **Hosting/DB Providers** (Render, Turso):
+   - Per DPA obligations; they may have their own notification duties
+
+### 4. Document
+
+- Record in incident log (date, scope, root cause, actions, notifications sent)
+- Link to `docs/PRIVACY.md` breach handling section
+- Update `docs/PRIVACY.md` if material changes to data map or notice
+
+### 5. Rotate Related Secrets (as needed)
+
+- `WEBHOOK_SECRET_ENCRYPTION_KEY` (if webhook payloads exposed)
+- `JWT_SECRET` (if session tokens exposed)
+- `SERVER_SIGNING_SECRET` (if signing key exposed)
+- `WEBHOOK_SECRET_ENCRYPTION_KEY` rotation (issue 4.31) — 24h overlap window
+
+### 6. Follow-up
+
+- [ ] Root cause analysis
+- [ ] Implement mitigations (code, config, process)
+- [ ] Update `docs/PRIVACY.md` if data map changed
+- [ ] Conduct post-incident review within 14 days
+- [ ] Report to board/management per internal policy
