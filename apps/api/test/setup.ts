@@ -315,6 +315,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     } as unknown as Container["kycConsents"],
     anchorDomain: "testanchor.stellar.org",
     anchorAuth: null,
+    deleteAnchorCustomer: null,
     telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),

@@ -8,6 +8,7 @@ import {
   describeError,
   type AnchorAuthView,
   type KycView,
+  type KycDisclosure,
   type PaymentLink,
   type UsdcTrustlineStatus,
 } from "../../lib/api";
@@ -19,6 +20,7 @@ import {
 } from "../../lib/anchor-session";
 import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
+import DisclosuresPanel from "./DisclosuresPanel";
 import CashOutModal from "./CashOutModal";
 import { useSellerWallet } from "./SessionGate";
 
@@ -267,6 +269,10 @@ export default function Dashboard() {
   const [copied, setCopied] = useState<string | null>(null);
   const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
   const [kyc, setKyc] = useState<KycView | null>(null);
+  const [disclosures, setDisclosures] = useState<KycDisclosure[]>([]);
+  const [disclosuresLoading, setDisclosuresLoading] = useState(true);
+  const [disclosuresError, setDisclosuresError] = useState<string | null>(null);
+  const [disclosureAction, setDisclosureAction] = useState<string | null>(null);
   const [anchorAuth, setAnchorAuth] = useState<AnchorAuthView | null>(null);
   // Which link has the cash-out modal open; null = closed (issue #32).
   const [cashOutLinkId, setCashOutLinkId] = useState<string | null>(null);
@@ -309,6 +315,47 @@ export default function Dashboard() {
       /* dashboard still works without it; the cash-out button just stays gated */
     }
   }, []);
+
+  const refreshDisclosures = useCallback(async () => {
+    if (OFFRAMP_IS_MOCK || !OFFRAMP_ENABLED) return;
+    setDisclosuresLoading(true);
+    try {
+      setDisclosures(await api.getDisclosures());
+      setDisclosuresError(null);
+    } catch (e) {
+      setDisclosuresError(e instanceof CheckoutError ? describeError(e) : "Could not load disclosure history.");
+    } finally {
+      setDisclosuresLoading(false);
+    }
+  }, []);
+
+  const revokeDisclosure = useCallback(async (anchorDomain: string) => {
+    setDisclosureAction(anchorDomain);
+    setDisclosuresError(null);
+    try {
+      await api.revokeKycConsent(anchorDomain);
+      await refreshDisclosures();
+    } catch (e) {
+      setDisclosuresError(e instanceof CheckoutError ? describeError(e) : "Could not revoke consent.");
+    } finally {
+      setDisclosureAction(null);
+    }
+  }, [refreshDisclosures]);
+
+  const deleteDisclosure = useCallback(async (anchorDomain: string) => {
+    if (!window.confirm(`Ask ${anchorDomain} to delete your identity data? This also removes Quay's KYC copy for that anchor.`)) return;
+    setDisclosureAction(anchorDomain);
+    setDisclosuresError(null);
+    try {
+      await api.deleteAnchorKyc(anchorDomain);
+      await refreshDisclosures();
+      void refreshKyc();
+    } catch (e) {
+      setDisclosuresError(e instanceof CheckoutError ? describeError(e) : "Could not request deletion from the anchor.");
+    } finally {
+      setDisclosureAction(null);
+    }
+  }, [refreshDisclosures, refreshKyc]);
 
   const refreshTrustline = useCallback(async () => {
     try {
@@ -381,6 +428,10 @@ export default function Dashboard() {
   useEffect(() => {
     void refreshKyc();
   }, [refreshKyc]);
+
+  useEffect(() => {
+    void refreshDisclosures();
+  }, [refreshDisclosures]);
 
   async function create() {
     setActionError(null);
@@ -563,7 +614,14 @@ export default function Dashboard() {
       </section>
 
       {OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK && (
-        <KycPanel kyc={kyc} anchor={anchorAuth} onUpdated={setKyc} onAnchorConnected={() => void refreshKyc()} />
+        <>
+          <KycPanel kyc={kyc} anchor={anchorAuth} onUpdated={(updated) => { setKyc(updated); void refreshDisclosures(); }} onAnchorConnected={() => void refreshKyc()} />
+          <DisclosuresPanel disclosures={disclosures} loading={disclosuresLoading} error={disclosuresError}
+            deletableAnchorDomain={anchorAuth?.connected ? anchorAuth.anchor : null}
+            onRetry={() => void refreshDisclosures()}
+            onRevoke={disclosureAction ? undefined : (domain) => void revokeDisclosure(domain)}
+            onAskDelete={disclosureAction ? undefined : (domain) => void deleteDisclosure(domain)} />
+        </>
       )}
 
       <section className="panel">

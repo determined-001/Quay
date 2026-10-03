@@ -89,6 +89,19 @@ export interface KycView {
   lastSyncedAt: number | null;
 }
 
+/** Disclosure metadata only. Field values must never appear in this response. */
+export interface KycDisclosure {
+  anchorDomain: string;
+  status: KycStatus;
+  fields: Array<{
+    name: string;
+    sentAt: number;
+    anchorStatus: string;
+    error?: string | null;
+  }>;
+  consent: { grantedAt: number; revokedAt: number | null } | null;
+}
+
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
 //
 // This has actually broken production once already (docs/FIXLOG.md, BUG-1.4,
@@ -523,6 +536,10 @@ export const api = {
 
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: () => http<KycView>("/seller/kyc"),
+  getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
+  deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
+    `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },
+  ),
 
   // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
   // sign with the wallet -> completeAnchorAuth(). Quay never signs it.

@@ -608,6 +608,28 @@ naming exactly which ones, never silently substituting a placeholder.
 
 ---
 
+## `GET /seller/kyc/disclosures`
+
+List the authenticated seller's recorded SEP-12 disclosures by anchor. Requires a
+seller session and `offramp:initiate` scope; API keys are rejected. Each entry
+contains `anchorDomain`, `status`, `consent` (`grantedAt` and `revokedAt`), and
+`fields` with only `name`, `sentAt` (epoch milliseconds), and `anchorStatus`.
+The response never contains field values or anchor error text. Send times are
+recorded for successful submissions made after this endpoint is deployed;
+older sends cannot be dated reliably and are omitted.
+
+## `DELETE /seller/kyc/disclosures/:anchorDomain`
+
+Revoke consent, request [SEP-12 customer deletion](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md#customer-delete)
+at the configured anchor using the seller's own SEP-10 session, then erase the
+local KYC record and disclosure metadata for that anchor. Requires a seller
+session and `offramp:initiate` scope; API keys are rejected. The path must equal
+the configured anchor domain; arbitrary anchor URLs are never accepted. A
+successful response contains `anchorResult` (`deleted` or `not_found`) and
+`localDataErased: true`. If anchor authentication or deletion fails, local
+erasure is not reported as complete. This does not erase the seller's separate
+reusable profile or data held by another anchor.
+
 ## `GET /seller/kyc/consent`
 
 List all consent records (active and revoked) for the authenticated seller.
