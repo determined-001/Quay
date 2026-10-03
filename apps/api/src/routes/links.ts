@@ -85,24 +85,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       if (!isNaN(toMs)) filtered = filtered.filter((l) => l.createdAt <= toMs);
     }
 
-    const header = "id,reference,title,amount,asset,status,payer,tx_hash,paid_amount,created_at,updated_at\n";
-    const rows = filtered.map(
-      (l) =>
-        [
-          l.id,
-          l.reference,
-          csvCell(l.title),
-          l.amount,
-          l.asset.code,
-          l.status,
-          l.payer ?? "",
-          l.txHash ?? "",
-          l.paidAmount ?? "",
-          new Date(l.createdAt).toISOString(),
-          new Date(l.updatedAt).toISOString(),
-        ].join(","),
-    );
-    const csv = header + rows.join("\n");
+    const csv = LINKS_CSV_HEADER + filtered.map(linkToCsvRow).join("\n");
 
     return ctx.newResponse(csv, 200, {
       "content-type": "text/csv; charset=utf-8",
@@ -298,7 +281,11 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json({ error: "not_found" }, 404);
     }
     const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
-    return ctx.json({ link: result.link, request: result.request, deliveries });
+    // Raw upstream status for the seller's interactive step (issue 5.20):
+    // SEP-24 `incomplete` reads as "waiting on you" in the UI, while the
+    // mapped offrampStatus stays `pending`.
+    const offrampExternalStatus = await c.service.getOffRampExternalStatus(result.link);
+    return ctx.json({ link: result.link, request: result.request, deliveries, offrampExternalStatus });
   });
 
   // Seller voids a link they created by mistake. Idempotent: cancelling an
@@ -353,6 +340,32 @@ export function toCheckoutView(link: PaymentLink) {
     createdAt: link.createdAt,
     updatedAt: link.updatedAt,
   };
+}
+
+/**
+ * Header of `GET /links/export/csv`. `offramp_status` is last so existing consumers that read the
+ * earlier columns by position keep working. It separates a cash-out that is waiting for the seller's
+ * on-chain transfer (`awaiting_transfer`) from one the anchor is paying out (`pending`); `status`
+ * alone reads `offramp_pending` for both.
+ */
+export const LINKS_CSV_HEADER =
+  "id,reference,title,amount,asset,status,payer,tx_hash,paid_amount,created_at,updated_at,offramp_status\n";
+
+export function linkToCsvRow(l: PaymentLink): string {
+  return [
+    l.id,
+    l.reference,
+    csvCell(l.title),
+    l.amount,
+    l.asset.code,
+    l.status,
+    l.payer ?? "",
+    l.txHash ?? "",
+    l.paidAmount ?? "",
+    new Date(l.createdAt).toISOString(),
+    new Date(l.updatedAt).toISOString(),
+    l.offrampStatus ?? "",
+  ].join(",");
 }
 
 /**

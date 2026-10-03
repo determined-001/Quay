@@ -487,7 +487,7 @@ settled.
   "job": {
     "jobId": "ofr_...",
     "linkId": "lnk_...",
-    "status": "pending",
+    "status": "awaiting_transfer",
     "targetCurrency": "NGN",
     "targetAmount": "17325.00",
     "rate": "1650",
@@ -509,10 +509,12 @@ settled.
   implements SEP-38), **`indicative`** when the anchor has no quote server and
   Quay computed it from a configured rate source plus the fees the anchor
   published in `/sep6/info` (issue 3.22). Real anchors mostly have no SEP-38, so
-  expect `indicative` in production. An indicative `targetAmount` is the anchor's
+  expect `indicative` in production. An indicative `targetAmount` is not the anchor's
   final say, so surface it as an estimate before the seller commits — which is
   what the dashboard does. It is a real quote either way; the difference is
   whose promise it is.
+
+- `job.status` / `link.offrampStatus` — `"awaiting_transfer"` (anchor is waiting for seller's on-chain transfer), `"pending"` (anchor is processing payout to local rails), `"settled"` (completed), or `"failed"`.
 - `transfer` — **present when the anchor is waiting for the asset** (SEP-6,
   once it has named its deposit account). The seller's own wallet sends
   `amount` of `asset` to `destination` with exactly this memo; the anchor pays
