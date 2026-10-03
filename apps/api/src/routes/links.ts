@@ -281,7 +281,11 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json({ error: "not_found" }, 404);
     }
     const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
-    return ctx.json({ link: result.link, request: result.request, deliveries });
+    // Raw upstream status for the seller's interactive step (issue 5.20):
+    // SEP-24 `incomplete` reads as "waiting on you" in the UI, while the
+    // mapped offrampStatus stays `pending`.
+    const offrampExternalStatus = await c.service.getOffRampExternalStatus(result.link);
+    return ctx.json({ link: result.link, request: result.request, deliveries, offrampExternalStatus });
   });
 
   // Seller voids a link they created by mistake. Idempotent: cancelling an

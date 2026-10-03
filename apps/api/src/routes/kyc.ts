@@ -1,12 +1,16 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import {
   AnchorAuthRequiredError,
   KycRequiredError,
   ConsentRequiredError,
+  type KycFieldSpec,
   type KycRecord,
   type KycConsent,
+  type KycUploadFile,
 } from "@checkout/core";
+import { env } from "../env";
 import type { Container } from "../services/container";
 import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
@@ -17,6 +21,8 @@ const grantConsentSchema = z.object({
   anchorDomain: z.string().min(1),
   fields: z.array(z.string()).min(1),
 });
+
+const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "application/pdf"]);
 
 function toResponse(record: KycRecord) {
   return {
@@ -215,6 +221,113 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       throw err;
     }
   });
+
+  // Upload binary KYC file fields (e.g. photo_id_front, photo_id_back, ...).
+  // Streams straight into the anchor and drops the bytes immediately.
+  // Never persists or logs uploaded file contents.
+  app.put(
+    "/files",
+    bodyLimit({
+      maxSize: env.kycMaxUploadBytes,
+      onError: (ctx) => ctx.json({ error: "payload_too_large" }, 413),
+    }),
+    async (ctx) => {
+      // Identity documents are only ever uploaded by the seller themselves, from their own
+      // session. An API key (a programmatic integration) has no business sending an ID photo.
+      if (ctx.get("authKind") === "api_key") {
+        return ctx.json(
+          { error: "forbidden", message: "file uploads require session authentication" },
+          403,
+        );
+      }
+      const seller = ctx.get("seller");
+      const customer = customerOf(seller);
+      let record: KycRecord;
+      try {
+        record = await c.kyc.status(customer);
+      } catch (err) {
+        if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+        throw err;
+      }
+
+      const requestedBinaryFields = new Map<string, KycFieldSpec>(
+        record.requiredFields.filter((f) => f.type === "binary").map((f) => [f.name, f]),
+      );
+
+      let body: Record<string, unknown>;
+      try {
+        body = (await ctx.req.parseBody({ all: true })) as Record<string, unknown>;
+      } catch {
+        return ctx.json({ error: "invalid_body" }, 400);
+      }
+
+      const uploadFiles: KycUploadFile[] = [];
+      const keys = Object.keys(body);
+      if (keys.length === 0) {
+        return ctx.json({ error: "no_files" }, 400);
+      }
+
+      for (const [key, value] of Object.entries(body)) {
+        if (!requestedBinaryFields.has(key)) {
+          return ctx.json({ error: "unrequested_field", field: key }, 400);
+        }
+        const fileValues = Array.isArray(value) ? value : [value];
+        if (fileValues.length > 1) {
+          return ctx.json({ error: "too_many_files", field: key }, 400);
+        }
+        for (const item of fileValues) {
+          if (!(item instanceof Blob) && (typeof item !== "object" || item === null || !("arrayBuffer" in item))) {
+            return ctx.json({ error: "invalid_file", field: key }, 400);
+          }
+          const blob = item as Blob;
+          const mimeType = blob.type || "application/octet-stream";
+          if (!ALLOWED_MIME_TYPES.has(mimeType)) {
+            return ctx.json({ error: "invalid_mime_type", field: key, mimeType }, 400);
+          }
+          if (blob.size > env.kycMaxUploadBytes) {
+            return ctx.json({ error: "payload_too_large" }, 413);
+          }
+          const filename =
+            (item as File).name ||
+            `${key}.${mimeType === "image/png" ? "png" : mimeType === "application/pdf" ? "pdf" : "jpg"}`;
+          uploadFiles.push({
+            name: key,
+            blob,
+            filename,
+          });
+        }
+      }
+
+      if (uploadFiles.length === 0) {
+        return ctx.json({ error: "no_files" }, 400);
+      }
+
+      // Same per-anchor consent gate as PUT /: no field reaches the anchor
+      // (files included) unless the seller consented to that specific field.
+      const anchorDomain = c.anchorDomain;
+      if (!anchorDomain) {
+        return ctx.json({ error: "server_error", message: "No anchor configured" }, 500);
+      }
+      const uploadedFields = [...new Set(uploadFiles.map((f) => f.name))];
+      const consent = await c.kycConsents.active(seller.id, anchorDomain);
+      const uncovered = consent ? uploadedFields.filter((f) => !consent.fields.includes(f)) : uploadedFields;
+      if (uncovered.length > 0) {
+        return ctx.json({ error: "consent_required", anchorDomain, fields: uncovered }, 403);
+      }
+
+      try {
+        const updated = await c.kyc.submitFiles(customer, uploadFiles);
+        await c.sellers.touchLastActive?.(seller.id);
+        return ctx.json(toResponse(updated));
+      } catch (err) {
+        if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+        if (err instanceof KycRequiredError) {
+          return ctx.json({ error: "kyc_required", missingFields: err.missingFields }, 422);
+        }
+        throw err;
+      }
+    },
+  );
 
   return app;
 }

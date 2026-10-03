@@ -41,6 +41,7 @@ function makeService(opts: {
   webhooks?: FakeWebhookRepository;
   kyc?: KycPort;
   telemetry?: FakeTelemetryRepository;
+  interactiveTimeoutMs?: number;
 }): LinkService {
   return new LinkService({
     links: opts.links,
@@ -61,6 +62,9 @@ function makeService(opts: {
     telemetry: opts.telemetry ?? new FakeTelemetryRepository(),
     correlation: "memo",
     webhookGuard: async () => ({ ok: true }) as const,
+    ...(opts.interactiveTimeoutMs !== undefined
+      ? { interactiveTimeoutMs: opts.interactiveTimeoutMs }
+      : {}),
   });
 }
 
@@ -175,6 +179,155 @@ describe("LinkService.pollCashOuts", () => {
 
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
     expect(links.get("lnk_1")?.offrampStatus).toBe("pending");
+  });
+
+  it("fails an incomplete job past the interactive timeout and fires offramp.failed", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_stuck", offrampStatus: "pending" }),
+    ]);
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_stuck",
+      linkId: "lnk_1",
+      anchor: "testanchor",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      status: "pending",
+      externalStatus: "incomplete",
+      lastError: null,
+      transferNotifiedAt: null,
+      createdAt: Date.now() - 2 * 3_600_000,
+      updatedAt: Date.now(),
+    });
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "pending",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
+    const webhooks = new FakeWebhookRepository();
+    await webhooks.create({ sellerId: "sel_1", url: "https://example.com/h", secret: "test-secret" });
+
+    await makeService({ links, offramp, offrampState, webhooks }).pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+    expect(links.get("lnk_1")?.offrampStatus).toBe("failed");
+    const failed = webhooks.queue.map((row) => JSON.parse(row.payload) as { event: string; data: { reason?: string } });
+    expect(failed.some((e) => e.event === "offramp.failed" && e.data.reason === "interactive_abandoned")).toBe(true);
+  });
+
+  it("leaves a recently-incomplete job pending", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_fresh", offrampStatus: "pending" }),
+    ]);
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_fresh",
+      linkId: "lnk_1",
+      anchor: "testanchor",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      status: "pending",
+      externalStatus: "incomplete",
+      lastError: null,
+      transferNotifiedAt: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "pending",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
+
+    await makeService({ links, offramp, offrampState }).pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("honors a custom interactiveTimeoutMs", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_custom", offrampStatus: "pending" }),
+    ]);
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_custom",
+      linkId: "lnk_1",
+      anchor: "testanchor",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      status: "pending",
+      externalStatus: "incomplete",
+      lastError: null,
+      transferNotifiedAt: null,
+      createdAt: Date.now() - 2_000,
+      updatedAt: Date.now(),
+    });
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "pending",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
+
+    await makeService({ links, offramp, offrampState, interactiveTimeoutMs: 1_000 }).pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+  });
+
+  it("leaves a stale non-incomplete job pending", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_old", offrampStatus: "pending" }),
+    ]);
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_old",
+      linkId: "lnk_1",
+      anchor: "testanchor",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      status: "pending",
+      externalStatus: "pending_anchor",
+      lastError: null,
+      transferNotifiedAt: null,
+      createdAt: Date.now() - 2 * 3_600_000,
+      updatedAt: Date.now(),
+    });
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "pending",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
+
+    await makeService({ links, offramp, offrampState }).pollCashOuts();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
   });
 });
 
