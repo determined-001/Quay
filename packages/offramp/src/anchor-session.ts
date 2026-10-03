@@ -24,6 +24,10 @@ import { fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
 
 /** Anchor-token lifetime we refuse to go below when deciding it is still live. */
 const EXPIRY_SKEW_MS = 60_000;
+/** Clock drift tolerated between us and the anchor when reading `iat`. */
+const CLAIM_SKEW_MS = 60_000;
+/** Longest session we will store, whatever `exp` claims. */
+const MAX_TOKEN_LIFETIME_MS = 7 * 24 * 60 * 60_000;
 
 export interface AnchorDiscoveryOptions {
   homeDomain: string;
@@ -80,7 +84,7 @@ export class AnchorDiscovery {
 
 /** The challenge failed verification, or the signed one came back for the wrong account. */
 export class AnchorChallengeError extends Error {
-  constructor(reason: string) {
+  constructor(readonly reason: string) {
     super(`Anchor SEP-10 challenge rejected: ${reason}`);
     this.name = "AnchorChallengeError";
   }
@@ -164,13 +168,21 @@ export class SellerAnchorAuth {
       throw new AnchorChallengeError(`anchor refused the signed challenge (${res.status}): ${await res.text()}`);
     }
     const { token } = (await res.json()) as { token: string };
-    const claims = decodeJwtClaims(token);
-    // `sub` is the account, or `account:memo` for a shared account. Never
-    // store a token the anchor issued to someone else.
-    if (claims.sub && claims.sub.split(":")[0] !== customer.account) {
-      throw new AnchorChallengeError("anchor issued a token for a different account");
+    let expiresAt: number;
+    try {
+      expiresAt = this.checkClaims(token, customer, d);
+    } catch (err) {
+      // Reason only. The token is a bearer credential for this seller's KYC.
+      this.logger.warn(
+        {
+          event: "anchor.sep10.seller_auth.rejected",
+          sellerId: customer.sellerId,
+          reason: err instanceof AnchorChallengeError ? err.reason : "unexpected error validating token",
+        },
+        "anchor token rejected",
+      );
+      throw err;
     }
-    const expiresAt = (claims.exp ?? Math.floor(Date.now() / 1000) + 300) * 1000;
     await this.sessions.save({
       sellerId: customer.sellerId,
       anchorDomain: this.anchorDomain,
@@ -184,6 +196,74 @@ export class SellerAnchorAuth {
       "seller authenticated to anchor",
     );
     return { expiresAt };
+  }
+
+  /**
+   * Sanity-check the claims of the JWT the anchor returned and return the
+   * expiry (ms) to store.
+   *
+   * Quay cannot verify the signature: SEP-10 does not publish the anchor's JWT
+   * key. So the claims are the only check available, and a token that fails any
+   * of them is never stored. See SEP-10 "JWT Structure"
+   * (https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md).
+   */
+  private checkClaims(token: string, customer: AnchorCustomer, d: Sep1DiscoveryInfo): number {
+    const claims = decodeJwtClaims(token);
+    if (!claims) throw new AnchorChallengeError("anchor token has no readable payload");
+
+    // `sub` must be exactly the seller's own G account. SEP-10 also allows
+    // `G...:memo` (a sub-customer of a shared account) and muxed `M...`
+    // accounts, but a Quay seller is always the account itself, so either form
+    // means the anchor authenticated somebody other than this seller.
+    // (If muxed accounts are ever supported, that belongs in a deliberate
+    // change here, not in a laxer comparison.)
+    if (typeof claims.sub !== "string" || claims.sub === "") {
+      throw new AnchorChallengeError("anchor token has no subject");
+    }
+    if (claims.sub !== customer.account) {
+      if (claims.sub.includes(":")) {
+        throw new AnchorChallengeError("anchor issued a token for a memo sub-account, not the seller's own account");
+      }
+      if (claims.sub.startsWith("M")) {
+        throw new AnchorChallengeError("anchor issued a token for a muxed account, not the seller's own account");
+      }
+      throw new AnchorChallengeError("anchor issued a token for a different account");
+    }
+
+    // `iss` is the issuer URI, e.g. https://testanchor.stellar.org/auth. Its
+    // host must be the anchor we are talking to: the host of the endpoint that
+    // issued it, or the anchor's home domain.
+    if (typeof claims.iss !== "string") throw new AnchorChallengeError("anchor token has no issuer");
+    let issHost: string;
+    try {
+      issHost = new URL(claims.iss).host.toLowerCase();
+    } catch {
+      throw new AnchorChallengeError("anchor token issuer is not a URL");
+    }
+    const allowedHosts = [new URL(d.webAuthEndpoint).host, this.anchorDomain].map((h) => h.toLowerCase());
+    if (!allowedHosts.includes(issHost)) {
+      throw new AnchorChallengeError(`anchor token issuer host ${issHost} is not ${allowedHosts.join(" or ")}`);
+    }
+
+    // Optional SEP-10 `home_domain` claim: when the anchor states one, it has to be ours.
+    if (claims.home_domain !== undefined && String(claims.home_domain).toLowerCase() !== this.anchorDomain.toLowerCase()) {
+      throw new AnchorChallengeError("anchor token was issued for a different home domain");
+    }
+
+    const now = Date.now();
+    if (claims.iat !== undefined) {
+      if (typeof claims.iat !== "number" || !Number.isFinite(claims.iat)) {
+        throw new AnchorChallengeError("anchor token iat is not a number");
+      }
+      if (claims.iat * 1000 > now + CLAIM_SKEW_MS) throw new AnchorChallengeError("anchor token was issued in the future");
+    }
+    if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp)) {
+      throw new AnchorChallengeError("anchor token has no expiry");
+    }
+    if (claims.exp * 1000 <= now) throw new AnchorChallengeError("anchor token has already expired");
+    // Do not trust a far-future expiry: a session that lives for years would
+    // outlast anything the seller consented to. Cap it instead of refusing.
+    return Math.min(claims.exp * 1000, now + MAX_TOKEN_LIFETIME_MS);
   }
 
   /**
@@ -247,12 +327,23 @@ export class SellerAnchorAuth {
   }
 }
 
-function decodeJwtClaims(token: string): { sub?: string; exp?: number } {
-  const payload = token.split(".")[1];
-  if (!payload) return {};
+interface JwtClaims {
+  iss?: unknown;
+  sub?: unknown;
+  iat?: unknown;
+  exp?: unknown;
+  home_domain?: unknown;
+}
+
+/** The payload of a three-part JWT as an object, or null when it is anything else. */
+function decodeJwtClaims(token: unknown): JwtClaims | null {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
   try {
-    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { sub?: string; exp?: number };
+    const claims: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return claims !== null && typeof claims === "object" && !Array.isArray(claims) ? (claims as JwtClaims) : null;
   } catch {
-    return {};
+    return null;
   }
 }

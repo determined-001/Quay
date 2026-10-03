@@ -174,7 +174,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `link_status_transitions_total` | `to` |
 | `wallet_submissions_total` | `outcome` (`submitted`, `invalid_xdr`, `rejected`) |
 | `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
-| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
+| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` (`ok`, `error`, `rejected`) |
 
 **Histograms**
 | Metric | Labels |
@@ -467,11 +467,19 @@ settled.
 ```json
 {
   "targetCurrency": "NGN",
-  "payoutFields": { "bank": "...", "accountNumber": "..." }
+  "payoutFields": { "bank": "...", "accountNumber": "..." },
+  "withdrawType": "bank_account"
 }
 ```
 - `targetCurrency` — 3-letter code, defaults to `NGN`.
 - `payoutFields` — opaque string map handed to the anchor adapter.
+- `withdrawType` — optional SEP-6 withdrawal type (`bank_account`, `cash`, …)
+  when the anchor offers several rails; the seller's choice, discovered from
+  `GET /links/:id/offramp-requirements`. Omitted, the adapter falls back to
+  the operator-wide `OFFRAMP_TYPE` default, or the anchor's only type.
+  An unknown type is **400** `{ "error": "unknown_withdraw_type",
+  "availableTypes": ["bank_account", "cash"] }` — the caller's mistake, never
+  the 502 a dead anchor gets.
 
 **200**
 ```json
@@ -479,7 +487,7 @@ settled.
   "job": {
     "jobId": "ofr_...",
     "linkId": "lnk_...",
-    "status": "pending",
+    "status": "awaiting_transfer",
     "targetCurrency": "NGN",
     "targetAmount": "17325.00",
     "rate": "1650"
@@ -494,6 +502,7 @@ settled.
   }
 }
 ```
+- `job.status` / `link.offrampStatus` — `"awaiting_transfer"` (anchor is waiting for seller's on-chain transfer), `"pending"` (anchor is processing payout to local rails), `"settled"` (completed), or `"failed"`.
 - `transfer` — **present when the anchor is waiting for the asset** (SEP-6,
   once it has named its deposit account). The seller's own wallet sends
   `amount` of `asset` to `destination` with exactly this memo; the anchor pays
@@ -512,6 +521,11 @@ settled.
 **403** — `{ "error": "anchor_auth_required" }`. Only possible with a real anchor
 (`OFFRAMP=testanchor|anchor`): the seller has no live SEP-10 session with the
 anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
+**422** — `{ "error": "offramp_rejected", "message", "limits": { "minAmount", "maxAmount" }, "availableTypes": [] }`.
+The anchor refused the request on its merits: the amount is outside the limits it publishes
+(SEP-6 `/info`), the asset is not withdrawable, or a withdraw type is needed. This is the
+seller's to fix (change the amount), it is not an anchor outage, and it does not count towards the
+circuit breaker. The same 422 is returned by `GET /links/:id/cash-out/quote`.
 **403** — `{ "error": "kyc_required" }`. Only possible with a real anchor: the
 seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
 bank/routing info only — it is never used as a source of identity data.

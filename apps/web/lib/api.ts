@@ -15,11 +15,23 @@ export interface LinkWithRequest {
   request: PaymentRequest;
 }
 
-/** Anchor field descriptors + the seller's previously-saved (masked) payout
- *  fields for the cash-out form (issue #32). */
-export interface OfframpRequirements {
-  /** Anchor's field descriptors — drives the dynamic form. */
+/** One SEP-6 withdrawal type and the payout fields it needs (issue 5.24). */
+export interface WithdrawTypeOption {
+  /** The anchor's type name, e.g. "bank_account", "cash". */
+  name: string;
   descriptors: PayoutFieldDescriptor[];
+}
+
+/** Anchor withdrawal types (each with its field descriptors) + the seller's
+ *  previously-saved (masked) payout fields for the cash-out form (issues #32,
+ *  5.24). */
+export interface OfframpRequirements {
+  /** Every withdrawal type the anchor offers — drives the rail picker and,
+   *  per selected type, the dynamic form. */
+  types: WithdrawTypeOption[];
+  /** The type to preselect: the operator default when offered, or the only
+   *  type when there is exactly one, else null and the seller must choose. */
+  defaultType: string | null;
   /**
    * Previously-saved values, masked to last 4 chars server-side. Null on first
    * cash-out. The form uses these to show "already on file" and skips fields
@@ -43,6 +55,8 @@ export interface LinkDetail {
   link: PaymentLink;
   request: PaymentRequest;
   deliveries: WebhookDelivery[];
+  /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
+  offrampExternalStatus: string | null;
 }
 
 /** Fields exposed on the public receipt — never includes seller PII. */
@@ -155,6 +169,7 @@ export type ApiErrorCode =
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
   | "server_error" // 5xx or unexpected non-JSON response
   | "consent_required" // per-anchor consent missing for KYC fields
+  | "offramp_rejected" // anchor refused the amount/type; see `details.limits` and `details.availableTypes`
   // Operator telemetry (issue 5.21):
   | "unauthorized" // telemetry token rejected
   | "telemetry_not_enabled" // deployment has no TELEMETRY_TOKEN configured
@@ -176,6 +191,17 @@ export class CheckoutError extends Error {
   }
 }
 
+function describeOffRampRejected(err: CheckoutError): string {
+  const limits = (err.details.limits ?? {}) as { minAmount?: number; maxAmount?: number };
+  const { minAmount, maxAmount } = limits;
+  if (minAmount !== undefined && maxAmount !== undefined) {
+    return `The anchor only accepts cash-outs between ${minAmount} and ${maxAmount}. Adjust the amount and try again.`;
+  }
+  if (minAmount !== undefined) return `The anchor requires a cash-out of at least ${minAmount}.`;
+  if (maxAmount !== undefined) return `The anchor accepts cash-outs of at most ${maxAmount}.`;
+  return "The anchor can't process this cash-out as requested.";
+}
+
 /** Map an error code to copy suitable for a seller-facing dashboard. */
 export function describeError(err: CheckoutError): string {
   switch (err.code) {
@@ -187,6 +213,8 @@ export function describeError(err: CheckoutError): string {
       return "This action cannot be completed right now. The link may be in an unexpected state. Try refreshing.";
     case "kyc_required":
       return "Identity verification is required before you can cash out. See the panel above.";
+    case "offramp_rejected":
+      return describeOffRampRejected(err);
     case "anchor_auth_required":
       return "Sign in to the anchor with your wallet first. See the identity verification panel.";
     case "destination_cannot_receive":
@@ -300,6 +328,8 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
                       ? "invalid_body"
                       : apiCode === "kyc_required"
                         ? "kyc_required"
+                        : apiCode === "offramp_rejected"
+                          ? "offramp_rejected"
                         : apiCode === "anchor_auth_required"
                           ? "anchor_auth_required"
                         : apiCode === "destination_cannot_receive"
@@ -433,14 +463,19 @@ export const api = {
   /** The route returns the whole OffRampQuote — including `expiresAt` (epoch
    *  ms, the ANCHOR's own TTL) — so the type is the shared one rather than a
    *  redeclaration that drops fields (issue 5.22 dropped exactly that one). */
-  quoteCashOut: (id: string, targetCurrency: string) =>
-    http<OffRampQuote>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+  quoteCashOut: (id: string, targetCurrency: string, withdrawType?: string) =>
+    http<OffRampQuote>(
+      `/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}${
+        withdrawType ? `&withdrawType=${encodeURIComponent(withdrawType)}` : ""
+      }`,
+    ),
 
   cashOut: (
     id: string,
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
+    withdrawType?: string,
   ) =>
     http<{
       job: {
@@ -458,7 +493,11 @@ export const api = {
       transfer?: WithdrawTransfer;
     }>(
       `/links/${id}/cash-out`,
-      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
+      {
+        method: "POST",
+        body: JSON.stringify({ targetCurrency, payoutFields, ...(withdrawType ? { withdrawType } : {}) }),
+        idempotencyKey,
+      },
     ),
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {

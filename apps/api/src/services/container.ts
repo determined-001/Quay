@@ -18,7 +18,15 @@ import {
   TestAnchorKyc,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
-import type { KycPort, Logger, OffRampPort, OffRampStateRepository, OffRampTelemetryRepository, WebhookRepository } from "@checkout/core";
+import type {
+  KycPort,
+  Logger,
+  OffRampPort,
+  OffRampStateRepository,
+  OffRampTelemetryRepository,
+  RailPort,
+  WebhookRepository,
+} from "@checkout/core";
 import { KycConsentRepository } from "@checkout/core";
 import { env, type OffRampKind } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
@@ -57,6 +65,7 @@ import type { StellarTomlConfig } from "../routes/well-known";
 import { CircuitBreakerOffRamp } from "./circuit-breaker";
 import { WebhookWorker } from "../worker/webhook-worker";
 import { assertKeyConfigured } from "./secret-crypto";
+import { runKycRetentionSweep } from "./kyc-retention";
 
 export interface Container {
   service: LinkService;
@@ -129,7 +138,14 @@ export async function createContainer(): Promise<Container> {
   });
 
   const { db, client } = createDb(env.databaseUrl, env.databaseAuthToken);
-  await bootstrap(client);
+  // A real anchor's home domain attributes pre-4.24 seller_kyc rows to it; with
+  // none configured they stay "legacy" and are never reused for a customer id.
+  await bootstrap(client, {
+    kycAnchorDomain:
+      env.offramp === "testanchor" || env.offramp === "anchor"
+        ? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN
+        : null,
+  });
 
   const piiKey = env.kycEncryptionKey ? parsePiiKey(env.kycEncryptionKey) : null;
   if (!piiKey) {
@@ -166,7 +182,19 @@ export async function createContainer(): Promise<Container> {
   const sellerWallet = seller.publicKey;
   if (sellerWallet) await sellersRepo.ensureDefault(sellerWallet, env.defaultSellerName);
 
-  const rail = new StellarRail(stellar);
+  const realRail = new StellarRail(stellar);
+  // E2E test mode runs with no network at all (issue 5.7): keep the pure
+  // parts of the rail (SEP-7 building, address validation) and skip only the
+  // Horizon account/trustline preflight. The preflight's own behavior is
+  // covered by unit tests; env.ts guarantees this branch cannot be reached
+  // in production or on the public network.
+  const rail: RailPort = env.e2eTestMode
+    ? {
+        buildRequest: (input) => realRail.buildRequest(input),
+        isValidDestination: (address) => realRail.isValidDestination(address),
+        assertCanReceive: async () => {},
+      }
+    : realRail;
   // Polling watcher gets the retry / fallback / degraded-tracking wrapper
   // (issue #10). The streaming path has its own reconnect handling.
   const pollingWatcher = new HorizonWatcher({
@@ -209,6 +237,7 @@ export async function createContainer(): Promise<Container> {
     telemetry: telemetryRepo,
     health: anchorHealth,
     correlation: env.correlation,
+    interactiveTimeoutMs: env.offrampInteractiveTimeoutMs,
     logger,
   });
 
@@ -261,6 +290,7 @@ export async function createContainer(): Promise<Container> {
 
   let stopPoller: (() => void) | null = null;
   let stopRevocationSweep: (() => void) | null = null;
+  let stopRetentionSweep: (() => void) | null = null;
   let stopProbe: (() => void) | null = null;
 
   return {
@@ -290,8 +320,17 @@ export async function createContainer(): Promise<Container> {
       allowedOrigins: env.corsOrigins,
     },
     start() {
-      logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
-      loop.start();
+      if (env.e2eTestMode) {
+        // The watcher is the one component that reaches out to Horizon on its
+        // own; in e2e mode payments are injected through /__test__/pay at the
+        // same applyMatch boundary, so the loop never starts and the process
+        // makes no outbound calls. Everything downstream of a matched payment
+        // (state machine, webhooks, mock off-ramp settlement) still runs.
+        logger.warn({ event: "watcher.skipped.e2e" }, "E2E_TEST_MODE=1 - ledger watcher not started");
+      } else {
+        logger.info({ event: "watcher.start", pollMs: env.pollMs }, "watcher started");
+        loop.start();
+      }
       webhookWorker.start();
       // With no off-ramp there is nothing to advance: no link can reach
       // offramp_pending, so the poller would query an always-empty set on
@@ -307,12 +346,28 @@ export async function createContainer(): Promise<Container> {
         60 * 60 * 1000, // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
       );
       stopRevocationSweep = () => clearInterval(sweepTimer);
+
+      if (env.kycRetentionDays > 0) {
+        const sweepKyc = () => {
+          void runKycRetentionSweep({
+            db,
+            retentionDays: env.kycRetentionDays,
+            logger,
+          }).catch((err) => {
+            logger.error({ err }, "kyc retention sweep error");
+          });
+        };
+        // Daily sweep interval (24 hours)
+        const retentionTimer = setInterval(sweepKyc, 24 * 60 * 60 * 1000);
+        stopRetentionSweep = () => clearInterval(retentionTimer);
+      }
     },
     async stop() {
       await loop.stop();
       webhookWorker.stop();
       stopPoller?.();
       stopRevocationSweep?.();
+      stopRetentionSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();
       stopProbe?.();
       stopPoller = null;

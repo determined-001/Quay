@@ -16,7 +16,7 @@ import {
   type OffRampStateRepository,
   type OffRampTelemetryRepository,
   type PaymentLink,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type RailPort,
   type Seller,
   type StoredOffRampJob,
@@ -477,6 +477,7 @@ class FakeKycAlwaysAcceptedForAnchor implements KycPort {
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      anchorDomain: "testanchor.stellar.org",
       account,
       customerId: null,
       status: "ACCEPTED",
@@ -524,8 +525,8 @@ class FlakyOffRamp implements OffRampPort {
     }
     return { jobId, linkId: "lnk_1", status: this.opts.status ?? "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
   }
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return { types: [], defaultType: null };
   }
 }
 
@@ -604,8 +605,8 @@ describe("LinkService with AnchorHealth", () => {
         offrampCalls.push("status");
         throw new Error("should not be called when breaker is open");
       }
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       }
     }
 
@@ -789,8 +790,8 @@ describe("LinkService.pollCashOuts attribution", () => {
         if (fail) throw new Error("first attempt fails");
         return { jobId, linkId: "lnk_2", status: "settled", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
       },
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       },
     };
     const service = new LinkService({
@@ -878,8 +879,8 @@ describe("LinkService.pollCashOuts attribution", () => {
         statusCalls++;
         throw new Error("anchor 502");
       },
-      async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-        return [];
+      async offrampRequirements(): Promise<OfframpRequirementTypes> {
+        return { types: [], defaultType: null };
       },
     };
     const service = new LinkService({

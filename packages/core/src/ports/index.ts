@@ -173,7 +173,7 @@ export interface SellerPayoutRef {
   fields: Record<string, string>;
 }
 
-export type OffRampJobStatus = "pending" | "settled" | "failed";
+export type OffRampJobStatus = "awaiting_transfer" | "pending" | "settled" | "failed";
 
 export interface OffRampJob {
   jobId: string;
@@ -211,6 +211,25 @@ export class AnchorAuthRequiredError extends Error {
 }
 
 /**
+ * The anchor refused the request because of what the caller asked for (an amount
+ * outside its published limits, an unsupported withdraw type), not because the
+ * anchor is unhealthy. The API maps it to `422 offramp_rejected` and it must not
+ * count towards the circuit breaker.
+ */
+export class OffRampRejectedError extends Error {
+  constructor(
+    message: string,
+    /** The anchor's published amount limits, when it named them. */
+    readonly limits: { minAmount?: number; maxAmount?: number } = {},
+    /** Withdraw types the anchor would accept, when relevant. */
+    readonly availableTypes: string[] = [],
+  ) {
+    super(message);
+    this.name = "OffRampRejectedError";
+  }
+}
+
+/**
  * The on-chain leg of a withdrawal: the seller sends `amount` of `asset` to the
  * anchor's account with this memo, signed by the seller's own wallet. Quay only
  * relays the instructions; it cannot send it, which is the point.
@@ -237,6 +256,13 @@ export interface OffRampPort {
       sourceAmount: string;
       targetCurrency: string;
       customer: AnchorCustomer;
+      /**
+       * SEP-6 withdrawal type the SELLER chose (`bank_account`, `cash`, …).
+       * Which rail the money leaves on is their call, not the operator's:
+       * adapters fall back to the operator-wide default (OFFRAMP_TYPE) only
+       * when this is absent (issue 5.24).
+       */
+      withdrawType?: string;
     },
     opts?: { logger?: Logger },
   ): Promise<OffRampQuote>;
@@ -258,12 +284,29 @@ export interface OffRampPort {
     sourceAmount: string;
   }): Promise<IndicativePrice[]>;
   /**
-   * Field descriptors the anchor requires before it will initiate a payout —
-   * SEP-6 GET /info for a real anchor, a fixed set for the mock. Drives the
-   * dynamic cash-out form (issue #32) so the dashboard never hardcodes bank
-   * fields.
+   * The withdrawal types the anchor offers for this asset and each type's
+   * field descriptors — SEP-6 GET /info `types[].fields` for a real anchor, a
+   * single fixed type for the mock. Drives the dynamic cash-out form (issue
+   * #32) and its rail picker (issue 5.24) so the dashboard never hardcodes
+   * bank fields or the rail.
    */
-  offrampRequirements(assetCode: string, customer?: AnchorCustomer): Promise<PayoutFieldDescriptor[]>;
+  offrampRequirements(assetCode: string, customer?: AnchorCustomer): Promise<OfframpRequirementTypes>;
+}
+
+/** One SEP-6 withdrawal type and the payout fields it needs (issue 5.24). */
+export interface WithdrawTypeRequirements {
+  /** The anchor's type name, e.g. `bank_account`, `cash`. */
+  name: string;
+  descriptors: PayoutFieldDescriptor[];
+}
+
+/** What {@link OffRampPort.offrampRequirements} returns: every offered type,
+ *  plus the type to preselect — the operator default (OFFRAMP_TYPE) when it is
+ *  actually offered, or the only type when there is exactly one, else null and
+ *  the seller must choose. */
+export interface OfframpRequirementTypes {
+  types: WithdrawTypeRequirements[];
+  defaultType: string | null;
 }
 
 /** One indicative price entry from SEP-38 GET /prices (issue 3.5). */
@@ -434,6 +477,10 @@ export interface KycFieldSpec {
 
 export interface KycRecord {
   sellerId: string;
+  /** The anchor this record is about (its home domain). `customerId`, `status`
+   *  and `requiredFields` are that anchor's decision; `"legacy"` marks a row
+   *  that predates per-anchor keys and could not be attributed. */
+  anchorDomain: string;
   /** The Stellar account the anchor's customer record belongs to. A stored
    *  `customerId` is only reused while this still matches the seller's wallet;
    *  null on rows written when every seller shared the platform's account. */
@@ -483,18 +530,14 @@ export interface KycPort {
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
 }
 
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
+/** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
+ *  to one anchor, so two anchors never share or overwrite a record.
+ *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
+  get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
-}
-
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
-export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
-  save(record: KycRecord): Promise<void>;
+  /** Removes the seller's record for one anchor, or for every anchor when omitted. */
+  delete(sellerId: string, anchorDomain?: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +678,8 @@ export interface Seller {
    * sensitive — never logged or included in webhook payloads.
    */
   payoutFields: Record<string, string> | null;
+  /** Timestamp (epoch ms) of the seller's most recent activity. */
+  lastActiveAt?: number | null;
   createdAt: number;
 }
 
@@ -652,6 +697,8 @@ export interface SellerRepository {
   /** Persist the seller's last-used payout destination fields for reuse on the
    *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
   savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
+  /** Update last active timestamp with hourly throttling. */
+  touchLastActive?(sellerId: string, now?: number, throttleMs?: number): Promise<void>;
   /** Select the kind of reusable KYC profile this merchant needs. */
   saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void>;
 }

@@ -18,7 +18,7 @@ import {
   type OffRampTelemetryRow,
   type OffRampTelemetrySummary,
   type PaymentLink,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
   type SellerPayoutRef,
   type StoredOffRampJob,
   type StoredOffRampQuote,
@@ -344,8 +344,8 @@ export class ScriptedOffRamp implements OffRampPort {
   async status(jobId: string): Promise<OffRampJob> {
     return this.statusImpl(jobId);
   }
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return { types: [], defaultType: null };
   }
 }
 
@@ -361,6 +361,7 @@ export class AlwaysAcceptedKyc implements KycPort {
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      anchorDomain: "mock",
       account,
       customerId: null,
       status: "ACCEPTED",

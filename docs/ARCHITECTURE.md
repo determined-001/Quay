@@ -281,6 +281,13 @@ stateDiagram-v2
 Note the CI check only catches drift between `status.ts` and the `.mmd` file — it can't
 verify you also updated *this* pasted copy. If you touch `TRANSITIONS`, update both.
 
+The cash-out sub-state is **not** part of this diagram. While a link is `offramp_pending`,
+`link.offrampStatus` (typed `OffRampLinkStatus`) says what the anchor is waiting for:
+`awaiting_transfer` (the seller has not yet sent the USDC leg; SEP-6 `pending_user_transfer_start`
+or `incomplete`), `pending` (the anchor has it and is paying out), then `settled` or `failed`.
+`pollCashOuts()` refreshes it on every poll, not only on a terminal state, and the dashboard pill,
+the link timeline and the CSV export (`offramp_status`) all read it. No extra link transition is needed.
+
 ---
 
 ## How to add a new chain / anchor / rail

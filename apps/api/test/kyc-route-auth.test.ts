@@ -19,6 +19,7 @@ import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord } from "@c
 describe("kycRoutes — authentication and scoping", () => {
   const record: KycRecord = {
     sellerId: "sel_x",
+    anchorDomain: "testanchor.stellar.org",
     account: null,
     customerId: "cus_1",
     status: "ACCEPTED",
