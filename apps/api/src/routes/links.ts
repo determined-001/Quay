@@ -135,7 +135,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       return ctx.json(result);
     } catch (err) {
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 404 | 409 | 502);
       throw err;
     }
   });
@@ -166,7 +166,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json(result);
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 403 | 502);
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 404 | 403 | 502);
       throw err;
     }
   });

@@ -38,7 +38,7 @@ import {
   type OffRampTelemetryRow,
   type WithdrawTransfer,
 } from "@checkout/core";
-import { Sep6ValidationError } from "@checkout/offramp";
+import { AnchorHttpError, Sep6ValidationError, anchorErrorSummary, truncateAnchorBody } from "@checkout/offramp";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -483,8 +483,7 @@ export class LinkService {
         sourceAmount,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new HttpError(502, `Off-ramp preview error: ${message}`);
+      throw anchorFailure(err, this.deps.logger!);
     }
 
     // Persist the indicative rate for the target currency so triggerCashOut()
@@ -523,8 +522,7 @@ export class LinkService {
     try {
       requirements = await this.deps.offramp.offrampRequirements(link.asset.code, customerOf(seller));
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new HttpError(502, `Off-ramp requirements error: ${message}`);
+      throw anchorFailure(err, this.deps.logger!);
     }
 
     const savedFields: Record<string, string> | null = seller.payoutFields
@@ -853,6 +851,7 @@ export class LinkService {
       status = (await this.deps.kyc.status(customer)).status;
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      if (err instanceof AnchorHttpError) throw anchorFailure(err, this.deps.logger!);
       throw err;
     }
     if (status !== "ACCEPTED") throw new HttpError(403, "kyc_required");
@@ -895,8 +894,7 @@ export class LinkService {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       throwIfUnknownWithdrawType(err, withdrawType);
       if (err instanceof OffRampRejectedError) throw offRampRejected(err);
-      const message = err instanceof Error ? err.message : String(err);
-      throw new HttpError(502, `Off-ramp error: ${message}`);
+      throw anchorFailure(err, log);
     }
   }
 
@@ -1006,7 +1004,7 @@ export class LinkService {
       }
       throwIfUnknownWithdrawType(err, body.withdrawType);
       if (err instanceof OffRampRejectedError) throw offRampRejected(err);
-      throw new HttpError(502, `Off-ramp error: ${message}`);
+      throw anchorFailure(err, child);
     }
 
     // Persist the (unmasked) merged fields for future reuse — never logged.
@@ -1391,6 +1389,26 @@ export function customerOf(seller: Seller): AnchorCustomer {
 /** Only the seller's wallet can open an anchor session, so this is theirs to fix. */
 function anchorAuthRequired(): HttpError {
   return new HttpError(403, "anchor_auth_required");
+}
+
+/**
+ * The client-facing outcome of a failed anchor call: 502 `anchor_error` with a
+ * fixed, safe `message`. The anchor's own response body is third-party content
+ * (it can be an HTML page, a stack trace, or an echo of the seller's KYC and
+ * bank fields), so it goes to the server log only, truncated, and never into
+ * the response or the stored idempotency record (issue 4.36).
+ */
+export function anchorFailure(err: unknown, log: Logger): HttpError {
+  if (err instanceof AnchorHttpError) {
+    log.error(
+      { event: "anchor.error", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },
+      "anchor returned an error",
+    );
+    return new HttpError(502, "anchor_error", { message: anchorErrorSummary(err) });
+  }
+  const detail = err instanceof Error ? err.message : String(err);
+  log.error({ event: "anchor.error", error: truncateAnchorBody(detail) }, "anchor call failed");
+  return new HttpError(502, "anchor_error", { message: "The anchor could not be reached or sent an unexpected response." });
 }
 
 /** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */

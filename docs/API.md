@@ -44,6 +44,18 @@ that"; 404 means "nothing here that is yours."
   decimals. Internally compared in integer stroops, never floats.
 - Errors return `{ "error": "<code>", ... }` with an appropriate HTTP status.
   Validation failures return `400` with `{ "error": "invalid_body", "issues": [...] }`.
+- `error` is a machine-readable code; a human-readable `message` may accompany it.
+  Two codes cover failures we do not control the wording of:
+  - `anchor_error` (**502**) — the anchor answered a SEP call with an error, was
+    unreachable, or sent something unusable. `message` is fixed text such as
+    `"The anchor returned an error (SEP-6 withdraw, HTTP 400)."`. The anchor's
+    own response body is never returned: it is third-party content that can echo
+    the seller's KYC or bank fields, so it is written, truncated to about 2 KB, to
+    the server log (`event: "anchor.error"`) only. Returned by the cash-out,
+    cash-out quote, `offramp-preview`, `offramp-requirements`, `/seller/kyc`,
+    `/seller/anchor-auth` and `/offramp/info` routes.
+  - `internal_error` (**500**) — an unhandled server error. The body is exactly
+    `{ "error": "internal_error" }`: no message, no stack. Details are in the log.
 
 ## Idempotency
 
@@ -521,6 +533,10 @@ settled.
 **403** — `{ "error": "anchor_auth_required" }`. Only possible with a real anchor
 (`OFFRAMP=testanchor|anchor`): the seller has no live SEP-10 session with the
 anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
+**502** — `{ "error": "anchor_error", "message": "The anchor returned an error (SEP-6 withdraw, HTTP 400)." }`.
+The anchor failed or was unreachable; see Conventions. Nothing from the anchor's
+response body is included.
+
 **422** — `{ "error": "offramp_rejected", "message", "limits": { "minAmount", "maxAmount" }, "availableTypes": [] }`.
 The anchor refused the request on its merits: the amount is outside the limits it publishes
 (SEP-6 `/info`), the asset is not withdrawable, or a withdraw type is needed. This is the
@@ -556,6 +572,10 @@ and `DELETE` remain on the global per-IP limit.
 - `POST /seller/anchor-auth/challenge` → `{ "transaction": "<XDR>", "networkPassphrase": "..." }` — sign it with the wallet, never submit it.
 - `POST /seller/anchor-auth` `{ "transaction": "<signed XDR>" }` → `{ "connected": true, "anchor": "...", "expiresAt": 1750000000000 }`.
   **400** `challenge_rejected` if it is not the anchor's challenge for this seller's account.
+  `challenge_rejected` carries a fixed `message` per failure (wrong network, wrong
+  account, anchor refused the signed challenge, anchor could not be verified); the
+  anchor's own wording is logged, not returned. An anchor HTTP failure while
+  fetching the challenge is **502** `anchor_error`.
 - `DELETE /seller/anchor-auth` → **204**, forgets the session.
 
 ---
@@ -564,6 +584,8 @@ and `DELETE` remain on the global per-IP limit.
 
 **403** `{ "error": "anchor_auth_required" }` until the seller has signed in to
 the anchor (above).
+**502** `{ "error": "anchor_error", "message": "..." }` when the anchor fails or
+is unreachable (also on `PUT`); never a 500, and never the anchor's own text.
 
 Current SEP-12 requirements and status for the seller, re-synced from the anchor
 (`OFFRAMP=mock` always reports `ACCEPTED` — there's no real anchor to satisfy).
