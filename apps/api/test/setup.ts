@@ -314,6 +314,7 @@ export async function createTestContainer(): Promise<TestContainer> {
       async revoke(sellerId: string, anchorDomain: string) { },
     } as unknown as Container["kycConsents"],
     anchorDomain: "testanchor.stellar.org",
+    kycRepo: null,
     anchorAuth: null,
     telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],

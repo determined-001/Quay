@@ -24,6 +24,7 @@ function record(over: Partial<KycRecord> = {}): KycRecord {
     providedFields: { first_name: "Ada Lovelace", email_address: "ada@example.org" },
     providedFieldStatus: [],
     sentFields: [],
+    callbackTokenHash: null,
     message: null,
     lastSyncedAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_001,
@@ -36,6 +37,16 @@ describe("DrizzleKycRepository", () => {
     const repo = new DrizzleKycRepository(await makeDb(), randomBytes(32));
     await repo.save(record());
     expect(await repo.get("sel_1", ANCHOR)).toEqual(record());
+  });
+
+  it("looks up a record by callbackTokenHash", async () => {
+    const db = await makeDb();
+    const repo = new DrizzleKycRepository(db, randomBytes(32));
+    const tokenHash = "abc123hash";
+    await repo.save(record({ callbackTokenHash: tokenHash }));
+    const found = await repo.getByCallbackTokenHash(tokenHash);
+    expect(found?.sellerId).toBe("sel_1");
+    expect(await repo.getByCallbackTokenHash("nonexistent")).toBeNull();
   });
 
   it("refuses to persist a binary field in providedFields (ID photos are never stored)", async () => {

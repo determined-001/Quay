@@ -192,6 +192,7 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   providedFieldStatus: text("provided_field_status"),
   // Field names (not values) sent to the anchor in the last submission. JSON string[].
   sentFields: text("sent_fields"),
+  callbackTokenHash: text("callback_token_hash"),
   message: text("message"),
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),

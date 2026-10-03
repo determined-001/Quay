@@ -498,6 +498,8 @@ export interface KycRecord {
   providedFieldStatus: ProvidedFieldStatus[];
   /** Field names (not values) sent to the anchor in the last submission. */
   sentFields: string[];
+  /** SHA-256 hash of the per-seller SEP-12 callback endpoint token. */
+  callbackTokenHash?: string | null;
   /** Anchor's status/rejection message, verbatim. */
   message: string | null;
   lastSyncedAt: number | null;
@@ -544,6 +546,7 @@ export interface KycPort {
  *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
   get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
+  getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
   /** Removes the seller's record for one anchor, or for every anchor when omitted. */
   delete(sellerId: string, anchorDomain?: string): Promise<void>;

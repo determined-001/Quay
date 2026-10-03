@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getSep12Customer, putSep12Customer, putSep12CustomerMultipart } from "../src/sep12";
+import {
+  getSep12Customer,
+  putSep12Callback,
+  putSep12Customer,
+  putSep12CustomerMultipart,
+} from "../src/sep12";
 
 const BASE_URL = "https://testanchor.stellar.org";
 const JWT = "jwt-token";
@@ -116,6 +121,39 @@ describe("getSep12Customer", () => {
     await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
     const [urlWithAccount] = fetchMock.mock.calls[1] as [URL];
     expect(urlWithAccount.searchParams.get("account")).toBe(ACCOUNT);
+  });
+});
+
+describe("putSep12Callback", () => {
+  const CALLBACK_URL = "https://api.example.com/anchor-callbacks/sep12/anchor.example/tok";
+
+  it("PUTs the callback url (and customer id when known) to /customer/callback with the seller's JWT", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Callback(BASE_URL, JWT, { customerId: "cust_1", url: CALLBACK_URL });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(String(url)).toBe(`${BASE_URL}/customer/callback`);
+    expect(init.method).toBe("PUT");
+    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${JWT}`);
+    expect(JSON.parse(init.body as string)).toEqual({ url: CALLBACK_URL, id: "cust_1" });
+  });
+
+  it("omits the id when no customer id exists yet", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Callback(BASE_URL, JWT, { customerId: null, url: CALLBACK_URL });
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ url: CALLBACK_URL });
+  });
+
+  it("throws on a non-2xx response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("nope", { status: 400 })));
+    await expect(putSep12Callback(BASE_URL, JWT, { url: CALLBACK_URL })).rejects.toThrow(/callback PUT failed: 400/);
   });
 });
 

@@ -162,6 +162,14 @@ verifies and relays the challenge and keeps the resulting JWT per seller in
 and SEP-12 KYC records (`seller_kyc.fields_encrypted`) are likewise encrypted at rest using AES-256-GCM
 via `KYC_ENCRYPTION_KEY`.
 
+**KYC status push (SEP-12 callback).** KYC status is otherwise only learned by polling `GET /customer`. After a
+seller submits KYC, `TestAnchorKyc` registers `<public origin>/anchor-callbacks/sep12/<anchor>/<token>` with the anchor
+(`PUT /customer/callback`) using the seller's own anchor session, and stores only the token's hash on the
+`seller_kyc` row. The anchor's POST is accepted by `apps/api/src/routes/anchor-callbacks.ts` only after the token
+resolves to a record *for that anchor*, the signature verifies against that anchor's `SIGNING_KEY`
+(`packages/offramp/src/sep12-callback.ts`) and the body's customer id matches. The stellar.toml is fetched only for an
+anchor Quay itself registered with, never for a domain taken from the request.
+
 ```mermaid
 sequenceDiagram
   participant Wallet as Seller's wallet (browser)

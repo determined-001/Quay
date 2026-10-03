@@ -14,3 +14,9 @@
 558c075f26a6969d82728db03e14993ae87749a9:scripts/uptime-check.test.ts:generic-api-key:89
 558c075f26a6969d82728db03e14993ae87749a9:scripts/uptime-check.test.ts:generic-api-key:101
 558c075f26a6969d82728db03e14993ae87749a9:scripts/uptime-check.test.ts:generic-api-key:114
+
+# Fake per-seller callback token in the SEP-12 callback route test (PR #308, issue 3.14).
+# `generic-api-key` matched a fixed hex string assigned to `rawToken`. It is a made-up value that the test only
+# ever hashes with SHA-256 to look up a record in an in-memory test database, so it is not a credential. The
+# current tree generates the token at runtime; this entry covers the historical commit, which gitleaks still scans.
+c08c40308ad6e6fef01176202de6ac3abf82e9f3:apps/api/test/anchor-callbacks-route.test.ts:generic-api-key:13

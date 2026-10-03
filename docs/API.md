@@ -703,6 +703,35 @@ grant consent via `POST /seller/kyc/consent` before retrying.
 
 ---
 
+## `POST /anchor-callbacks/sep12/:anchorDomain/:token`
+
+Receives the anchor's SEP-12 push when a seller's KYC status changes, so a decision made overnight
+is visible without the seller reloading. **Called by the anchor, not by a browser or an API client:**
+there is no session or API key. The anchor is given this URL when Quay registers it with
+`PUT [KYC_SERVER]/customer/callback`, using the seller's own anchor session. Registration happens
+after a successful `PUT /seller/kyc` and on the first status read that yields a customer id. It is
+skipped, with a log line, when the API's public origin is `localhost`. Polling `GET /seller/kyc`
+keeps working when no callback arrives.
+
+`:token` is a random per-seller value. Only its SHA-256 hash is stored (on the `seller_kyc` row), so the
+URL identifies the seller and cannot be guessed. `:anchorDomain` must be the anchor that token was issued for.
+
+The request must carry the anchor's signature in `Signature: t=<unix-seconds>, s=<base64>` (the deprecated
+`X-Stellar-Signature` header is also accepted), over `<t>.<host>.<body>`, verifiable with the `SIGNING_KEY`
+in that anchor's `stellar.toml`. A timestamp more than 120 seconds from now is refused. The body is the
+SEP-12 `GET /customer` response; its `id` must equal the stored customer id.
+
+| Status | Body | Meaning |
+|---|---|---|
+| 200 | `{ "ok": true }` | KYC record updated: `status`, required fields, per-field status, `message` |
+| 400 | `{ "error": "invalid_json" }` / `{ "error": "invalid_body" }` | Signed, but not a usable SEP-12 customer body. Nothing is changed |
+| 400 | `{ "error": "customer_id_mismatch" }` | Body `id` is not this seller's customer |
+| 400 | `{ "error": "unknown_anchor" }` / `{ "error": "missing_anchor_signing_key" }` | The anchor's `stellar.toml` or signing key could not be resolved |
+| 401 | `{ "error": "missing_signature" }` / `{ "error": "invalid_signature" }` | No signature, a bad or stale one |
+| 404 | `{ "error": "invalid_callback_token" }` | Unknown token, or a token used under a different anchor. No `stellar.toml` is fetched in either case |
+
+---
+
 ## `POST /webhooks`
 
 Register a webhook endpoint. The signing secret is returned **once** — store it.

@@ -5,3 +5,5 @@ export * from "./kyc";
 export * from "./sep6";
 export * from "./sep1";
 export * from "./anchor-session";
+export * from "./sep12";
+export * from "./sep12-callback";

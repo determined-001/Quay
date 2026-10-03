@@ -80,6 +80,7 @@ export interface Container {
   kycConsents: KycConsentRepository;
   /** The anchor's home domain (e.g. "testanchor.stellar.org") for consent tracking. Null when no real anchor. */
   anchorDomain: string | null;
+  kycRepo?: DrizzleKycRepository | null;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
@@ -165,6 +166,10 @@ export async function createContainer(): Promise<Container> {
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
   const kycConsentsRepo = new DrizzleKycConsentRepository(db);
+  const kycKeyring = env.kycEncryptionKey
+    ? parsePiiKeyring(env.kycEncryptionKey, env.kycEncryptionKeyPrevious)
+    : null;
+  const kycRepo = kycKeyring ? new DrizzleKycRepository(db, kycKeyring) : null;
 
   // Optional. Quay is multi-tenant: a seller signs in with their own wallet
   // over SEP-10, that address becomes their identity AND their payout
@@ -211,7 +216,7 @@ export async function createContainer(): Promise<Container> {
   const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
   const kycAnchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
   const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
-  const kyc = createKyc(anchor, db, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain);
+  const kyc = createKyc(anchor, kycRepo, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain, logger);
   const anchorDomain = anchor?.auth.anchorDomain ?? null;
 
   // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
@@ -304,6 +309,7 @@ export async function createContainer(): Promise<Container> {
     kyc,
     kycConsents: kycConsentsRepo,
     anchorDomain,
+    kycRepo,
     anchorAuth: anchor?.auth ?? null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
@@ -514,23 +520,18 @@ function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepositor
 
 function createKyc(
   anchor: AnchorWiring | null,
-  db: DB,
+  repo: DrizzleKycRepository | null,
   sellersRepo: DrizzleSellerRepository,
-  webhooks?: WebhookRepository,
-  sender?: WebhookSender,
-  anchorDomain?: string,
+  webhooks: WebhookRepository | undefined,
+  sender: WebhookSender | undefined,
+  anchorDomain: string | undefined,
+  logger: Logger,
 ): KycPort {
-  if (!anchor) {
+  if (!anchor || !repo) {
     // No real anchor, nothing to be compliant with. For "none" there is no
     // cash-out to gate at all; for "mock" it never gates the simulated one.
     return new NoKycRequired();
   }
-  // env.kycEncryptionKey is guaranteed set whenever OFFRAMP is testanchor/anchor (see env.ts).
-  const keyring = parsePiiKeyring(
-    env.kycEncryptionKey as string,
-    env.kycEncryptionKeyPrevious,
-  );
-  const repo = new DrizzleKycRepository(db, keyring);
   repo
     .countNonPrimaryRows()
     .then((count) => {
@@ -547,7 +548,20 @@ function createKyc(
       return { fields: seller.payoutFields };
     },
   };
-  const baseKyc = new TestAnchorKyc({ discovery: anchor.discovery, auth: anchor.auth, repo, profileRepo });
+  // Public base URL of this API, used to register a SEP-12 push callback with the anchor.
+  const callbackBaseUrl = env.homeDomain
+    ? env.homeDomain.startsWith("http://") || env.homeDomain.startsWith("https://")
+      ? env.homeDomain
+      : `https://${env.homeDomain}`
+    : undefined;
+  const baseKyc = new TestAnchorKyc({
+    discovery: anchor.discovery,
+    auth: anchor.auth,
+    repo,
+    profileRepo,
+    callbackBaseUrl,
+    logger,
+  });
   if (webhooks && sender && anchorDomain) {
     return new KycEvents({
       inner: baseKyc,

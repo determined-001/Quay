@@ -996,6 +996,7 @@ export class DrizzleKycRepository implements KycRepository {
       providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.keyring)) as Record<string, string>,
       providedFieldStatus: row.providedFieldStatus ? JSON.parse(row.providedFieldStatus) as ProvidedFieldStatus[] : [],
       sentFields: row.sentFields ? JSON.parse(row.sentFields) as string[] : [],
+      callbackTokenHash: row.callbackTokenHash ?? null,
       message: row.message ?? null,
       lastSyncedAt: row.lastSyncedAt ?? null,
       updatedAt: row.updatedAt,
@@ -1021,6 +1022,11 @@ export class DrizzleKycRepository implements KycRepository {
       );
   }
 
+  async getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null> {
+    const rows = await this.db.select().from(sellerKyc).where(eq(sellerKyc.callbackTokenHash, tokenHash)).limit(1);
+    return rows[0] ? this.rowToRecord(rows[0]) : null;
+  }
+
   async save(record: KycRecord): Promise<void> {
     const binaryFieldNames = new Set(
       record.requiredFields.filter((f) => f.type === "binary").map((f) => f.name),
@@ -1041,6 +1047,7 @@ export class DrizzleKycRepository implements KycRepository {
       fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.keyring),
       providedFieldStatus: record.providedFieldStatus?.length ? JSON.stringify(record.providedFieldStatus) : null,
       sentFields: record.sentFields?.length ? JSON.stringify(record.sentFields) : null,
+      callbackTokenHash: record.callbackTokenHash ?? null,
       message: record.message,
       lastSyncedAt: record.lastSyncedAt,
       updatedAt: record.updatedAt,

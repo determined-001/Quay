@@ -1,5 +1,7 @@
+import { createHash, randomBytes } from "node:crypto";
 import {
   KycRequiredError,
+  NOOP_LOGGER,
   type AnchorCustomer,
   type KycFieldSpec,
   type KycPort,
@@ -7,9 +9,15 @@ import {
   type KycRepository,
   type ProvidedFieldStatus,
   type KycUploadFile,
+  type Logger,
 } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { getSep12Customer, putSep12Customer, putSep12CustomerMultipart } from "./sep12";
+import {
+  getSep12Customer,
+  putSep12Callback,
+  putSep12Customer,
+  putSep12CustomerMultipart,
+} from "./sep12";
 import { selectFieldsForAnchor } from "@checkout/core";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
@@ -39,6 +47,9 @@ export interface TestAnchorKycOptions {
   repo: KycRepository;
   /** Profile repository for reusable SEP-9 fields. */
   profileRepo: { get(sellerId: string): Promise<{ fields: Record<string, string> } | null> };
+  /** Optional public API base URL (e.g. https://api.example.com) for registering SEP-12 callback. */
+  callbackBaseUrl?: string;
+  logger?: Logger;
 }
 
 /**
@@ -56,12 +67,52 @@ export class TestAnchorKyc implements KycPort {
   private readonly auth: SellerAnchorAuth;
   private readonly repo: KycRepository;
   private readonly profileRepo: TestAnchorKycOptions["profileRepo"];
+  private readonly callbackBaseUrl?: string;
+  private readonly logger: Logger;
 
   constructor(opts: TestAnchorKycOptions) {
     this.discovery = opts.discovery;
     this.auth = opts.auth;
     this.repo = opts.repo;
     this.profileRepo = opts.profileRepo;
+    this.callbackBaseUrl = opts.callbackBaseUrl;
+    this.logger = opts.logger ?? NOOP_LOGGER;
+  }
+
+  private async registerCallbackIfConfigured(
+    kycServer: string,
+    jwt: string,
+    customerId: string | null,
+    sellerId: string,
+    existingTokenHash?: string | null,
+  ): Promise<string | null> {
+    if (!this.callbackBaseUrl) return existingTokenHash ?? null;
+
+    // Skip localhost and log reason
+    if (
+      this.callbackBaseUrl.includes("localhost") ||
+      this.callbackBaseUrl.includes("127.0.0.1") ||
+      this.callbackBaseUrl.startsWith("http://localhost")
+    ) {
+      this.logger.info(
+        { sellerId, callbackBaseUrl: this.callbackBaseUrl },
+        "Skipping SEP-12 callback registration for localhost origin",
+      );
+      return existingTokenHash ?? null;
+    }
+
+    try {
+      const token = randomBytes(24).toString("hex");
+      const tokenHash = createHash("sha256").update(token).digest("hex");
+      const url = `${this.callbackBaseUrl.replace(/\/$/, "")}/anchor-callbacks/sep12/${this.auth.anchorDomain}/${token}`;
+
+      await putSep12Callback(kycServer, jwt, { customerId, url });
+      this.logger.info({ sellerId, customerId }, "Registered SEP-12 KYC callback with anchor");
+      return tokenHash;
+    } catch (err) {
+      this.logger.warn({ sellerId, err }, "Failed to register SEP-12 KYC callback with anchor");
+      return existingTokenHash ?? null;
+    }
   }
 
   async status(customer: AnchorCustomer): Promise<KycRecord> {
@@ -72,6 +123,17 @@ export class TestAnchorKyc implements KycPort {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
     });
+
+    let callbackTokenHash = existing?.callbackTokenHash ?? null;
+    if (remote.customerId && !callbackTokenHash) {
+      callbackTokenHash = await this.registerCallbackIfConfigured(
+        kycServer,
+        jwt,
+        remote.customerId,
+        customer.sellerId,
+        callbackTokenHash,
+      );
+    }
 
     const cleanProvided = stripBinaryFields(existing?.providedFields ?? {}, remote.requiredFields);
     const record: KycRecord = {
@@ -84,6 +146,7 @@ export class TestAnchorKyc implements KycPort {
       providedFields: cleanProvided,
       providedFieldStatus: remote.providedFieldStatus,
       sentFields: existing?.sentFields ?? [],
+      callbackTokenHash,
       message: remote.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -150,6 +213,13 @@ export class TestAnchorKyc implements KycPort {
     // Values typed in this submission (overrides) are written back to the profile
     // for SEP-9 fields so they can be reused. Binary fields are never persisted.
     const mergedProvided = { ...existing?.providedFields, ...fields };
+    const callbackTokenHash = await this.registerCallbackIfConfigured(
+      kycServer,
+      jwt,
+      put.customerId,
+      customer.sellerId,
+      existing?.callbackTokenHash,
+    );
     const cleanProvided = stripBinaryFields(mergedProvided, [...discovery.requiredFields, ...after.requiredFields]);
 
     const record: KycRecord = {
@@ -162,6 +232,7 @@ export class TestAnchorKyc implements KycPort {
       providedFields: cleanProvided,
       providedFieldStatus: after.providedFieldStatus,
       sentFields: Object.keys(selection.send),
+      callbackTokenHash,
       message: after.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -212,6 +283,7 @@ export class TestAnchorKyc implements KycPort {
       providedFields: cleanProvided,
       providedFieldStatus: after.providedFieldStatus,
       sentFields: [...new Set([...(existing?.sentFields ?? []), ...files.map((x) => x.name)])],
+      callbackTokenHash: existing?.callbackTokenHash ?? null,
       message: after.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),

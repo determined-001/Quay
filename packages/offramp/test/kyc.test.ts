@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnchorCustomer, KycFieldSpec, KycRecord, ProvidedFieldStatus } from "@checkout/core";
+import { createHash } from "node:crypto";
 import { TestAnchorKyc, missingRequiredFields } from "../src/kyc";
 import { selectFieldsForAnchor } from "@checkout/core";
 import * as sep12 from "../src/sep12";
@@ -252,6 +253,143 @@ describe("TestAnchorKyc customer ids are scoped to the anchor (issue 4.24)", () 
 
     expect(get.mock.calls[0]![2]).toEqual({ account: "GSELLER", customerId: null });
     expect(record.status).toBe("NEEDS_INFO");
+  });
+});
+
+describe("TestAnchorKyc SEP-12 callback registration (#211)", () => {
+  const customer: AnchorCustomer = { sellerId: "sel_cb", account: "GSELLER" };
+  const ANCHOR = "anchor.example";
+
+  // Spies on ../src/sep12 outlive a test unless reset, and these tests count calls.
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeKyc(opts: { callbackBaseUrl?: string; existingHash?: string | null; existing?: boolean } = {}) {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any;
+    logger.child = () => logger;
+    const stored: KycRecord | null =
+      opts.existing === false
+        ? null
+        : {
+            sellerId: "sel_cb",
+            anchorDomain: ANCHOR,
+            account: "GSELLER",
+            customerId: "cust_1",
+            status: "PROCESSING",
+            requiredFields: [],
+            providedFields: {},
+            providedFieldStatus: [],
+            sentFields: [],
+            callbackTokenHash: opts.existingHash ?? null,
+            message: null,
+            lastSyncedAt: 0,
+            updatedAt: 0,
+          };
+    const kyc = new TestAnchorKyc({
+      discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://kyc.example" }) } as any,
+      auth: { token: vi.fn().mockResolvedValue("seller-jwt"), anchorDomain: ANCHOR } as any,
+      repo: { get: vi.fn().mockResolvedValue(stored), save },
+      profileRepo: { get: vi.fn().mockResolvedValue({ fields: { first_name: "Ada" } }) },
+      callbackBaseUrl: opts.callbackBaseUrl,
+      logger,
+    });
+    return { kyc, save, logger };
+  }
+
+  function stubAnchor() {
+    vi.spyOn(sep12, "getSep12Customer")
+      .mockResolvedValueOnce({
+        customerId: "cust_1",
+        status: "NEEDS_INFO",
+        requiredFields: [{ name: "first_name", type: "string", optional: false }],
+        providedFieldStatus: [],
+        message: null,
+      })
+      .mockResolvedValueOnce({
+        customerId: "cust_1",
+        status: "PROCESSING",
+        requiredFields: [],
+        providedFieldStatus: [],
+        message: null,
+      });
+    vi.spyOn(sep12, "putSep12Customer").mockResolvedValue({ customerId: "cust_1" });
+    return vi.spyOn(sep12, "putSep12Callback").mockResolvedValue(undefined);
+  }
+
+  it("registers a callback after submit, using the seller's own anchor session", async () => {
+    const register = stubAnchor();
+    const { kyc, save } = makeKyc({ callbackBaseUrl: "https://api.example.com/" });
+
+    const record = await kyc.submit(customer, { first_name: "Ada" });
+
+    expect(register).toHaveBeenCalledTimes(1);
+    const [kycServer, jwt, params] = register.mock.calls[0]!;
+    expect(kycServer).toBe("https://kyc.example");
+    expect(jwt).toBe("seller-jwt");
+    expect(params.customerId).toBe("cust_1");
+
+    // /anchor-callbacks/sep12/<the anchor the record is keyed by>/<random token>
+    const match = params.url.match(/^https:\/\/api\.example\.com\/anchor-callbacks\/sep12\/anchor\.example\/([0-9a-f]{48})$/);
+    expect(match).not.toBeNull();
+    const token = match![1]!;
+    // only the hash is persisted, never the token itself
+    expect(record.callbackTokenHash).toBe(createHash("sha256").update(token).digest("hex"));
+    expect(JSON.stringify(save.mock.calls)).not.toContain(token);
+  });
+
+  it("registers from status() the first time a customer id is known, but not again", async () => {
+    const register = vi.spyOn(sep12, "putSep12Callback").mockResolvedValue(undefined);
+    vi.spyOn(sep12, "getSep12Customer").mockResolvedValue({
+      customerId: "cust_1",
+      status: "PROCESSING",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+    });
+
+    const first = makeKyc({ callbackBaseUrl: "https://api.example.com" });
+    const rec = await first.kyc.status(customer);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(rec.callbackTokenHash).toMatch(/^[0-9a-f]{64}$/);
+
+    register.mockClear();
+    const already = makeKyc({ callbackBaseUrl: "https://api.example.com", existingHash: "a".repeat(64) });
+    const rec2 = await already.kyc.status(customer);
+    expect(register).not.toHaveBeenCalled();
+    expect(rec2.callbackTokenHash).toBe("a".repeat(64));
+  });
+
+  it("skips registration for a localhost origin and logs why", async () => {
+    const register = stubAnchor();
+    const { kyc, logger } = makeKyc({ callbackBaseUrl: "http://localhost:8787" });
+
+    await kyc.submit(customer, { first_name: "Ada" });
+
+    expect(register).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("localhost"));
+  });
+
+  it("does nothing when no public callback origin is configured", async () => {
+    const register = stubAnchor();
+    const { kyc } = makeKyc({});
+
+    await kyc.submit(customer, { first_name: "Ada" });
+
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it("a failed registration never fails the submission (polling stays the fallback)", async () => {
+    const register = stubAnchor();
+    register.mockRejectedValue(new Error("anchor said no"));
+    const { kyc, logger } = makeKyc({ callbackBaseUrl: "https://api.example.com", existingHash: "b".repeat(64) });
+
+    const record = await kyc.submit(customer, { first_name: "Ada" });
+
+    expect(record.customerId).toBe("cust_1");
+    expect(record.callbackTokenHash).toBe("b".repeat(64)); // the previous hash is kept
+    expect(logger.warn).toHaveBeenCalled();
   });
 });
 
