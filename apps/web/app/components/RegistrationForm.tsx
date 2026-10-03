@@ -67,7 +67,8 @@ export default function RegistrationForm() {
     for (const f of fields) {
       const current = values[f.name] || "";
       const original = profile?.fields?.[f.name] || "";
-      if (current !== original) {
+      // The API rejects empty values (a stored field cannot be cleared via PUT).
+      if (current !== original && current !== "") {
         changedFields[f.name] = current;
       }
     }
@@ -85,7 +86,7 @@ export default function RegistrationForm() {
       setExpanded(false);
     } catch (err) {
       if (err instanceof CheckoutError && err.status === 422) {
-        const invalidFields = (err.details?.invalid_fields || err.details?.fields || err.details) as Record<string, string>;
+        const invalidFields = (err.details?.fields || err.details?.invalid_fields || err.details) as Record<string, string>;
         setFieldErrors(invalidFields || {});
         setErrorMsg("Please fix the errors below.");
       } else {
