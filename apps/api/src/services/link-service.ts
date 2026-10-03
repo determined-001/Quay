@@ -10,6 +10,7 @@ import {
   normalizeAmount,
   OffRampJobNotFoundError,
   AnchorAuthRequiredError,
+  OffRampRejectedError,
   NOOP_LOGGER,
   type AnchorCustomer,
   type AssetRef,
@@ -265,6 +266,13 @@ export class LinkService {
   private readonly nextPollAtByLinkId = new Map<string, number>();
   private static readonly POLL_BACKOFF_BASE_MS = 2_000;
   private static readonly POLL_BACKOFF_CAP_MS = 60_000;
+  /**
+   * How long a job may sit at the anchor-reported `incomplete` status before
+   * the seller is assumed to have abandoned the anchor's window. Overridden
+   * per instance via the `interactiveTimeoutMs` dep (wired to
+   * OFFRAMP_INTERACTIVE_TIMEOUT_MS in services/container.ts).
+   */
+  static readonly DEFAULT_INTERACTIVE_TIMEOUT_MS = 3_600_000;
   private readonly consecutivePollErrorsByLinkId = new Map<string, number>();
 
   constructor(
@@ -295,6 +303,13 @@ export class LinkService {
       /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
        *  a permissive one so they do not depend on live DNS resolution. */
       webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
+      /**
+       * abandonment timeout for anchor-interactive jobs (issue 5.20). A job
+       * the anchor still reports as `incomplete` past this age is failed with
+       * reason `interactive_abandoned`. Defaults to
+       * DEFAULT_INTERACTIVE_TIMEOUT_MS (1 hour).
+       */
+      interactiveTimeoutMs?: number;
       /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
       logger?: Logger;
     },
@@ -367,6 +382,7 @@ export class LinkService {
       isDemo: body.isDemo ?? false,
     });
     metrics.linkStatusTransitionsTotal.inc({ to: link.status });
+    await this.deps.sellers.touchLastActive?.(seller.id);
 
     log.info(
       {
@@ -423,6 +439,18 @@ export class LinkService {
     const link = await this.deps.links.findById(id);
     if (!link) return null;
     return { link, request: this.buildRequest(link) };
+  }
+
+  /**
+   * Raw upstream status for a link's off-ramp job (issue 5.20), sourced from
+   * `offramp_jobs.external_status` — e.g. SEP-24 `incomplete`, which the
+   * mapped `offrampStatus` deliberately collapses to `pending`. Null when the
+   * link has no job or the job row carries no upstream status.
+   */
+  async getOffRampExternalStatus(link: PaymentLink): Promise<string | null> {
+    if (!link.offrampJobId) return null;
+    const job = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
+    return job?.externalStatus ?? null;
   }
 
   /**
@@ -865,6 +893,7 @@ export class LinkService {
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       throwIfUnknownWithdrawType(err, withdrawType);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw anchorFailure(err, log);
     }
   }
@@ -974,6 +1003,7 @@ export class LinkService {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
       throwIfUnknownWithdrawType(err, body.withdrawType);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw anchorFailure(err, child);
     }
 
@@ -984,10 +1014,11 @@ export class LinkService {
 
     const from = link.status;
     const jobId = initiation.jobId;
+    const initialOfframpStatus = initiation.kind === "transfer" ? "awaiting_transfer" : "pending";
     link.status = "offramp_pending";
     link.offrampJobId = jobId;
     link.offrampTargetCurrency = quote.targetCurrency;
-    link.offrampStatus = "pending";
+    link.offrampStatus = initialOfframpStatus;
 
     // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
     // offrampIndicativeRate may already be set if the seller visited the preview
@@ -1034,7 +1065,7 @@ export class LinkService {
     const job: OffRampJob = {
       jobId,
       linkId: link.id,
-      status: "pending",
+      status: initialOfframpStatus,
       targetCurrency: quote.targetCurrency,
       targetAmount: quote.targetAmount,
       rate: quote.rate,
@@ -1181,6 +1212,30 @@ export class LinkService {
           status: "failed",
           failureReason: job.reason ?? null,
         });
+      } else {
+        // Still pending at the anchor. An `incomplete` job means the seller
+        // never finished the anchor's window — without a timeout it would sit
+        // in `offramp_pending` indefinitely. `createdAt` is the durable proxy
+        // for "waiting since": it is written once at initiation, unlike
+        // `updatedAt`, which every status poll refreshes.
+        const stored = link.offrampJobId
+          ? await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null)
+          : null;
+        const timeoutMs = this.deps.interactiveTimeoutMs ?? LinkService.DEFAULT_INTERACTIVE_TIMEOUT_MS;
+        if (stored?.externalStatus === "incomplete" && now - stored.createdAt > timeoutMs) {
+          child.info(
+            { event: "link.transition", from: link.status, reason: "interactive_abandoned" },
+            "interactive anchor flow abandoned",
+          );
+          await this.markOffRampFailed(link, "interactive_abandoned");
+        } else if (link.offrampStatus !== job.status) {
+          link.offrampStatus = job.status;
+          await this.deps.links.save(link);
+          child.info(
+            { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
+            "cash-out offrampStatus updated",
+          );
+        }
       }
     }
   }
@@ -1354,6 +1409,15 @@ export function anchorFailure(err: unknown, log: Logger): HttpError {
   const detail = err instanceof Error ? err.message : String(err);
   log.error({ event: "anchor.error", error: truncateAnchorBody(detail) }, "anchor call failed");
   return new HttpError(502, "anchor_error", { message: "The anchor could not be reached or sent an unexpected response." });
+}
+
+/** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */
+function offRampRejected(err: OffRampRejectedError): HttpError {
+  return new HttpError(422, "offramp_rejected", {
+    message: err.message,
+    limits: err.limits,
+    availableTypes: err.availableTypes,
+  });
 }
 
 export class HttpError extends Error {

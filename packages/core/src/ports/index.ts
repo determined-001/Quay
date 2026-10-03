@@ -173,7 +173,7 @@ export interface SellerPayoutRef {
   fields: Record<string, string>;
 }
 
-export type OffRampJobStatus = "pending" | "settled" | "failed";
+export type OffRampJobStatus = "awaiting_transfer" | "pending" | "settled" | "failed";
 
 export interface OffRampJob {
   jobId: string;
@@ -207,6 +207,25 @@ export class AnchorAuthRequiredError extends Error {
   constructor(readonly anchorDomain: string) {
     super(`No active session with anchor ${anchorDomain}; the seller must sign in to it with their wallet`);
     this.name = "AnchorAuthRequiredError";
+  }
+}
+
+/**
+ * The anchor refused the request because of what the caller asked for (an amount
+ * outside its published limits, an unsupported withdraw type), not because the
+ * anchor is unhealthy. The API maps it to `422 offramp_rejected` and it must not
+ * count towards the circuit breaker.
+ */
+export class OffRampRejectedError extends Error {
+  constructor(
+    message: string,
+    /** The anchor's published amount limits, when it named them. */
+    readonly limits: { minAmount?: number; maxAmount?: number } = {},
+    /** Withdraw types the anchor would accept, when relevant. */
+    readonly availableTypes: string[] = [],
+  ) {
+    super(message);
+    this.name = "OffRampRejectedError";
   }
 }
 
@@ -458,6 +477,10 @@ export interface KycFieldSpec {
 
 export interface KycRecord {
   sellerId: string;
+  /** The anchor this record is about (its home domain). `customerId`, `status`
+   *  and `requiredFields` are that anchor's decision; `"legacy"` marks a row
+   *  that predates per-anchor keys and could not be attributed. */
+  anchorDomain: string;
   /** The Stellar account the anchor's customer record belongs to. A stored
    *  `customerId` is only reused while this still matches the seller's wallet;
    *  null on rows written when every seller shared the platform's account. */
@@ -507,18 +530,14 @@ export interface KycPort {
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
 }
 
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
+/** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
+ *  to one anchor, so two anchors never share or overwrite a record.
+ *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
+  get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
-}
-
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
-export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
-  save(record: KycRecord): Promise<void>;
+  /** Removes the seller's record for one anchor, or for every anchor when omitted. */
+  delete(sellerId: string, anchorDomain?: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +678,8 @@ export interface Seller {
    * sensitive — never logged or included in webhook payloads.
    */
   payoutFields: Record<string, string> | null;
+  /** Timestamp (epoch ms) of the seller's most recent activity. */
+  lastActiveAt?: number | null;
   createdAt: number;
 }
 
@@ -676,6 +697,8 @@ export interface SellerRepository {
   /** Persist the seller's last-used payout destination fields for reuse on the
    *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
   savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
+  /** Update last active timestamp with hourly throttling. */
+  touchLastActive?(sellerId: string, now?: number, throttleMs?: number): Promise<void>;
   /** Select the kind of reusable KYC profile this merchant needs. */
   saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void>;
 }

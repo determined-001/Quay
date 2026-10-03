@@ -41,7 +41,10 @@ const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
-function StatusPill({ status }: { status: string }) {
+function StatusPill({ status, offrampStatus }: { status: string; offrampStatus?: string | null }) {
+  if (status === "offramp_pending" && offrampStatus === "awaiting_transfer") {
+    return <span className="pill pill--offramp_awaiting_transfer">awaiting transfer</span>;
+  }
   const label = status.replace("offramp_", "off-ramp ").replace("_", " ");
   return <span className={`pill pill--${status}`}>{label}</span>;
 }
@@ -214,7 +217,7 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked, anchorAu
                     waiting for reconnect
                   </span>
                 ) : (
-                  <StatusPill status={link.status} />
+                  <StatusPill status={link.status} offrampStatus={link.offrampStatus} />
                 )}
               </td>
               <td className="hide-sm">

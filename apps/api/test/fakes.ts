@@ -361,6 +361,7 @@ export class AlwaysAcceptedKyc implements KycPort {
   private accepted({ sellerId, account }: AnchorCustomer): KycRecord {
     return {
       sellerId,
+      anchorDomain: "mock",
       account,
       customerId: null,
       status: "ACCEPTED",

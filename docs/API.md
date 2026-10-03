@@ -186,7 +186,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `link_status_transitions_total` | `to` |
 | `wallet_submissions_total` | `outcome` (`submitted`, `invalid_xdr`, `rejected`) |
 | `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
-| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
+| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` (`ok`, `error`, `rejected`) |
 
 **Histograms**
 | Metric | Labels |
@@ -499,7 +499,7 @@ settled.
   "job": {
     "jobId": "ofr_...",
     "linkId": "lnk_...",
-    "status": "pending",
+    "status": "awaiting_transfer",
     "targetCurrency": "NGN",
     "targetAmount": "17325.00",
     "rate": "1650"
@@ -514,6 +514,7 @@ settled.
   }
 }
 ```
+- `job.status` / `link.offrampStatus` — `"awaiting_transfer"` (anchor is waiting for seller's on-chain transfer), `"pending"` (anchor is processing payout to local rails), `"settled"` (completed), or `"failed"`.
 - `transfer` — **present when the anchor is waiting for the asset** (SEP-6,
   once it has named its deposit account). The seller's own wallet sends
   `amount` of `asset` to `destination` with exactly this memo; the anchor pays
@@ -535,6 +536,12 @@ anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
 **502** — `{ "error": "anchor_error", "message": "The anchor returned an error (SEP-6 withdraw, HTTP 400)." }`.
 The anchor failed or was unreachable; see Conventions. Nothing from the anchor's
 response body is included.
+
+**422** — `{ "error": "offramp_rejected", "message", "limits": { "minAmount", "maxAmount" }, "availableTypes": [] }`.
+The anchor refused the request on its merits: the amount is outside the limits it publishes
+(SEP-6 `/info`), the asset is not withdrawable, or a withdraw type is needed. This is the
+seller's to fix (change the amount), it is not an anchor outage, and it does not count towards the
+circuit breaker. The same 422 is returned by `GET /links/:id/cash-out/quote`.
 **403** — `{ "error": "kyc_required" }`. Only possible with a real anchor: the
 seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
 bank/routing info only — it is never used as a source of identity data.

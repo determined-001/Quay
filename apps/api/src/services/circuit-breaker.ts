@@ -1,5 +1,6 @@
 import {
   AnchorAuthRequiredError,
+  OffRampRejectedError,
   type OffRampInitiation,
   type OffRampJob,
   type OffRampMode,
@@ -86,11 +87,14 @@ export class CircuitBreakerOffRamp implements OffRampPort {
       return result;
     } catch (err) {
       metrics.anchorCallDurationSeconds.observe({ method }, (Date.now() - start) / 1000);
-      metrics.anchorCallsTotal.inc({ method, status: "error" });
+      // A request the anchor refused on its merits (out-of-range amount,
+      // unsupported type) is the caller's problem, not an outage.
+      const rejected = err instanceof OffRampRejectedError;
+      metrics.anchorCallsTotal.inc({ method, status: rejected ? "rejected" : "error" });
       // A seller without a live anchor session says nothing about the
       // anchor's health; counting it would let one signed-out seller open the
       // circuit for everybody.
-      if (!(err instanceof AnchorAuthRequiredError)) this.onFailure();
+      if (!(err instanceof AnchorAuthRequiredError) && !rejected) this.onFailure();
       throw err;
     }
   }
