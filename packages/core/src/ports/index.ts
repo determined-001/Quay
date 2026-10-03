@@ -180,7 +180,7 @@ export interface SellerPayoutRef {
   fields: Record<string, string>;
 }
 
-export type OffRampJobStatus = "pending" | "settled" | "failed";
+export type OffRampJobStatus = "awaiting_transfer" | "pending" | "settled" | "failed";
 
 export interface OffRampJob {
   jobId: string;
@@ -545,16 +545,22 @@ export class KycRequiredError extends Error {
   }
 }
 
+export interface KycUploadFile {
+  name: string;
+  blob: Blob;
+  filename: string;
+}
+
 export interface KycPort {
   /** Refreshes from the anchor (if applicable) and persists the result.
    *  Throws {@link AnchorAuthRequiredError} without a live anchor session. */
   status(customer: AnchorCustomer): Promise<KycRecord>;
   /** Submits/updates fields. Throws {@link KycRequiredError} if a required
    *  field is still missing after merging with what's already on file. */
-  submit(
-    customer: AnchorCustomer,
-    fields: Record<string, string>,
-  ): Promise<KycRecord>;
+  submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
+  /** Submits binary/file fields directly to the anchor via multipart/form-data.
+   *  Never persists binary file data. */
+  submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord>;
 }
 
 /** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs

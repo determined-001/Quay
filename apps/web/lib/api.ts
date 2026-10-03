@@ -55,6 +55,8 @@ export interface LinkDetail {
   link: PaymentLink;
   request: PaymentRequest;
   deliveries: WebhookDelivery[];
+  /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
+  offrampExternalStatus: string | null;
 }
 
 /** Fields exposed on the public receipt — never includes seller PII. */
@@ -269,8 +271,9 @@ export function setServerSkewForTest(ms: number): void {
 }
 
 async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: string; raw?: boolean }): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const headers: Record<string, string> = {
-    "content-type": "application/json",
+    ...(isFormData ? {} : { "content-type": "application/json" }),
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
   if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
@@ -562,6 +565,8 @@ export const api = {
 
   revokeKycConsent: (anchorDomain: string) =>
     http<{ revoked: boolean; anchorDomain: string; note: string }>(`/seller/kyc/consent/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" }),
+  submitKycFiles: (formData: FormData) =>
+    http<KycView>("/seller/kyc/files", { method: "PUT", body: formData }),
 
   listWebhooks: () => http<{ webhooks: Webhook[] }>("/webhooks"),
 

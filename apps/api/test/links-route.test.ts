@@ -57,6 +57,7 @@ function fakeContainer(): Container {
   return {
     service: {
       getLink: async (id: string) => (id === ownedLink.id ? { link: ownedLink, request: {} as any } : null),
+      getOffRampExternalStatus: async () => "incomplete",
       createLink: async () => ({ link: ownedLink, request: {} as any }),
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
@@ -64,7 +65,7 @@ function fakeContainer(): Container {
     logger: NOOP_LOGGER,
     links: {} as Container["links"],
     sellers: sellers as unknown as Container["sellers"],
-    webhooks: {} as Container["webhooks"],
+    webhooks: { listDeliveriesByLinkId: async () => [] } as unknown as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: owner.wallet },
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     apiKeys: {} as Container["apiKeys"],
@@ -169,6 +170,31 @@ describe("POST /links/:id/cancel — ownership", () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("GET /links/:id/detail — seller reconciliation view", () => {
+  it("includes the anchor-reported external status for the owner", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/detail`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>).offrampExternalStatus).toBe("incomplete");
+  });
+
+  it("returns 404 when a different seller requests the detail view", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, other.id);
+
+    const res = await app.request(`/${ownedLink.id}/detail`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
   });
 });
 
