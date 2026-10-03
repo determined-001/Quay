@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
-import type { AnchorCustomer, KycPort, KycRecord, Webhook } from "@checkout/core";
+import type { AnchorCustomer, KycPort, KycRecord, KycUploadFile, Webhook } from "@checkout/core";
 import { createDb, bootstrap, type DB } from "../src/db/client";
 import { DrizzleKycRepository, DrizzleWebhookRepository } from "../src/repos/index";
 import { WebhookSender } from "../src/services/webhook-sender";
@@ -38,6 +38,10 @@ class FakeKycPort implements KycPort {
   }
 
   async submit(_customer: AnchorCustomer, _fields: Record<string, string>): Promise<KycRecord> {
+    return this.recordToReturn;
+  }
+
+  async submitFiles(_customer: AnchorCustomer, _files: KycUploadFile[]): Promise<KycRecord> {
     return this.recordToReturn;
   }
 }

@@ -38,6 +38,24 @@ describe("DrizzleKycRepository", () => {
     expect(await repo.get("sel_1", ANCHOR)).toEqual(record());
   });
 
+  it("refuses to persist a binary field in providedFields (ID photos are never stored)", async () => {
+    const repo = new DrizzleKycRepository(await makeDb(), randomBytes(32));
+    const withPhoto = record({
+      requiredFields: [{ name: "photo_id_front", type: "binary", optional: false }],
+      providedFields: { photo_id_front: "RAW-IMAGE-BYTES" },
+    });
+
+    const failure = await repo.save(withPhoto).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+
+    expect(failure?.message).toMatch(/must never be persisted/);
+    // the message names the field, never its value
+    expect(failure?.message).not.toContain("RAW-IMAGE-BYTES");
+    expect(await repo.get("sel_1", ANCHOR)).toBeNull();
+  });
+
   it("returns null for a seller with no KYC record", async () => {
     const repo = new DrizzleKycRepository(await makeDb(), randomBytes(32));
     expect(await repo.get("sel_nobody", ANCHOR)).toBeNull();
