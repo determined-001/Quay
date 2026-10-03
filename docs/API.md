@@ -583,6 +583,11 @@ Current SEP-12 requirements and status for the seller, re-synced from the anchor
 ```
 `status` is one of `unsubmitted | NEEDS_INFO | PROCESSING | ACCEPTED | REJECTED`.
 
+`unsubmitted` means the anchor has no customer for the seller's account. If a stored customer id is no longer
+known to the anchor (it returns 404 for it), Quay retries by account, keeps the id the anchor returns, and logs
+`kyc.customer_id.stale` (no PII) rather than reporting the seller as new. A status the anchor sends that Quay does not
+model is treated as `PROCESSING` and logged as `kyc.status.unknown` with the raw status string only.
+
 ---
 
 ## `PUT /seller/kyc`

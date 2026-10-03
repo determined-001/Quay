@@ -73,6 +73,10 @@ export class TestAnchorKyc implements KycPort {
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
     });
 
+    if (remote.staleCustomerId) {
+      console.warn(JSON.stringify({ event: "kyc.customer_id.stale", sellerId: customer.sellerId }));
+    }
+
     const cleanProvided = stripBinaryFields(existing?.providedFields ?? {}, remote.requiredFields);
     const record: KycRecord = {
       sellerId: customer.sellerId,
@@ -100,6 +104,10 @@ export class TestAnchorKyc implements KycPort {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
     });
+
+    if (discovery.staleCustomerId) {
+      console.warn(JSON.stringify({ event: "kyc.customer_id.stale", sellerId: customer.sellerId }));
+    }
 
     // Get the reusable profile for this seller
     const profile = await this.profileRepo.get(customer.sellerId);

@@ -117,6 +117,89 @@ describe("getSep12Customer", () => {
     const [urlWithAccount] = fetchMock.mock.calls[1] as [URL];
     expect(urlWithAccount.searchParams.get("account")).toBe(ACCOUNT);
   });
+
+  it("keeps the anchor's field list when a customer it does not know yet gets 200 NEEDS_INFO (#222)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        status: "NEEDS_INFO",
+        fields: {
+          first_name: { type: "string", description: "Given name" },
+          email_address: { type: "string", description: "Email", optional: true },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // by account straight away, no retry
+    expect(result.status).toBe("NEEDS_INFO");
+    expect(result.staleCustomerId).toBeUndefined();
+    expect(result.requiredFields.map((f) => f.name)).toEqual(["first_name", "email_address"]);
+    expect(result.requiredFields.find((f) => f.name === "email_address")?.optional).toBe(true);
+  });
+
+  it("retries by account when query by customerId returns 404 and returns 200 with new id (#222)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+      .mockResolvedValueOnce(jsonResponse({ id: "cust_new", status: "ACCEPTED" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_stale" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstCallUrl] = fetchMock.mock.calls[0] as [URL];
+    const [secondCallUrl] = fetchMock.mock.calls[1] as [URL];
+    expect(firstCallUrl.searchParams.get("id")).toBe("cust_stale");
+    expect(secondCallUrl.searchParams.get("account")).toBe(ACCOUNT);
+
+    expect(result).toEqual({
+      customerId: "cust_new",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+      staleCustomerId: true,
+    });
+  });
+
+  it("retries by account when query by customerId returns 404 and returns unsubmitted if account also 404s (#222)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_stale" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      customerId: null,
+      status: "unsubmitted",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+      staleCustomerId: true,
+    });
+  });
+
+  it("logs a warning when status is unrecognised and falls back to PROCESSING (#222)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+          status: "NEEDS_VERIFICATION",
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.status).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: "NEEDS_VERIFICATION" }),
+    );
+  });
 });
 
 describe("putSep12CustomerMultipart", () => {

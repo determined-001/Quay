@@ -360,3 +360,81 @@ describe("TestAnchorKyc.submitFiles", () => {
     logged.forEach((spy) => spy.mockRestore());
   });
 });
+
+describe("TestAnchorKyc stale customer id (#222)", () => {
+  const customer: AnchorCustomer = { sellerId: "seller_1", account: "GSELLER" };
+
+  function makeKyc() {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const stored: KycRecord = {
+      sellerId: "seller_1",
+      anchorDomain: "anchor.example",
+      account: "GSELLER",
+      customerId: "cust_stale",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
+      message: null,
+      lastSyncedAt: 0,
+      updatedAt: 0,
+    };
+    const kyc = new TestAnchorKyc({
+      discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }) },
+      auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "anchor.example" } as any,
+      repo: { get: vi.fn().mockResolvedValue(stored), save },
+      profileRepo: { get: vi.fn().mockResolvedValue({ fields: { first_name: "Ada" } }) },
+    });
+    return { kyc, save };
+  }
+
+  const staleEvent = JSON.stringify({ event: "kyc.customer_id.stale", sellerId: "seller_1" });
+
+  it("saves the recovered id and logs a warning when status() recovers from a stale customer id", async () => {
+    const { kyc, save } = makeKyc();
+    vi.spyOn(sep12, "getSep12Customer").mockResolvedValue({
+      customerId: "cust_recovered",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+      staleCustomerId: true,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const record = await kyc.status(customer);
+
+    expect(record.customerId).toBe("cust_recovered");
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]![0].customerId).toBe("cust_recovered");
+    expect(warnSpy).toHaveBeenCalledWith(staleEvent);
+  });
+
+  it("logs a warning when submit() recovers from a stale customer id", async () => {
+    const { kyc } = makeKyc();
+    vi.spyOn(sep12, "getSep12Customer")
+      .mockResolvedValueOnce({
+        customerId: "cust_recovered",
+        status: "NEEDS_INFO",
+        requiredFields: [{ name: "first_name", type: "string", optional: false }],
+        providedFieldStatus: [],
+        message: null,
+        staleCustomerId: true,
+      })
+      .mockResolvedValueOnce({
+        customerId: "cust_recovered",
+        status: "ACCEPTED",
+        requiredFields: [],
+        providedFieldStatus: [],
+        message: null,
+      });
+    vi.spyOn(sep12, "putSep12Customer").mockResolvedValue({ customerId: "cust_recovered" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const record = await kyc.submit(customer, { first_name: "Ada" });
+
+    expect(record.customerId).toBe("cust_recovered");
+    expect(warnSpy).toHaveBeenCalledWith(staleEvent);
+  });
+});
