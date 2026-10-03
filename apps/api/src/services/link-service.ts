@@ -1093,6 +1093,28 @@ export class LinkService {
     };
   }
 
+  /**
+   * Retrieves any pending transfer instructions for a cash-out (e.g. SEP-24 pending_user_transfer_start).
+   * Returns null if the link does not exist, has no offramp job, or has no pending transfer instructions.
+   */
+  async getCashOutTransfer(linkId: string, opts: ServiceCallOptions = {}): Promise<WithdrawTransfer | null> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link || !link.offrampJobId) return null;
+    try {
+      const job = await this.deps.offramp.status(link.offrampJobId, opts);
+      return job.transfer ?? null;
+    } catch (err) {
+      // The anchor could not be asked right now (offline, or the seller's session expired). Fall back to
+      // what was stored the last time it answered rather than hide instructions the seller still needs.
+      (opts.logger ?? this.deps.logger)?.warn(
+        { event: "cashout.transfer.status_failed", linkId, err },
+        "could not refresh the anchor status for transfer instructions; using the stored transfer",
+      );
+      const stored = await this.deps.offrampState.getJob(link.offrampJobId);
+      return stored?.pendingTransfer ?? null;
+    }
+  }
+
   /** Advance any pending cash-outs by polling the off-ramp adapter. */
   async pollCashOuts(opts: ServiceCallOptions = {}): Promise<void> {
     const log = (opts.logger ?? this.deps.logger!);

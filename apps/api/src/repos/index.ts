@@ -32,6 +32,7 @@ import type {
   OffRampTelemetryStatus,
   OffRampTelemetrySummary,
   AssetRef,
+  WithdrawTransfer,
 } from "@checkout/core";
 import type { DB } from "../db/client";
 import {
@@ -896,6 +897,14 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
 }
 
 function rowToJob(row: OffRampJobRow): StoredOffRampJob {
+  let pendingTransfer: WithdrawTransfer | null = null;
+  if (row.pendingTransfer) {
+    try {
+      pendingTransfer = JSON.parse(row.pendingTransfer);
+    } catch {
+      pendingTransfer = null;
+    }
+  }
   return {
     jobId: row.jobId,
     linkId: row.linkId,
@@ -909,6 +918,7 @@ function rowToJob(row: OffRampJobRow): StoredOffRampJob {
     externalStatus: row.externalStatus ?? null,
     lastError: row.lastError ?? null,
     transferNotifiedAt: row.transferNotifiedAt ?? null,
+    pendingTransfer,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -951,6 +961,7 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       externalStatus: job.externalStatus,
       lastError: job.lastError,
       transferNotifiedAt: job.transferNotifiedAt,
+      pendingTransfer: job.pendingTransfer ? JSON.stringify(job.pendingTransfer) : null,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
     });
@@ -963,11 +974,24 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<
+      Pick<
+        StoredOffRampJob,
+        "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt" | "pendingTransfer"
+      >
+    >,
   ): Promise<void> {
+    const { pendingTransfer, ...rest } = patch;
+    const values: Record<string, unknown> = {
+      ...rest,
+      updatedAt: Date.now(),
+    };
+    if (pendingTransfer !== undefined) {
+      values.pendingTransfer = pendingTransfer ? JSON.stringify(pendingTransfer) : null;
+    }
     await this.db
       .update(offrampJobs)
-      .set({ ...patch, updatedAt: Date.now() })
+      .set(values)
       .where(eq(offrampJobs.jobId, jobId));
   }
 }

@@ -8,7 +8,7 @@ import type {
   WithdrawTransfer,
 } from "@checkout/core";
 
-export type { OffRampQuote, PaymentLink, PaymentRequest, PayoutFieldDescriptor };
+export type { OffRampQuote, PaymentLink, PaymentRequest, PayoutFieldDescriptor, WithdrawTransfer };
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -500,6 +500,9 @@ export const api = {
         idempotencyKey,
       },
     ),
+
+  getCashOutTransfer: (id: string) =>
+    http<{ transfer: WithdrawTransfer }>(`/links/${id}/cash-out/transfer`),
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();

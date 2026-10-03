@@ -89,7 +89,7 @@ const BOOTSTRAP_SQL = [
      job_id TEXT PRIMARY KEY, link_id TEXT NOT NULL, anchor TEXT NOT NULL,
      seller_id TEXT, account TEXT, target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
      status TEXT NOT NULL, external_status TEXT, last_error TEXT,
-     transfer_notified_at INTEGER,
+     transfer_notified_at INTEGER, pending_transfer TEXT,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS seller_kyc (
@@ -205,6 +205,7 @@ const ADDITIVE_MIGRATIONS = [
   // Track whether the offramp.transfer_required webhook has been sent for a job.
   // Null means not yet sent; epoch-ms when sent.
   `ALTER TABLE offramp_jobs ADD COLUMN transfer_notified_at INTEGER`,
+  `ALTER TABLE offramp_jobs ADD COLUMN pending_transfer TEXT`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
   // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never
   // upgrades an existing table. `createIfAbsent` uses ON CONFLICT (wallet),

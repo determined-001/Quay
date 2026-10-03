@@ -169,6 +169,7 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   // Null means the transfer instructions haven't been surfaced yet; once set,
   // the webhook is not re-fired on subsequent polls or restarts.
   transferNotifiedAt: integer("transfer_notified_at"),
+  pendingTransfer: text("pending_transfer"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });

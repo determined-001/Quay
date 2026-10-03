@@ -269,6 +269,24 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     }
   });
 
+  // Non-custodial transfer instructions for cash-out (e.g. SEP-24 pending_user_transfer_start).
+  // Scoped to offramp:initiate and seller ownership, returning { transfer } or 404.
+  app.get("/:id/cash-out/transfer", auth, requireScope("offramp:initiate"), async (ctx) => {
+    const log = getLogger(ctx);
+    const linkId = ctx.req.param("id");
+    const existing = await c.service.getLink(linkId);
+    if (!existing) return ctx.json({ error: "not_found" }, 404);
+    if (existing.link.sellerId !== ctx.get("seller").id) {
+      log.warn({ event: "cashout.transfer.rejected", linkId }, "cash-out transfer rejected: not the link's seller");
+      return ctx.json({ error: "not_found" }, 404);
+    }
+    const transfer = await c.service.getCashOutTransfer(linkId, { logger: log });
+    if (!transfer) {
+      return ctx.json({ error: "not_found" }, 404);
+    }
+    return ctx.json({ transfer });
+  });
+
   // Link detail with webhook deliveries (for the seller's timeline page).
   // Gated and ownership-checked: unlike GET /:id this is the seller's
   // reconciliation view and carries webhook delivery history.

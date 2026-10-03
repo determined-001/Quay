@@ -61,6 +61,16 @@ function fakeContainer(): Container {
       createLink: async () => ({ link: ownedLink, request: {} as any }),
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
+      getCashOutTransfer: async (id: string) =>
+        id === ownedLink.id
+          ? {
+              destination: "GANCHORACCOUNT123",
+              amount: "10",
+              asset: { code: "USDC", issuer: "GISSUER" },
+              memo: "test-memo",
+              memoType: "text",
+            }
+          : null,
     } as unknown as Container["service"],
     logger: NOOP_LOGGER,
     links: {} as Container["links"],
@@ -263,5 +273,52 @@ describe("cash-out routes — offramp_rejected", () => {
     });
     expect(res.status).toBe(422);
     expect(await res.json()).toMatchObject({ error: "offramp_rejected", limits: { maxAmount: 10 } });
+  });
+});
+
+describe("GET /links/:id/cash-out/transfer — non-custodial transfer instructions", () => {
+  it("rejects with 401 when no token is provided", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`);
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 when requested by a different seller (IDOR protection)", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, other.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as Record<string, unknown>).error).toBe("not_found");
+  });
+
+  it("returns 404 when link does not exist", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/lnk_does_not_exist/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns transfer instructions (200) for the owning seller", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { transfer: { destination: string; amount: string; memo: string } };
+    expect(body.transfer).toBeDefined();
+    expect(body.transfer.destination).toBe("GANCHORACCOUNT123");
+    expect(body.transfer.amount).toBe("10");
+    expect(body.transfer.memo).toBe("test-memo");
   });
 });

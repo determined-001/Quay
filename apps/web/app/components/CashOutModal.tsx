@@ -274,6 +274,15 @@ export default function CashOutModal({
           onSuccess();
           return;
         }
+        // A SEP-24 anchor only names its deposit account after the seller finishes its form (issue 3.18).
+        // Once it does, the seller's wallet has a transfer to send: switch to the existing transfer step.
+        const late = await api.getCashOutTransfer(linkId).catch(() => null); // 404 until instructions exist
+        if (cancelled) return;
+        if (late?.transfer) {
+          setTransfer(late.transfer);
+          setStep("transfer");
+          return;
+        }
       } catch {
         // A failed poll must not close the step or strand the seller — the
         // next tick retries, and the server-side poller settles the link.

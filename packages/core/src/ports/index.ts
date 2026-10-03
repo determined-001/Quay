@@ -183,6 +183,7 @@ export interface OffRampJob {
   targetAmount: string;
   rate: string;
   reason?: string; // set when failed
+  transfer?: WithdrawTransfer;
 }
 
 /**
@@ -389,6 +390,7 @@ export interface StoredOffRampJob {
    *  Null means the transfer instructions haven't been surfaced yet; once set,
    *  the webhook is not re-fired on subsequent polls or restarts. */
   transferNotifiedAt: number | null;
+  pendingTransfer?: WithdrawTransfer | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -400,7 +402,12 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<
+      Pick<
+        StoredOffRampJob,
+        "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt" | "pendingTransfer"
+      >
+    >,
   ): Promise<void>;
 }
 
