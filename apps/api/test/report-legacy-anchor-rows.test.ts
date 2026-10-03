@@ -59,6 +59,7 @@ async function seedJob(
 async function seedKyc(sellerId: string, over: Partial<typeof sellerKyc.$inferInsert> = {}) {
   await db.insert(sellerKyc).values({
     sellerId,
+    anchorDomain: "anchor.example.com",
     account: "GSELLER",
     customerId: `cust_${sellerId}`,
     status: "ACCEPTED",
