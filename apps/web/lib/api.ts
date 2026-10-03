@@ -89,6 +89,11 @@ export interface KycView {
   lastSyncedAt: number | null;
 }
 
+export interface ProfileView {
+  fields: Record<string, string>;
+  updatedAt: Record<string, number>;
+}
+
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
 //
 // This has actually broken production once already (docs/FIXLOG.md, BUG-1.4,
@@ -523,6 +528,9 @@ export const api = {
 
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: () => http<KycView>("/seller/kyc"),
+  
+  getProfile: () => http<ProfileView>("/seller/profile"),
+  saveProfile: (fields: Record<string, string>) => http<ProfileView>("/seller/profile", { method: "PUT", body: JSON.stringify(fields) }),
 
   // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
   // sign with the wallet -> completeAnchorAuth(). Quay never signs it.

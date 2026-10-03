@@ -19,6 +19,7 @@ import {
 } from "../../lib/anchor-session";
 import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
+import RegistrationForm from "./RegistrationForm";
 import CashOutModal from "./CashOutModal";
 import { useSellerWallet } from "./SessionGate";
 
@@ -563,7 +564,10 @@ export default function Dashboard() {
       </section>
 
       {OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK && (
-        <KycPanel kyc={kyc} anchor={anchorAuth} onUpdated={setKyc} onAnchorConnected={() => void refreshKyc()} />
+        <>
+          <RegistrationForm />
+          <KycPanel kyc={kyc} anchor={anchorAuth} onUpdated={setKyc} onAnchorConnected={() => void refreshKyc()} />
+        </>
       )}
 
       <section className="panel">
