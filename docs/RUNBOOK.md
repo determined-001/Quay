@@ -675,8 +675,10 @@ typical settlement time.
    channel whether the off-ramp actually executed, and manually transition
    the link's status (`offramp_settled` or `offramp_failed`, per
    `packages/core/src/domain/status.ts`'s allowed transitions) to match
-   reality. `offramp_failed` can transition back to `offramp_pending` to
-   retry.
+   reality. A link in `offramp_failed` does not need a database edit to retry:
+   the seller can use "Retry cash-out" on the dashboard (or `POST
+   /links/:id/cash-out`), provided the previous job is terminal (see
+   `previous_withdrawal_active` in `docs/API.md`).
 
 ## KYC and Identity Data Retention Policy (NDPA Compliance)
 

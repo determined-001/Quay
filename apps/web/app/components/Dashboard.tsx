@@ -227,7 +227,7 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked, anchorAu
                 <button className="linkbtn" onClick={() => onCopy(link.id)}>
                   {copied === link.id ? "Copied" : "Copy link"}
                 </button>
-                {OFFRAMP_ENABLED && link.status === "paid" && (
+                {OFFRAMP_ENABLED && (link.status === "paid" || link.status === "offramp_failed") && (
                   <>
                     {" · "}
                     {cashOutBlocked ? (
@@ -236,7 +236,7 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked, anchorAu
                       </span>
                     ) : (
                       <button className="linkbtn" onClick={() => onCashOut(link.id)}>
-                        {CASH_OUT_LABEL}
+                        {link.status === "offramp_failed" ? "Retry cash-out" : CASH_OUT_LABEL}
                       </button>
                     )}
                   </>

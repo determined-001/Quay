@@ -842,6 +842,102 @@ describe("offramp.transfer_required webhook (4.22)", () => {
   });
 });
 
+describe("LinkService cash-out retry from offramp_failed", () => {
+  const stale = {
+    offrampJobId: "job_old",
+    offrampStatus: "failed" as const,
+    offrampRate: "1500",
+    offrampRateDelta: "0.5",
+    offrampFeeAmount: "9",
+    offrampFeeCurrency: "NGN",
+    offrampFeeSource: "estimated" as const,
+    offrampNetTargetAmount: "14991",
+  };
+
+  async function failedSetup(previousStatus: "failed" | "pending" | null, alwaysFail = false) {
+    const links = new FakeLinkRepository([makeLink({ status: "offramp_failed", ...stale })]);
+    const offrampState = new FakeOffRampStateRepository();
+    if (previousStatus) {
+      await offrampState.saveJob({
+        jobId: "job_old",
+        linkId: "lnk_1",
+        anchor: "mock",
+        sellerId: "sel_1",
+        account: null,
+        targetCurrency: "NGN",
+        targetAmount: "1",
+        rate: "1",
+        status: previousStatus,
+        externalStatus: null,
+        lastError: null,
+        transferNotifiedAt: null,
+        createdAt: 0,
+        updatedAt: 0,
+      } as never);
+    }
+    const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 60_000, alwaysFail });
+    return { links, service: makeService({ links, offramp, offrampState }) };
+  }
+
+  it("quotes and cashes out again after a failure, moving the link to offramp_pending", async () => {
+    const { links, service } = await failedSetup("failed");
+    const quote = await service.quoteCashOut("lnk_1", "NGN");
+    expect(quote.targetCurrency).toBe("NGN");
+
+    const { job } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    const link = links.get("lnk_1")!;
+    expect(link.status).toBe("offramp_pending");
+    expect(link.offrampJobId).toBe(job.jobId);
+    expect(link.offrampJobId).not.toBe("job_old");
+    // Per-attempt fields describe the new attempt, not the failed one.
+    expect(link.offrampRate).not.toBe("1500");
+    expect(link.offrampRateDelta).not.toBe("0.5");
+    expect(link.offrampFeeAmount).not.toBe("9");
+    expect(link.offrampNetTargetAmount).not.toBe("14991");
+  });
+
+  it("allows a retry when the previous job's state is gone (job_state_lost)", async () => {
+    const { links, service } = await failedSetup(null);
+    await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("refuses a retry while the previous job is still pending at the anchor", async () => {
+    const { links, service } = await failedSetup("pending");
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 409, message: "previous_withdrawal_active" });
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+    expect(links.get("lnk_1")?.offrampJobId).toBe("job_old");
+  });
+
+  it("a failing anchor fails the retry again and it can be retried once more", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 0, alwaysFail: true });
+    const service = makeService({ links, offramp, offrampState });
+
+    await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    await service.pollCashOuts();
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+
+    await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("still refuses offramp_settled and links that are not paid", async () => {
+    for (const status of ["offramp_settled", "offramp_pending", "active"] as const) {
+      const links = new FakeLinkRepository([makeLink({ status })]);
+      const offrampState = new FakeOffRampStateRepository();
+      const service = makeService({ links, offramp: new MockAnchorOffRamp({ state: offrampState }), offrampState });
+      await expect(service.quoteCashOut("lnk_1", "NGN")).rejects.toMatchObject({ status: 409 });
+      await expect(
+        service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+      ).rejects.toMatchObject({ status: 409 });
+    }
+  });
+});
+
 describe("LinkService cash-out — anchor rejections", () => {
   function rejecting(): ScriptedOffRamp {
     const offramp = new ScriptedOffRamp();
