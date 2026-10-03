@@ -11,9 +11,16 @@ import {
   type PaymentLink,
   type UsdcTrustlineStatus,
 } from "../../lib/api";
+import {
+  calculateAnchorRecheckDelay,
+  shouldShowAnchorReconnectBanner,
+  shouldShowReconnectHint,
+  useAnchorConnect,
+} from "../../lib/anchor-session";
 import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
 import CashOutModal from "./CashOutModal";
+import { useSellerWallet } from "./SessionGate";
 
 // Mirrors the API's OFFRAMP setting (see .env.example) so this button never
 // claims a real payout when the backend is still running MockAnchorOffRamp.
@@ -34,7 +41,10 @@ const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
-function StatusPill({ status }: { status: string }) {
+function StatusPill({ status, offrampStatus }: { status: string; offrampStatus?: string | null }) {
+  if (status === "offramp_pending" && offrampStatus === "awaiting_transfer") {
+    return <span className="pill pill--offramp_awaiting_transfer">awaiting transfer</span>;
+  }
   const label = status.replace("offramp_", "off-ramp ").replace("_", " ");
   return <span className={`pill pill--${status}`}>{label}</span>;
 }
@@ -159,9 +169,10 @@ interface TableProps {
   onCopy: (id: string) => void;
   onCashOut: (id: string) => void;
   cashOutBlocked: boolean;
+  anchorAuth: AnchorAuthView | null;
 }
 
-function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableProps) {
+function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked, anchorAuth }: TableProps) {
   return (
     <table className="table">
       <thead>
@@ -174,50 +185,66 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableP
         </tr>
       </thead>
       <tbody>
-        {links.map((link) => (
-          <tr key={link.id}>
-            <td>
-              <Link href={`/links/${link.id}`} className="dash-link-title">
-                {link.title}
-              </Link>
-              {link.isDemo && <> <DemoBadge /></>}
-            </td>
-            <td className="amt">
-              {amountLabel(link)}
-              {/* Indicative rate shown inline for paid links — no firm quote burned */}
-              {link.status === "paid" && (
-                <div style={{ marginTop: 2 }}>
-                  <IndicativeRateBadge linkId={link.id} />
-                </div>
-              )}
-            </td>
-            <td>
-              <StatusPill status={link.status} />
-            </td>
-            <td className="hide-sm">
-              <span className="mono muted">{link.reference}</span>
-            </td>
-            <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-              <button className="linkbtn" onClick={() => onCopy(link.id)}>
-                {copied === link.id ? "Copied" : "Copy link"}
-              </button>
-              {OFFRAMP_ENABLED && link.status === "paid" && (
-                <>
-                  {" · "}
-                  {cashOutBlocked ? (
-                    <span className="muted" style={{ fontSize: 12 }} title="Complete identity verification above">
-                      Identity verification required
-                    </span>
-                  ) : (
-                    <button className="linkbtn" onClick={() => onCashOut(link.id)}>
-                      {CASH_OUT_LABEL}
-                    </button>
-                  )}
-                </>
-              )}
-            </td>
-          </tr>
-        ))}
+        {links.map((link) => {
+          const showReconnect = shouldShowReconnectHint(link, anchorAuth, {
+            offrampEnabled: OFFRAMP_ENABLED,
+            isMock: OFFRAMP_IS_MOCK,
+          });
+
+          return (
+            <tr key={link.id}>
+              <td>
+                <Link href={`/links/${link.id}`} className="dash-link-title">
+                  {link.title}
+                </Link>
+                {link.isDemo && <> <DemoBadge /></>}
+              </td>
+              <td className="amt">
+                {amountLabel(link)}
+                {/* Indicative rate shown inline for paid links — no firm quote burned */}
+                {link.status === "paid" && (
+                  <div style={{ marginTop: 2 }}>
+                    <IndicativeRateBadge linkId={link.id} />
+                  </div>
+                )}
+              </td>
+              <td>
+                {showReconnect ? (
+                  <span
+                    className="pill pill--offramp_pending"
+                    title="Your session with the anchor expired. Reconnect to keep tracking."
+                  >
+                    waiting for reconnect
+                  </span>
+                ) : (
+                  <StatusPill status={link.status} offrampStatus={link.offrampStatus} />
+                )}
+              </td>
+              <td className="hide-sm">
+                <span className="mono muted">{link.reference}</span>
+              </td>
+              <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                <button className="linkbtn" onClick={() => onCopy(link.id)}>
+                  {copied === link.id ? "Copied" : "Copy link"}
+                </button>
+                {OFFRAMP_ENABLED && link.status === "paid" && (
+                  <>
+                    {" · "}
+                    {cashOutBlocked ? (
+                      <span className="muted" style={{ fontSize: 12 }} title="Complete identity verification above">
+                        Identity verification required
+                      </span>
+                    ) : (
+                      <button className="linkbtn" onClick={() => onCashOut(link.id)}>
+                        {CASH_OUT_LABEL}
+                      </button>
+                    )}
+                  </>
+                )}
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -226,6 +253,7 @@ function LinksTable({ links, copied, onCopy, onCashOut, cashOutBlocked }: TableP
 // ── Component ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
+  const wallet = useSellerWallet();
   const [links, setLinks] = useState<PaymentLink[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -251,6 +279,9 @@ export default function Dashboard() {
       setLinks(fresh);
       setFetchError(null);
     } catch (e) {
+      if (e instanceof CheckoutError && e.code === "anchor_auth_required") {
+        setAnchorAuth((prev) => (prev ? { ...prev, connected: false } : prev));
+      }
       const msg =
         e instanceof CheckoutError
           ? describeError(e)
@@ -289,6 +320,52 @@ export default function Dashboard() {
       // showing real, still-relevant information.
     }
   }, []);
+
+  const reconnectBanner = shouldShowAnchorReconnectBanner({
+    anchorAuth,
+    links,
+    offrampEnabled: OFFRAMP_ENABLED,
+    isMock: OFFRAMP_IS_MOCK,
+  });
+
+  const {
+    connecting: reconnecting,
+    error: reconnectError,
+    connectAnchor: handleReconnect,
+  } = useAnchorConnect({
+    wallet,
+    onSuccess: () => {
+      void refreshKyc();
+      void refresh();
+    },
+  });
+
+  // Re-check anchor session when expiresAt arrives (plus small margin)
+  useEffect(() => {
+    if (!anchorAuth?.expiresAt || !OFFRAMP_ENABLED || OFFRAMP_IS_MOCK) return;
+    const delay = calculateAnchorRecheckDelay(anchorAuth.expiresAt);
+    if (delay === null) return;
+    const timer = setTimeout(() => {
+      void refreshKyc();
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [anchorAuth?.expiresAt, refreshKyc]);
+
+  // Re-check on window focus or visibility change
+  useEffect(() => {
+    const onFocusOrVisible = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        void refreshKyc();
+        void refresh();
+      }
+    };
+    window.addEventListener("focus", onFocusOrVisible);
+    document.addEventListener("visibilitychange", onFocusOrVisible);
+    return () => {
+      window.removeEventListener("focus", onFocusOrVisible);
+      document.removeEventListener("visibilitychange", onFocusOrVisible);
+    };
+  }, [refreshKyc, refresh]);
 
   useEffect(() => {
     void refresh();
@@ -492,6 +569,48 @@ export default function Dashboard() {
       <section className="panel">
         <h2>Links</h2>
 
+        {reconnectBanner.show && (
+          <div
+            className="banner banner--warn"
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: 12,
+              marginBottom: 16,
+            }}
+          >
+            <div>
+              <strong>
+                {reconnectBanner.isExpired
+                  ? `Your session with ${reconnectBanner.anchorName} expired.`
+                  : `Your session with ${reconnectBanner.anchorName} expires soon.`}
+              </strong>{" "}
+              {reconnectBanner.isExpired
+                ? `Reconnect to keep tracking ${reconnectBanner.affectedCount} cash-out${reconnectBanner.affectedCount > 1 ? "s" : ""}.`
+                : `Renew to keep tracking ${reconnectBanner.affectedCount} cash-out${reconnectBanner.affectedCount > 1 ? "s" : ""}.`}
+              {reconnectError && (
+                <div className="err" style={{ marginTop: 4 }}>
+                  {reconnectError}
+                </div>
+              )}
+            </div>
+            <button
+              className="btn btn--primary"
+              onClick={handleReconnect}
+              disabled={reconnecting}
+              style={{ fontSize: 13, padding: "6px 12px" }}
+            >
+              {reconnecting
+                ? "Waiting for wallet…"
+                : reconnectBanner.isExpired
+                  ? `Reconnect to ${reconnectBanner.anchorName}`
+                  : "Renew now"}
+            </button>
+          </div>
+        )}
+
         {loading && <SkeletonTable />}
 
         {!loading && fetchError && links.length === 0 && (
@@ -508,6 +627,7 @@ export default function Dashboard() {
                 onCopy={copyCheckout}
                 onCashOut={(id) => setCashOutLinkId(id)}
                 cashOutBlocked={cashOutBlocked}
+                anchorAuth={anchorAuth}
               />
             </div>
           </>
@@ -524,6 +644,7 @@ export default function Dashboard() {
             onCopy={copyCheckout}
             onCashOut={(id) => setCashOutLinkId(id)}
             cashOutBlocked={cashOutBlocked}
+            anchorAuth={anchorAuth}
           />
         )}
       </section>
@@ -572,6 +693,11 @@ export default function Dashboard() {
       )}
         </>
       )}
+      <footer style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid var(--border)", display: "flex", justifyContent: "center", gap: 16, fontSize: 13, color: "var(--text-2, #6b7280)" }}>
+        <Link href="/privacy" style={{ color: "var(--blue)" }}>Privacy Notice</Link>
+        <span aria-hidden="true">·</span>
+        <a href="https://github.com/determined-001/Quay" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue)" }}>GitHub</a>
+      </footer>
 
       {tab === "api-keys" && <ApiKeys />}
     </>

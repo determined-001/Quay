@@ -10,6 +10,7 @@ import {
   type OffRampQuote,
   type IndicativePrice,
   type OffRampStateRepository,
+  type OfframpRequirementTypes,
   type PayoutFieldDescriptor,
   type SellerPayoutRef,
 } from "@checkout/core";
@@ -122,15 +123,26 @@ export class MockAnchorOffRamp implements OffRampPort {
   }
 
   /**
-   * Field descriptors for the mock anchor's cash-out form. Fixed set
-   * mirroring what `initiate()` reads from `payout.fields` (issue #32).
+   * A single fixed withdrawal type for the mock anchor's cash-out form,
+   * mirroring what `initiate()` reads from `payout.fields` (issue #32). One
+   * type only, so it is also the default and the dashboard shows no rail
+   * picker in mock mode (issue 5.24).
    */
-  async offrampRequirements(_assetCode: string): Promise<PayoutFieldDescriptor[]> {
-    return MOCK_PAYOUT_FIELDS;
+  async offrampRequirements(_assetCode: string): Promise<OfframpRequirementTypes> {
+    return {
+      types: [{ name: "bank_account", descriptors: MOCK_PAYOUT_FIELDS }],
+      defaultType: "bank_account",
+    };
   }
 
   async quote(
-    input: { linkId: string; sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    input: {
+      linkId: string;
+      sourceAsset: AssetRef;
+      sourceAmount: string;
+      targetCurrency: string;
+      withdrawType?: string;
+    },
     opts: { logger?: Logger } = {},
   ): Promise<OffRampQuote> {
     const log = opts.logger ?? this.logger;
@@ -195,9 +207,10 @@ export class MockAnchorOffRamp implements OffRampPort {
       targetCurrency: q.buyCurrency,
       targetAmount,
       rate: q.price,
-      status: "pending",
+      status: "awaiting_transfer",
       externalStatus: null,
       lastError: null,
+      transferNotifiedAt: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -211,11 +224,22 @@ export class MockAnchorOffRamp implements OffRampPort {
     const job = await this.state.getJob(jobId);
     if (!job) throw new OffRampJobNotFoundError(jobId);
 
+    const elapsed = Date.now() - job.createdAt;
     let status = job.status;
     let lastError = job.lastError;
-    if (status === "pending" && Date.now() - job.createdAt >= this.settleAfterMs) {
-      status = this.alwaysFail ? "failed" : "settled";
-      lastError = status === "failed" ? "mock anchor: simulated payout failure" : null;
+    // A terminal job never moves again: the anchor does not un-settle a payout.
+    if (status !== "settled" && status !== "failed") {
+      if (elapsed >= this.settleAfterMs) {
+        status = this.alwaysFail ? "failed" : "settled";
+        lastError = status === "failed" ? "mock anchor: simulated payout failure" : null;
+      } else if (elapsed >= this.settleAfterMs / 2) {
+        status = "pending";
+      } else {
+        status = "awaiting_transfer";
+      }
+    }
+
+    if (status !== job.status) {
       await this.state.updateJob(jobId, { status, lastError });
       log.info({ event: "anchor.mock.status.transition", jobId, status }, "mock status transition");
     }
