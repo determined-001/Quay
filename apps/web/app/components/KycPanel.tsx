@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 import { api, CheckoutError, describeError, type AnchorAuthView, type KycView } from "../../lib/api";
 import { useAnchorConnect } from "../../lib/anchor-session";
 import { useSellerWallet } from "./SessionGate";
+import { kycPanelStage, type KycLoadState } from "../../lib/kyc-load";
 import Sep9Input from "./Sep9Input";
 import { checkSep9Value, todayIso } from "../../lib/sep9-input";
 
@@ -25,11 +26,17 @@ interface KycConsent {
 export default function KycPanel({
   kyc,
   anchor,
+  loadState = "ready",
+  loadError = null,
+  onRetry,
   onUpdated,
   onAnchorConnected,
 }: {
   kyc: KycView | null;
   anchor: AnchorAuthView | null;
+  loadState?: KycLoadState;
+  loadError?: string | null;
+  onRetry?: () => void;
   onUpdated: (kyc: KycView) => void;
   onAnchorConnected: () => void;
 }) {
@@ -151,27 +158,51 @@ export default function KycPanel({
     }
   }
 
-  if (anchor?.required && !anchor.connected) {
+  const stage = kycPanelStage({
+    anchorNeedsConnect: Boolean(anchor?.required && !anchor.connected),
+    state: loadState,
+    hasKyc: kyc !== null,
+  });
+
+  if (stage === "connect") {
     return (
       <section className="panel">
         <h2>Identity verification</h2>
         <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
-          Cash-out runs through {anchor.anchor ?? "the anchor"}, which verifies you by your wallet
+          Cash-out runs through {anchor?.anchor ?? "the anchor"}, which verifies you by your wallet
           address. Sign its challenge to connect. It is never submitted, and it cannot move your funds.
         </p>
         <button className="btn btn--primary" onClick={connectAnchor} disabled={connecting || !hasWallet}>
-          {connecting ? "Waiting for wallet…" : `Connect to ${anchor.anchor ?? "anchor"}`}
+          {connecting ? "Waiting for wallet…" : `Connect to ${anchor?.anchor ?? "anchor"}`}
         </button>
         {(anchorError || error) && <div className="err">{anchorError || error}</div>}
       </section>
     );
   }
 
-  if (!kyc) {
+  if (stage === "error") {
     return (
       <section className="panel">
         <h2>Identity verification</h2>
-        <div className="muted">Loading…</div>
+        <div className="err" role="alert">
+          {loadError ?? "Could not load identity verification."}
+        </div>
+        {onRetry && (
+          <button className="btn btn--secondary" style={{ marginTop: 12 }} onClick={onRetry}>
+            Try again
+          </button>
+        )}
+      </section>
+    );
+  }
+
+  if (stage === "loading" || !kyc) {
+    return (
+      <section className="panel">
+        <h2>Identity verification</h2>
+        <div className="muted" role="status" aria-busy="true">
+          Loading…
+        </div>
       </section>
     );
   }
