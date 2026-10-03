@@ -58,6 +58,15 @@ jobs:
       - name: Docs — domain boundary (packages/core stays chain-agnostic)
         run: pnpm docs:check-domain-boundary
 
+      # Issue #207. The dormant SEP-24 AnchorOffRamp signed the seller's send
+      # leg with a server-held keypair and Sep10Client signed SEP-10 challenges
+      # the same way. Both are deleted; this fails the build if either pattern
+      # reappears under apps/api/src or packages/offramp/src. The two reviewed
+      # exceptions (Quay's own login challenge and config validation) are
+      # allowlisted with reasons inside the script.
+      - name: Security — no server-held key signs a payment or anchor challenge
+        run: pnpm check:no-server-signing
+
       - name: Docs — every env var apps/api reads is documented
         run: pnpm docs:check-env-docs
 

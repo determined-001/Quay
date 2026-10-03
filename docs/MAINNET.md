@@ -339,9 +339,12 @@ Not blockers for a first cutover, but each has a real production cost:
 - **`.github/workflows/anchor-probe.yml` probes `testanchor.stellar.org`** and
   auto-files a GitHub issue when that sandbox is down. On a mainnet project it
   is watching the wrong host — repoint it at your anchor or disable it.
-- **`AnchorOffRamp` (SEP-24, `packages/offramp/src/anchor.ts`) is not exported
-  and must stay that way** until its quotes and jobs are persisted through
-  `OffRampStateRepository`. It currently keeps them in in-process `Map`s, so a
-  restart mid-withdrawal loses `sendTxHash` — and money-adjacent state that does
-  not survive a redeploy has no business on pubnet. `TestAnchorOffRamp` (SEP-6)
-  is the adapter that is wired in, and it persists both.
+- **The dormant SEP-24 adapter is gone (issue #207).** `AnchorOffRamp`
+  (`packages/offramp/src/anchor.ts`) and its `Sep10Client` were deleted rather
+  than ported: between them they signed the seller's send leg and the seller's
+  anchor login with a keypair the server would have to hold, which is exactly
+  what the per-seller anchor identity fix removed. `TestAnchorOffRamp` (SEP-6)
+  is the adapter that is wired in, it persists quotes and jobs through
+  `OffRampStateRepository`, and it returns the send leg to the seller to sign.
+  `scripts/check-no-server-signing.mjs` fails CI if a server-side signing path
+  reappears.
