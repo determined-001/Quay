@@ -176,6 +176,11 @@ const BOOTSTRAP_SQL = [
 // above won't touch an existing table, so add it out-of-band; ignore the
 // "duplicate column" error on databases that already have it.
 const ADDITIVE_MIGRATIONS = [
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_rate TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_target_amount TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_amount TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_source TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_net_target_amount TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,

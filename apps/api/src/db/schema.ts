@@ -147,6 +147,12 @@ export const offrampQuotes = sqliteTable("offramp_quotes", {
   sellAmount: text("sell_amount").notNull(),
   buyCurrency: text("buy_currency").notNull(),
   price: text("price").notNull(),
+  // The figures shown to the seller at quote time; null on pre-existing rows.
+  quotedRate: text("quoted_rate"),
+  quotedTargetAmount: text("quoted_target_amount"),
+  quotedFeeAmount: text("quoted_fee_amount"),
+  quotedFeeSource: text("quoted_fee_source"),
+  quotedNetTargetAmount: text("quoted_net_target_amount"),
   expiresAt: integer("expires_at").notNull(),
   createdAt: integer("created_at").notNull(),
 });

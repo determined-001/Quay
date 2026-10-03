@@ -954,28 +954,64 @@ export class LinkService {
     let initiation: OffRampInitiation;
     const t0 = Date.now();
     try {
-      quote = await fetchFreshQuote();
-
-      // Guard: reject quotes with unparsable or already-expired expiresAt.
-      if (isQuoteExpired(quote)) {
-        // One automatic re-quote in case of clock skew or a very short TTL.
-        quote = await fetchFreshQuote();
-        if (isQuoteExpired(quote)) {
-          throw new QuoteExpiredError(quote.quoteId);
+      if (body.quoteId) {
+        const stored = await this.deps.offrampState.getQuote(body.quoteId);
+        if (!stored) {
+          throw new HttpError(409, "quote_mismatch");
         }
+        if (
+          stored.linkId !== link.id ||
+          stored.buyCurrency !== body.targetCurrency ||
+          stored.sellAmount !== sourceAmount
+        ) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+        if (Number.isNaN(stored.expiresAt) || Date.now() >= stored.expiresAt) {
+          throw new HttpError(409, `quote_expired: Quote ${stored.quoteId} has expired`);
+        }
+        // Replay exactly what the seller was shown. A row saved before the
+        // amounts were persisted cannot be confirmed by id: recomputing them
+        // here would record figures the seller never agreed to.
+        const quoted = stored.quotedAmounts;
+        if (!quoted) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+
+        quote = {
+          quoteId: stored.quoteId,
+          sourceAsset: stored.sellAsset,
+          sourceAmount: stored.sellAmount,
+          targetCurrency: stored.buyCurrency,
+          targetAmount: quoted.targetAmount,
+          rate: quoted.rate,
+          expiresAt: stored.expiresAt,
+          fee: { amount: quoted.feeAmount, currency: stored.buyCurrency, source: quoted.feeSource },
+          netTargetAmount: quoted.netTargetAmount,
+        };
+      } else {
+        quote = await fetchFreshQuote();
+
+        // Guard: reject quotes with unparsable or already-expired expiresAt.
+        if (isQuoteExpired(quote)) {
+          // One automatic re-quote in case of clock skew or a very short TTL.
+          quote = await fetchFreshQuote();
+          if (isQuoteExpired(quote)) {
+            throw new QuoteExpiredError(quote.quoteId);
+          }
+        }
+        child.info(
+          {
+            event: "cashout.quote",
+            anchor: this.deps.offramp.mode,
+            quoteId: quote.quoteId,
+            targetCurrency: quote.targetCurrency,
+            targetAmount: quote.targetAmount,
+            rate: quote.rate,
+            durationMs: Date.now() - t0,
+          },
+          "cash-out quoted",
+        );
       }
-      child.info(
-        {
-          event: "cashout.quote",
-          anchor: this.deps.offramp.mode,
-          quoteId: quote.quoteId,
-          targetCurrency: quote.targetCurrency,
-          targetAmount: quote.targetAmount,
-          rate: quote.rate,
-          durationMs: Date.now() - t0,
-        },
-        "cash-out quoted",
-      );
 
       const t1 = Date.now();
       initiation = await this.deps.offramp.initiate({

@@ -25,6 +25,7 @@ import type {
   WatcherPort,
   NormalizedPayment,
   OffRampPort,
+  OffRampStateRepository,
   OffRampQuote,
   OffRampJob,
   OffRampInitiation,
@@ -157,6 +158,8 @@ export class FakeOffRampPort implements OffRampPort {
   private nextQuoteId = 1;
   private nextJobId = 1;
 
+  /** Persists quotes the way the real adapters do, so a confirm-by-quoteId can find them. */
+  constructor(private readonly state?: OffRampStateRepository) {}
   /** The withdrawal types this fake "anchor" offers — two, like the live
    *  testanchor's USDC, so routes can exercise the rail picker (issue 5.24). */
   readonly withdrawTypes = ["bank_account", "cash"] as const;
@@ -164,6 +167,7 @@ export class FakeOffRampPort implements OffRampPort {
   lastQuoteWithdrawType: string | undefined;
 
   async quote(input: {
+    linkId: string;
     sourceAsset: AssetRef;
     sourceAmount: string;
     targetCurrency: string;
@@ -179,14 +183,37 @@ export class FakeOffRampPort implements OffRampPort {
     }
     const rate = input.targetCurrency === "NGN" ? 1650 : 1;
     const targetAmount = (Number(input.sourceAmount) * rate).toFixed(2);
+    const quoteId = `quote_${this.nextQuoteId++}`;
+    const expiresAt = Date.now() + 300_000;
+
+    if (this.state) {
+      await this.state.saveQuote({
+        quoteId,
+        linkId: input.linkId,
+        sellAsset: input.sourceAsset,
+        sellAmount: input.sourceAmount,
+        buyCurrency: input.targetCurrency,
+        price: String(rate),
+        quotedAmounts: {
+          rate: String(rate),
+          targetAmount,
+          feeAmount: "0",
+          feeSource: "estimated",
+          netTargetAmount: targetAmount,
+        },
+        expiresAt,
+        createdAt: Date.now(),
+      });
+    }
+
     return {
-      quoteId: `quote_${this.nextQuoteId++}`,
+      quoteId,
       sourceAsset: input.sourceAsset,
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
       targetAmount,
       rate: String(rate),
-      expiresAt: Date.now() + 300_000,
+      expiresAt,
       fee: { amount: "0", currency: input.targetCurrency, source: "estimated" },
       netTargetAmount: targetAmount,
     };
@@ -269,9 +296,9 @@ export async function createTestContainer(): Promise<TestContainer> {
 
   const rail = new FakeRailPort();
   const watcher = new FakeWatcherPort();
-  const offramp = new FakeOffRampPort();
-
   const offrampState = new DrizzleOffRampStateRepository(repos.db);
+  const offramp = new FakeOffRampPort(offrampState);
+
   const telemetry = new FakeTelemetryRepository();
   const apiKeys = new DrizzleApiKeyRepository(repos.db);
 

@@ -225,6 +225,11 @@ export class TestAnchorOffRamp implements OffRampPort {
     }, log);
 
     const expiresAt = Date.parse(q.expiresAt);
+    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
+    const netTargetAmount = q.buyAmount;
+    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+    const rate = targetPerSourceRate(q.price);
+
     await this.state.saveQuote({
       quoteId: q.id,
       linkId: input.linkId,
@@ -235,13 +240,17 @@ export class TestAnchorOffRamp implements OffRampPort {
       // Persisted so initiate() withdraws on the rail this price was quoted
       // for, rather than re-deriving it and possibly landing on another.
       withdrawType,
+      // What the seller is about to be shown, so a confirm-by-quoteId replays it.
+      quotedAmounts: {
+        rate,
+        targetAmount: grossTargetAmount,
+        feeAmount,
+        feeSource: "anchor",
+        netTargetAmount,
+      },
       expiresAt,
       createdAt: Date.now(),
     });
-
-    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
-    const netTargetAmount = q.buyAmount;
-    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
 
     return {
       quoteId: q.id,
@@ -252,7 +261,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       // OffRampQuote.rate is TARGET per source (issue 5.21); SEP-38's price
       // is the inverse. The raw price stays on the stored quote above —
       // this is a unit conversion at the boundary, not a loss of data.
-      rate: targetPerSourceRate(q.price),
+      rate,
       expiresAt,
       fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
       netTargetAmount,

@@ -311,6 +311,49 @@ describe("POST /links/:id/cash-out", () => {
     expect(updated?.status).toBe("offramp_pending");
     expect(updated?.offrampJobId).toBeDefined();
   });
+
+  it("triggers cash-out successfully when a valid quoteId is provided", async () => {
+    const linkId = await createAndPayLink();
+
+    // 1. Get firm quote
+    const quoteRes = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`);
+    expect(quoteRes.status).toBe(200);
+    const quoteBody = (await quoteRes.json()) as Record<string, unknown>;
+    const quoteId = quoteBody.quoteId as string;
+    expect(quoteId).toBeDefined();
+
+    // 2. Commit cash-out with quoteId
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetCurrency: "NGN",
+        payoutFields: { bank: "GTBank", account: "1234567890" },
+        quoteId,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.job).toBeDefined();
+    expect((body.job as Record<string, unknown>).status).toBe("pending");
+  });
+
+  it("returns 409 when an expired or mismatched quoteId is provided", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_invalid_nonexistent",
+      }),
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("quote_mismatch");
+  });
 });
 
 // ---------------------------------------------------------------------------
