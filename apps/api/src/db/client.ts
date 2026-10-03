@@ -89,6 +89,7 @@ const BOOTSTRAP_SQL = [
      job_id TEXT PRIMARY KEY, link_id TEXT NOT NULL, anchor TEXT NOT NULL,
      seller_id TEXT, account TEXT, target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
      status TEXT NOT NULL, external_status TEXT, last_error TEXT,
+     sell_asset_code TEXT, sell_asset_issuer TEXT, sell_amount TEXT, transfer_json TEXT,
      transfer_notified_at INTEGER,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
@@ -200,6 +201,13 @@ const ADDITIVE_MIGRATIONS = [
   // the old shared platform account and are treated as such.
   `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
+  // 3.9: SEP-6 deposit instructions can arrive after the withdraw call. The job
+  // remembers what it sold and the instructions once published. Additive; old
+  // rows stay NULL.
+  `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_code TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_issuer TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN sell_amount TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN transfer_json TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
   `ALTER TABLE sellers ADD COLUMN last_active_at INTEGER`,
   // Track whether the offramp.transfer_required webhook has been sent for a job.

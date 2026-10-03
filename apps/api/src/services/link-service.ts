@@ -264,6 +264,8 @@ export class LinkService {
    * survives restart.
    */
   private readonly nextPollAtByLinkId = new Map<string, number>();
+  /** Jobs whose `cashout.transfer_required` event was already emitted by this process. */
+  private readonly transferRequiredLogged = new Set<string>();
   private static readonly POLL_BACKOFF_BASE_MS = 2_000;
   private static readonly POLL_BACKOFF_CAP_MS = 60_000;
   /**
@@ -1113,7 +1115,27 @@ export class LinkService {
       const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
       let job: OffRampJob;
       try {
+        // Read before polling: status() persists any deposit instructions, so
+        // "had none before this poll" is what makes the event fire once, and
+        // it still does after a restart.
+        const before = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
         job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
+        if (job.transfer && !before?.transfer && !this.transferRequiredLogged.has(link.offrampJobId)) {
+          this.transferRequiredLogged.add(link.offrampJobId);
+          // Deliberately no memo/destination here: payment instructions stay
+          // out of plaintext logs. The seller still signs; nothing is sent
+          // from the server.
+          child.info(
+            {
+              event: "cashout.transfer_required",
+              linkId: link.id,
+              jobId: link.offrampJobId,
+              assetCode: job.transfer.asset.code,
+              amount: job.transfer.amount,
+            },
+            "anchor published deposit instructions; seller must send the asset",
+          );
+        }
         // Successful poll clears any prior in-memory last_error + backoff.
         this.lastPollErrorByLinkId.delete(link.id);
         this.consecutivePollErrorsByLinkId.delete(link.id);

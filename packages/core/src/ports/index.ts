@@ -183,6 +183,13 @@ export interface OffRampJob {
   targetAmount: string;
   rate: string;
   reason?: string; // set when failed
+  /**
+   * Where the seller must send the asset, when the anchor published it only
+   * after `initiate()` (e.g. once its own KYC review finished). Set only while
+   * the anchor is waiting for that payment. Quay relays it; the seller's
+   * wallet signs.
+   */
+  transfer?: WithdrawTransfer;
 }
 
 /**
@@ -385,6 +392,13 @@ export interface StoredOffRampJob {
   status: OffRampJobStatus;
   externalStatus: string | null; // raw upstream status string, for debugging
   lastError: string | null;
+  /** What was sold. Kept on the job (not looked up from the quote, which the job
+   *  does not reference) so deposit instructions that arrive later can name the
+   *  asset and fall back to the quoted amount. Absent on older rows. */
+  sellAsset?: AssetRef | null;
+  sellAmount?: string | null;
+  /** Deposit instructions the anchor published after the withdraw call. */
+  transfer?: WithdrawTransfer | null;
   /** When the offramp.transfer_required webhook was first sent for this job.
    *  Null means the transfer instructions haven't been surfaced yet; once set,
    *  the webhook is not re-fired on subsequent polls or restarts. */
@@ -400,7 +414,7 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt">>,
   ): Promise<void>;
 }
 

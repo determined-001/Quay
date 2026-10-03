@@ -217,6 +217,25 @@ export interface Sep6TransactionResult {
   status: string;
   amountOut?: string;
   message?: string;
+  /**
+   * Deposit instructions. SEP-6 publishes these on the transaction, not (only)
+   * on the /withdraw response: an anchor that is still reviewing KYC leaves
+   * them out of /withdraw and adds them when the transaction reaches
+   * `pending_user_transfer_start`. Populated only for that status.
+   */
+  withdrawAnchorAccount?: string;
+  withdrawMemo?: string;
+  withdrawMemoType?: "text" | "id" | "hash";
+  /** What the anchor expects to receive, when it says so (SEP-6 `amount_in`). */
+  amountIn?: string;
+}
+
+/** Thrown when an anchor's transaction carries a value we refuse to guess at. */
+export class Sep6TransactionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "Sep6TransactionError";
+  }
 }
 
 /** SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md */
@@ -285,16 +304,52 @@ export async function getSep6Transaction(
     throw new Error(`SEP-6 transaction fetch failed: ${res.status} ${await res.text()}`);
   }
   const body = (await res.json()) as {
-    transaction: { id: string; status: string; amount_out?: string; message?: string };
+    transaction: {
+      id: string;
+      status: string;
+      amount_out?: string;
+      message?: string;
+      amount_in?: string;
+      withdraw_anchor_account?: string;
+      withdraw_memo?: string;
+      withdraw_memo_type?: string;
+    };
   };
+  const tx = body.transaction;
   const out: Sep6TransactionResult = {
-    id: body.transaction.id,
-    status: body.transaction.status,
-    amountOut: body.transaction.amount_out,
-    message: body.transaction.message,
+    id: tx.id,
+    status: tx.status,
+    amountOut: tx.amount_out,
+    message: tx.message,
   };
+  // The deposit instructions only mean something while the anchor is waiting
+  // for the seller's payment. Reading them at any other status would also let
+  // an odd value on, say, a completed transaction wedge the poller for a job
+  // that has already finished.
+  if (tx.status === "pending_user_transfer_start") {
+    let memoType: Sep6TransactionResult["withdrawMemoType"];
+    if (tx.withdraw_memo_type !== undefined && tx.withdraw_memo_type !== null) {
+      if (tx.withdraw_memo_type !== "text" && tx.withdraw_memo_type !== "id" && tx.withdraw_memo_type !== "hash") {
+        // A wrong memo type sends the seller's USDC somewhere the anchor
+        // cannot credit. Refuse rather than fall back to a default.
+        throw new Sep6TransactionError(
+          `SEP-6 transaction ${tx.id} has an unsupported withdraw_memo_type "${String(tx.withdraw_memo_type)}"`,
+        );
+      }
+      memoType = tx.withdraw_memo_type;
+    }
+    out.withdrawAnchorAccount = tx.withdraw_anchor_account || undefined;
+    out.withdrawMemo = tx.withdraw_memo ?? undefined;
+    out.withdrawMemoType = memoType;
+    out.amountIn = tx.amount_in ?? undefined;
+  }
   log.info(
-    { event: "anchor.sep6.status.ok", status: out.status, amountOut: out.amountOut, durationMs: Date.now() - t0 },
+    {
+      event: "anchor.sep6.status.ok",
+      status: out.status,
+      amountOut: out.amountOut,
+      hasDepositInstructions: out.withdrawAnchorAccount !== undefined,
+      durationMs: Date.now() - t0 },
     "SEP-6 transaction polled",
   );
   return out;

@@ -165,6 +165,15 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   status: text("status").notNull(),
   externalStatus: text("external_status"),
   lastError: text("last_error"),
+  // What was sold, so deposit instructions that arrive after the withdraw call
+  // can name the asset. NULL on rows from before these columns existed.
+  sellAssetCode: text("sell_asset_code"),
+  sellAssetIssuer: text("sell_asset_issuer"),
+  sellAmount: text("sell_amount"),
+  // JSON WithdrawTransfer the anchor published later (SEP-6
+  // pending_user_transfer_start). Payment instructions, not a secret, but the
+  // memo is not logged.
+  transferJson: text("transfer_json"),
   // When the offramp.transfer_required webhook was first sent for this job.
   // Null means the transfer instructions haven't been surfaced yet; once set,
   // the webhook is not re-fired on subsequent polls or restarts.

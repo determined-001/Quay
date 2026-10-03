@@ -209,6 +209,18 @@ sequenceDiagram
   end
 ```
 
+If `/sep6/withdraw` came back without `account_id` (SEP-6 allows this while the
+anchor is still reviewing), `initiate()` returns `kind: "fields"` and the modal
+tells the seller the send step will follow. The poller keeps reading
+`/sep6/transaction`; when the status reaches `pending_user_transfer_start` it
+carries `withdraw_anchor_account`, `withdraw_memo`, `withdraw_memo_type` and
+`amount_in`, and `status()` returns them as `OffRampJob.transfer`. They are
+stored on the job row (`offramp_jobs.transfer_json`; the sold asset and amount
+are in `sell_asset_code`, `sell_asset_issuer`, `sell_amount`) and the first
+appearance logs `cashout.transfer_required` (without the memo). An unknown
+`withdraw_memo_type` is rejected rather than guessed. Quay only relays the
+instructions; the seller's wallet still signs and sends.
+
 A seller with no live anchor session gets `403 anchor_auth_required` (and the
 circuit breaker does not count it — it says nothing about the anchor's health).
 
