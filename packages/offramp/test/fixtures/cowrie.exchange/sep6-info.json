@@ -1,0 +1,72 @@
+{
+  "deposit": {
+    "NGNT": {
+      "enabled": true,
+      "authentication_required": true,
+      "fee_fixed": 0,
+      "min_amount": 100,
+      "fields": {
+        "amount": {
+          "description": "amount in NGN that to deposit"
+        },
+        "customer_id": {
+          "description": "Unique ID of customer previously onboarded via SEP12"
+        }
+      }
+    }
+  },
+  "withdraw": {
+    "NGNT": {
+      "enabled": true,
+      "authentication_required": true,
+      "fee_fixed": 200,
+      "min_amount": 300,
+      "types": {
+        "bank_account": {
+          "fields": {
+            "amount": {
+              "description": "amount in NGN to withdraw"
+            },
+            "customer_id": {
+              "description": "Unique ID of customer previously onboarded via SEP12"
+            },
+            "dest": {
+              "description": "your NUBAN bank account number"
+            },
+            "dest_extra": {
+              "description": "your bank name",
+              "choices": [
+                "AccessBank",
+                "CitiBank",
+                "DiamondBank",
+                "Ecobank",
+                "EnterpriseBank",
+                "FCMB",
+                "FidelityBank",
+                "FirstBank",
+                "GTBank",
+                "Heritage",
+                "JaizBank",
+                "KeystoneBank",
+                "ProvidusBank",
+                "PolarisBank",
+                "Stanbic",
+                "StandardChartered",
+                "SterlingBank",
+                "SuntrustBank",
+                "UBA",
+                "UnionBank",
+                "UnityBank",
+                "WemaBank",
+                "ZenithBank"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "transactions": {
+    "enabled": true
+  }
+}

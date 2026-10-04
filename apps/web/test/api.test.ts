@@ -117,3 +117,68 @@ describe("server clock skew", () => {
     expect(serverNow()).toBe(Date.now());
   });
 });
+
+describe("api.quoteCashOut and api.cashOut", () => {
+  const realFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    setSessionToken("tok-test");
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    setSessionToken(null);
+    vi.restoreAllMocks();
+  });
+
+  it("api.quoteCashOut URL-encodes targetCurrency and calls GET /links/:id/cash-out/quote", async () => {
+    const quotePayload = {
+      quoteId: "quote_123",
+      sourceAmount: "10",
+      targetCurrency: "NGN",
+      targetAmount: "16500.00",
+      rate: "1650",
+      expiresAt: 1786000000000,
+      fee: { amount: "165.00", currency: "NGN", source: "anchor" },
+      netTargetAmount: "16335.00",
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(quotePayload), { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await api.quoteCashOut("lnk_1", "NGN");
+
+    expect(res).toEqual(quotePayload);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${apiBase()}/links/lnk_1/cash-out/quote?targetCurrency=NGN`);
+    expect(init.method).toBeUndefined();
+  });
+
+  it("api.cashOut includes idempotencyKey header and sends quoteId in JSON body", async () => {
+    const cashOutPayload = {
+      job: { jobId: "job_123", status: "pending", targetAmount: "16335.00", targetCurrency: "NGN" },
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(cashOutPayload), { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await api.cashOut(
+      "lnk_1",
+      "NGN",
+      { bank: "GTBank", account: "1234567890" },
+      "idemp_key_123",
+      "quote_123",
+    );
+
+    expect(res).toEqual(cashOutPayload);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${apiBase()}/links/lnk_1/cash-out`);
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["idempotency-key"]).toBe("idemp_key_123");
+    expect(JSON.parse(init.body as string)).toEqual({
+      targetCurrency: "NGN",
+      payoutFields: { bank: "GTBank", account: "1234567890" },
+      quoteId: "quote_123",
+    });
+  });
+});
+
+

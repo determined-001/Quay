@@ -1,0 +1,5 @@
+{
+  "status": 401,
+  "statusText": "Unauthorized",
+  "body": "{\"status\":401,\"error\":\"Missing authorization\"}"
+}

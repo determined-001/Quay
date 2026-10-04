@@ -58,6 +58,7 @@ function fakeContainer(): Container {
     service: {
       getLink: async (id: string) => (id === ownedLink.id ? { link: ownedLink, request: {} as any } : null),
       getOffRampExternalStatus: async () => "incomplete",
+      getOfframpPollStatus: async () => null,
       createLink: async () => ({ link: ownedLink, request: {} as any }),
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),

@@ -873,9 +873,7 @@ export class LinkService {
     const log = (opts.logger ?? this.deps.logger!);
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
-    if (link.status !== "paid") {
-      throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
-    }
+    assertCanCashOut(link);
     if (!this.health.isAvailable()) {
       throw new HttpError(503, "anchor_unavailable");
     }
@@ -910,10 +908,9 @@ export class LinkService {
     const baseLog = (opts.logger ?? this.deps.logger!);
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
-    if (link.status !== "paid") {
-      throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
-    }
+    assertCanCashOut(link);
     const child = baseLog.child({ linkId: link.id });
+    const previousJobId = await this.assertPreviousWithdrawalTerminal(link);
 
     // Merge: previously-saved fields are the base; submitted fields override.
     // This means the seller only needs to re-enter fields they want to change
@@ -952,28 +949,64 @@ export class LinkService {
     let initiation: OffRampInitiation;
     const t0 = Date.now();
     try {
-      quote = await fetchFreshQuote();
-
-      // Guard: reject quotes with unparsable or already-expired expiresAt.
-      if (isQuoteExpired(quote)) {
-        // One automatic re-quote in case of clock skew or a very short TTL.
-        quote = await fetchFreshQuote();
-        if (isQuoteExpired(quote)) {
-          throw new QuoteExpiredError(quote.quoteId);
+      if (body.quoteId) {
+        const stored = await this.deps.offrampState.getQuote(body.quoteId);
+        if (!stored) {
+          throw new HttpError(409, "quote_mismatch");
         }
+        if (
+          stored.linkId !== link.id ||
+          stored.buyCurrency !== body.targetCurrency ||
+          stored.sellAmount !== sourceAmount
+        ) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+        if (Number.isNaN(stored.expiresAt) || Date.now() >= stored.expiresAt) {
+          throw new HttpError(409, `quote_expired: Quote ${stored.quoteId} has expired`);
+        }
+        // Replay exactly what the seller was shown. A row saved before the
+        // amounts were persisted cannot be confirmed by id: recomputing them
+        // here would record figures the seller never agreed to.
+        const quoted = stored.quotedAmounts;
+        if (!quoted) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+
+        quote = {
+          quoteId: stored.quoteId,
+          sourceAsset: stored.sellAsset,
+          sourceAmount: stored.sellAmount,
+          targetCurrency: stored.buyCurrency,
+          targetAmount: quoted.targetAmount,
+          rate: quoted.rate,
+          expiresAt: stored.expiresAt,
+          fee: { amount: quoted.feeAmount, currency: stored.buyCurrency, source: quoted.feeSource },
+          netTargetAmount: quoted.netTargetAmount,
+        };
+      } else {
+        quote = await fetchFreshQuote();
+
+        // Guard: reject quotes with unparsable or already-expired expiresAt.
+        if (isQuoteExpired(quote)) {
+          // One automatic re-quote in case of clock skew or a very short TTL.
+          quote = await fetchFreshQuote();
+          if (isQuoteExpired(quote)) {
+            throw new QuoteExpiredError(quote.quoteId);
+          }
+        }
+        child.info(
+          {
+            event: "cashout.quote",
+            anchor: this.deps.offramp.mode,
+            quoteId: quote.quoteId,
+            targetCurrency: quote.targetCurrency,
+            targetAmount: quote.targetAmount,
+            rate: quote.rate,
+            durationMs: Date.now() - t0,
+          },
+          "cash-out quoted",
+        );
       }
-      child.info(
-        {
-          event: "cashout.quote",
-          anchor: this.deps.offramp.mode,
-          quoteId: quote.quoteId,
-          targetCurrency: quote.targetCurrency,
-          targetAmount: quote.targetAmount,
-          rate: quote.rate,
-          durationMs: Date.now() - t0,
-        },
-        "cash-out quoted",
-      );
 
       const t1 = Date.now();
       initiation = await this.deps.offramp.initiate({
@@ -1014,6 +1047,14 @@ export class LinkService {
 
     const from = link.status;
     const jobId = initiation.jobId;
+    // A retry starts from a clean slate: nothing from the failed attempt may
+    // survive into the new attempt's rate, fee or net-amount fields.
+    link.offrampRate = null;
+    link.offrampRateDelta = null;
+    link.offrampFeeAmount = null;
+    link.offrampFeeCurrency = null;
+    link.offrampFeeSource = null;
+    link.offrampNetTargetAmount = null;
     const initialOfframpStatus = initiation.kind === "transfer" ? "awaiting_transfer" : "pending";
     link.status = "offramp_pending";
     link.offrampJobId = jobId;
@@ -1043,9 +1084,19 @@ export class LinkService {
     await this.deps.links.save(link);
     metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
     child.info(
-      { event: "link.transition", linkId: link.id, from, to: "offramp_pending", jobId },
+      {
+        event: "link.transition",
+        linkId: link.id,
+        from,
+        to: "offramp_pending",
+        jobId,
+        ...(previousJobId !== null && { retry: true, previousJobId }),
+      },
       "cash-out initiated, link moved to offramp_pending",
     );
+    if (previousJobId !== null) {
+      child.info({ event: "cashout.retry", linkId: link.id, previousJobId, jobId }, "cash-out retried");
+    }
     this.cashOutStartedAt.set(link.id, Date.now());
 
     // Passive telemetry (issue #20, 3.8) — never blocks the cash-out response.
@@ -1112,10 +1163,17 @@ export class LinkService {
       let job: OffRampJob;
       try {
         job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
-        // Successful poll clears any prior in-memory last_error + backoff.
+        // Successful poll clears any prior in-memory last_error + backoff + persisted poll error.
         this.lastPollErrorByLinkId.delete(link.id);
         this.consecutivePollErrorsByLinkId.delete(link.id);
         this.nextPollAtByLinkId.delete(link.id);
+        if (link.offrampJobId) {
+          await this.deps.offrampState.updateJob(link.offrampJobId, {
+            lastPollError: null,
+            lastPollErrorAt: null,
+            lastPollReason: null,
+          });
+        }
       } catch (err) {
         if (err instanceof OffRampJobNotFoundError) {
           // The adapter has no state for this job id at all — not a transient
@@ -1125,14 +1183,27 @@ export class LinkService {
           this.lastPollErrorByLinkId.delete(link.id);
           this.consecutivePollErrorsByLinkId.delete(link.id);
           this.nextPollAtByLinkId.delete(link.id);
+          if (link.offrampJobId) {
+            await this.deps.offrampState.updateJob(link.offrampJobId, {
+              lastPollError: null,
+              lastPollErrorAt: null,
+              lastPollReason: null,
+            });
+          }
           continue;
         }
-        // ATTRIBUTABLE: record the error against the link id so it can be
-        // exposed in a follow-up PR (and is logged now). Without this catch
-        // the swallowed error meant a downed anchor's failures evaporated.
-        const message = err instanceof Error ? err.message : String(err);
-        this.lastPollErrorByLinkId.set(link.id, message);
-        console.warn(`[offramp] poll failed for link ${link.id}: ${message}`);
+        // Classify the poll error into a sanitized, seller-safe reason and message.
+        const { reason, message: safeMessage } = classifyPollError(err);
+        if (link.offrampJobId) {
+          await this.deps.offrampState.updateJob(link.offrampJobId, {
+            lastPollError: safeMessage,
+            lastPollErrorAt: Date.now(),
+            lastPollReason: reason,
+          });
+        }
+        const rawMessage = err instanceof Error ? err.message : String(err);
+        this.lastPollErrorByLinkId.set(link.id, rawMessage);
+        console.warn(`[offramp] poll failed for link ${link.id}: ${rawMessage}`);
         // Exponential backoff per job (in-memory). Capped so a long-lived
         // pending job doesn't end up wedged for hours.
         const prev = this.consecutivePollErrorsByLinkId.get(link.id) ?? 0;
@@ -1282,11 +1353,24 @@ export class LinkService {
   }
 
   /**
-   * Read the in-memory last poll error for a single link, if any. Surface this
-   * in a follow-up PR; for now it's the attribution trail the issue asked for.
+   * Read the in-memory last poll error for a single link, if any.
    */
   lastPollErrorFor(linkId: string): string | null {
     return this.lastPollErrorByLinkId.get(linkId) ?? null;
+  }
+
+  /**
+   * Returns the persisted poll error details for an offramp_pending link, or null.
+   */
+  async getOfframpPollStatus(link: PaymentLink): Promise<{ reason: string; message: string; at: number } | null> {
+    if (link.status !== "offramp_pending" || !link.offrampJobId) return null;
+    const job = await this.deps.offrampState.getJob(link.offrampJobId);
+    if (!job || !job.lastPollReason || !job.lastPollError || !job.lastPollErrorAt) return null;
+    return {
+      reason: job.lastPollReason,
+      message: job.lastPollError,
+      at: job.lastPollErrorAt,
+    };
   }
 
   /**
@@ -1315,6 +1399,22 @@ export class LinkService {
       fixed++;
     }
     return fixed;
+  }
+
+  /**
+   * On a retry (`offramp_failed` -> `offramp_pending`), confirm the previous
+   * withdrawal really is terminal at the anchor so a slow anchor can never end
+   * up with two live withdrawals for one payment. Returns the previous job id
+   * when this is a retry, else null. A job with no stored state (the
+   * `job_state_lost` repair) has nothing left to be live and may be retried.
+   */
+  private async assertPreviousWithdrawalTerminal(link: PaymentLink): Promise<string | null> {
+    if (link.status !== "offramp_failed" || !link.offrampJobId) return null;
+    const previous = await this.deps.offrampState.getJob(link.offrampJobId);
+    if (previous && previous.status !== "failed") {
+      throw new HttpError(409, "previous_withdrawal_active");
+    }
+    return link.offrampJobId;
   }
 
   private async markOffRampFailed(link: PaymentLink, reason: string): Promise<void> {
@@ -1411,6 +1511,13 @@ export function anchorFailure(err: unknown, log: Logger): HttpError {
   return new HttpError(502, "anchor_error", { message: "The anchor could not be reached or sent an unexpected response." });
 }
 
+/** A cash-out starts from `paid`, or retries from `offramp_failed`; the state machine decides. */
+function assertCanCashOut(link: PaymentLink): void {
+  if (!canTransition(link.status, "offramp_pending")) {
+    throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
+  }
+}
+
 /** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */
 function offRampRejected(err: OffRampRejectedError): HttpError {
   return new HttpError(422, "offramp_rejected", {
@@ -1428,6 +1535,45 @@ export class HttpError extends Error {
   ) {
     super(message);
   }
+}
+
+export function classifyPollError(err: unknown): { reason: string; message: string } {
+  if (err instanceof AnchorAuthRequiredError || (err instanceof Error && err.message.includes("anchor_auth_required"))) {
+    return {
+      reason: "anchor_auth_required",
+      message: "Anchor session expired or required. Please reconnect your anchor session in settings.",
+    };
+  }
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  if (rawMsg.toLowerCase().includes("circuit open")) {
+    return {
+      reason: "circuit_open",
+      message: "Anchor calls are temporarily paused due to upstream service degradation. We will retry shortly.",
+    };
+  }
+  if (
+    rawMsg.includes("fetch failed") ||
+    rawMsg.includes("ECONNREFUSED") ||
+    rawMsg.includes("ECONNRESET") ||
+    rawMsg.includes("ETIMEDOUT") ||
+    rawMsg.includes("ENOTFOUND") ||
+    rawMsg.includes("DNS") ||
+    rawMsg.includes("timeout") ||
+    rawMsg.includes("anchor down") ||
+    rawMsg.includes("502") ||
+    rawMsg.includes("503") ||
+    rawMsg.includes("504") ||
+    rawMsg.includes("anchor unavailable")
+  ) {
+    return {
+      reason: "anchor_unreachable",
+      message: "The anchor could not be reached. We will keep trying.",
+    };
+  }
+  return {
+    reason: "unknown",
+    message: "A transient error occurred while checking cash-out status. We will keep trying.",
+  };
 }
 
 /**
