@@ -26,9 +26,14 @@ export interface CircuitBreakerOptions {
  * anchor can't be hammered by every cash-out poll, and (b) instrument every
  * call — this is the one seam all off-ramp adapter calls pass through,
  * regardless of which SEPs the underlying adapter actually speaks.
+ *
+ * `indicativePrices` (SEP-38 GET /prices) is unauthenticated and cheap; when
+ * supported by the inner adapter, calls through it are instrumented and
+ * failures count toward opening the breaker just like other anchor calls.
  */
 export class CircuitBreakerOffRamp implements OffRampPort {
   readonly mode: OffRampMode;
+  readonly indicativePrices?: OffRampPort["indicativePrices"];
 
   private state: CircuitState = "closed";
   private consecutiveFailures = 0;
@@ -43,6 +48,11 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     this.mode = inner.mode;
     this.failureThreshold = opts.failureThreshold ?? 3;
     this.cooldownMs = opts.cooldownMs ?? 30_000;
+
+    if (inner.indicativePrices) {
+      const fn = inner.indicativePrices.bind(inner);
+      this.indicativePrices = (input) => this.call("indicativePrices", () => fn(input));
+    }
   }
 
   getState(): CircuitState {

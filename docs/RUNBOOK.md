@@ -654,6 +654,69 @@ would invert the values back to wrong. Historical `fee_amount` on pre-fix
 non-mock rows was computed across the mixed units and stays unreliable; the
 script deliberately does not rewrite it.
 
+## Legacy shared-account rows (issue 4.18)
+
+Before withdrawals ran per seller, every seller authenticated to the anchor as
+one platform account. The fix added nullable columns and left old rows NULL:
+`offramp_jobs.seller_id` / `account` and `seller_kyc.account`. The runtime is
+safe with them (a legacy job cannot be polled, so its link is failed as
+`job_state_lost`; a legacy KYC row's `customer_id` is never reused), but nothing
+told an operator what that left behind. This report does.
+
+**When to run it:** once after upgrading a database that predates per-seller
+anchor identity, when a seller asks why a cash-out failed as `job_state_lost`,
+and before deleting or archiving old `offramp_jobs` rows.
+
+```bash
+# Take a backup first, then a dry run (the default; writes nothing):
+pnpm db:backup
+pnpm --filter @checkout/api exec tsx scripts/report-legacy-anchor-rows.ts
+pnpm --filter @checkout/api exec tsx scripts/report-legacy-anchor-rows.ts --json   # machine-readable
+```
+
+It reads `DATABASE_URL` / `DATABASE_AUTH_TOKEN` like the other scripts. It never
+decrypts or prints `seller_kyc.fields_encrypted`, and for KYC rows it only says
+whether a `customer_id` is still stored, not what it is.
+
+**Reading the output**
+
+- *offramp_jobs*: one entry per job with `seller_id` or `account` NULL, with its
+  link's current status and seller, the job status, `external_status` and
+  timestamps. Flags:
+  - `auto-failed as job_state_lost`: the link is still `offramp_pending`, so the
+    poller fails it on its next tick (the anchor lookup throws
+    `OffRampJobNotFoundError`).
+  - `FUNDS MAY HAVE BEEN SENT`: transfer instructions were surfaced
+    (`transfer_notified_at` set) or the anchor reported a post-transfer status
+    (`pending_anchor`, `pending_external`, `completed`, ...). This is a
+    heuristic from local data; the anchor is the source of truth.
+  - `settled: needs reconciliation`: a legacy job that finished. The payout went
+    out under the platform account, so check the records line up.
+- *seller_kyc*: rows with `account` NULL. `customer_id set` means the row may
+  still carry the shared platform customer's id, which another seller's identity
+  could have overwritten. The row's encrypted profile is fine to keep.
+
+**Cleaning up** (`--apply` alone is refused; it needs `--confirm` too):
+
+```bash
+pnpm --filter @checkout/api exec tsx scripts/report-legacy-anchor-rows.ts --apply --confirm
+```
+
+- Legacy `seller_kyc` rows: `customer_id` is cleared and `status` returns to
+  `unsubmitted`, so the next sync starts from the seller's own account. The
+  encrypted reusable profile is kept.
+- Legacy `offramp_jobs` rows: `last_error` is set to `legacy_shared_account`
+  where it was empty. Nothing else on the row changes; the rows are the audit
+  trail.
+- Only legacy rows are touched, and a second `--apply --confirm` changes nothing.
+  It prints what it changed.
+
+**A legacy job that had funds sent:** do not retry it from Quay; the job's state
+is gone. Contact the anchor with the job id (`job_id` is the anchor's
+transaction id) and the platform account. The platform account, not the seller,
+is the anchor customer for that transfer, so the anchor must refund or credit
+against that customer.
+
 ## Stuck `offramp_pending` job
 
 Symptom: a link has been `offramp_pending` far longer than the anchor's
@@ -675,8 +738,10 @@ typical settlement time.
    channel whether the off-ramp actually executed, and manually transition
    the link's status (`offramp_settled` or `offramp_failed`, per
    `packages/core/src/domain/status.ts`'s allowed transitions) to match
-   reality. `offramp_failed` can transition back to `offramp_pending` to
-   retry.
+   reality. A link in `offramp_failed` does not need a database edit to retry:
+   the seller can use "Retry cash-out" on the dashboard (or `POST
+   /links/:id/cash-out`), provided the previous job is terminal (see
+   `previous_withdrawal_active` in `docs/API.md`).
 
 ## KYC and Identity Data Retention Policy (NDPA Compliance)
 

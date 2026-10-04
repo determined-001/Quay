@@ -117,6 +117,54 @@ describe("CircuitBreakerOffRamp", () => {
     // One signed-out seller must not pause cash-outs for everyone else.
     expect(breaker.getState()).toBe("closed");
   });
+
+  describe("indicativePrices forwarding", () => {
+    it("exposes indicativePrices iff the inner adapter provides it", () => {
+      const withoutPrices = new CircuitBreakerOffRamp(fakePort());
+      expect(withoutPrices.indicativePrices).toBeUndefined();
+
+      const innerWithPrices = fakePort({
+        indicativePrices: vi.fn(async () => [
+          { targetCurrency: "USD", price: "1.00", deliveryMethods: ["WIRE"] },
+        ]),
+      });
+      const withPrices = new CircuitBreakerOffRamp(innerWithPrices);
+      expect(typeof withPrices.indicativePrices).toBe("function");
+    });
+
+    it("forwards indicativePrices calls to inner adapter and passes results through", async () => {
+      const mockResult = [{ targetCurrency: "USD", price: "0.99", deliveryMethods: ["WIRE"] }];
+      const fn = vi.fn(async () => mockResult);
+      const inner = fakePort({ indicativePrices: fn });
+      const breaker = new CircuitBreakerOffRamp(inner);
+
+      const input = {
+        sourceAsset: { code: "USDC", issuer: "G" },
+        sourceAmount: "10",
+      };
+      const res = await breaker.indicativePrices!(input);
+      expect(res).toEqual(mockResult);
+      expect(fn).toHaveBeenCalledWith(input);
+      expect(breaker.getState()).toBe("closed");
+    });
+
+    it("trips the breaker on repeated indicativePrices failures", async () => {
+      const fn = vi.fn(async () => {
+        throw new Error("503 anchor unavailable");
+      });
+      const inner = fakePort({ indicativePrices: fn });
+      const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 2 });
+
+      const input = { sourceAsset: { code: "USDC", issuer: "G" }, sourceAmount: "10" };
+      await expect(breaker.indicativePrices!(input)).rejects.toThrow("503 anchor unavailable");
+      expect(breaker.getState()).toBe("closed");
+      await expect(breaker.indicativePrices!(input)).rejects.toThrow("503 anchor unavailable");
+      expect(breaker.getState()).toBe("open");
+
+      await expect(breaker.indicativePrices!(input)).rejects.toThrow(/circuit open/);
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+  });
 });
 
 describe("CircuitBreakerOffRamp — rejected requests", () => {

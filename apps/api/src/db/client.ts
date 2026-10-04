@@ -101,6 +101,12 @@ const BOOTSTRAP_SQL = [
      provided_field_status TEXT, sent_fields TEXT,
      PRIMARY KEY (seller_id, anchor_domain)
    )`,
+  // Historical last-send time per field and anchor. Values are never stored.
+  `CREATE TABLE IF NOT EXISTS kyc_disclosure_fields (
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+     field_name TEXT NOT NULL, sent_at INTEGER NOT NULL,
+     UNIQUE (seller_id, anchor_domain, field_name)
+   )`,
   `CREATE TABLE IF NOT EXISTS anchor_sessions (
      seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT NOT NULL,
      token_encrypted TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
@@ -177,6 +183,11 @@ const BOOTSTRAP_SQL = [
 // above won't touch an existing table, so add it out-of-band; ignore the
 // "duplicate column" error on databases that already have it.
 const ADDITIVE_MIGRATIONS = [
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_rate TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_target_amount TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_amount TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_source TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_net_target_amount TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,

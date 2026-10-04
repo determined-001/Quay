@@ -266,6 +266,13 @@ export class LinkService {
   private readonly nextPollAtByLinkId = new Map<string, number>();
   private static readonly POLL_BACKOFF_BASE_MS = 2_000;
   private static readonly POLL_BACKOFF_CAP_MS = 60_000;
+  /**
+   * How long a job may sit at the anchor-reported `incomplete` status before
+   * the seller is assumed to have abandoned the anchor's window. Overridden
+   * per instance via the `interactiveTimeoutMs` dep (wired to
+   * OFFRAMP_INTERACTIVE_TIMEOUT_MS in services/container.ts).
+   */
+  static readonly DEFAULT_INTERACTIVE_TIMEOUT_MS = 3_600_000;
   private readonly consecutivePollErrorsByLinkId = new Map<string, number>();
 
   constructor(
@@ -296,6 +303,13 @@ export class LinkService {
       /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
        *  a permissive one so they do not depend on live DNS resolution. */
       webhookGuard?: (url: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
+      /**
+       * abandonment timeout for anchor-interactive jobs (issue 5.20). A job
+       * the anchor still reports as `incomplete` past this age is failed with
+       * reason `interactive_abandoned`. Defaults to
+       * DEFAULT_INTERACTIVE_TIMEOUT_MS (1 hour).
+       */
+      interactiveTimeoutMs?: number;
       /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
       logger?: Logger;
     },
@@ -425,6 +439,18 @@ export class LinkService {
     const link = await this.deps.links.findById(id);
     if (!link) return null;
     return { link, request: this.buildRequest(link) };
+  }
+
+  /**
+   * Raw upstream status for a link's off-ramp job (issue 5.20), sourced from
+   * `offramp_jobs.external_status` — e.g. SEP-24 `incomplete`, which the
+   * mapped `offrampStatus` deliberately collapses to `pending`. Null when the
+   * link has no job or the job row carries no upstream status.
+   */
+  async getOffRampExternalStatus(link: PaymentLink): Promise<string | null> {
+    if (!link.offrampJobId) return null;
+    const job = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
+    return job?.externalStatus ?? null;
   }
 
   /**
@@ -848,9 +874,7 @@ export class LinkService {
     const log = (opts.logger ?? this.deps.logger!);
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
-    if (link.status !== "paid") {
-      throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
-    }
+    assertCanCashOut(link);
     if (!this.health.isAvailable()) {
       throw new HttpError(503, "anchor_unavailable");
     }
@@ -886,10 +910,9 @@ export class LinkService {
     const baseLog = (opts.logger ?? this.deps.logger!);
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
-    if (link.status !== "paid") {
-      throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
-    }
+    assertCanCashOut(link);
     const child = baseLog.child({ linkId: link.id });
+    const previousJobId = await this.assertPreviousWithdrawalTerminal(link);
 
     // Merge: previously-saved fields are the base; submitted fields override.
     // This means the seller only needs to re-enter fields they want to change
@@ -928,28 +951,64 @@ export class LinkService {
     let initiation: OffRampInitiation;
     const t0 = Date.now();
     try {
-      quote = await fetchFreshQuote();
-
-      // Guard: reject quotes with unparsable or already-expired expiresAt.
-      if (isQuoteExpired(quote)) {
-        // One automatic re-quote in case of clock skew or a very short TTL.
-        quote = await fetchFreshQuote();
-        if (isQuoteExpired(quote)) {
-          throw new QuoteExpiredError(quote.quoteId);
+      if (body.quoteId) {
+        const stored = await this.deps.offrampState.getQuote(body.quoteId);
+        if (!stored) {
+          throw new HttpError(409, "quote_mismatch");
         }
+        if (
+          stored.linkId !== link.id ||
+          stored.buyCurrency !== body.targetCurrency ||
+          stored.sellAmount !== sourceAmount
+        ) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+        if (Number.isNaN(stored.expiresAt) || Date.now() >= stored.expiresAt) {
+          throw new HttpError(409, `quote_expired: Quote ${stored.quoteId} has expired`);
+        }
+        // Replay exactly what the seller was shown. A row saved before the
+        // amounts were persisted cannot be confirmed by id: recomputing them
+        // here would record figures the seller never agreed to.
+        const quoted = stored.quotedAmounts;
+        if (!quoted) {
+          throw new HttpError(409, "quote_mismatch");
+        }
+
+        quote = {
+          quoteId: stored.quoteId,
+          sourceAsset: stored.sellAsset,
+          sourceAmount: stored.sellAmount,
+          targetCurrency: stored.buyCurrency,
+          targetAmount: quoted.targetAmount,
+          rate: quoted.rate,
+          expiresAt: stored.expiresAt,
+          fee: { amount: quoted.feeAmount, currency: stored.buyCurrency, source: quoted.feeSource },
+          netTargetAmount: quoted.netTargetAmount,
+        };
+      } else {
+        quote = await fetchFreshQuote();
+
+        // Guard: reject quotes with unparsable or already-expired expiresAt.
+        if (isQuoteExpired(quote)) {
+          // One automatic re-quote in case of clock skew or a very short TTL.
+          quote = await fetchFreshQuote();
+          if (isQuoteExpired(quote)) {
+            throw new QuoteExpiredError(quote.quoteId);
+          }
+        }
+        child.info(
+          {
+            event: "cashout.quote",
+            anchor: this.deps.offramp.mode,
+            quoteId: quote.quoteId,
+            targetCurrency: quote.targetCurrency,
+            targetAmount: quote.targetAmount,
+            rate: quote.rate,
+            durationMs: Date.now() - t0,
+          },
+          "cash-out quoted",
+        );
       }
-      child.info(
-        {
-          event: "cashout.quote",
-          anchor: this.deps.offramp.mode,
-          quoteId: quote.quoteId,
-          targetCurrency: quote.targetCurrency,
-          targetAmount: quote.targetAmount,
-          rate: quote.rate,
-          durationMs: Date.now() - t0,
-        },
-        "cash-out quoted",
-      );
 
       const t1 = Date.now();
       initiation = await this.deps.offramp.initiate({
@@ -990,10 +1049,19 @@ export class LinkService {
 
     const from = link.status;
     const jobId = initiation.jobId;
+    // A retry starts from a clean slate: nothing from the failed attempt may
+    // survive into the new attempt's rate, fee or net-amount fields.
+    link.offrampRate = null;
+    link.offrampRateDelta = null;
+    link.offrampFeeAmount = null;
+    link.offrampFeeCurrency = null;
+    link.offrampFeeSource = null;
+    link.offrampNetTargetAmount = null;
+    const initialOfframpStatus = initiation.kind === "transfer" ? "awaiting_transfer" : "pending";
     link.status = "offramp_pending";
     link.offrampJobId = jobId;
     link.offrampTargetCurrency = quote.targetCurrency;
-    link.offrampStatus = "pending";
+    link.offrampStatus = initialOfframpStatus;
 
     // Telemetry (issue 3.5): persist the firm rate and the spread vs. indicative.
     // offrampIndicativeRate may already be set if the seller visited the preview
@@ -1018,9 +1086,19 @@ export class LinkService {
     await this.deps.links.save(link);
     metrics.linkStatusTransitionsTotal.inc({ to: "offramp_pending" });
     child.info(
-      { event: "link.transition", linkId: link.id, from, to: "offramp_pending", jobId },
+      {
+        event: "link.transition",
+        linkId: link.id,
+        from,
+        to: "offramp_pending",
+        jobId,
+        ...(previousJobId !== null && { retry: true, previousJobId }),
+      },
       "cash-out initiated, link moved to offramp_pending",
     );
+    if (previousJobId !== null) {
+      child.info({ event: "cashout.retry", linkId: link.id, previousJobId, jobId }, "cash-out retried");
+    }
     this.cashOutStartedAt.set(link.id, Date.now());
 
     // Passive telemetry (issue #20, 3.8) — never blocks the cash-out response.
@@ -1040,7 +1118,7 @@ export class LinkService {
     const job: OffRampJob = {
       jobId,
       linkId: link.id,
-      status: "pending",
+      status: initialOfframpStatus,
       targetCurrency: quote.targetCurrency,
       targetAmount: quote.targetAmount,
       rate: quote.rate,
@@ -1207,6 +1285,30 @@ export class LinkService {
           status: "failed",
           failureReason: job.reason ?? null,
         });
+      } else {
+        // Still pending at the anchor. An `incomplete` job means the seller
+        // never finished the anchor's window — without a timeout it would sit
+        // in `offramp_pending` indefinitely. `createdAt` is the durable proxy
+        // for "waiting since": it is written once at initiation, unlike
+        // `updatedAt`, which every status poll refreshes.
+        const stored = link.offrampJobId
+          ? await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null)
+          : null;
+        const timeoutMs = this.deps.interactiveTimeoutMs ?? LinkService.DEFAULT_INTERACTIVE_TIMEOUT_MS;
+        if (stored?.externalStatus === "incomplete" && now - stored.createdAt > timeoutMs) {
+          child.info(
+            { event: "link.transition", from: link.status, reason: "interactive_abandoned" },
+            "interactive anchor flow abandoned",
+          );
+          await this.markOffRampFailed(link, "interactive_abandoned");
+        } else if (link.offrampStatus !== job.status) {
+          link.offrampStatus = job.status;
+          await this.deps.links.save(link);
+          child.info(
+            { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
+            "cash-out offrampStatus updated",
+          );
+        }
       }
     }
   }
@@ -1301,6 +1403,22 @@ export class LinkService {
     return fixed;
   }
 
+  /**
+   * On a retry (`offramp_failed` -> `offramp_pending`), confirm the previous
+   * withdrawal really is terminal at the anchor so a slow anchor can never end
+   * up with two live withdrawals for one payment. Returns the previous job id
+   * when this is a retry, else null. A job with no stored state (the
+   * `job_state_lost` repair) has nothing left to be live and may be retried.
+   */
+  private async assertPreviousWithdrawalTerminal(link: PaymentLink): Promise<string | null> {
+    if (link.status !== "offramp_failed" || !link.offrampJobId) return null;
+    const previous = await this.deps.offrampState.getJob(link.offrampJobId);
+    if (previous && previous.status !== "failed") {
+      throw new HttpError(409, "previous_withdrawal_active");
+    }
+    return link.offrampJobId;
+  }
+
   private async markOffRampFailed(link: PaymentLink, reason: string): Promise<void> {
     if (!canTransition(link.status, "offramp_failed")) return;
     link.status = "offramp_failed";
@@ -1373,6 +1491,13 @@ export function customerOf(seller: Seller): AnchorCustomer {
 /** Only the seller's wallet can open an anchor session, so this is theirs to fix. */
 function anchorAuthRequired(): HttpError {
   return new HttpError(403, "anchor_auth_required");
+}
+
+/** A cash-out starts from `paid`, or retries from `offramp_failed`; the state machine decides. */
+function assertCanCashOut(link: PaymentLink): void {
+  if (!canTransition(link.status, "offramp_pending")) {
+    throw new HttpError(409, `Link must be paid to cash out (is "${link.status}")`);
+  }
 }
 
 /** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */

@@ -247,6 +247,11 @@ export const env = {
   // Preferred SEP-6 withdrawal type (e.g. "bank_account"). Unset means "read
   // /sep6/info and use the only enabled type, or refuse if there are several".
   offrampType: process.env.OFFRAMP_TYPE || undefined,
+  // How long an anchor-interactive job may sit at the upstream `incomplete`
+  // status before pollCashOuts fails it as abandoned (issue 5.20). The seller
+  // closed the anchor's window without finishing; without this the link would
+  // stay `offramp_pending` indefinitely.
+  offrampInteractiveTimeoutMs: num("OFFRAMP_INTERACTIVE_TIMEOUT_MS", 3_600_000),
   // Testnet-only convenience secret for demo scripts (pnpm demo:seed / pnpm demo:reset).
   // Never set on public network.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,
@@ -298,6 +303,8 @@ export const env = {
   // Optional comma-separated list of previous 32-byte hex keys used for decrypting
   // older KYC records during key rotation.
   kycEncryptionKeyPrevious: process.env.KYC_ENCRYPTION_KEY_PREVIOUS || undefined,
+  // Maximum allowed size (bytes) for multipart KYC file uploads (default 10 MiB).
+  kycMaxUploadBytes: num("KYC_MAX_UPLOAD_BYTES", 10 * 1024 * 1024),
 } as const;
 
 // A production process with the e2e backdoors mounted would accept
