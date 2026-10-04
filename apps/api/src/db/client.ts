@@ -100,6 +100,12 @@ const BOOTSTRAP_SQL = [
      provided_field_status TEXT, sent_fields TEXT,
      PRIMARY KEY (seller_id, anchor_domain)
    )`,
+  // Historical last-send time per field and anchor. Values are never stored.
+  `CREATE TABLE IF NOT EXISTS kyc_disclosure_fields (
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+     field_name TEXT NOT NULL, sent_at INTEGER NOT NULL,
+     UNIQUE (seller_id, anchor_domain, field_name)
+   )`,
   `CREATE TABLE IF NOT EXISTS anchor_sessions (
      seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT NOT NULL,
      token_encrypted TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,

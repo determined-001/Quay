@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getSep12Customer, putSep12Customer, putSep12CustomerMultipart } from "../src/sep12";
+import { deleteSep12Customer, getSep12Customer, putSep12Customer, putSep12CustomerMultipart } from "../src/sep12";
 
 const BASE_URL = "https://testanchor.stellar.org";
 const JWT = "jwt-token";
@@ -11,6 +11,24 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("deleteSep12Customer", () => {
+  it("uses the authenticated account at the anchor and accepts an already absent customer", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await deleteSep12Customer(`${BASE_URL}/sep12`, JWT, ACCOUNT)).toBe("deleted");
+    expect(await deleteSep12Customer(`${BASE_URL}/sep12`, JWT, ACCOUNT)).toBe("not_found");
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe(`${BASE_URL}/sep12/customer/${ACCOUNT}`);
+    expect(init).toEqual({ method: "DELETE", headers: { authorization: `Bearer ${JWT}` } });
+  });
+
+  it("does not report deletion when the anchor rejects the request", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 401 })));
+    await expect(deleteSep12Customer(BASE_URL, JWT, ACCOUNT)).rejects.toThrow(/401/);
+  });
 });
 
 describe("putSep12Customer", () => {
@@ -167,4 +185,3 @@ describe("putSep12CustomerMultipart", () => {
     expect(formData.get("account")).toBeNull();
   });
 });
-

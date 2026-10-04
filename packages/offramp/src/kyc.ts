@@ -272,4 +272,3 @@ export class NoKycRequired implements KycPort {
     };
   }
 }
-

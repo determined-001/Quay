@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   AnchorAuthRequiredError,
   KycRequiredError,
@@ -14,6 +15,7 @@ import { env } from "../env";
 import type { Container } from "../services/container";
 import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
+import { kycDisclosureFields, sellerKyc } from "../db/schema";
 
 const submitKycSchema = z.record(z.string(), z.string());
 
@@ -32,6 +34,11 @@ function toResponse(record: KycRecord) {
     message: record.message,
     lastSyncedAt: record.lastSyncedAt,
   };
+}
+
+function safeAnchorStatus(value: string | null | undefined): string {
+  return value === "ACCEPTED" || value === "REJECTED" || value === "PROCESSING" ||
+    value === "NEEDS_INFO" || value === "VERIFICATION_REQUIRED" ? value : "UNKNOWN";
 }
 
 function consentToResponse(consent: KycConsent) {
@@ -158,6 +165,73 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
 
   app.route("/consent", consentApp);
 
+  // Disclosure history is seller-owned metadata. Never read the encrypted field
+  // values into this response, and never infer a send time from a status sync.
+  app.get("/disclosures", async (ctx) => {
+    if (ctx.get("authKind") === "api_key") {
+      return ctx.json({ error: "forbidden", message: "disclosures require session authentication" }, 403);
+    }
+    const sellerId = ctx.get("seller").id;
+    const sent = await c.db.select().from(kycDisclosureFields).where(eq(kycDisclosureFields.sellerId, sellerId));
+    if (sent.length === 0) return ctx.json([]);
+
+    const domains = [...new Set(sent.map((field) => field.anchorDomain))];
+    const records = await c.db.select({
+      anchorDomain: sellerKyc.anchorDomain,
+      status: sellerKyc.status,
+      providedFieldStatus: sellerKyc.providedFieldStatus,
+    }).from(sellerKyc).where(and(eq(sellerKyc.sellerId, sellerId), inArray(sellerKyc.anchorDomain, domains)));
+    const consents = await c.kycConsents.list(sellerId);
+    const byDomain = new Map(records.map((record) => [record.anchorDomain, record]));
+    const disclosures = domains.sort().map((anchorDomain) => {
+      const record = byDomain.get(anchorDomain);
+      const latestConsent = consents.filter((consent) => consent.anchorDomain === anchorDomain)
+        .sort((a, b) => b.grantedAt - a.grantedAt)[0];
+      const statuses = record?.providedFieldStatus
+        ? JSON.parse(record.providedFieldStatus) as Array<{ name: string; status: string | null; error: string | null }>
+        : [];
+      return {
+        anchorDomain,
+        status: record?.status ?? "unsubmitted",
+        fields: sent.filter((field) => field.anchorDomain === anchorDomain)
+          .sort((a, b) => a.fieldName.localeCompare(b.fieldName))
+          .map((field) => ({
+            name: field.fieldName,
+            sentAt: field.sentAt,
+            anchorStatus: safeAnchorStatus(statuses.find((status) => status.name === field.fieldName)?.status),
+          })),
+        consent: latestConsent
+          ? { grantedAt: latestConsent.grantedAt, revokedAt: latestConsent.revokedAt }
+          : null,
+      };
+    });
+    return ctx.json(disclosures);
+  });
+
+  // SEP-12 DELETE applies to the seller's customer at the configured anchor.
+  // Do not accept an arbitrary URL or account from the browser.
+  app.delete("/disclosures/:anchorDomain", async (ctx) => {
+    if (ctx.get("authKind") === "api_key") {
+      return ctx.json({ error: "forbidden", message: "deletion requires session authentication" }, 403);
+    }
+    const anchorDomain = ctx.req.param("anchorDomain");
+    if (!c.anchorDomain || anchorDomain !== c.anchorDomain || !c.deleteAnchorCustomer) {
+      return ctx.json({ error: "anchor_unavailable" }, 404);
+    }
+    const seller = ctx.get("seller");
+    const customer = customerOf(seller);
+    try {
+      await c.kycConsents.revoke(seller.id, anchorDomain);
+      const anchorResult = await c.deleteAnchorCustomer(customer);
+      await c.db.delete(sellerKyc).where(and(eq(sellerKyc.sellerId, seller.id), eq(sellerKyc.anchorDomain, anchorDomain)));
+      await c.db.delete(kycDisclosureFields).where(and(eq(kycDisclosureFields.sellerId, seller.id), eq(kycDisclosureFields.anchorDomain, anchorDomain)));
+      return ctx.json({ anchorDomain, anchorResult, localDataErased: true });
+    } catch (err) {
+      if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      throw err;
+    }
+  });
+
   // Current requirements + status, re-synced from the anchor.
   app.get("/", async (ctx) => {
     try {
@@ -211,6 +285,18 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       // (handled by the UI calling the consent endpoint first)
 
       const updatedRecord = await c.kyc.submit(customer, fields);
+      if (updatedRecord.sentFields.length > 0) {
+        const sentAt = Date.now();
+        await c.db.insert(kycDisclosureFields).values(updatedRecord.sentFields.map((fieldName) => ({
+          sellerId: seller.id,
+          anchorDomain,
+          fieldName,
+          sentAt,
+        }))).onConflictDoUpdate({
+          target: [kycDisclosureFields.sellerId, kycDisclosureFields.anchorDomain, kycDisclosureFields.fieldName],
+          set: { sentAt: sql`excluded.sent_at` },
+        });
+      }
       await c.sellers.touchLastActive?.(seller.id);
       return ctx.json(toResponse(updatedRecord));
     } catch (err) {
