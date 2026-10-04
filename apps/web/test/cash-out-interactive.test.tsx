@@ -38,6 +38,19 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
       if (url.endsWith("/offramp-requirements")) {
         return jsonResponse({ descriptors: [], savedFields: null });
       }
+      if (url.includes("/cash-out/quote")) {
+        return jsonResponse({
+          quoteId: "q_1",
+          sourceAsset: { code: "USDC", issuer: "GISSUER" },
+          sourceAmount: "10",
+          targetCurrency: "NGN",
+          targetAmount: "16500",
+          rate: "1650",
+          expiresAt: Date.now() + 10 * 60_000,
+          fee: { amount: "0", currency: "NGN", source: "anchor" },
+          netTargetAmount: "16500",
+        });
+      }
       if (url.endsWith("/cash-out")) {
         return jsonResponse({
           job: {
@@ -82,8 +95,17 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
     const submit = container.querySelector(
       'button[type="submit"]',
     ) as HTMLButtonElement;
+    // Step 1: "Get quote" fetches the firm quote and shows the quote panel.
     await act(async () => {
       submit.click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Step 2: confirming the quote is what initiates the cash-out.
+    const confirm = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Confirm cash-out",
+    ) as HTMLButtonElement;
+    await act(async () => {
+      confirm.click();
       await vi.advanceTimersByTimeAsync(0);
     });
   }

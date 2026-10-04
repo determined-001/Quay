@@ -16,10 +16,12 @@ import {
   TESTANCHOR_BASE_URL,
   TESTANCHOR_HOME_DOMAIN,
   TestAnchorKyc,
+  deleteSep12Customer,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
 import type {
   KycPort,
+  AnchorCustomer,
   Logger,
   OffRampPort,
   OffRampStateRepository,
@@ -83,6 +85,7 @@ export interface Container {
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
+  deleteAnchorCustomer?: ((customer: AnchorCustomer) => Promise<"deleted" | "not_found">) | null;
   telemetry: OffRampTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string | null };
   horizonStatus(): HorizonStatus;
@@ -305,6 +308,11 @@ export async function createContainer(): Promise<Container> {
     kycConsents: kycConsentsRepo,
     anchorDomain,
     anchorAuth: anchor?.auth ?? null,
+    deleteAnchorCustomer: anchor ? async (customer) => {
+      const jwt = await anchor.auth.token(customer);
+      const { kycServer } = await anchor.discovery.get();
+      return deleteSep12Customer(kycServer, jwt, customer.account);
+    } : null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet },
     horizonStatus: () => pollingWatcher.getStatus(),

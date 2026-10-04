@@ -468,11 +468,13 @@ settled.
 {
   "targetCurrency": "NGN",
   "payoutFields": { "bank": "...", "accountNumber": "..." },
+  "quoteId": "quote_..."
   "withdrawType": "bank_account"
 }
 ```
 - `targetCurrency` — 3-letter code, defaults to `NGN`.
 - `payoutFields` — opaque string map handed to the anchor adapter.
+- `quoteId` — *optional*. The firm quote ID returned by `GET /links/:id/cash-out/quote`. When supplied, the withdrawal initiates against that exact quote with no re-quote. If omitted, a fresh quote is fetched and initiated atomically.
 - `withdrawType` — optional SEP-6 withdrawal type (`bank_account`, `cash`, …)
   when the anchor offers several rails; the seller's choice, discovered from
   `GET /links/:id/offramp-requirements`. Omitted, the adapter falls back to
@@ -516,7 +518,10 @@ settled.
   field is additive and a client that ignores it behaves as it did previously.
   It is always `https`; the dashboard refuses any other scheme.
 
-**409** — link is not in `paid` state: `{ "error": "Link must be paid to cash out (is \"pending\")" }`
+**409** — link is not in `paid` or `offramp_failed` state: `{ "error": "Link must be paid to cash out (is \"pending\")" }`. `offramp_settled` and every in-flight state are refused.
+**409** — `{ "error": "previous_withdrawal_active" }`. A retry from `offramp_failed` is refused while the previous job's stored status is not `failed`, so a slow anchor cannot end up with two live withdrawals for one payment.
+
+**Retrying a failed cash-out.** A link in `offramp_failed` can be quoted (`GET /links/:id/cash-out/quote`) and cashed out again with this same endpoint; it moves back to `offramp_pending` with a new job id. The rate, fee and net-amount fields of the failed attempt are cleared and replaced by the new attempt's values. A job whose state is no longer stored (the `job_state_lost` repair) has nothing left to be live and may be retried. The webhook payloads are unchanged; the API log carries `event: "cashout.retry"` with `previousJobId`, and `link.transition` carries `retry: true`. The dashboard shows "Retry cash-out" on failed links.
 **404** — `{ "error": "Link not found" }`
 **403** — `{ "error": "anchor_auth_required" }`. Only possible with a real anchor
 (`OFFRAMP=testanchor|anchor`): the seller has no live SEP-10 session with the
@@ -583,6 +588,11 @@ Current SEP-12 requirements and status for the seller, re-synced from the anchor
 ```
 `status` is one of `unsubmitted | NEEDS_INFO | PROCESSING | ACCEPTED | REJECTED`.
 
+`unsubmitted` means the anchor has no customer for the seller's account. If a stored customer id is no longer
+known to the anchor (it returns 404 for it), Quay retries by account, keeps the id the anchor returns, and logs
+`kyc.customer_id.stale` (no PII) rather than reporting the seller as new. A status the anchor sends that Quay does not
+model is treated as `PROCESSING` and logged as `kyc.status.unknown` with the raw status string only.
+
 ---
 
 ## `PUT /seller/kyc`
@@ -607,6 +617,28 @@ Returned when a field the anchor is already known to require is missing —
 naming exactly which ones, never silently substituting a placeholder.
 
 ---
+
+## `GET /seller/kyc/disclosures`
+
+List the authenticated seller's recorded SEP-12 disclosures by anchor. Requires a
+seller session and `offramp:initiate` scope; API keys are rejected. Each entry
+contains `anchorDomain`, `status`, `consent` (`grantedAt` and `revokedAt`), and
+`fields` with only `name`, `sentAt` (epoch milliseconds), and `anchorStatus`.
+The response never contains field values or anchor error text. Send times are
+recorded for successful submissions made after this endpoint is deployed;
+older sends cannot be dated reliably and are omitted.
+
+## `DELETE /seller/kyc/disclosures/:anchorDomain`
+
+Revoke consent, request [SEP-12 customer deletion](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md#customer-delete)
+at the configured anchor using the seller's own SEP-10 session, then erase the
+local KYC record and disclosure metadata for that anchor. Requires a seller
+session and `offramp:initiate` scope; API keys are rejected. The path must equal
+the configured anchor domain; arbitrary anchor URLs are never accepted. A
+successful response contains `anchorResult` (`deleted` or `not_found`) and
+`localDataErased: true`. If anchor authentication or deletion fails, local
+erasure is not reported as complete. This does not erase the seller's separate
+reusable profile or data held by another anchor.
 
 ## `GET /seller/kyc/consent`
 

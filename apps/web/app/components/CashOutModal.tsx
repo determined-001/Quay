@@ -7,14 +7,11 @@
  *   1. Open → fetch descriptors + saved (masked) fields from /offramp-requirements.
  *   2. Seller fills the form (pre-filled with masked saved values as placeholders).
  *   3. Client-side validation from descriptors (required fields must be non-empty).
- *   4. "Get quote" → POST /cash-out with payoutFields → receive gross/fee/net + expiry.
- *      In this flow the API does quote+initiate atomically; we display the quote the
- *      API computed before it committed so the seller sees the numbers before anything
- *      is submitted to the anchor.
- *      TODO: split into a two-step GET /quote → confirm → POST /cash-out when the API
- *      exposes a separate quote endpoint.
- *   5. Confirmation panel shows gross / fee / net and a countdown to quote expiry.
- *   6. Confirm → POST /cash-out (the actual initiate).
+ *   4. "Get quote" → GET /links/:id/cash-out/quote → gross / fee / net + rate + expiry.
+ *      Nothing is started at the anchor yet.
+ *   5. Confirmation panel shows gross / fee / net, the rate and a countdown to quote expiry.
+ *   6. "Confirm cash-out" → POST /cash-out with the quoteId (so the API initiates against
+ *      exactly the quote the seller saw) and an Idempotency-Key reused across retries.
  *   7. Any unmet required field → cash-out button is disabled with explanatory text.
  *   8. Anchor interactive flow (SEP-24) → "interactive" step: the seller opens
  *      the anchor's page from a real click, and the modal polls
@@ -29,6 +26,7 @@ import {
   CheckoutError,
   describeError,
   serverNow,
+  type OffRampQuote,
   type OfframpRequirements,
   type PayoutFieldDescriptor,
 } from "../../lib/api";
@@ -62,7 +60,16 @@ interface Props {
   onSuccess: () => void;
 }
 
-type ModalStep = "loading" | "form" | "confirming" | "submitting" | "transfer" | "interactive" | "error";
+// "confirming" = fetching the quote; "quote" = seller reviewing it; "submitting" = initiating.
+type ModalStep =
+  | "loading"
+  | "form"
+  | "confirming"
+  | "quote"
+  | "submitting"
+  | "transfer"
+  | "interactive"
+  | "error";
 
 interface QuotePreview {
   jobId: string;
@@ -148,6 +155,10 @@ export default function CashOutModal({
   const [values, setValues] = useState<Record<string, string>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [quote, setQuote] = useState<QuotePreview | null>(null);
+  // The firm quote the seller is reviewing, and the key that makes confirming
+  // it idempotent across a dropped response.
+  const [firmQuote, setFirmQuote] = useState<OffRampQuote | null>(null);
+  const idempotencyKeyRef = useRef<string | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   // Set when the anchor asked for an interactive flow — the seller opens it
@@ -330,7 +341,7 @@ export default function CashOutModal({
     }
   }
 
-  async function handleSubmit() {
+  async function handleGetQuote() {
     if (!requirements) return;
     if (types.length > 1 && !withdrawType) return; // the picker gates submit
     const errs = validate(descriptors, values, requirements.savedFields);
@@ -341,11 +352,31 @@ export default function CashOutModal({
     setStep("confirming");
     setErrorMsg(null);
     try {
+      const q = await api.quoteCashOut(linkId, targetCurrency, withdrawType ?? undefined);
+      setFirmQuote(q);
+      // A new quote is a new decision: it must not reuse the previous key.
+      idempotencyKeyRef.current = null;
+      startCountdown(q.expiresAt);
+      setStep("quote");
+    } catch (e: unknown) {
+      setErrorMsg(e instanceof CheckoutError ? describeError(e) : e instanceof Error ? e.message : "Failed to fetch quote");
+      setStep("form");
+    }
+  }
+
+  async function handleConfirmCashOut() {
+    if (!firmQuote) return;
+    setStep("submitting");
+    setErrorMsg(null);
+    // One key per confirmed quote, reused if the seller retries after a dropped response.
+    if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
+    try {
       const result = await api.cashOut(
         linkId,
         targetCurrency,
         buildPayoutFields(),
-        undefined,
+        idempotencyKeyRef.current,
+        firmQuote.quoteId,
         withdrawType ?? undefined,
       );
       const j = result.job;
@@ -356,11 +387,11 @@ export default function CashOutModal({
         targetCurrency: j.targetCurrency,
       };
       setQuote(preview);
+      setFirmQuote(null);
       // The anchor's real quote expiry, straight from the response. When the
       // API sends none, startCountdown shows no countdown at all.
       startCountdown(j.quoteExpiresAt);
-      // Cash-out is already initiated at this point (quote+initiate are atomic
-      // in the current API). An interactive anchor URL is a modal state, not a
+      // Cash-out is initiated at this point (the seller already confirmed the quote). An interactive anchor URL is a modal state, not a
       // success: the seller must finish in the anchor's window, and the modal
       // must stay open (a blocked-popup fallback rendered after onSuccess
       // would unmount with the modal in the same tick). If the anchor now
@@ -385,8 +416,12 @@ export default function CashOutModal({
         onSuccess();
       }
     } catch (e: unknown) {
-      setErrorMsg(e instanceof CheckoutError ? describeError(e) : e instanceof Error ? e.message : "Cash-out failed");
-      setStep("form");
+      const msg = e instanceof CheckoutError ? describeError(e) : e instanceof Error ? e.message : "Cash-out failed";
+      setErrorMsg(msg);
+      // An expired or mismatched quote cannot be confirmed; the countdown is
+      // forced to zero so the panel offers a fresh quote instead.
+      if (/quote_expired|quote_mismatch/.test(msg)) setCountdown(0);
+      setStep("quote");
     }
   }
 
@@ -421,6 +456,7 @@ export default function CashOutModal({
     return !typed && !hasSaved;
   });
   const canSubmit = unmetRequired.length === 0 && !needsTypeChoice;
+  const quoteExpired = countdown !== null && countdown <= 0;
 
   // ---- render --------------------------------------------------------------
   return (
@@ -518,11 +554,11 @@ export default function CashOutModal({
         )}
 
         {/* Form */}
-        {(step === "form" || step === "confirming" || step === "submitting") && (
+        {(step === "form" || step === "confirming") && (
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              void handleSubmit();
+              void handleGetQuote();
             }}
           >
             {/* Amount summary */}
@@ -576,7 +612,7 @@ export default function CashOutModal({
                         // no longer exist.
                         setFieldErrors({});
                       }}
-                      disabled={step === "confirming" || step === "submitting"}
+                      disabled={step === "confirming"}
                     />
                     {withdrawTypeLabel(t.name)}
                   </label>
@@ -603,7 +639,7 @@ export default function CashOutModal({
                 savedMasked={savedFields?.[d.name] ?? null}
                 error={fieldErrors[d.name] ?? null}
                 onChange={(v) => handleChange(d.name, v)}
-                disabled={step === "confirming" || step === "submitting"}
+                disabled={step === "confirming"}
               />
             ))}
 
@@ -637,14 +673,10 @@ export default function CashOutModal({
             <button
               type="submit"
               className="btn btn--primary btn--block"
-              disabled={!canSubmit || step === "confirming" || step === "submitting"}
+              disabled={!canSubmit || step === "confirming"}
               aria-disabled={!canSubmit}
             >
-              {step === "confirming"
-                ? "Processing…"
-                : step === "submitting"
-                  ? "Submitting…"
-                  : `Cash out to ${targetCurrency}`}
+              {step === "confirming" ? "Getting quote…" : "Get quote"}
             </button>
 
             <button
@@ -652,11 +684,115 @@ export default function CashOutModal({
               className="btn btn--block"
               style={{ marginTop: 8 }}
               onClick={onClose}
-              disabled={step === "confirming" || step === "submitting"}
+              disabled={step === "confirming"}
             >
               Cancel
             </button>
           </form>
+        )}
+
+        {/* Firm quote — nothing has been started at the anchor yet. */}
+        {(step === "quote" || step === "submitting") && firmQuote && (
+          <div>
+            <div
+              style={{
+                background: "var(--surface-2)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: "14px 16px",
+                fontSize: 13,
+                marginBottom: 20,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  color: "var(--muted)",
+                  marginBottom: 10,
+                }}
+              >
+                Firm quote {isMock && <span style={{ color: "var(--amber)" }}>(simulated)</span>}
+              </div>
+              <Row label="You send" value={`${firmQuote.sourceAmount} ${assetCode}`} mono />
+              <Row label="Gross amount" value={`${firmQuote.targetAmount} ${firmQuote.targetCurrency}`} mono />
+              <Row
+                label={firmQuote.fee.source === "estimated" ? "Fee (estimated)" : "Fee"}
+                value={`${firmQuote.fee.amount} ${firmQuote.fee.currency}`}
+                mono
+              />
+              <Row
+                label={`You receive (${firmQuote.targetCurrency})`}
+                value={`${firmQuote.netTargetAmount} ${firmQuote.targetCurrency}`}
+                mono
+                accent
+              />
+              <Row
+                label="Exchange rate"
+                value={`1 ${assetCode} = ${firmQuote.rate} ${firmQuote.targetCurrency}`}
+                mono
+              />
+              {countdown !== null && (
+                <div
+                  style={{ marginTop: 12, fontSize: 12, color: quoteExpired ? "var(--red)" : "var(--muted)" }}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {quoteExpired ? (
+                    "Quote expired — please request a new quote."
+                  ) : (
+                    <>
+                      Quote valid for{" "}
+                      <span className="mono" style={{ color: "var(--amber)" }}>
+                        {fmtCountdown(countdown)}
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {errorMsg && (
+              <div className="err" style={{ marginBottom: 14 }}>
+                {errorMsg}
+              </div>
+            )}
+
+            {quoteExpired ? (
+              <button
+                type="button"
+                className="btn btn--primary btn--block"
+                onClick={() => void handleGetQuote()}
+              >
+                Get a new quote
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn--primary btn--block"
+                onClick={() => void handleConfirmCashOut()}
+                disabled={step === "submitting"}
+              >
+                {step === "submitting" ? "Submitting…" : "Confirm cash-out"}
+              </button>
+            )}
+
+            <button
+              type="button"
+              className="btn btn--block"
+              style={{ marginTop: 8 }}
+              onClick={() => {
+                if (countdownRef.current) clearInterval(countdownRef.current);
+                setCountdown(null);
+                setErrorMsg(null);
+                setStep("form");
+              }}
+              disabled={step === "submitting"}
+            >
+              Back
+            </button>
+          </div>
         )}
 
         {/* The anchor is waiting for the asset. The seller's wallet sends it
@@ -944,9 +1080,8 @@ function QuoteSummary({
   countdown: number | null;
   isMock: boolean;
 }) {
-  // The API returns the net amount after fees (targetAmount). Gross = sourceAmount
-  // converted at the same rate. We surface what we have; fee breakdown requires a
-  // separate quote endpoint (see TODO in handleSubmit).
+  // The post-initiate receipt: the job's net amount. The fee breakdown the seller
+  // agreed to was shown in the firm-quote panel before confirming.
   const expired = countdown !== null && countdown <= 0;
 
   return (

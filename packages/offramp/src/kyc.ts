@@ -6,16 +6,30 @@ import {
   type KycRecord,
   type KycRepository,
   type ProvidedFieldStatus,
+  type KycUploadFile,
 } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { getSep12Customer, putSep12Customer } from "./sep12";
+import { getSep12Customer, putSep12Customer, putSep12CustomerMultipart } from "./sep12";
 import { selectFieldsForAnchor } from "@checkout/core";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
- *  entry for. Exported for direct unit testing of the "name exactly which
- *  fields are missing" requirement, without needing a live/mocked anchor. */
+ *  entry for. Binary fields are handled via file uploads, so they are excluded
+ *  from text-field completeness checks. */
 export function missingRequiredFields(required: KycFieldSpec[], values: Record<string, string>): string[] {
-  return required.filter((f) => !f.optional && !(values[f.name] ?? "").trim()).map((f) => f.name);
+  return required
+    .filter((f) => !f.optional && f.type !== "binary" && !(values[f.name] ?? "").trim())
+    .map((f) => f.name);
+}
+
+function stripBinaryFields(provided: Record<string, string>, required: KycFieldSpec[]): Record<string, string> {
+  const binaryNames = new Set(required.filter((f) => f.type === "binary").map((f) => f.name));
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(provided)) {
+    if (!binaryNames.has(k)) {
+      result[k] = v;
+    }
+  }
+  return result;
 }
 
 export interface TestAnchorKycOptions {
@@ -59,6 +73,11 @@ export class TestAnchorKyc implements KycPort {
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
     });
 
+    if (remote.staleCustomerId) {
+      console.warn(JSON.stringify({ event: "kyc.customer_id.stale", sellerId: customer.sellerId }));
+    }
+
+    const cleanProvided = stripBinaryFields(existing?.providedFields ?? {}, remote.requiredFields);
     const record: KycRecord = {
       sellerId: customer.sellerId,
       anchorDomain: this.auth.anchorDomain,
@@ -66,7 +85,7 @@ export class TestAnchorKyc implements KycPort {
       customerId: remote.customerId,
       status: remote.status,
       requiredFields: remote.requiredFields,
-      providedFields: existing?.providedFields ?? {},
+      providedFields: cleanProvided,
       providedFieldStatus: remote.providedFieldStatus,
       sentFields: existing?.sentFields ?? [],
       message: remote.message,
@@ -85,6 +104,10 @@ export class TestAnchorKyc implements KycPort {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
     });
+
+    if (discovery.staleCustomerId) {
+      console.warn(JSON.stringify({ event: "kyc.customer_id.stale", sellerId: customer.sellerId }));
+    }
 
     // Get the reusable profile for this seller
     const profile = await this.profileRepo.get(customer.sellerId);
@@ -133,8 +156,9 @@ export class TestAnchorKyc implements KycPort {
 
     // Merge the new fields into the existing providedFields for future submissions
     // Values typed in this submission (overrides) are written back to the profile
-    // for SEP-9 fields so they can be reused
+    // for SEP-9 fields so they can be reused. Binary fields are never persisted.
     const mergedProvided = { ...existing?.providedFields, ...fields };
+    const cleanProvided = stripBinaryFields(mergedProvided, [...discovery.requiredFields, ...after.requiredFields]);
 
     const record: KycRecord = {
       sellerId: customer.sellerId,
@@ -143,9 +167,59 @@ export class TestAnchorKyc implements KycPort {
       customerId: put.customerId,
       status: after.status,
       requiredFields: after.requiredFields,
-      providedFields: mergedProvided,
+      providedFields: cleanProvided,
       providedFieldStatus: after.providedFieldStatus,
       sentFields: Object.keys(selection.send),
+      message: after.message,
+      lastSyncedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await this.repo.save(record);
+    return record;
+  }
+
+  /**
+   * Upload binary SEP-12 fields (e.g. photo_id_front) as multipart. Only the
+   * files are sent: text fields already on file are never re-sent from here,
+   * so everything that reaches the anchor goes through the consent-checked
+   * paths. Uploaded bytes are never stored; only the field names are recorded
+   * in `sentFields`.
+   */
+  async submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord> {
+    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
+    const jwt = await this.auth.token(customer);
+    const { kycServer } = await this.discovery.get();
+    const discovery = await getSep12Customer(kycServer, jwt, {
+      account: customer.account,
+      customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
+    });
+
+    const put = await putSep12CustomerMultipart(kycServer, jwt, {
+      account: customer.account,
+      customerId: discovery.customerId,
+      files,
+    });
+
+    const after = await getSep12Customer(kycServer, jwt, {
+      account: customer.account,
+      customerId: put.customerId,
+    });
+
+    const cleanProvided = stripBinaryFields(existing?.providedFields ?? {}, [
+      ...discovery.requiredFields,
+      ...after.requiredFields,
+    ]);
+
+    const record: KycRecord = {
+      sellerId: customer.sellerId,
+      anchorDomain: this.auth.anchorDomain,
+      account: customer.account,
+      customerId: put.customerId,
+      status: after.status,
+      requiredFields: after.requiredFields,
+      providedFields: cleanProvided,
+      providedFieldStatus: after.providedFieldStatus,
+      sentFields: [...new Set([...(existing?.sentFields ?? []), ...files.map((x) => x.name)])],
       message: after.message,
       lastSyncedAt: Date.now(),
       updatedAt: Date.now(),
@@ -182,6 +256,10 @@ export class NoKycRequired implements KycPort {
   }
 
   async submit(customer: AnchorCustomer): Promise<KycRecord> {
+    return this.accepted(customer);
+  }
+
+  async submitFiles(customer: AnchorCustomer): Promise<KycRecord> {
     return this.accepted(customer);
   }
 

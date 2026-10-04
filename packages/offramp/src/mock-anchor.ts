@@ -165,6 +165,13 @@ export class MockAnchorOffRamp implements OffRampPort {
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
       price: String(rate),
+      quotedAmounts: {
+        rate: String(rate),
+        targetAmount,
+        feeAmount,
+        feeSource: "estimated",
+        netTargetAmount,
+      },
       expiresAt,
       createdAt: now,
     });

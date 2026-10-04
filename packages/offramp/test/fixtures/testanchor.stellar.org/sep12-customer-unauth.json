@@ -1,0 +1,5 @@
+{
+  "status": 403,
+  "statusText": "Forbidden",
+  "body": "{\n  \"error\": \"forbidden\"\n}"
+}

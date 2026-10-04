@@ -303,6 +303,8 @@ export const env = {
   // Optional comma-separated list of previous 32-byte hex keys used for decrypting
   // older KYC records during key rotation.
   kycEncryptionKeyPrevious: process.env.KYC_ENCRYPTION_KEY_PREVIOUS || undefined,
+  // Maximum allowed size (bytes) for multipart KYC file uploads (default 10 MiB).
+  kycMaxUploadBytes: num("KYC_MAX_UPLOAD_BYTES", 10 * 1024 * 1024),
 } as const;
 
 // A production process with the e2e backdoors mounted would accept

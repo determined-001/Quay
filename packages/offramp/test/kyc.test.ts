@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AnchorCustomer, KycFieldSpec, KycRecord, ProvidedFieldStatus } from "@checkout/core";
-import { TestAnchorKyc } from "../src/kyc";
+import { TestAnchorKyc, missingRequiredFields } from "../src/kyc";
 import { selectFieldsForAnchor } from "@checkout/core";
 import * as sep12 from "../src/sep12";
 
@@ -252,5 +252,189 @@ describe("TestAnchorKyc customer ids are scoped to the anchor (issue 4.24)", () 
 
     expect(get.mock.calls[0]![2]).toEqual({ account: "GSELLER", customerId: null });
     expect(record.status).toBe("NEEDS_INFO");
+  });
+});
+
+describe("missingRequiredFields", () => {
+  const NAME: KycFieldSpec = { name: "first_name", type: "string", optional: false };
+  const PHOTO_FRONT: KycFieldSpec = { name: "photo_id_front", type: "binary", optional: false };
+
+  it("names exactly the missing required text fields", () => {
+    expect(missingRequiredFields([NAME], {})).toEqual(["first_name"]);
+    expect(missingRequiredFields([NAME], { first_name: "Ada" })).toEqual([]);
+  });
+
+  it("ignores binary fields for text submissions (they go through file upload)", () => {
+    expect(missingRequiredFields([NAME, PHOTO_FRONT], { first_name: "Ada" })).toEqual([]);
+  });
+});
+
+describe("TestAnchorKyc.submitFiles", () => {
+  const customer: AnchorCustomer = { sellerId: "sel_1", account: "GSELLER" };
+  const PHOTO_FRONT: KycFieldSpec = { name: "photo_id_front", type: "binary", optional: false };
+  const NAME: KycFieldSpec = { name: "first_name", type: "string", optional: false };
+
+  it("uploads only the files, never persists binary fields, and records sentFields", async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const kyc = new TestAnchorKyc({
+      discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }) },
+      auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "anchor.example" } as any,
+      repo: {
+        get: vi.fn().mockResolvedValue({
+          sellerId: "sel_1",
+          anchorDomain: "anchor.example",
+          account: "GSELLER",
+          customerId: "cus_1",
+          status: "NEEDS_INFO",
+          requiredFields: [NAME, PHOTO_FRONT],
+          providedFields: { first_name: "Ada", photo_id_front: "should-not-survive" },
+          sentFields: ["first_name"],
+          message: null,
+          lastSyncedAt: 0,
+          updatedAt: 0,
+        }),
+        save,
+      },
+      profileRepo: { get: vi.fn().mockResolvedValue(null) },
+    });
+
+    const getSpy = vi.spyOn(sep12, "getSep12Customer");
+    getSpy
+      .mockResolvedValueOnce({
+        requiredFields: [NAME, PHOTO_FRONT],
+        customerId: "cus_1",
+        status: "NEEDS_INFO",
+        message: null,
+      } as any)
+      .mockResolvedValueOnce({
+        requiredFields: [NAME, PHOTO_FRONT],
+        customerId: "cus_1",
+        status: "PROCESSING",
+        message: null,
+      } as any);
+    const putSpy = vi.spyOn(sep12, "putSep12CustomerMultipart").mockResolvedValue({ customerId: "cus_1" });
+
+    const file = { name: "photo_id_front", blob: new Blob(["x"], { type: "image/png" }), filename: "front.png" };
+    const record = await kyc.submitFiles(customer, [file]);
+
+    const params = putSpy.mock.calls[0]![2];
+    expect(params.files).toEqual([file]);
+    expect(params.fields).toBeUndefined();
+    expect(record.providedFields).toEqual({ first_name: "Ada" });
+    expect(record.sentFields).toEqual(["first_name", "photo_id_front"]);
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it("leaves no trace of the uploaded bytes or filename in the saved record or in any log output", async () => {
+    const logged = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    const save = vi.fn().mockResolvedValue(undefined);
+    const kyc = new TestAnchorKyc({
+      discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }) },
+      auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "anchor.example" } as any,
+      repo: { get: vi.fn().mockResolvedValue(null), save },
+      profileRepo: { get: vi.fn().mockResolvedValue(null) },
+    });
+    vi.spyOn(sep12, "getSep12Customer").mockResolvedValue({
+      requiredFields: [NAME, PHOTO_FRONT],
+      customerId: "cus_1",
+      status: "PROCESSING",
+      providedFieldStatus: [],
+      message: null,
+    } as any);
+    vi.spyOn(sep12, "putSep12CustomerMultipart").mockResolvedValue({ customerId: "cus_1" });
+
+    const secretBytes = "UNIQUE-ID-PHOTO-BYTES-7f3a";
+    const secretName = "passport-scan-7f3a.jpg";
+    const record = await kyc.submitFiles(customer, [
+      { name: "photo_id_front", blob: new Blob([secretBytes], { type: "image/jpeg" }), filename: secretName },
+    ]);
+
+    const everythingKept = JSON.stringify([save.mock.calls, record]);
+    expect(everythingKept).not.toContain(secretBytes);
+    expect(everythingKept).not.toContain(secretName);
+    const everythingLogged = JSON.stringify(logged.flatMap((spy) => spy.mock.calls));
+    expect(everythingLogged).not.toContain(secretBytes);
+    expect(everythingLogged).not.toContain(secretName);
+    logged.forEach((spy) => spy.mockRestore());
+  });
+});
+
+describe("TestAnchorKyc stale customer id (#222)", () => {
+  const customer: AnchorCustomer = { sellerId: "seller_1", account: "GSELLER" };
+
+  function makeKyc() {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const stored: KycRecord = {
+      sellerId: "seller_1",
+      anchorDomain: "anchor.example",
+      account: "GSELLER",
+      customerId: "cust_stale",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFields: {},
+      providedFieldStatus: [],
+      sentFields: [],
+      message: null,
+      lastSyncedAt: 0,
+      updatedAt: 0,
+    };
+    const kyc = new TestAnchorKyc({
+      discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }) },
+      auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "anchor.example" } as any,
+      repo: { get: vi.fn().mockResolvedValue(stored), save },
+      profileRepo: { get: vi.fn().mockResolvedValue({ fields: { first_name: "Ada" } }) },
+    });
+    return { kyc, save };
+  }
+
+  const staleEvent = JSON.stringify({ event: "kyc.customer_id.stale", sellerId: "seller_1" });
+
+  it("saves the recovered id and logs a warning when status() recovers from a stale customer id", async () => {
+    const { kyc, save } = makeKyc();
+    vi.spyOn(sep12, "getSep12Customer").mockResolvedValue({
+      customerId: "cust_recovered",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+      staleCustomerId: true,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const record = await kyc.status(customer);
+
+    expect(record.customerId).toBe("cust_recovered");
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]![0].customerId).toBe("cust_recovered");
+    expect(warnSpy).toHaveBeenCalledWith(staleEvent);
+  });
+
+  it("logs a warning when submit() recovers from a stale customer id", async () => {
+    const { kyc } = makeKyc();
+    vi.spyOn(sep12, "getSep12Customer")
+      .mockResolvedValueOnce({
+        customerId: "cust_recovered",
+        status: "NEEDS_INFO",
+        requiredFields: [{ name: "first_name", type: "string", optional: false }],
+        providedFieldStatus: [],
+        message: null,
+        staleCustomerId: true,
+      })
+      .mockResolvedValueOnce({
+        customerId: "cust_recovered",
+        status: "ACCEPTED",
+        requiredFields: [],
+        providedFieldStatus: [],
+        message: null,
+      });
+    vi.spyOn(sep12, "putSep12Customer").mockResolvedValue({ customerId: "cust_recovered" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const record = await kyc.submit(customer, { first_name: "Ada" });
+
+    expect(record.customerId).toBe("cust_recovered");
+    expect(warnSpy).toHaveBeenCalledWith(staleEvent);
   });
 });

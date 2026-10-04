@@ -366,6 +366,18 @@ export interface StoredOffRampQuote {
   sellAmount: string;
   buyCurrency: string;
   price: string;
+  /** What the seller was shown at quote time. A later `quoteId` confirm replays
+   *  these verbatim — it must never recompute them, or the job would record
+   *  figures the seller never agreed to. Absent on rows saved before they were
+   *  persisted; those cannot be confirmed by id. */
+  quotedAmounts?: {
+    /** OffRampQuote.rate — target per source, which is not always `price`. */
+    rate: string;
+    targetAmount: string;
+    feeAmount: string;
+    feeSource: "anchor" | "estimated";
+    netTargetAmount: string;
+  };
   expiresAt: number;
   createdAt: number;
 }
@@ -521,6 +533,12 @@ export class KycRequiredError extends Error {
   }
 }
 
+export interface KycUploadFile {
+  name: string;
+  blob: Blob;
+  filename: string;
+}
+
 export interface KycPort {
   /** Refreshes from the anchor (if applicable) and persists the result.
    *  Throws {@link AnchorAuthRequiredError} without a live anchor session. */
@@ -528,6 +546,9 @@ export interface KycPort {
   /** Submits/updates fields. Throws {@link KycRequiredError} if a required
    *  field is still missing after merging with what's already on file. */
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
+  /** Submits binary/file fields directly to the anchor via multipart/form-data.
+   *  Never persists binary file data. */
+  submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord>;
 }
 
 /** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs

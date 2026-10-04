@@ -890,6 +890,20 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
     sellAmount: row.sellAmount,
     buyCurrency: row.buyCurrency,
     price: row.price,
+    ...(row.quotedRate !== null &&
+    row.quotedTargetAmount !== null &&
+    row.quotedFeeAmount !== null &&
+    row.quotedNetTargetAmount !== null
+      ? {
+          quotedAmounts: {
+            rate: row.quotedRate,
+            targetAmount: row.quotedTargetAmount,
+            feeAmount: row.quotedFeeAmount,
+            feeSource: row.quotedFeeSource === "anchor" ? ("anchor" as const) : ("estimated" as const),
+            netTargetAmount: row.quotedNetTargetAmount,
+          },
+        }
+      : {}),
     expiresAt: row.expiresAt,
     createdAt: row.createdAt,
   };
@@ -927,6 +941,11 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       sellAmount: quote.sellAmount,
       buyCurrency: quote.buyCurrency,
       price: quote.price,
+      quotedRate: quote.quotedAmounts?.rate ?? null,
+      quotedTargetAmount: quote.quotedAmounts?.targetAmount ?? null,
+      quotedFeeAmount: quote.quotedAmounts?.feeAmount ?? null,
+      quotedFeeSource: quote.quotedAmounts?.feeSource ?? null,
+      quotedNetTargetAmount: quote.quotedAmounts?.netTargetAmount ?? null,
       expiresAt: quote.expiresAt,
       createdAt: quote.createdAt,
     });
@@ -1022,6 +1041,15 @@ export class DrizzleKycRepository implements KycRepository {
   }
 
   async save(record: KycRecord): Promise<void> {
+    const binaryFieldNames = new Set(
+      record.requiredFields.filter((f) => f.type === "binary").map((f) => f.name),
+    );
+    for (const key of Object.keys(record.providedFields)) {
+      if (binaryFieldNames.has(key)) {
+        throw new Error(`Binary field ${key} must never be persisted in KYC providedFields`);
+      }
+    }
+
     const row = {
       sellerId: record.sellerId,
       anchorDomain: record.anchorDomain,
