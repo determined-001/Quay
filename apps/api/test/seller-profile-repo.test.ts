@@ -21,6 +21,7 @@ function makeRepo(db: DB, keyring = randomBytes(32)) {
 function kycRecord(sellerId: string, providedFields: Record<string, string>, over: Partial<KycRecord> = {}): KycRecord {
   return {
     sellerId,
+    anchorDomain: "testanchor.stellar.org",
     account: "GSELLER",
     customerId: "cust_1",
     status: "ACCEPTED",
