@@ -1,6 +1,7 @@
 import type { AssetRef, Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { endpointUrl } from "./sep1";
+import { anchorHttpError } from "./anchor-error";
 
 export interface Sep38QuoteResult {
   id: string;
@@ -47,7 +48,7 @@ export async function getSep38Prices(
 
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`SEP-38 /prices failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("38", "/prices", res);
   }
 
   const body = (await res.json()) as {
@@ -113,7 +114,7 @@ export async function getSep38Quote(
   });
   if (!res.ok) {
     log.warn({ event: "anchor.sep38.quote.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-38 quote failed");
-    throw new Error(`SEP-38 quote failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("38", "quote", res);
   }
   const body = (await res.json()) as {
     id: string;

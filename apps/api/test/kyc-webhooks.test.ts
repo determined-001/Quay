@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
-import type { AnchorCustomer, KycPort, KycRecord, Webhook } from "@checkout/core";
+import type { AnchorCustomer, KycPort, KycRecord, KycUploadFile, Webhook } from "@checkout/core";
 import { createDb, bootstrap, type DB } from "../src/db/client";
 import { DrizzleKycRepository, DrizzleWebhookRepository } from "../src/repos/index";
 import { WebhookSender } from "../src/services/webhook-sender";
@@ -40,6 +40,10 @@ class FakeKycPort implements KycPort {
   async submit(_customer: AnchorCustomer, _fields: Record<string, string>): Promise<KycRecord> {
     return this.recordToReturn;
   }
+
+  async submitFiles(_customer: AnchorCustomer, _files: KycUploadFile[]): Promise<KycRecord> {
+    return this.recordToReturn;
+  }
 }
 
 describe("KycEvents Webhook Delivery", () => {
@@ -54,6 +58,7 @@ describe("KycEvents Webhook Delivery", () => {
     // Initial state in repo is null (or PROCESSING)
     const innerPort = new FakeKycPort({
       sellerId: "sel_1",
+      anchorDomain: "testanchor.stellar.org",
       account: "GSELLER1",
       customerId: "cust_1",
       status: "ACCEPTED",
@@ -103,6 +108,7 @@ describe("KycEvents Webhook Delivery", () => {
     // Save existing record with status ACCEPTED
     await kycRepo.save({
       sellerId: "sel_1",
+      anchorDomain: "testanchor.stellar.org",
       account: "GSELLER1",
       customerId: "cust_1",
       status: "ACCEPTED",
@@ -117,6 +123,7 @@ describe("KycEvents Webhook Delivery", () => {
 
     const innerPort = new FakeKycPort({
       sellerId: "sel_1",
+      anchorDomain: "testanchor.stellar.org",
       account: "GSELLER1",
       customerId: "cust_1",
       status: "ACCEPTED",
@@ -148,6 +155,7 @@ describe("KycEvents Webhook Delivery", () => {
 
     const innerPort = new FakeKycPort({
       sellerId: "sel_1",
+      anchorDomain: "testanchor.stellar.org",
       account: "GSELLER1",
       customerId: "cust_1",
       status: "NEEDS_INFO",
@@ -189,6 +197,7 @@ describe("KycEvents Webhook Delivery", () => {
     // Previous status was NEEDS_INFO
     await kycRepo.save({
       sellerId: "sel_1",
+      anchorDomain: "testanchor.stellar.org",
       account: "GSELLER1",
       customerId: "cust_1",
       status: "NEEDS_INFO",
@@ -203,6 +212,7 @@ describe("KycEvents Webhook Delivery", () => {
 
     const innerPort = new FakeKycPort({
       sellerId: "sel_1",
+      anchorDomain: "testanchor.stellar.org",
       account: "GSELLER1",
       customerId: "cust_1",
       status: "REJECTED",
@@ -249,6 +259,7 @@ describe("KycEvents Webhook Delivery", () => {
 
     const innerPort = new FakeKycPort({
       sellerId: "sel_unregistered",
+      anchorDomain: "testanchor.stellar.org",
       account: "GOTHER",
       customerId: "cust_2",
       status: "ACCEPTED",

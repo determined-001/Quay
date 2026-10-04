@@ -1,6 +1,7 @@
 import type { Logger } from "@checkout/core";
-import { NOOP_LOGGER } from "@checkout/core";
+import { NOOP_LOGGER, OffRampRejectedError } from "@checkout/core";
 import { endpointUrl } from "./sep1";
+import { anchorHttpError } from "./anchor-error";
 
 export interface Sep6WithdrawResult {
   id: string;
@@ -11,68 +12,18 @@ export interface Sep6WithdrawResult {
   memoType?: "text" | "id" | "hash";
 }
 
-/**
- * A single field descriptor as returned by SEP-6 GET /info for a withdraw type.
- * See SEP-6 §3.4 — the anchor returns an `fields` map keyed by field name.
- */
-export interface Sep6FieldInfo {
-  name: string;
-  description: string;
-  optional?: boolean;
-  choices?: string[];
-}
-
-/**
- * GET /sep6/info — returns the withdraw field requirements for a given asset code.
- * The anchor may or may not require authentication for /info; we send the JWT if
- * provided so authenticated anchors can return KYC-aware field sets.
- */
-export async function getSep6WithdrawInfo(
-  baseUrl: string,
-  assetCode: string,
-  jwt?: string,
-): Promise<Sep6FieldInfo[]> {
-  const url = endpointUrl(baseUrl, "info");
-  const headers: Record<string, string> = {};
-  if (jwt) headers["authorization"] = `Bearer ${jwt}`;
-
-  const res = await fetch(url, { headers });
-  if (!res.ok) {
-    throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
-  }
-
-  const body = (await res.json()) as {
-    withdraw?: Record<
-      string,
-      {
-        enabled?: boolean;
-        fields?: Record<string, { description?: string; optional?: boolean; choices?: string[] }>;
-      }
-    >;
-  };
-
-  const assetInfo = body.withdraw?.[assetCode];
-  if (!assetInfo?.enabled) {
-    throw new Error(`SEP-6 anchor does not support withdrawing ${assetCode}`);
-  }
-
-  const rawFields = assetInfo.fields ?? {};
-  return Object.entries(rawFields).map(([name, meta]) => ({
-    name,
-    description: meta.description ?? name,
-    optional: meta.optional ?? false,
-    choices: meta.choices,
-  }));
-}
-
 // ---------------------------------------------------------------------------
 // SEP-6 /info capability discovery
 // ---------------------------------------------------------------------------
-// `getSep6WithdrawInfo` above answers "what fields does the form need". This
-// pair answers the questions that have to be settled *before* a quote is
-// requested: which withdrawal type are we doing, and will the anchor accept
-// this amount at all. Asking after quoting means burning a firm quote to
-// discover a limit the anchor published all along.
+// `getSep6Info` below is the ONE /info parser (issue 5.24). It answers both
+// questions the flow needs: what fields does each withdrawal type's form
+// need (SEP-6 puts withdraw fields under `types[].fields` — an asset-level
+// `fields` map is not where the spec keeps them, and a parser that read it
+// there meant the form never changed with the rail), and the questions that
+// have to be settled *before* a quote is requested: which withdrawal type
+// are we doing, and will the anchor accept this amount at all. Asking after
+// quoting means burning a firm quote to discover a limit the anchor
+// published all along.
 
 /** One withdrawal type (`bank_account`, `cash`, …) under an asset. */
 export interface Sep6WithdrawType {
@@ -100,13 +51,9 @@ export interface Sep6Info {
  * limits so the caller can tell the seller what would be accepted rather than
  * just that this wasn't.
  */
-export class Sep6ValidationError extends Error {
-  constructor(
-    message: string,
-    readonly limits: { minAmount?: number; maxAmount?: number } = {},
-    readonly availableTypes: string[] = [],
-  ) {
-    super(message);
+export class Sep6ValidationError extends OffRampRejectedError {
+  constructor(message: string, limits: { minAmount?: number; maxAmount?: number } = {}, availableTypes: string[] = []) {
+    super(message, limits, availableTypes);
     this.name = "Sep6ValidationError";
   }
 }
@@ -127,7 +74,7 @@ export async function getSep6Info(baseUrl: string, logger?: Logger): Promise<Sep
   const res = await fetch(endpointUrl(baseUrl, "info"));
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.info.fail", statusCode: res.status }, "SEP-6 /info failed");
-    throw new Error(`SEP-6 /info failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("6", "/info", res);
   }
 
   const body = (await res.json()) as {
@@ -232,7 +179,7 @@ export async function resolveWithdrawType(
     throw new Sep6ValidationError(
       typeNames.length === 0
         ? `Anchor lists no withdraw types for ${assetCode}`
-        : `Anchor offers ${typeNames.length} withdraw types for ${assetCode}; set OFFRAMP_TYPE to choose one`,
+        : `Anchor offers ${typeNames.length} withdraw types for ${assetCode} (${typeNames.join(", ")}); choose one with withdrawType, or set OFFRAMP_TYPE as the operator default`,
       { minAmount: asset.minAmount, maxAmount: asset.maxAmount },
       typeNames,
     );
@@ -271,6 +218,25 @@ export interface Sep6TransactionResult {
   status: string;
   amountOut?: string;
   message?: string;
+  /**
+   * Deposit instructions. SEP-6 publishes these on the transaction, not (only)
+   * on the /withdraw response: an anchor that is still reviewing KYC leaves
+   * them out of /withdraw and adds them when the transaction reaches
+   * `pending_user_transfer_start`. Populated only for that status.
+   */
+  withdrawAnchorAccount?: string;
+  withdrawMemo?: string;
+  withdrawMemoType?: "text" | "id" | "hash";
+  /** What the anchor expects to receive, when it says so (SEP-6 `amount_in`). */
+  amountIn?: string;
+}
+
+/** Thrown when an anchor's transaction carries a value we refuse to guess at. */
+export class Sep6TransactionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "Sep6TransactionError";
+  }
 }
 
 /** SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md */
@@ -310,7 +276,7 @@ export async function startSep6Withdraw(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
-    throw new Error(`SEP-6 withdraw failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("6", "withdraw", res);
   }
   const body = (await res.json()) as { id: string; account_id?: string; memo?: string; memo_type?: string };
   const memoType = body.memo_type === "id" || body.memo_type === "hash" || body.memo_type === "text" ? body.memo_type : undefined;
@@ -336,19 +302,55 @@ export async function getSep6Transaction(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.status.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 transaction fetch failed");
-    throw new Error(`SEP-6 transaction fetch failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("6", "transaction fetch", res);
   }
   const body = (await res.json()) as {
-    transaction: { id: string; status: string; amount_out?: string; message?: string };
+    transaction: {
+      id: string;
+      status: string;
+      amount_out?: string;
+      message?: string;
+      amount_in?: string;
+      withdraw_anchor_account?: string;
+      withdraw_memo?: string;
+      withdraw_memo_type?: string;
+    };
   };
+  const tx = body.transaction;
   const out: Sep6TransactionResult = {
-    id: body.transaction.id,
-    status: body.transaction.status,
-    amountOut: body.transaction.amount_out,
-    message: body.transaction.message,
+    id: tx.id,
+    status: tx.status,
+    amountOut: tx.amount_out,
+    message: tx.message,
   };
+  // The deposit instructions only mean something while the anchor is waiting
+  // for the seller's payment. Reading them at any other status would also let
+  // an odd value on, say, a completed transaction wedge the poller for a job
+  // that has already finished.
+  if (tx.status === "pending_user_transfer_start") {
+    let memoType: Sep6TransactionResult["withdrawMemoType"];
+    if (tx.withdraw_memo_type !== undefined && tx.withdraw_memo_type !== null) {
+      if (tx.withdraw_memo_type !== "text" && tx.withdraw_memo_type !== "id" && tx.withdraw_memo_type !== "hash") {
+        // A wrong memo type sends the seller's USDC somewhere the anchor
+        // cannot credit. Refuse rather than fall back to a default.
+        throw new Sep6TransactionError(
+          `SEP-6 transaction ${tx.id} has an unsupported withdraw_memo_type "${String(tx.withdraw_memo_type)}"`,
+        );
+      }
+      memoType = tx.withdraw_memo_type;
+    }
+    out.withdrawAnchorAccount = tx.withdraw_anchor_account || undefined;
+    out.withdrawMemo = tx.withdraw_memo ?? undefined;
+    out.withdrawMemoType = memoType;
+    out.amountIn = tx.amount_in ?? undefined;
+  }
   log.info(
-    { event: "anchor.sep6.status.ok", status: out.status, amountOut: out.amountOut, durationMs: Date.now() - t0 },
+    {
+      event: "anchor.sep6.status.ok",
+      status: out.status,
+      amountOut: out.amountOut,
+      hasDepositInstructions: out.withdrawAnchorAccount !== undefined,
+      durationMs: Date.now() - t0 },
     "SEP-6 transaction polled",
   );
   return out;

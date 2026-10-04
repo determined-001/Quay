@@ -15,11 +15,23 @@ export interface LinkWithRequest {
   request: PaymentRequest;
 }
 
-/** Anchor field descriptors + the seller's previously-saved (masked) payout
- *  fields for the cash-out form (issue #32). */
-export interface OfframpRequirements {
-  /** Anchor's field descriptors — drives the dynamic form. */
+/** One SEP-6 withdrawal type and the payout fields it needs (issue 5.24). */
+export interface WithdrawTypeOption {
+  /** The anchor's type name, e.g. "bank_account", "cash". */
+  name: string;
   descriptors: PayoutFieldDescriptor[];
+}
+
+/** Anchor withdrawal types (each with its field descriptors) + the seller's
+ *  previously-saved (masked) payout fields for the cash-out form (issues #32,
+ *  5.24). */
+export interface OfframpRequirements {
+  /** Every withdrawal type the anchor offers — drives the rail picker and,
+   *  per selected type, the dynamic form. */
+  types: WithdrawTypeOption[];
+  /** The type to preselect: the operator default when offered, or the only
+   *  type when there is exactly one, else null and the seller must choose. */
+  defaultType: string | null;
   /**
    * Previously-saved values, masked to last 4 chars server-side. Null on first
    * cash-out. The form uses these to show "already on file" and skips fields
@@ -39,10 +51,19 @@ export interface WebhookDelivery {
   createdAt: number;
 }
 
+export interface OfframpPollStatus {
+  reason: string;
+  message: string;
+  at: number;
+}
+
 export interface LinkDetail {
   link: PaymentLink;
   request: PaymentRequest;
   deliveries: WebhookDelivery[];
+  offrampPoll?: OfframpPollStatus | null;
+  /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
+  offrampExternalStatus: string | null;
 }
 
 /** Fields exposed on the public receipt — never includes seller PII. */
@@ -73,6 +94,19 @@ export interface KycView {
   providedFields: Record<string, string>;
   message: string | null;
   lastSyncedAt: number | null;
+}
+
+/** Disclosure metadata only. Field values must never appear in this response. */
+export interface KycDisclosure {
+  anchorDomain: string;
+  status: KycStatus;
+  fields: Array<{
+    name: string;
+    sentAt: number;
+    anchorStatus: string;
+    error?: string | null;
+  }>;
+  consent: { grantedAt: number; revokedAt: number | null } | null;
 }
 
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
@@ -155,10 +189,62 @@ export type ApiErrorCode =
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
   | "server_error" // 5xx or unexpected non-JSON response
   | "consent_required" // per-anchor consent missing for KYC fields
+  | "offramp_rejected" // anchor refused the amount/type; see `details.limits` and `details.availableTypes`
   // Operator telemetry (issue 5.21):
   | "unauthorized" // telemetry token rejected
   | "telemetry_not_enabled" // deployment has no TELEMETRY_TOKEN configured
-  | "telemetry_error"; // any other telemetry-route failure
+  | "telemetry_error" // any other telemetry-route failure
+  | "anchor_unavailable" // 503: the seller's anchor is down or its circuit breaker is open
+  | "offramp_disabled" // 501: this deployment has no off-ramp configured
+  | "quote_expired" // 409 `quote_expired: <detail>`: the anchor quote lapsed before use
+  | "request_in_progress" // 409: same Idempotency-Key still running, or key reused with a different body
+  | "challenge_rejected"; // anchor SEP-10 challenge refused (400/502)
+
+const BY_REASON_409: Record<string, ApiErrorCode> = {
+  insufficient_balance: "insufficient_balance",
+  missing_trustline: "missing_trustline",
+  wrong_network: "wrong_network",
+};
+
+// Codes the API names explicitly; these win over the generic `>= 500` rule.
+const EXPLICIT: Record<string, ApiErrorCode> = {
+  anchor_unavailable: "anchor_unavailable",
+  offramp_disabled: "offramp_disabled",
+  request_in_progress: "request_in_progress",
+  idempotency_key_reuse: "request_in_progress",
+  challenge_rejected: "challenge_rejected",
+};
+
+const BY_CODE: Record<string, ApiErrorCode> = {
+  not_found: "not_found",
+  invalid_body: "invalid_body",
+  kyc_required: "kyc_required",
+  offramp_rejected: "offramp_rejected",
+  anchor_auth_required: "anchor_auth_required",
+  destination_cannot_receive: "destination_cannot_receive",
+  payment_rejected: "payment_rejected",
+};
+
+/**
+ * Map an API error response to an ApiErrorCode. Pure. Precedence: explicit new
+ * codes, then `>= 500`, then 409 + `reason`, 409 + `payment_rejected`, 409 as
+ * `conflict`, then by `error` code, else `server_error`.
+ */
+export function classifyError(status: number, body: Record<string, unknown>): ApiErrorCode {
+  const error = typeof body.error === "string" ? body.error : "";
+  const reason = typeof body.reason === "string" ? body.reason : "";
+
+  if (Object.hasOwn(EXPLICIT, error)) return EXPLICIT[error]!;
+  if (error.startsWith("quote_expired")) return "quote_expired";
+
+  if (status >= 500) return "server_error";
+
+  if (status === 409 && Object.hasOwn(BY_REASON_409, reason)) return BY_REASON_409[reason]!;
+  if (status === 409 && error === "payment_rejected") return "payment_rejected";
+  if (status === 409) return "conflict";
+
+  return Object.hasOwn(BY_CODE, error) ? BY_CODE[error]! : "server_error";
+}
 
 /** Structured error thrown by http() so callers can branch on code. */
 export class CheckoutError extends Error {
@@ -176,6 +262,17 @@ export class CheckoutError extends Error {
   }
 }
 
+function describeOffRampRejected(err: CheckoutError): string {
+  const limits = (err.details.limits ?? {}) as { minAmount?: number; maxAmount?: number };
+  const { minAmount, maxAmount } = limits;
+  if (minAmount !== undefined && maxAmount !== undefined) {
+    return `The anchor only accepts cash-outs between ${minAmount} and ${maxAmount}. Adjust the amount and try again.`;
+  }
+  if (minAmount !== undefined) return `The anchor requires a cash-out of at least ${minAmount}.`;
+  if (maxAmount !== undefined) return `The anchor accepts cash-outs of at most ${maxAmount}.`;
+  return "The anchor can't process this cash-out as requested.";
+}
+
 /** Map an error code to copy suitable for a seller-facing dashboard. */
 export function describeError(err: CheckoutError): string {
   switch (err.code) {
@@ -187,6 +284,8 @@ export function describeError(err: CheckoutError): string {
       return "This action cannot be completed right now. The link may be in an unexpected state. Try refreshing.";
     case "kyc_required":
       return "Identity verification is required before you can cash out. See the panel above.";
+    case "offramp_rejected":
+      return describeOffRampRejected(err);
     case "anchor_auth_required":
       return "Sign in to the anchor with your wallet first. See the identity verification panel.";
     case "destination_cannot_receive":
@@ -205,6 +304,16 @@ export function describeError(err: CheckoutError): string {
       return "We can't reach the payment service right now. Check your connection and try again.";
     case "server_error":
       return "Something went wrong on the server. Please try again in a moment.";
+    case "anchor_unavailable":
+      return "The anchor is currently unavailable. Please try again later.";
+    case "offramp_disabled":
+      return "Offramping is currently disabled for this anchor.";
+    case "quote_expired":
+      return "The quote expired before the transaction could complete. Try refreshing.";
+    case "request_in_progress":
+      return "This request is already being processed. Please wait.";
+    case "challenge_rejected":
+      return "The anchor rejected the sign-in challenge. Please try again.";
     case "consent_required":
       return "You need to approve sharing these identity fields with the anchor before submitting.";
     default:
@@ -243,8 +352,9 @@ export function setServerSkewForTest(ms: number): void {
 }
 
 async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: string; raw?: boolean }): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const headers: Record<string, string> = {
-    "content-type": "application/json",
+    ...(isFormData ? {} : { "content-type": "application/json" }),
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
   if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
@@ -280,33 +390,7 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
     const { error, missingFields: rawMissing, message, ...details } = body;
     const apiCode = typeof error === "string" ? error : undefined;
     const missingFields = Array.isArray(rawMissing) ? (rawMissing as string[]) : undefined;
-    const reason = typeof details.reason === "string" ? details.reason : undefined;
-    const code: ApiErrorCode =
-      res.status >= 500
-        ? "server_error"
-        : res.status === 409 && reason === "insufficient_balance"
-          ? "insufficient_balance"
-          : res.status === 409 && reason === "missing_trustline"
-            ? "missing_trustline"
-            : res.status === 409 && reason === "wrong_network"
-              ? "wrong_network"
-              : res.status === 409 && apiCode === "payment_rejected"
-                ? "payment_rejected"
-                : res.status === 409
-                  ? "conflict"
-                  : apiCode === "not_found"
-                    ? "not_found"
-                    : apiCode === "invalid_body"
-                      ? "invalid_body"
-                      : apiCode === "kyc_required"
-                        ? "kyc_required"
-                        : apiCode === "anchor_auth_required"
-                          ? "anchor_auth_required"
-                        : apiCode === "destination_cannot_receive"
-                          ? "destination_cannot_receive"
-                          : apiCode === "payment_rejected"
-                            ? "payment_rejected"
-                            : "server_error";
+    const code: ApiErrorCode = classifyError(res.status, body);
     const detail = typeof message === "string" ? message : (apiCode ?? res.statusText);
     throw new CheckoutError(code, res.status, detail, missingFields, details);
   }
@@ -433,14 +517,20 @@ export const api = {
   /** The route returns the whole OffRampQuote — including `expiresAt` (epoch
    *  ms, the ANCHOR's own TTL) — so the type is the shared one rather than a
    *  redeclaration that drops fields (issue 5.22 dropped exactly that one). */
-  quoteCashOut: (id: string, targetCurrency: string) =>
-    http<OffRampQuote>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+  quoteCashOut: (id: string, targetCurrency: string, withdrawType?: string) =>
+    http<OffRampQuote>(
+      `/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}${
+        withdrawType ? `&withdrawType=${encodeURIComponent(withdrawType)}` : ""
+      }`,
+    ),
 
   cashOut: (
     id: string,
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
+    quoteId?: string,
+    withdrawType?: string,
   ) =>
     http<{
       job: {
@@ -458,8 +548,21 @@ export const api = {
       transfer?: WithdrawTransfer;
     }>(
       `/links/${id}/cash-out`,
-      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          targetCurrency,
+          payoutFields,
+          ...(quoteId ? { quoteId } : {}),
+          ...(withdrawType ? { withdrawType } : {}),
+        }),
+        idempotencyKey,
+      },
     ),
+
+
+  getCashOutTransfer: (id: string) =>
+    http<{ transfer: WithdrawTransfer }>(`/links/${id}/cash-out/transfer`),
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
@@ -482,7 +585,12 @@ export const api = {
     }),
 
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
-  getKyc: () => http<KycView>("/seller/kyc"),
+  getKyc: (opts?: { refresh?: boolean }) =>
+    http<KycView>(`/seller/kyc${opts?.refresh ? "?refresh=1" : ""}`),
+  getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
+  deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
+    `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },
+  ),
 
   // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
   // sign with the wallet -> completeAnchorAuth(). Quay never signs it.
@@ -525,6 +633,8 @@ export const api = {
 
   revokeKycConsent: (anchorDomain: string) =>
     http<{ revoked: boolean; anchorDomain: string; note: string }>(`/seller/kyc/consent/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" }),
+  submitKycFiles: (formData: FormData) =>
+    http<KycView>("/seller/kyc/files", { method: "PUT", body: formData }),
 
   listWebhooks: () => http<{ webhooks: Webhook[] }>("/webhooks"),
 

@@ -35,6 +35,7 @@ import type {
   OffRampTelemetryStatus,
   OffRampTelemetrySummary,
   AssetRef,
+  WithdrawTransfer,
 } from "@checkout/core";
 import type { DB } from "../db/client";
 import {
@@ -91,7 +92,7 @@ function rowToLink(row: LinkRow): PaymentLink {
     overpaidAmount: row.overpaidAmount ?? null,
     offrampJobId: row.offrampJobId ?? null,
     offrampTargetCurrency: row.offrampTargetCurrency ?? null,
-    offrampStatus: row.offrampStatus ?? null,
+    offrampStatus: (row.offrampStatus ?? null) as PaymentLink["offrampStatus"],
     offrampIndicativeRate: row.offrampIndicativeRate ?? null,
     offrampRate: row.offrampRate ?? null,
     offrampRateDelta: row.offrampRateDelta ?? null,
@@ -316,6 +317,7 @@ function rowToSeller(
     wallet: row.wallet,
     profileKind: row.profileKind,
     payoutFields,
+    lastActiveAt: row.lastActiveAt ?? null,
     createdAt: row.createdAt,
   };
 }
@@ -419,6 +421,7 @@ export class DrizzleSellerRepository implements SellerRepository {
       wallet,
       profileKind: "individual",
       payoutFieldsJson: null,
+      lastActiveAt: now,
       payoutFieldsEncrypted: null,
       createdAt: now,
     };
@@ -456,13 +459,33 @@ export class DrizzleSellerRepository implements SellerRepository {
   }
 
   async createIfAbsent(wallet: string): Promise<Seller> {
+    const now = Date.now();
     await this.db
       .insert(sellers)
-      .values({ id: newId("sel"), name: shortWallet(wallet), wallet, createdAt: Date.now() })
+      .values({ id: newId("sel"), name: shortWallet(wallet), wallet, lastActiveAt: now, createdAt: now })
       .onConflictDoNothing({ target: sellers.wallet });
     const seller = await this.findByWallet(wallet);
     if (!seller) throw new Error(`failed to create or find seller for wallet ${wallet}`);
     return seller;
+  }
+
+  /**
+   * Update seller's last_active_at timestamp. Throttled to at most once per hour
+   * (throttleMs, default 3600_000) to keep high-frequency calls cheap.
+   */
+  async touchLastActive(sellerId: string, now = Date.now(), throttleMs = 3600_000): Promise<void> {
+    await this.db
+      .update(sellers)
+      .set({ lastActiveAt: now })
+      .where(
+        and(
+          eq(sellers.id, sellerId),
+          or(
+            isNull(sellers.lastActiveAt),
+            lt(sellers.lastActiveAt, now - throttleMs),
+          ),
+        ),
+      );
   }
 
   /**
@@ -872,6 +895,20 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
     sellAmount: row.sellAmount,
     buyCurrency: row.buyCurrency,
     price: row.price,
+    ...(row.quotedRate !== null &&
+    row.quotedTargetAmount !== null &&
+    row.quotedFeeAmount !== null &&
+    row.quotedNetTargetAmount !== null
+      ? {
+          quotedAmounts: {
+            rate: row.quotedRate,
+            targetAmount: row.quotedTargetAmount,
+            feeAmount: row.quotedFeeAmount,
+            feeSource: row.quotedFeeSource === "anchor" ? ("anchor" as const) : ("estimated" as const),
+            netTargetAmount: row.quotedNetTargetAmount,
+          },
+        }
+      : {}),
     expiresAt: row.expiresAt,
     createdAt: row.createdAt,
   };
@@ -890,6 +927,12 @@ function rowToJob(row: OffRampJobRow): StoredOffRampJob {
     status: row.status as StoredOffRampJob["status"],
     externalStatus: row.externalStatus ?? null,
     lastError: row.lastError ?? null,
+    sellAsset: row.sellAssetCode ? { code: row.sellAssetCode, issuer: row.sellAssetIssuer ?? null } : null,
+    sellAmount: row.sellAmount ?? null,
+    transfer: row.transferJson ? (JSON.parse(row.transferJson) as WithdrawTransfer) : null,
+    lastPollError: row.lastPollError ?? null,
+    lastPollErrorAt: row.lastPollErrorAt ?? null,
+    lastPollReason: row.lastPollReason ?? null,
     transferNotifiedAt: row.transferNotifiedAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -909,6 +952,11 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       sellAmount: quote.sellAmount,
       buyCurrency: quote.buyCurrency,
       price: quote.price,
+      quotedRate: quote.quotedAmounts?.rate ?? null,
+      quotedTargetAmount: quote.quotedAmounts?.targetAmount ?? null,
+      quotedFeeAmount: quote.quotedAmounts?.feeAmount ?? null,
+      quotedFeeSource: quote.quotedAmounts?.feeSource ?? null,
+      quotedNetTargetAmount: quote.quotedAmounts?.netTargetAmount ?? null,
       expiresAt: quote.expiresAt,
       createdAt: quote.createdAt,
     });
@@ -932,6 +980,13 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       status: job.status,
       externalStatus: job.externalStatus,
       lastError: job.lastError,
+      sellAssetCode: job.sellAsset?.code ?? null,
+      sellAssetIssuer: job.sellAsset?.issuer ?? null,
+      sellAmount: job.sellAmount ?? null,
+      transferJson: job.transfer ? JSON.stringify(job.transfer) : null,
+      lastPollError: job.lastPollError ?? null,
+      lastPollErrorAt: job.lastPollErrorAt ?? null,
+      lastPollReason: job.lastPollReason ?? null,
       transferNotifiedAt: job.transferNotifiedAt,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
@@ -945,11 +1000,18 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
   ): Promise<void> {
+    const { transfer, ...columns } = patch;
     await this.db
       .update(offrampJobs)
-      .set({ ...patch, updatedAt: Date.now() })
+      .set({
+        ...columns,
+        // `undefined` leaves the stored instructions alone; only an explicit
+        // value (or null) rewrites them.
+        ...(transfer !== undefined ? { transferJson: transfer ? JSON.stringify(transfer) : null } : {}),
+        updatedAt: Date.now(),
+      })
       .where(eq(offrampJobs.jobId, jobId));
   }
 }
@@ -970,6 +1032,7 @@ export class DrizzleKycRepository implements KycRepository {
   private rowToRecord(row: SellerKycRow): KycRecord {
     return {
       sellerId: row.sellerId,
+      anchorDomain: row.anchorDomain,
       account: row.account ?? null,
       customerId: row.customerId ?? null,
       status: row.status as KycStatus,
@@ -977,20 +1040,50 @@ export class DrizzleKycRepository implements KycRepository {
       providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.keyring)) as Record<string, string>,
       providedFieldStatus: row.providedFieldStatus ? JSON.parse(row.providedFieldStatus) as ProvidedFieldStatus[] : [],
       sentFields: row.sentFields ? JSON.parse(row.sentFields) as string[] : [],
+      callbackTokenHash: row.callbackTokenHash ?? null,
       message: row.message ?? null,
       lastSyncedAt: row.lastSyncedAt ?? null,
       updatedAt: row.updatedAt,
     };
   }
 
-  async get(sellerId: string): Promise<KycRecord | null> {
-    const rows = await this.db.select().from(sellerKyc).where(eq(sellerKyc.sellerId, sellerId)).limit(1);
+  async get(sellerId: string, anchorDomain: string): Promise<KycRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(sellerKyc)
+      .where(and(eq(sellerKyc.sellerId, sellerId), eq(sellerKyc.anchorDomain, anchorDomain)))
+      .limit(1);
+    return rows[0] ? this.rowToRecord(rows[0]) : null;
+  }
+
+  async delete(sellerId: string, anchorDomain?: string): Promise<void> {
+    await this.db
+      .delete(sellerKyc)
+      .where(
+        anchorDomain === undefined
+          ? eq(sellerKyc.sellerId, sellerId)
+          : and(eq(sellerKyc.sellerId, sellerId), eq(sellerKyc.anchorDomain, anchorDomain)),
+      );
+  }
+
+  async getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null> {
+    const rows = await this.db.select().from(sellerKyc).where(eq(sellerKyc.callbackTokenHash, tokenHash)).limit(1);
     return rows[0] ? this.rowToRecord(rows[0]) : null;
   }
 
   async save(record: KycRecord): Promise<void> {
+    const binaryFieldNames = new Set(
+      record.requiredFields.filter((f) => f.type === "binary").map((f) => f.name),
+    );
+    for (const key of Object.keys(record.providedFields)) {
+      if (binaryFieldNames.has(key)) {
+        throw new Error(`Binary field ${key} must never be persisted in KYC providedFields`);
+      }
+    }
+
     const row = {
       sellerId: record.sellerId,
+      anchorDomain: record.anchorDomain,
       account: record.account,
       customerId: record.customerId,
       status: record.status,
@@ -998,6 +1091,7 @@ export class DrizzleKycRepository implements KycRepository {
       fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.keyring),
       providedFieldStatus: record.providedFieldStatus?.length ? JSON.stringify(record.providedFieldStatus) : null,
       sentFields: record.sentFields?.length ? JSON.stringify(record.sentFields) : null,
+      callbackTokenHash: record.callbackTokenHash ?? null,
       message: record.message,
       lastSyncedAt: record.lastSyncedAt,
       updatedAt: record.updatedAt,
@@ -1005,7 +1099,7 @@ export class DrizzleKycRepository implements KycRepository {
     await this.db
       .insert(sellerKyc)
       .values(row)
-      .onConflictDoUpdate({ target: sellerKyc.sellerId, set: row });
+      .onConflictDoUpdate({ target: [sellerKyc.sellerId, sellerKyc.anchorDomain], set: row });
   }
 
   async countNonPrimaryRows(): Promise<number> {
@@ -1161,6 +1255,13 @@ export class DrizzleSellerProfileRepository implements SellerProfileRepository {
 }
 
 /**
+ * Grace period after expiration before an anchor session row is swept at rest.
+ * A grace period of 24h keeps "your session expired" distinguishable from
+ * "never connected" for the dashboard reconnection prompt.
+ */
+export const ANCHOR_SESSION_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Sellers' SEP-10 sessions with the anchor. The token is a bearer credential,
  * so it is stored encrypted with the same key as webhook secrets and only
  * decrypted in-process when a call to the anchor needs it.
@@ -1205,6 +1306,21 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
     await this.db
       .delete(anchorSessions)
       .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
+  }
+
+  /**
+   * Delete anchor session rows that expired longer than graceMs ago.
+   *
+   * @param now Current timestamp in epoch ms.
+   * @param graceMs Minimum elapsed ms past expiresAt before deletion.
+   * @returns The number of deleted rows.
+   */
+  async sweepExpired(now: number, graceMs: number = ANCHOR_SESSION_SWEEP_GRACE_MS): Promise<number> {
+    const cutoff = now - graceMs;
+    const res = await this.db
+      .delete(anchorSessions)
+      .where(lt(anchorSessions.expiresAt, cutoff));
+    return res.rowsAffected ?? 0;
   }
 }
 

@@ -9,12 +9,12 @@ export type DB = LibSQLDatabase<typeof schema>;
 // CREATE TABLE IF NOT EXISTS so a fresh clone runs with no migration step.
 // (drizzle-kit push can manage this instead; see drizzle.config.ts.)
 const BOOTSTRAP_SQL = [
-  // payout_fields_json and payout_fields_encrypted included here so fresh databases get the full schema
-  // (issue #32, issue 4.34). Existing databases are handled by the ALTER TABLE statements
-  // in ADDITIVE_MIGRATIONS below.
+  // payout_fields_json, payout_fields_encrypted, profile_kind and last_active_at included here so
+  // fresh databases get the full schema (issue #32, issue 4.34, issue #240). Existing databases
+  // are handled by the ALTER TABLE statements in ADDITIVE_MIGRATIONS below.
   `CREATE TABLE IF NOT EXISTS sellers (
      id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL UNIQUE,
-     payout_fields_json TEXT, payout_fields_encrypted TEXT,
+     payout_fields_json TEXT, payout_fields_encrypted TEXT, last_active_at INTEGER,
      profile_kind TEXT NOT NULL DEFAULT 'individual', created_at INTEGER NOT NULL
    )`,
   // New columns (offramp_indicative_rate, offramp_rate, offramp_rate_delta) are
@@ -89,13 +89,25 @@ const BOOTSTRAP_SQL = [
      job_id TEXT PRIMARY KEY, link_id TEXT NOT NULL, anchor TEXT NOT NULL,
      seller_id TEXT, account TEXT, target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
      status TEXT NOT NULL, external_status TEXT, last_error TEXT,
+     sell_asset_code TEXT, sell_asset_issuer TEXT, sell_amount TEXT, transfer_json TEXT,
+     last_poll_error TEXT, last_poll_error_at INTEGER, last_poll_reason TEXT,
      transfer_notified_at INTEGER,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS seller_kyc (
-     seller_id TEXT PRIMARY KEY, account TEXT, customer_id TEXT, status TEXT NOT NULL,
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+     account TEXT, customer_id TEXT, status TEXT NOT NULL,
      required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
-     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL
+     callback_token_hash TEXT,
+     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL,
+     provided_field_status TEXT, sent_fields TEXT,
+     PRIMARY KEY (seller_id, anchor_domain)
+   )`,
+  // Historical last-send time per field and anchor. Values are never stored.
+  `CREATE TABLE IF NOT EXISTS kyc_disclosure_fields (
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+     field_name TEXT NOT NULL, sent_at INTEGER NOT NULL,
+     UNIQUE (seller_id, anchor_domain, field_name)
    )`,
   `CREATE TABLE IF NOT EXISTS anchor_sessions (
      seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT NOT NULL,
@@ -184,6 +196,11 @@ const BOOTSTRAP_SQL = [
 // above won't touch an existing table, so add it out-of-band; ignore the
 // "duplicate column" error on databases that already have it.
 const ADDITIVE_MIGRATIONS = [
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_rate TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_target_amount TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_amount TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_source TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_net_target_amount TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,
@@ -208,10 +225,23 @@ const ADDITIVE_MIGRATIONS = [
   // the old shared platform account and are treated as such.
   `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
+  // 3.9: SEP-6 deposit instructions can arrive after the withdraw call. The job
+  // remembers what it sold and the instructions once published. Additive; old
+  // rows stay NULL.
+  `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_code TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_issuer TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN sell_amount TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN transfer_json TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error_at INTEGER`,
+  `ALTER TABLE offramp_jobs ADD COLUMN last_poll_reason TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
+  `ALTER TABLE sellers ADD COLUMN last_active_at INTEGER`,
   // Track whether the offramp.transfer_required webhook has been sent for a job.
   // Null means not yet sent; epoch-ms when sent.
   `ALTER TABLE offramp_jobs ADD COLUMN transfer_notified_at INTEGER`,
+  `ALTER TABLE seller_kyc ADD COLUMN callback_token_hash TEXT`,
+  `CREATE INDEX IF NOT EXISTS seller_kyc_callback_token_hash_idx ON seller_kyc (callback_token_hash)`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
   // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never
   // upgrades an existing table. `createIfAbsent` uses ON CONFLICT (wallet),
@@ -350,6 +380,36 @@ async function migrateLegacyLinkPaymentsTable(client: Client): Promise<void> {
 }
 
 /**
+ * Backfill `last_active_at` on existing sellers that do not have it populated.
+ * Uses the latest activity timestamp across links, seller_kyc, anchor_sessions,
+ * and api_keys, falling back to sellers.created_at.
+ */
+async function backfillSellerLastActiveAt(client: Client): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(sellers)");
+  const columns = new Set(info.rows.map((r) => String(r.name)));
+  if (!columns.has("last_active_at")) return;
+
+  await client.execute(`
+    UPDATE sellers
+    SET last_active_at = COALESCE(
+      (
+        SELECT MAX(val) FROM (
+          SELECT created_at AS val FROM links WHERE seller_id = sellers.id
+          UNION ALL
+          SELECT updated_at AS val FROM seller_kyc WHERE seller_id = sellers.id
+          UNION ALL
+          SELECT created_at AS val FROM anchor_sessions WHERE seller_id = sellers.id
+          UNION ALL
+          SELECT last_used_at AS val FROM api_keys WHERE seller_id = sellers.id AND last_used_at IS NOT NULL
+        )
+      ),
+      created_at
+    )
+    WHERE last_active_at IS NULL
+  `);
+}
+
+/**
  * Rebuilds `webhook_queue` so `link_id` is nullable (allowing seller-level events).
  */
 async function migrateLegacyWebhookQueueTable(client: Client): Promise<void> {
@@ -398,8 +458,57 @@ async function migrateLegacyWebhookDeliveriesTable(client: Client): Promise<void
   }
 }
 
-export async function bootstrap(client: Client): Promise<void> {
+/** Marks a `seller_kyc` row that predates per-anchor keys and cannot be attributed to an anchor. */
+export const LEGACY_KYC_ANCHOR = "legacy";
+
+/**
+ * Issue 4.24: `seller_kyc` was keyed by seller alone, so a second anchor would
+ * overwrite the first's state and inherit its customer id. SQLite cannot change
+ * a primary key in place, so rebuild: create `seller_kyc_v2` keyed by
+ * (seller_id, anchor_domain), copy every row, drop, rename.
+ *
+ * Existing rows are attributed to `anchorDomain` (the currently configured
+ * anchor's home domain). With no real anchor configured they cannot be
+ * attributed and keep {@link LEGACY_KYC_ANCHOR}, whose rows are never reused for
+ * a customer id. Idempotent: a table that already has `anchor_domain` is left alone.
+ */
+async function migrateLegacySellerKycTable(client: Client, anchorDomain: string | null): Promise<void> {
+  const info = await client.execute("PRAGMA table_info(seller_kyc)");
+  const columns = new Set(info.rows.map((r) => String(r.name)));
+  if (columns.size === 0 || columns.has("anchor_domain")) return; // fresh table, or already migrated
+
+  await client.execute("DROP TABLE IF EXISTS seller_kyc_v2");
+  await client.execute(`CREATE TABLE seller_kyc_v2 (
+     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
+     account TEXT, customer_id TEXT, status TEXT NOT NULL,
+     required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
+     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL,
+     provided_field_status TEXT, sent_fields TEXT,
+     PRIMARY KEY (seller_id, anchor_domain)
+   )`);
+  // Older tables may lack columns that were added later by ALTER TABLE.
+  const opt = (name: string) => (columns.has(name) ? name : "NULL");
+  await client.execute({
+    sql: `INSERT INTO seller_kyc_v2
+       (seller_id, anchor_domain, account, customer_id, status, required_fields, fields_encrypted,
+        message, last_synced_at, updated_at, provided_field_status, sent_fields)
+     SELECT seller_id, ?, ${opt("account")}, customer_id, status, required_fields, fields_encrypted,
+        message, last_synced_at, updated_at, ${opt("provided_field_status")}, ${opt("sent_fields")}
+     FROM seller_kyc`,
+    args: [anchorDomain ?? LEGACY_KYC_ANCHOR],
+  });
+  await client.execute("DROP TABLE seller_kyc");
+  await client.execute("ALTER TABLE seller_kyc_v2 RENAME TO seller_kyc");
+}
+
+export interface BootstrapOptions {
+  /** Home domain of the configured real anchor, used to attribute pre-4.24 `seller_kyc` rows. */
+  kycAnchorDomain?: string | null;
+}
+
+export async function bootstrap(client: Client, opts: BootstrapOptions = {}): Promise<void> {
   await migrateLegacyWebhooksTable(client);
+  await migrateLegacySellerKycTable(client, opts.kycAnchorDomain ?? null);
   await migrateLegacyProcessedTxTable(client);
   await migrateLegacyLinkPaymentsTable(client);
   await migrateLegacyWebhookQueueTable(client);
@@ -423,6 +532,7 @@ export async function bootstrap(client: Client): Promise<void> {
       if (!message.toLowerCase().includes("duplicate column")) throw err;
     }
   }
+  await backfillSellerLastActiveAt(client);
 }
 
 export { schema };

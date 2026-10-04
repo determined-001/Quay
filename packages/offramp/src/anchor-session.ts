@@ -8,6 +8,7 @@ import {
   type Logger,
 } from "@checkout/core";
 import { fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
+import { anchorHttpError } from "./anchor-error";
 
 // ===========================================================================
 //  Per-seller anchor identity.
@@ -24,6 +25,10 @@ import { fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
 
 /** Anchor-token lifetime we refuse to go below when deciding it is still live. */
 const EXPIRY_SKEW_MS = 60_000;
+/** Clock drift tolerated between us and the anchor when reading `iat`. */
+const CLAIM_SKEW_MS = 60_000;
+/** Longest session we will store, whatever `exp` claims. */
+const MAX_TOKEN_LIFETIME_MS = 7 * 24 * 60 * 60_000;
 
 export interface AnchorDiscoveryOptions {
   homeDomain: string;
@@ -79,8 +84,28 @@ export class AnchorDiscovery {
 }
 
 /** The challenge failed verification, or the signed one came back for the wrong account. */
+export type AnchorChallengeErrorKind =
+  /** The challenge was built for a different Stellar network than ours. */
+  | "wrong_network"
+  /** The challenge or token belongs to a different account than the seller's. */
+  | "wrong_account"
+  /** The anchor answered the signed challenge with an error. */
+  | "refused"
+  /** We could not vouch for the anchor (no SIGNING_KEY / stellar.toml). */
+  | "unverifiable"
+  /** The challenge failed verification for any other reason. */
+  | "invalid";
+
 export class AnchorChallengeError extends Error {
-  constructor(reason: string) {
+  /**
+   * `reason` is for server-side logs. Callers building an HTTP response should
+   * branch on `kind` and use fixed text, never `message`: some reasons come from
+   * the anchor's own response.
+   */
+  constructor(
+    readonly reason: string,
+    readonly kind: AnchorChallengeErrorKind = "invalid",
+  ) {
     super(`Anchor SEP-10 challenge rejected: ${reason}`);
     this.name = "AnchorChallengeError";
   }
@@ -132,14 +157,14 @@ export class SellerAnchorAuth {
 
     const res = await fetch(url);
     if (!res.ok) {
-      throw new Error(`SEP-10 challenge fetch failed: ${res.status} ${await res.text()}`);
+      throw await anchorHttpError("10", "challenge fetch", res);
     }
     const { transaction, network_passphrase } = (await res.json()) as {
       transaction: string;
       network_passphrase: string;
     };
     if (network_passphrase !== this.networkPassphrase) {
-      throw new AnchorChallengeError("challenge was built for a different network");
+      throw new AnchorChallengeError("challenge was built for a different network", "wrong_network");
     }
     this.verify(transaction, d, customer.account);
     return { transaction, networkPassphrase: network_passphrase };
@@ -161,16 +186,31 @@ export class SellerAnchorAuth {
       body: JSON.stringify({ transaction: signedTransaction }),
     });
     if (!res.ok) {
-      throw new AnchorChallengeError(`anchor refused the signed challenge (${res.status}): ${await res.text()}`);
+      // The anchor's body stays out of the error (and so out of any HTTP
+      // response); it is logged, truncated, for operators.
+      const refusal = await anchorHttpError("10", "auth submit", res);
+      this.logger?.warn(
+        { event: "anchor.error", sep: refusal.sep, op: refusal.op, statusCode: refusal.status, body: refusal.body },
+        "anchor refused the signed SEP-10 challenge",
+      );
+      throw new AnchorChallengeError(`anchor refused the signed challenge (${res.status})`, "refused");
     }
     const { token } = (await res.json()) as { token: string };
-    const claims = decodeJwtClaims(token);
-    // `sub` is the account, or `account:memo` for a shared account. Never
-    // store a token the anchor issued to someone else.
-    if (claims.sub && claims.sub.split(":")[0] !== customer.account) {
-      throw new AnchorChallengeError("anchor issued a token for a different account");
+    let expiresAt: number;
+    try {
+      expiresAt = this.checkClaims(token, customer, d);
+    } catch (err) {
+      // Reason only. The token is a bearer credential for this seller's KYC.
+      this.logger.warn(
+        {
+          event: "anchor.sep10.seller_auth.rejected",
+          sellerId: customer.sellerId,
+          reason: err instanceof AnchorChallengeError ? err.reason : "unexpected error validating token",
+        },
+        "anchor token rejected",
+      );
+      throw err;
     }
-    const expiresAt = (claims.exp ?? Math.floor(Date.now() / 1000) + 300) * 1000;
     await this.sessions.save({
       sellerId: customer.sellerId,
       anchorDomain: this.anchorDomain,
@@ -184,6 +224,74 @@ export class SellerAnchorAuth {
       "seller authenticated to anchor",
     );
     return { expiresAt };
+  }
+
+  /**
+   * Sanity-check the claims of the JWT the anchor returned and return the
+   * expiry (ms) to store.
+   *
+   * Quay cannot verify the signature: SEP-10 does not publish the anchor's JWT
+   * key. So the claims are the only check available, and a token that fails any
+   * of them is never stored. See SEP-10 "JWT Structure"
+   * (https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md).
+   */
+  private checkClaims(token: string, customer: AnchorCustomer, d: Sep1DiscoveryInfo): number {
+    const claims = decodeJwtClaims(token);
+    if (!claims) throw new AnchorChallengeError("anchor token has no readable payload");
+
+    // `sub` must be exactly the seller's own G account. SEP-10 also allows
+    // `G...:memo` (a sub-customer of a shared account) and muxed `M...`
+    // accounts, but a Quay seller is always the account itself, so either form
+    // means the anchor authenticated somebody other than this seller.
+    // (If muxed accounts are ever supported, that belongs in a deliberate
+    // change here, not in a laxer comparison.)
+    if (typeof claims.sub !== "string" || claims.sub === "") {
+      throw new AnchorChallengeError("anchor token has no subject");
+    }
+    if (claims.sub !== customer.account) {
+      if (claims.sub.includes(":")) {
+        throw new AnchorChallengeError("anchor issued a token for a memo sub-account, not the seller's own account", "wrong_account");
+      }
+      if (claims.sub.startsWith("M")) {
+        throw new AnchorChallengeError("anchor issued a token for a muxed account, not the seller's own account", "wrong_account");
+      }
+      throw new AnchorChallengeError("anchor issued a token for a different account", "wrong_account");
+    }
+
+    // `iss` is the issuer URI, e.g. https://testanchor.stellar.org/auth. Its
+    // host must be the anchor we are talking to: the host of the endpoint that
+    // issued it, or the anchor's home domain.
+    if (typeof claims.iss !== "string") throw new AnchorChallengeError("anchor token has no issuer");
+    let issHost: string;
+    try {
+      issHost = new URL(claims.iss).host.toLowerCase();
+    } catch {
+      throw new AnchorChallengeError("anchor token issuer is not a URL");
+    }
+    const allowedHosts = [new URL(d.webAuthEndpoint).host, this.anchorDomain].map((h) => h.toLowerCase());
+    if (!allowedHosts.includes(issHost)) {
+      throw new AnchorChallengeError(`anchor token issuer host ${issHost} is not ${allowedHosts.join(" or ")}`);
+    }
+
+    // Optional SEP-10 `home_domain` claim: when the anchor states one, it has to be ours.
+    if (claims.home_domain !== undefined && String(claims.home_domain).toLowerCase() !== this.anchorDomain.toLowerCase()) {
+      throw new AnchorChallengeError("anchor token was issued for a different home domain");
+    }
+
+    const now = Date.now();
+    if (claims.iat !== undefined) {
+      if (typeof claims.iat !== "number" || !Number.isFinite(claims.iat)) {
+        throw new AnchorChallengeError("anchor token iat is not a number");
+      }
+      if (claims.iat * 1000 > now + CLAIM_SKEW_MS) throw new AnchorChallengeError("anchor token was issued in the future");
+    }
+    if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp)) {
+      throw new AnchorChallengeError("anchor token has no expiry");
+    }
+    if (claims.exp * 1000 <= now) throw new AnchorChallengeError("anchor token has already expired");
+    // Do not trust a far-future expiry: a session that lives for years would
+    // outlast anything the seller consented to. Cap it instead of refusing.
+    return Math.min(claims.exp * 1000, now + MAX_TOKEN_LIFETIME_MS);
   }
 
   /**
@@ -223,6 +331,7 @@ export class SellerAnchorAuth {
     if (d.fallback || !d.signingKey) {
       throw new AnchorChallengeError(
         `could not verify ${this.anchorDomain}: its stellar.toml was unreachable or declares no SIGNING_KEY`,
+        "unverifiable",
       );
     }
     return d;
@@ -242,17 +351,28 @@ export class SellerAnchorAuth {
       throw new AnchorChallengeError(err instanceof Error ? err.message : String(err));
     }
     if (clientAccountID !== account) {
-      throw new AnchorChallengeError("challenge is for a different account than the signed-in seller");
+      throw new AnchorChallengeError("challenge is for a different account than the signed-in seller", "wrong_account");
     }
   }
 }
 
-function decodeJwtClaims(token: string): { sub?: string; exp?: number } {
-  const payload = token.split(".")[1];
-  if (!payload) return {};
+interface JwtClaims {
+  iss?: unknown;
+  sub?: unknown;
+  iat?: unknown;
+  exp?: unknown;
+  home_domain?: unknown;
+}
+
+/** The payload of a three-part JWT as an object, or null when it is anything else. */
+function decodeJwtClaims(token: unknown): JwtClaims | null {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
   try {
-    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { sub?: string; exp?: number };
+    const claims: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return claims !== null && typeof claims === "object" && !Array.isArray(claims) ? (claims as JwtClaims) : null;
   } catch {
-    return {};
+    return null;
   }
 }

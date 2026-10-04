@@ -162,6 +162,14 @@ verifies and relays the challenge and keeps the resulting JWT per seller in
 and SEP-12 KYC records (`seller_kyc.fields_encrypted`) are likewise encrypted at rest using AES-256-GCM
 via `KYC_ENCRYPTION_KEY`.
 
+**KYC status push (SEP-12 callback).** KYC status is otherwise only learned by polling `GET /customer`. After a
+seller submits KYC, `TestAnchorKyc` registers `<public origin>/anchor-callbacks/sep12/<anchor>/<token>` with the anchor
+(`PUT /customer/callback`) using the seller's own anchor session, and stores only the token's hash on the
+`seller_kyc` row. The anchor's POST is accepted by `apps/api/src/routes/anchor-callbacks.ts` only after the token
+resolves to a record *for that anchor*, the signature verifies against that anchor's `SIGNING_KEY`
+(`packages/offramp/src/sep12-callback.ts`) and the body's customer id matches. The stellar.toml is fetched only for an
+anchor Quay itself registered with, never for a domain taken from the request.
+
 ```mermaid
 sequenceDiagram
   participant Wallet as Seller's wallet (browser)
@@ -208,6 +216,18 @@ sequenceDiagram
     end
   end
 ```
+
+If `/sep6/withdraw` came back without `account_id` (SEP-6 allows this while the
+anchor is still reviewing), `initiate()` returns `kind: "fields"` and the modal
+tells the seller the send step will follow. The poller keeps reading
+`/sep6/transaction`; when the status reaches `pending_user_transfer_start` it
+carries `withdraw_anchor_account`, `withdraw_memo`, `withdraw_memo_type` and
+`amount_in`, and `status()` returns them as `OffRampJob.transfer`. They are
+stored on the job row (`offramp_jobs.transfer_json`; the sold asset and amount
+are in `sell_asset_code`, `sell_asset_issuer`, `sell_amount`) and the first
+appearance logs `cashout.transfer_required` (without the memo). An unknown
+`withdraw_memo_type` is rejected rather than guessed. Quay only relays the
+instructions; the seller's wallet still signs and sends.
 
 A seller with no live anchor session gets `403 anchor_auth_required` (and the
 circuit breaker does not count it — it says nothing about the anchor's health).
@@ -280,6 +300,13 @@ stateDiagram-v2
 
 Note the CI check only catches drift between `status.ts` and the `.mmd` file — it can't
 verify you also updated *this* pasted copy. If you touch `TRANSITIONS`, update both.
+
+The cash-out sub-state is **not** part of this diagram. While a link is `offramp_pending`,
+`link.offrampStatus` (typed `OffRampLinkStatus`) says what the anchor is waiting for:
+`awaiting_transfer` (the seller has not yet sent the USDC leg; SEP-6 `pending_user_transfer_start`
+or `incomplete`), `pending` (the anchor has it and is paying out), then `settled` or `failed`.
+`pollCashOuts()` refreshes it on every poll, not only on a terminal state, and the dashboard pill,
+the link timeline and the CSV export (`offramp_status`) all read it. No extra link transition is needed.
 
 ---
 

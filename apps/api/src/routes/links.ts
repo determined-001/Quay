@@ -85,24 +85,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       if (!isNaN(toMs)) filtered = filtered.filter((l) => l.createdAt <= toMs);
     }
 
-    const header = "id,reference,title,amount,asset,status,payer,tx_hash,paid_amount,created_at,updated_at\n";
-    const rows = filtered.map(
-      (l) =>
-        [
-          l.id,
-          l.reference,
-          csvCell(l.title),
-          l.amount,
-          l.asset.code,
-          l.status,
-          l.payer ?? "",
-          l.txHash ?? "",
-          l.paidAmount ?? "",
-          new Date(l.createdAt).toISOString(),
-          new Date(l.updatedAt).toISOString(),
-        ].join(","),
-    );
-    const csv = header + rows.join("\n");
+    const csv = LINKS_CSV_HEADER + filtered.map(linkToCsvRow).join("\n");
 
     return ctx.newResponse(csv, 200, {
       "content-type": "text/csv; charset=utf-8",
@@ -152,7 +135,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       return ctx.json(result);
     } catch (err) {
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 404 | 409 | 502);
       throw err;
     }
   });
@@ -183,7 +166,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json(result);
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 403 | 502);
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 404 | 403 | 502);
       throw err;
     }
   });
@@ -195,6 +178,9 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     const linkId = ctx.req.param("id");
     const targetCurrency = ctx.req.query("targetCurrency");
     if (!targetCurrency) return ctx.json({ error: "invalid_query", message: "targetCurrency is required" }, 400);
+    // The seller's rail choice (issue 5.24); optional — adapters fall back to
+    // the operator default. An unknown type comes back 400 with availableTypes.
+    const withdrawType = ctx.req.query("withdrawType") || undefined;
     try {
       const existing = await c.service.getLink(linkId);
       if (!existing) return ctx.json({ error: "not_found" }, 404);
@@ -203,11 +189,15 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
         // the id and leaks the link's existence (issue #41).
         return ctx.json({ error: "not_found" }, 404);
       }
-      const quote = await c.service.quoteCashOut(linkId, targetCurrency, { logger: getLogger(ctx) });
+      const quote = await c.service.quoteCashOut(linkId, targetCurrency, withdrawType, {
+        logger: getLogger(ctx),
+      });
       return ctx.json(quote);
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
+      if (err instanceof HttpError) {
+        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 422 | 502);
+      }
       throw err;
     }
   });
@@ -272,8 +262,34 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       if (err instanceof HttpError) {
         log.warn({ event: "cashout.request.error", linkId, error: err.message }, "cash-out request failed");
-        return ctx.json({ error: err.message }, err.status as 403 | 404 | 409 | 502);
+        // `extra` carries availableTypes on unknown_withdraw_type (issue 5.24).
+        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 403 | 404 | 409 | 422 | 502);
       }
+      throw err;
+    }
+  });
+
+  // Non-custodial transfer instructions for cash-out (e.g. SEP-24 pending_user_transfer_start).
+  // Scoped to offramp:initiate and seller ownership, returning { transfer } or 404.
+  app.get("/:id/cash-out/transfer", auth, requireScope("offramp:initiate"), async (ctx) => {
+    const log = getLogger(ctx);
+    const linkId = ctx.req.param("id");
+    const existing = await c.service.getLink(linkId);
+    if (!existing) return ctx.json({ error: "not_found" }, 404);
+    if (existing.link.sellerId !== ctx.get("seller").id) {
+      log.warn({ event: "cashout.transfer.rejected", linkId }, "cash-out transfer rejected: not the link's seller");
+      return ctx.json({ error: "not_found" }, 404);
+    }
+    try {
+      const transfer = await c.service.getCashOutTransfer(linkId, { logger: log });
+      if (!transfer) {
+        return ctx.json({ error: "not_found" }, 404);
+      }
+      return ctx.json({ transfer });
+    } catch (err) {
+      // 409 when the link is not offramp_pending; 403 anchor_auth_required when
+      // the seller has no live anchor session.
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 403 | 404 | 409);
       throw err;
     }
   });
@@ -290,7 +306,18 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json({ error: "not_found" }, 404);
     }
     const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
-    return ctx.json({ link: result.link, request: result.request, deliveries });
+    const offrampPoll = await c.service.getOfframpPollStatus(result.link);
+    // Raw upstream status for the seller's interactive step (issue 5.20):
+    // SEP-24 `incomplete` reads as "waiting on you" in the UI, while the
+    // mapped offrampStatus stays `pending`.
+    const offrampExternalStatus = await c.service.getOffRampExternalStatus(result.link);
+    return ctx.json({
+      link: result.link,
+      request: result.request,
+      deliveries,
+      offrampExternalStatus,
+      offrampPoll,
+    });
   });
 
   // Seller voids a link they created by mistake. Idempotent: cancelling an
@@ -345,6 +372,32 @@ export function toCheckoutView(link: PaymentLink) {
     createdAt: link.createdAt,
     updatedAt: link.updatedAt,
   };
+}
+
+/**
+ * Header of `GET /links/export/csv`. `offramp_status` is last so existing consumers that read the
+ * earlier columns by position keep working. It separates a cash-out that is waiting for the seller's
+ * on-chain transfer (`awaiting_transfer`) from one the anchor is paying out (`pending`); `status`
+ * alone reads `offramp_pending` for both.
+ */
+export const LINKS_CSV_HEADER =
+  "id,reference,title,amount,asset,status,payer,tx_hash,paid_amount,created_at,updated_at,offramp_status\n";
+
+export function linkToCsvRow(l: PaymentLink): string {
+  return [
+    l.id,
+    l.reference,
+    csvCell(l.title),
+    l.amount,
+    l.asset.code,
+    l.status,
+    l.payer ?? "",
+    l.txHash ?? "",
+    l.paidAmount ?? "",
+    new Date(l.createdAt).toISOString(),
+    new Date(l.updatedAt).toISOString(),
+    l.offrampStatus ?? "",
+  ].join(",");
 }
 
 /**

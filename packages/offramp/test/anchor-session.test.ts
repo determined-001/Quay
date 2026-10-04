@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Keypair, Networks, Transaction, TransactionBuilder, WebAuth } from "@stellar/stellar-sdk";
-import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer } from "@checkout/core";
+import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type Logger } from "@checkout/core";
 import { AnchorChallengeError, AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { TestAnchorKyc } from "../src/kyc";
 import { TestAnchorOffRamp } from "../src/testanchor";
@@ -36,9 +36,19 @@ ANCHOR_QUOTE_SERVER="${ORIGIN}/sep38"
 code="USDC"
 `;
 
-function jwtFor(sub: string): string {
-  const claims = Buffer.from(JSON.stringify({ sub, exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
-  return ["h", claims, "s"].join(".");
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+/** A SEP-10 JWT shaped like a real anchor's; `claims` overrides (undefined deletes) individual claims. */
+function jwtFor(sub: string, claims: Record<string, unknown> = {}): string {
+  const payload: Record<string, unknown> = {
+    iss: `${ORIGIN}/auth`,
+    sub,
+    iat: nowSec(),
+    exp: nowSec() + 3600,
+    ...claims,
+  };
+  for (const k of Object.keys(payload)) if (payload[k] === undefined) delete payload[k];
+  return ["h", Buffer.from(JSON.stringify(payload)).toString("base64url"), "s"].join(".");
 }
 
 function subOf(req: { headers?: HeadersInit }): string {
@@ -48,7 +58,16 @@ function subOf(req: { headers?: HeadersInit }): string {
 }
 
 /** A stub anchor keyed by SEP-10 account, the way real anchors key customers. */
-function stubAnchor(opts: { signingKey?: Keypair; tokenSub?: (account: string) => string } = {}) {
+function stubAnchor(
+  opts: {
+    signingKey?: Keypair;
+    tokenSub?: (account: string) => string;
+    /** Claim overrides for the JWT the anchor issues at POST /auth. */
+    tokenClaims?: Record<string, unknown>;
+    /** Replace the whole token (e.g. one with an unparsable payload). */
+    rawToken?: string;
+  } = {},
+) {
   const customers = new Map<string, { id: string; fields: Record<string, string> }>();
   const withdrawals: Array<{ account: string; sub: string }> = [];
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -58,7 +77,9 @@ function stubAnchor(opts: { signingKey?: Keypair; tokenSub?: (account: string) =
       const xdr = JSON.parse(init.body as string).transaction as string;
       const tx = TransactionBuilder.fromXDR(xdr, Networks.TESTNET) as Transaction;
       const account = tx.operations[0]!.source as string;
-      return Response.json({ token: jwtFor(opts.tokenSub ? opts.tokenSub(account) : account) });
+      return Response.json({
+        token: opts.rawToken ?? jwtFor(opts.tokenSub ? opts.tokenSub(account) : account, opts.tokenClaims),
+      });
     }
     if (url.pathname === "/auth") {
       const tx = WebAuth.buildChallengeTx(
@@ -111,7 +132,7 @@ function stubAnchor(opts: { signingKey?: Keypair; tokenSub?: (account: string) =
     return new Response("unexpected", { status: 500 });
   });
   vi.stubGlobal("fetch", fetchMock);
-  return { customers, withdrawals };
+  return { customers, withdrawals, fetchMock };
 }
 
 function setup() {
@@ -175,6 +196,123 @@ describe("SellerAnchorAuth", () => {
     await expect(signIn(auth, ALICE, alice)).rejects.toThrow(/different account/);
   });
 
+  describe("JWT claims are checked before a session is stored", () => {
+    async function rejected(anchorOpts: Parameters<typeof stubAnchor>[0], reason: RegExp) {
+      stubAnchor(anchorOpts);
+      const { auth, sessions } = setup();
+      await expect(signIn(auth, ALICE, alice)).rejects.toSatisfy(
+        (e: unknown) => e instanceof AnchorChallengeError && reason.test(e.message),
+      );
+      expect(await sessions.get(ALICE.sellerId, HOME)).toBeNull();
+    }
+
+    it("rejects a token with an unparsable payload", async () => {
+      await rejected({ rawToken: "h.!!!not-json!!!.s" }, /no readable payload/);
+    });
+
+    it("rejects a token that is not a three-part JWT", async () => {
+      await rejected({ rawToken: "just-a-string" }, /no readable payload/);
+    });
+
+    it("rejects a payload that is not a JSON object", async () => {
+      const arr = ["h", Buffer.from("[1,2]").toString("base64url"), "s"].join(".");
+      await rejected({ rawToken: arr }, /no readable payload/);
+    });
+
+    it("rejects a token with no sub (it used to pass the account check)", async () => {
+      await rejected({ tokenClaims: { sub: undefined } }, /no subject/);
+    });
+
+    it("rejects a memo'd sub for the seller's own account", async () => {
+      await rejected({ tokenSub: (a) => `${a}:12345` }, /memo sub-account/);
+    });
+
+    it("rejects a muxed (M...) sub", async () => {
+      const muxed = "M" + "A".repeat(68);
+      await rejected({ tokenSub: () => muxed }, /muxed/);
+    });
+
+    it("rejects an issuer on a foreign host", async () => {
+      await rejected({ tokenClaims: { iss: "https://evil.example/auth" } }, /issuer host evil\.example/);
+    });
+
+    it("rejects a missing or non-URL issuer", async () => {
+      await rejected({ tokenClaims: { iss: undefined } }, /no issuer/);
+      await rejected({ tokenClaims: { iss: "not a url" } }, /not a URL/);
+    });
+
+    it("accepts an issuer on the anchor's home domain even when the path differs", async () => {
+      stubAnchor({ tokenClaims: { iss: `https://${HOME}` } });
+      const { auth } = setup();
+      await expect(signIn(auth, ALICE, alice)).resolves.toBeUndefined();
+    });
+
+    it("rejects an expired token", async () => {
+      await rejected({ tokenClaims: { exp: nowSec() - 10 } }, /already expired/);
+    });
+
+    it("rejects a token with no exp instead of inventing five minutes", async () => {
+      await rejected({ tokenClaims: { exp: undefined } }, /no expiry/);
+    });
+
+    it("rejects an iat in the future beyond the 60s skew, but tolerates a few seconds of drift", async () => {
+      await rejected({ tokenClaims: { iat: nowSec() + 600 } }, /issued in the future/);
+      stubAnchor({ tokenClaims: { iat: nowSec() + 20 } });
+      const { auth } = setup();
+      await expect(signIn(auth, ALICE, alice)).resolves.toBeUndefined();
+    });
+
+    it("rejects a home_domain claim for another anchor, and accepts a matching one", async () => {
+      await rejected({ tokenClaims: { home_domain: "other.example" } }, /different home domain/);
+      stubAnchor({ tokenClaims: { home_domain: HOME } });
+      const { auth } = setup();
+      await expect(signIn(auth, ALICE, alice)).resolves.toBeUndefined();
+    });
+
+    it("caps a far-future exp at seven days rather than trusting it", async () => {
+      stubAnchor({ tokenClaims: { exp: nowSec() + 10 * 365 * 24 * 3600 } });
+      const { auth, sessions } = setup();
+      await signIn(auth, ALICE, alice);
+      const stored = await sessions.get(ALICE.sellerId, HOME);
+      const sevenDays = 7 * 24 * 3600 * 1000;
+      expect(stored!.expiresAt).toBeLessThanOrEqual(Date.now() + sevenDays);
+      expect(stored!.expiresAt).toBeGreaterThan(Date.now() + sevenDays - 60_000);
+    });
+
+    it("keeps a normal exp as issued", async () => {
+      const exp = nowSec() + 3600;
+      stubAnchor({ tokenClaims: { exp } });
+      const { auth, sessions } = setup();
+      await signIn(auth, ALICE, alice);
+      expect((await sessions.get(ALICE.sellerId, HOME))!.expiresAt).toBe(exp * 1000);
+    });
+
+    it("logs anchor.sep10.seller_auth.rejected with the reason and never the token", async () => {
+      const token = jwtFor(alice.publicKey(), { iss: "https://evil.example/auth" });
+      stubAnchor({ rawToken: token });
+      const events: Array<Record<string, unknown>> = [];
+      const logger: Logger = {
+        child: () => logger,
+        info: () => undefined,
+        warn: (...a: unknown[]) => void events.push(a[0] as Record<string, unknown>),
+        error: () => undefined,
+        debug: () => undefined,
+      };
+      const discovery = new AnchorDiscovery({ homeDomain: HOME, fallbackBaseUrl: ORIGIN });
+      const auth = new SellerAnchorAuth({
+        discovery,
+        sessions: new FakeAnchorSessionRepository(),
+        networkPassphrase: Networks.TESTNET,
+        logger,
+      });
+      await expect(signIn(auth, ALICE, alice)).rejects.toBeInstanceOf(AnchorChallengeError);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ event: "anchor.sep10.seller_auth.rejected", sellerId: ALICE.sellerId });
+      expect(JSON.stringify(events)).not.toContain(token);
+      expect(JSON.stringify(events)).not.toContain(token.split(".")[1]!);
+    });
+  });
+
   it("treats a session for the seller's previous wallet as no session", async () => {
     stubAnchor();
     const { auth } = setup();
@@ -207,11 +345,14 @@ describe("TestAnchorKyc — per seller", () => {
     // A row from before per-seller identity: no account, somebody else's customer.
     await repo.save({
       sellerId: ALICE.sellerId,
+      anchorDomain: HOME,
       account: null,
       customerId: "cus_platform",
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: { first_name: "Alice" },
+      providedFieldStatus: [],
+      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: 0,
@@ -226,6 +367,114 @@ describe("TestAnchorKyc — per seller", () => {
     expect(record.account).toBe(alice.publicKey());
     // What she had on file is still there to resubmit — the reusable profile.
     expect(record.providedFields.first_name).toBe("Alice");
+  });
+
+  /** A stored record in dev's per-anchor shape, synced `ageMs` ago. */
+  function cachedRecord(overrides: Partial<import("@checkout/core").KycRecord> & { ageMs: number }) {
+    const { ageMs, ...rest } = overrides;
+    return {
+      sellerId: ALICE.sellerId,
+      anchorDomain: HOME,
+      account: alice.publicKey(),
+      customerId: "cus_alice",
+      status: "ACCEPTED" as const,
+      requiredFields: [],
+      providedFields: { first_name: "Alice" },
+      providedFieldStatus: [],
+      sentFields: [],
+      message: null,
+      lastSyncedAt: Date.now() - ageMs,
+      updatedAt: Date.now() - ageMs,
+      ...rest,
+    };
+  }
+
+  /** Counts calls so a test can prove the repo was (not) written. */
+  function countingRepo() {
+    const repo = new InMemoryKycRepo();
+    const calls = { save: 0 };
+    const save = repo.save.bind(repo);
+    repo.save = async (record) => {
+      calls.save++;
+      await save(record);
+    };
+    return { repo, calls };
+  }
+
+  it("serves cached status without querying anchor or writing the repo if within maxAgeMs", async () => {
+    const anchor = stubAnchor();
+    const { discovery, auth } = setup();
+    const { repo, calls } = countingRepo();
+    await repo.save(cachedRecord({ ageMs: 5000 }));
+    calls.save = 0;
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    // Alice has NOT signed in, so querying the anchor would throw AnchorAuthRequiredError.
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.customerId).toBe("cus_alice");
+    expect(anchor.fetchMock).not.toHaveBeenCalled();
+    expect(calls.save).toBe(0);
+  });
+
+  it("re-syncs from anchor, and writes lastSyncedAt, if cached record is older than maxAgeMs", async () => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const { repo, calls } = countingRepo();
+    await repo.save(cachedRecord({ ageMs: 70_000 }));
+    calls.save = 0;
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.lastSyncedAt).toBeGreaterThan(Date.now() - 5000);
+    expect(calls.save).toBe(1);
+  });
+
+  it("caps maxAgeMs to 15s when record is PROCESSING", async () => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    // older than the 15s cap, but younger than the 60s maxAgeMs
+    await repo.save(cachedRecord({ status: "PROCESSING", ageMs: 20_000 }));
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.lastSyncedAt).toBeGreaterThan(Date.now() - 5000);
+  });
+
+  it("never serves a record that belongs to a different account from the cache", async () => {
+    const anchor = stubAnchor();
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    // Fresh, ACCEPTED, but synced for the seller's previous wallet.
+    await repo.save(cachedRecord({ account: Keypair.random().publicKey(), ageMs: 1000 }));
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+    anchor.fetchMock.mockClear();
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(anchor.fetchMock).toHaveBeenCalled();
+    expect(record.account).toBe(alice.publicKey());
+    // The anchor has never seen this account, so the stale ACCEPTED is not reused.
+    expect(record.status).toBe("unsubmitted");
+  });
+
+  it.each([[0], [undefined]])("always hits the anchor when maxAgeMs is %s", async (maxAgeMs) => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    await repo.save(cachedRecord({ ageMs: 1000 }));
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+    anchor.fetchMock.mockClear();
+
+    await kyc.status(ALICE, maxAgeMs === undefined ? undefined : { maxAgeMs });
+    expect(anchor.fetchMock).toHaveBeenCalled();
   });
 });
 
@@ -260,7 +509,7 @@ describe("TestAnchorOffRamp — per seller", () => {
     expect(await state.getJob("wd_1")).toMatchObject({ sellerId: ALICE.sellerId, account: alice.publicKey() });
 
     const polled = await offramp.status("wd_1");
-    expect(polled.status).toBe("pending");
+    expect(polled.status).toBe("awaiting_transfer");
   });
 
   it("will not quote for a seller with no anchor session", async () => {
@@ -298,7 +547,7 @@ describe("TestAnchorOffRamp — per seller", () => {
 
 class InMemoryKycRepo {
   private readonly rows = new Map<string, import("@checkout/core").KycRecord>();
-  async get(sellerId: string) {
+  async get(sellerId: string, _anchorDomain?: string) {
     return this.rows.get(sellerId) ?? null;
   }
   async save(record: import("@checkout/core").KycRecord) {

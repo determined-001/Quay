@@ -173,7 +173,7 @@ export interface SellerPayoutRef {
   fields: Record<string, string>;
 }
 
-export type OffRampJobStatus = "pending" | "settled" | "failed";
+export type OffRampJobStatus = "awaiting_transfer" | "pending" | "settled" | "failed";
 
 export interface OffRampJob {
   jobId: string;
@@ -183,6 +183,14 @@ export interface OffRampJob {
   targetAmount: string;
   rate: string;
   reason?: string; // set when failed
+  /**
+   * Where the seller must send the asset, when the anchor published it only
+   * after `initiate()` (e.g. once its own KYC review finished). Set only while
+   * the anchor is waiting for that payment. Quay relays it; the seller's
+   * wallet signs.
+   */
+  transfer?: WithdrawTransfer;
+  needsSellerAction?: boolean;
 }
 
 /**
@@ -207,6 +215,25 @@ export class AnchorAuthRequiredError extends Error {
   constructor(readonly anchorDomain: string) {
     super(`No active session with anchor ${anchorDomain}; the seller must sign in to it with their wallet`);
     this.name = "AnchorAuthRequiredError";
+  }
+}
+
+/**
+ * The anchor refused the request because of what the caller asked for (an amount
+ * outside its published limits, an unsupported withdraw type), not because the
+ * anchor is unhealthy. The API maps it to `422 offramp_rejected` and it must not
+ * count towards the circuit breaker.
+ */
+export class OffRampRejectedError extends Error {
+  constructor(
+    message: string,
+    /** The anchor's published amount limits, when it named them. */
+    readonly limits: { minAmount?: number; maxAmount?: number } = {},
+    /** Withdraw types the anchor would accept, when relevant. */
+    readonly availableTypes: string[] = [],
+  ) {
+    super(message);
+    this.name = "OffRampRejectedError";
   }
 }
 
@@ -237,6 +264,13 @@ export interface OffRampPort {
       sourceAmount: string;
       targetCurrency: string;
       customer: AnchorCustomer;
+      /**
+       * SEP-6 withdrawal type the SELLER chose (`bank_account`, `cash`, …).
+       * Which rail the money leaves on is their call, not the operator's:
+       * adapters fall back to the operator-wide default (OFFRAMP_TYPE) only
+       * when this is absent (issue 5.24).
+       */
+      withdrawType?: string;
     },
     opts?: { logger?: Logger },
   ): Promise<OffRampQuote>;
@@ -258,12 +292,29 @@ export interface OffRampPort {
     sourceAmount: string;
   }): Promise<IndicativePrice[]>;
   /**
-   * Field descriptors the anchor requires before it will initiate a payout —
-   * SEP-6 GET /info for a real anchor, a fixed set for the mock. Drives the
-   * dynamic cash-out form (issue #32) so the dashboard never hardcodes bank
-   * fields.
+   * The withdrawal types the anchor offers for this asset and each type's
+   * field descriptors — SEP-6 GET /info `types[].fields` for a real anchor, a
+   * single fixed type for the mock. Drives the dynamic cash-out form (issue
+   * #32) and its rail picker (issue 5.24) so the dashboard never hardcodes
+   * bank fields or the rail.
    */
-  offrampRequirements(assetCode: string, customer?: AnchorCustomer): Promise<PayoutFieldDescriptor[]>;
+  offrampRequirements(assetCode: string, customer?: AnchorCustomer): Promise<OfframpRequirementTypes>;
+}
+
+/** One SEP-6 withdrawal type and the payout fields it needs (issue 5.24). */
+export interface WithdrawTypeRequirements {
+  /** The anchor's type name, e.g. `bank_account`, `cash`. */
+  name: string;
+  descriptors: PayoutFieldDescriptor[];
+}
+
+/** What {@link OffRampPort.offrampRequirements} returns: every offered type,
+ *  plus the type to preselect — the operator default (OFFRAMP_TYPE) when it is
+ *  actually offered, or the only type when there is exactly one, else null and
+ *  the seller must choose. */
+export interface OfframpRequirementTypes {
+  types: WithdrawTypeRequirements[];
+  defaultType: string | null;
 }
 
 /** One indicative price entry from SEP-38 GET /prices (issue 3.5). */
@@ -323,6 +374,18 @@ export interface StoredOffRampQuote {
   sellAmount: string;
   buyCurrency: string;
   price: string;
+  /** What the seller was shown at quote time. A later `quoteId` confirm replays
+   *  these verbatim — it must never recompute them, or the job would record
+   *  figures the seller never agreed to. Absent on rows saved before they were
+   *  persisted; those cannot be confirmed by id. */
+  quotedAmounts?: {
+    /** OffRampQuote.rate — target per source, which is not always `price`. */
+    rate: string;
+    targetAmount: string;
+    feeAmount: string;
+    feeSource: "anchor" | "estimated";
+    netTargetAmount: string;
+  };
   expiresAt: number;
   createdAt: number;
 }
@@ -342,6 +405,16 @@ export interface StoredOffRampJob {
   status: OffRampJobStatus;
   externalStatus: string | null; // raw upstream status string, for debugging
   lastError: string | null;
+  /** What was sold. Kept on the job (not looked up from the quote, which the job
+   *  does not reference) so deposit instructions that arrive later can name the
+   *  asset and fall back to the quoted amount. Absent on older rows. */
+  sellAsset?: AssetRef | null;
+  sellAmount?: string | null;
+  /** Deposit instructions the anchor published after the withdraw call. */
+  transfer?: WithdrawTransfer | null;
+  lastPollError?: string | null;
+  lastPollErrorAt?: number | null;
+  lastPollReason?: string | null;
   /** When the offramp.transfer_required webhook was first sent for this job.
    *  Null means the transfer instructions haven't been surfaced yet; once set,
    *  the webhook is not re-fired on subsequent polls or restarts. */
@@ -357,7 +430,7 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
   ): Promise<void>;
 }
 
@@ -434,6 +507,10 @@ export interface KycFieldSpec {
 
 export interface KycRecord {
   sellerId: string;
+  /** The anchor this record is about (its home domain). `customerId`, `status`
+   *  and `requiredFields` are that anchor's decision; `"legacy"` marks a row
+   *  that predates per-anchor keys and could not be attributed. */
+  anchorDomain: string;
   /** The Stellar account the anchor's customer record belongs to. A stored
    *  `customerId` is only reused while this still matches the seller's wallet;
    *  null on rows written when every seller shared the platform's account. */
@@ -451,6 +528,8 @@ export interface KycRecord {
   providedFieldStatus: ProvidedFieldStatus[];
   /** Field names (not values) sent to the anchor in the last submission. */
   sentFields: string[];
+  /** SHA-256 hash of the per-seller SEP-12 callback endpoint token. */
+  callbackTokenHash?: string | null;
   /** Anchor's status/rejection message, verbatim. */
   message: string | null;
   lastSyncedAt: number | null;
@@ -474,27 +553,43 @@ export class KycRequiredError extends Error {
   }
 }
 
+export interface KycStatusOptions {
+  /**
+   * Maximum acceptable age (ms) of a cached KYC record.
+   * If provided and the stored record's `lastSyncedAt` is within `maxAgeMs`
+   * (and its account matches `customer.account`), implementations may return
+   * the cached record without querying the anchor.
+   */
+  maxAgeMs?: number;
+}
+
+export interface KycUploadFile {
+  name: string;
+  blob: Blob;
+  filename: string;
+}
+
 export interface KycPort {
   /** Refreshes from the anchor (if applicable) and persists the result.
    *  Throws {@link AnchorAuthRequiredError} without a live anchor session. */
-  status(customer: AnchorCustomer): Promise<KycRecord>;
+  status(customer: AnchorCustomer, opts?: KycStatusOptions): Promise<KycRecord>;
   /** Submits/updates fields. Throws {@link KycRequiredError} if a required
    *  field is still missing after merging with what's already on file. */
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
+  /** Submits binary/file fields directly to the anchor via multipart/form-data.
+   *  Never persists binary file data. */
+  submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord>;
 }
 
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
+/** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
+ *  to one anchor, so two anchors never share or overwrite a record.
+ *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
+  get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
+  getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
-}
-
-/** Persistence for `KycRecord`, keyed by seller. `providedFields` is PII and
- *  must be encrypted at rest by the implementation. */
-export interface KycRepository {
-  get(sellerId: string): Promise<KycRecord | null>;
-  save(record: KycRecord): Promise<void>;
+  /** Removes the seller's record for one anchor, or for every anchor when omitted. */
+  delete(sellerId: string, anchorDomain?: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +653,7 @@ export interface AnchorSessionRepository {
   get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null>;
   save(session: AnchorSession): Promise<void>;
   delete(sellerId: string, anchorDomain: string): Promise<void>;
+  sweepExpired(now: number, graceMs: number): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +784,8 @@ export interface Seller {
    * sensitive — never logged or included in webhook payloads.
    */
   payoutFields: Record<string, string> | null;
+  /** Timestamp (epoch ms) of the seller's most recent activity. */
+  lastActiveAt?: number | null;
   createdAt: number;
 }
 
@@ -705,6 +803,8 @@ export interface SellerRepository {
   /** Persist the seller's last-used payout destination fields for reuse on the
    *  next cash-out (issue #32). Sensitive — never logged or webhook'd. */
   savePayoutFields(sellerId: string, fields: Record<string, string>): Promise<void>;
+  /** Update last active timestamp with hourly throttling. */
+  touchLastActive?(sellerId: string, now?: number, throttleMs?: number): Promise<void>;
   /** Select the kind of reusable KYC profile this merchant needs. */
   saveProfileKind(sellerId: string, kind: SellerProfileKind): Promise<void>;
 }

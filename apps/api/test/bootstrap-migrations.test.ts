@@ -300,3 +300,75 @@ describe("bootstrap() against a pre-existing database", () => {
     }
   });
 });
+
+// Issue 4.24: seller_kyc was keyed by seller_id alone.
+describe("bootstrap() rebuilds seller_kyc keyed by (seller_id, anchor_domain)", () => {
+  const LEGACY_SELLER_KYC = `CREATE TABLE seller_kyc (
+    seller_id TEXT PRIMARY KEY, account TEXT, customer_id TEXT, status TEXT NOT NULL,
+    required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
+    message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL
+  )`;
+
+  async function legacyDb() {
+    const client = createClient({ url: "file::memory:" });
+    await client.execute(LEGACY_SELLER_KYC);
+    await client.execute(
+      `INSERT INTO seller_kyc (seller_id, account, customer_id, status, required_fields, fields_encrypted, updated_at)
+       VALUES ('s1', 'GACC', 'cust_1', 'ACCEPTED', '[]', 'v1:blob1', 10),
+              ('s2', NULL, 'cust_2', 'NEEDS_INFO', '[]', 'v1:blob2', 20)`,
+    );
+    return client;
+  }
+
+  it("keeps every row, attributed to the configured anchor", async () => {
+    const client = await legacyDb();
+    await bootstrap(client, { kycAnchorDomain: "testanchor.stellar.org" });
+
+    const rows = (await client.execute("SELECT * FROM seller_kyc ORDER BY seller_id")).rows;
+    expect(rows.map((r) => [r.seller_id, r.anchor_domain, r.customer_id, r.fields_encrypted])).toEqual([
+      ["s1", "testanchor.stellar.org", "cust_1", "v1:blob1"],
+      ["s2", "testanchor.stellar.org", "cust_2", "v1:blob2"],
+    ]);
+    expect(await columnsOf(client, "seller_kyc")).toEqual(
+      expect.arrayContaining(["anchor_domain", "provided_field_status", "sent_fields"]),
+    );
+  });
+
+  it("marks rows 'legacy' when no anchor is configured to attribute them to", async () => {
+    const client = await legacyDb();
+    await bootstrap(client);
+    const rows = (await client.execute("SELECT anchor_domain FROM seller_kyc")).rows;
+    expect(rows.map((r) => r.anchor_domain)).toEqual(["legacy", "legacy"]);
+  });
+
+  it("allows one row per anchor for a seller afterwards, and only one per (seller, anchor)", async () => {
+    const client = await legacyDb();
+    await bootstrap(client, { kycAnchorDomain: "a.example" });
+    const insert = (domain: string) =>
+      client.execute({
+        sql: `INSERT INTO seller_kyc (seller_id, anchor_domain, status, required_fields, fields_encrypted, updated_at)
+              VALUES ('s1', ?, 'NEEDS_INFO', '[]', 'x', 1)`,
+        args: [domain],
+      });
+
+    await expect(insert("b.example")).resolves.toBeDefined();
+    await expect(insert("a.example")).rejects.toThrow(); // already migrated with a.example
+  });
+
+  it("is idempotent: a second bootstrap changes nothing", async () => {
+    const client = await legacyDb();
+    await bootstrap(client, { kycAnchorDomain: "a.example" });
+    const first = (await client.execute("SELECT * FROM seller_kyc ORDER BY seller_id")).rows.map((r) => ({ ...r }));
+
+    await bootstrap(client, { kycAnchorDomain: "other.example" });
+    const second = (await client.execute("SELECT * FROM seller_kyc ORDER BY seller_id")).rows.map((r) => ({ ...r }));
+    expect(second).toEqual(first);
+  });
+
+  it("leaves no rebuild scratch table behind", async () => {
+    const client = await legacyDb();
+    await bootstrap(client, { kycAnchorDomain: "a.example" });
+    const tables = (await client.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'seller_kyc%'")).rows;
+    expect(tables.map((t) => t.name)).toEqual(["seller_kyc"]);
+  });
+});
