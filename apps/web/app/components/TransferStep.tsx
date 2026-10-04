@@ -4,25 +4,52 @@ import { useCallback, useEffect, useState } from "react";
 import type { WithdrawTransfer } from "@checkout/core";
 import { api, CheckoutError, describeError } from "../../lib/api";
 import { useSellerWallet } from "./SessionGate";
+import { TransferOtherDevice } from "./TransferOtherDevice";
 import { checkPaymentPreflight, type PaymentPreflightResult } from "../../lib/payment-preflight";
 import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
 
-export interface TransferStepProps {
-  transfer: WithdrawTransfer;
-  onSuccess?: (hash: string) => void;
-  onClose?: () => void;
-  initialSentHash?: string | null;
+// Keyed by the instructions too: a retried cash-out after a failed one gets a new
+// memo, and its send must not be blocked by the earlier withdrawal's hash.
+const SENT_KEY = (linkId: string, t: WithdrawTransfer) =>
+  `quay:transfer-sent:${linkId}:${t.destination}:${t.memo ?? ""}`;
+
+// A second send would be a second payment to the anchor, so the hash of a
+// completed send is kept per link for the browser session. A reload (or closing
+// and reopening the resume dialog) then shows "sent" instead of the send button.
+function readSentHash(linkId: string | undefined, t: WithdrawTransfer): string | null {
+  if (!linkId) return null;
+  try {
+    return window.sessionStorage.getItem(SENT_KEY(linkId, t));
+  } catch {
+    return null;
+  }
 }
 
-export default function TransferStep({
-  transfer,
-  onSuccess,
-  onClose,
-  initialSentHash = null,
-}: TransferStepProps) {
+function rememberSentHash(linkId: string | undefined, t: WithdrawTransfer, hash: string): void {
+  if (!linkId) return;
+  try {
+    window.sessionStorage.setItem(SENT_KEY(linkId, t), hash);
+  } catch {
+    // Storage blocked: the in-memory guard still holds for this mount.
+  }
+}
+
+export interface TransferStepProps {
+  transfer: WithdrawTransfer;
+  /** Scopes the double-send guard; pass it whenever the link is known. */
+  linkId?: string;
+  /** Called with the hash right after a send (or a found payment). */
+  onSent?: (hash: string) => void;
+  /** Shown after the payment is sent. */
+  onDone?: () => void;
+  /** Shown before it is sent, to leave without paying. */
+  onClose?: () => void;
+}
+
+export default function TransferStep({ transfer, linkId, onSent, onDone, onClose }: TransferStepProps) {
   const wallet = useSellerWallet();
   const [sending, setSending] = useState(false);
-  const [sentHash, setSentHash] = useState<string | null>(initialSentHash);
+  const [sentHash, setSentHash] = useState<string | null>(() => readSentHash(linkId, transfer));
   const [transferError, setTransferError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<PaymentPreflightResult | null>(null);
   const [checkingPreflight, setCheckingPreflight] = useState(false);
@@ -71,16 +98,22 @@ export default function TransferStep({
     }
   }, [transfer, wallet, sentHash, runPreflight]);
 
+  const markSent = useCallback(
+    (hash: string) => {
+      rememberSentHash(linkId, transfer, hash);
+      setSentHash(hash);
+      onSent?.(hash);
+    },
+    [linkId, transfer, onSent],
+  );
+
   async function handleSendTransfer() {
     if (!transfer || !wallet || sentHash) return;
     setTransferError(null);
     setSending(true);
     try {
       const hash = await sendAnchorTransfer(wallet, transfer, wallet);
-      setSentHash(hash);
-      if (onSuccess) {
-        onSuccess(hash);
-      }
+      markSent(hash);
     } catch (e: unknown) {
       setTransferError(
         e instanceof Error && e.message ? `The payment was not sent: ${e.message}` : "The payment was not sent.",
@@ -103,8 +136,8 @@ export default function TransferStep({
           <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
             Do not send a second payment; the anchor will credit this withdrawal once confirmed on-chain.
           </p>
-          {onClose && (
-            <button className="btn btn--primary btn--block" onClick={onClose} style={{ marginTop: 12 }}>
+          {onDone && (
+            <button className="btn btn--primary btn--block" onClick={onDone} style={{ marginTop: 12 }}>
               Done
             </button>
           )}
@@ -180,6 +213,7 @@ export default function TransferStep({
             </>
           )}
           {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
+          <TransferOtherDevice transfer={transfer} wallet={wallet} onSent={markSent} />
           {onClose && (
             <button
               type="button"
@@ -211,19 +245,18 @@ export function PendingTransferModal({
   useEffect(() => {
     let cancelled = false;
     api
-      .getPendingTransfer(linkId)
+      .getCashOutTransfer(linkId)
       .then((res) => {
         if (cancelled) return;
         setTransfer(res.transfer);
-        if (!res.transfer) {
-          setError("No pending transfer instructions found from the anchor.");
-        }
       })
       .catch((e: unknown) => {
         if (cancelled) return;
         setError(
-          e instanceof CheckoutError
-            ? describeError(e)
+          e instanceof CheckoutError && e.status === 404
+            ? "The anchor has not published transfer instructions for this withdrawal yet. Try again in a moment."
+            : e instanceof CheckoutError
+              ? describeError(e)
             : e instanceof Error
               ? e.message
               : "Failed to load transfer instructions",
@@ -287,7 +320,7 @@ export function PendingTransferModal({
           </div>
         )}
         {!loading && !error && transfer && (
-          <TransferStep transfer={transfer} onClose={onClose} />
+          <TransferStep transfer={transfer} linkId={linkId} onDone={onClose} onClose={onClose} />
         )}
       </div>
     </div>

@@ -1,9 +1,9 @@
 import { Keypair, Networks, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
 import { existsSync, writeFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
-import { OffRampJobNotFoundError, type AnchorCustomer } from "@checkout/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { OffRampJobNotFoundError, type AnchorCustomer, type Logger } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
-import { TESTANCHOR_BASE_URL, TESTANCHOR_HOME_DOMAIN, TestAnchorOffRamp } from "../src/testanchor";
+import { SEP6_STATUS_MAP, TESTANCHOR_BASE_URL, TESTANCHOR_HOME_DOMAIN, TestAnchorOffRamp } from "../src/testanchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 
 // These hit the real https://testanchor.stellar.org sandbox. Off by default —
@@ -24,8 +24,9 @@ function makeKeypair(): Keypair {
 
 function anchorWiring() {
   const discovery = new AnchorDiscovery({ homeDomain: TESTANCHOR_HOME_DOMAIN, fallbackBaseUrl: TESTANCHOR_BASE_URL });
-  const auth = new SellerAnchorAuth({ discovery, sessions: new FakeAnchorSessionRepository(), networkPassphrase: Networks.TESTNET });
-  return { discovery, auth };
+  const sessions = new FakeAnchorSessionRepository();
+  const auth = new SellerAnchorAuth({ discovery, sessions, networkPassphrase: Networks.TESTNET });
+  return { discovery, auth, sessions };
 }
 
 function makeOffRamp(state = new FakeOffRampStateRepository(), wiring = anchorWiring()) {
@@ -34,6 +35,52 @@ function makeOffRamp(state = new FakeOffRampStateRepository(), wiring = anchorWi
 }
 
 const OFFLINE_CUSTOMER: AnchorCustomer = { sellerId: "sel_1", account: Keypair.random().publicKey() };
+
+async function makeStatusFixture(logger?: Logger) {
+  const state = new FakeOffRampStateRepository();
+  const wiring = anchorWiring();
+  const now = Date.now();
+  await wiring.sessions.save({
+    sellerId: OFFLINE_CUSTOMER.sellerId,
+    anchorDomain: TESTANCHOR_HOME_DOMAIN,
+    account: OFFLINE_CUSTOMER.account,
+    token: "offline-jwt",
+    expiresAt: now + 60 * 60_000,
+    createdAt: now,
+  });
+  await state.saveJob({
+    jobId: "t1",
+    linkId: "lnk_1",
+    anchor: TESTANCHOR_HOME_DOMAIN,
+    sellerId: OFFLINE_CUSTOMER.sellerId,
+    account: OFFLINE_CUSTOMER.account,
+    targetCurrency: "USD",
+    targetAmount: "10",
+    rate: "1",
+    status: "pending",
+    externalStatus: null,
+    lastError: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const offramp = new TestAnchorOffRamp({
+    ...wiring,
+    state,
+    preferredWithdrawType: "bank_account",
+    ...(logger ? { logger } : {}),
+  });
+  return { state, offramp };
+}
+
+function stubTransaction(status: string, message?: string) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes(".well-known/stellar.toml")) return new Response("", { status: 500 });
+      return Response.json({ transaction: { id: "t1", status, message } });
+    }),
+  );
+}
 
 /** Sign the live anchor's challenge with the seller's key, as their wallet would in the browser. */
 async function signedIn(wallet: Keypair, wiring = anchorWiring()) {
@@ -46,6 +93,33 @@ async function signedIn(wallet: Keypair, wiring = anchorWiring()) {
 }
 
 describe("TestAnchorOffRamp (offline)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("exports an explicit mapping for every SEP-6 transaction status", () => {
+    expect(Object.keys(SEP6_STATUS_MAP).sort()).toEqual(
+      [
+        "completed",
+        "error",
+        "expired",
+        "incomplete",
+        "no_market",
+        "on_hold",
+        "pending_anchor",
+        "pending_customer_info_update",
+        "pending_external",
+        "pending_stellar",
+        "pending_transaction_info_update",
+        "pending_trust",
+        "pending_user",
+        "pending_user_transfer_complete",
+        "pending_user_transfer_start",
+        "refunded",
+        "too_large",
+        "too_small",
+      ].sort(),
+    );
+  });
+
   it("quote() rejects native XLM with a clear error before any network call", async () => {
     const offramp = makeOffRamp();
     await expect(
@@ -62,6 +136,66 @@ describe("TestAnchorOffRamp (offline)", () => {
   it("status() throws a typed OffRampJobNotFoundError for an unknown job id, not an anonymous Error", async () => {
     const offramp = makeOffRamp();
     await expect(offramp.status("no-such-job")).rejects.toBeInstanceOf(OffRampJobNotFoundError);
+  });
+
+  it.each([
+    ["no_market", "no market for the asset pair (no_market)"],
+    ["too_small", "amount below the anchor's limit (too_small)"],
+    ["too_large", "amount above the anchor's limit (too_large)"],
+  ])("status() maps %s to failed with a reason", async (externalStatus, expectedReason) => {
+    stubTransaction(externalStatus);
+    const { state, offramp } = await makeStatusFixture();
+
+    const result = await offramp.status("t1");
+
+    expect(result.status).toBe("failed");
+    expect(result.reason).toBe(expectedReason);
+    expect(await state.getJob("t1")).toMatchObject({ externalStatus, lastError: expectedReason });
+  });
+
+  it("status() prefers the anchor message for a failed transaction reason", async () => {
+    stubTransaction("too_large", "maximum withdrawal amount is 20 USD");
+    const { offramp } = await makeStatusFixture();
+
+    await expect(offramp.status("t1")).resolves.toMatchObject({
+      status: "failed",
+      reason: "maximum withdrawal amount is 20 USD",
+    });
+  });
+
+  it.each(["pending_customer_info_update", "pending_transaction_info_update"])(
+    "status() marks %s as waiting on the seller without failing",
+    async (externalStatus) => {
+      stubTransaction(externalStatus);
+      const { state, offramp } = await makeStatusFixture();
+
+      const result = await offramp.status("t1");
+
+      expect(result).toMatchObject({ status: "pending", needsSellerAction: true });
+      expect(await state.getJob("t1")).toMatchObject({ status: "pending", externalStatus });
+    },
+  );
+
+  it("logs an unknown SEP-6 status only once per job", async () => {
+    stubTransaction("future_status");
+    const warn = vi.fn();
+    const logger: Logger = {
+      child: () => logger,
+      info: vi.fn(),
+      warn,
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const { offramp } = await makeStatusFixture(logger);
+
+    await offramp.status("t1");
+    await offramp.status("t1");
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      { event: "anchor.sep6.status.unknown", status: "future_status" },
+      "unknown SEP-6 transaction status",
+    );
   });
 });
 

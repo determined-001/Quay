@@ -1,6 +1,7 @@
 import { Keypair, Transaction, TransactionBuilder, WebAuth } from "@stellar/stellar-sdk";
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
+import { anchorHttpError } from "./anchor-error";
 
 export interface Sep10Options {
   baseUrl: string;
@@ -76,7 +77,7 @@ export class Sep10Client {
     const challengeRes = await fetch(challengeUrl);
     if (!challengeRes.ok) {
       child.warn({ event: "anchor.sep10.challenge.fail", statusCode: challengeRes.status, durationMs: Date.now() - t0 }, "SEP-10 challenge failed");
-      throw new Error(`SEP-10 challenge fetch failed: ${challengeRes.status} ${await challengeRes.text()}`);
+      throw await anchorHttpError("10", "challenge fetch", challengeRes);
     }
     const { transaction, network_passphrase } = (await challengeRes.json()) as {
       transaction: string;
@@ -131,7 +132,7 @@ export class Sep10Client {
     });
     if (!authRes.ok) {
       child.warn({ event: "anchor.sep10.auth.fail", statusCode: authRes.status, durationMs: Date.now() - t1 }, "SEP-10 auth submit failed");
-      throw new Error(`SEP-10 auth submit failed: ${authRes.status} ${await authRes.text()}`);
+      throw await anchorHttpError("10", "auth submit", authRes);
     }
     const { token } = (await authRes.json()) as { token: string };
     const exp = decodeJwtExp(token);

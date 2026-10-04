@@ -1,11 +1,12 @@
 import {
   AnchorAuthRequiredError,
+  OffRampRejectedError,
   type OffRampInitiation,
   type OffRampJob,
   type OffRampMode,
   type OffRampPort,
   type OffRampQuote,
-  type PayoutFieldDescriptor,
+  type OfframpRequirementTypes,
 } from "@checkout/core";
 import { metrics } from "../metrics";
 
@@ -25,9 +26,14 @@ export interface CircuitBreakerOptions {
  * anchor can't be hammered by every cash-out poll, and (b) instrument every
  * call — this is the one seam all off-ramp adapter calls pass through,
  * regardless of which SEPs the underlying adapter actually speaks.
+ *
+ * `indicativePrices` (SEP-38 GET /prices) is unauthenticated and cheap; when
+ * supported by the inner adapter, calls through it are instrumented and
+ * failures count toward opening the breaker just like other anchor calls.
  */
 export class CircuitBreakerOffRamp implements OffRampPort {
   readonly mode: OffRampMode;
+  readonly indicativePrices?: OffRampPort["indicativePrices"];
 
   private state: CircuitState = "closed";
   private consecutiveFailures = 0;
@@ -42,6 +48,11 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     this.mode = inner.mode;
     this.failureThreshold = opts.failureThreshold ?? 3;
     this.cooldownMs = opts.cooldownMs ?? 30_000;
+
+    if (inner.indicativePrices) {
+      const fn = inner.indicativePrices.bind(inner);
+      this.indicativePrices = (input) => this.call("indicativePrices", () => fn(input));
+    }
   }
 
   getState(): CircuitState {
@@ -64,7 +75,7 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     return this.call("status", () => this.inner.status(...args));
   }
 
-  offrampRequirements(...args: Parameters<OffRampPort["offrampRequirements"]>): Promise<PayoutFieldDescriptor[]> {
+  offrampRequirements(...args: Parameters<OffRampPort["offrampRequirements"]>): Promise<OfframpRequirementTypes> {
     return this.call("offrampRequirements", () => this.inner.offrampRequirements(...args));
   }
 
@@ -86,11 +97,14 @@ export class CircuitBreakerOffRamp implements OffRampPort {
       return result;
     } catch (err) {
       metrics.anchorCallDurationSeconds.observe({ method }, (Date.now() - start) / 1000);
-      metrics.anchorCallsTotal.inc({ method, status: "error" });
+      // A request the anchor refused on its merits (out-of-range amount,
+      // unsupported type) is the caller's problem, not an outage.
+      const rejected = err instanceof OffRampRejectedError;
+      metrics.anchorCallsTotal.inc({ method, status: rejected ? "rejected" : "error" });
       // A seller without a live anchor session says nothing about the
       // anchor's health; counting it would let one signed-out seller open the
       // circuit for everybody.
-      if (!(err instanceof AnchorAuthRequiredError)) this.onFailure();
+      if (!(err instanceof AnchorAuthRequiredError) && !rejected) this.onFailure();
       throw err;
     }
   }

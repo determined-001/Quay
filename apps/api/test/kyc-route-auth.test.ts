@@ -19,12 +19,15 @@ import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord } from "@c
 describe("kycRoutes — authentication and scoping", () => {
   const record: KycRecord = {
     sellerId: "sel_x",
+    anchorDomain: "testanchor.stellar.org",
     account: null,
     customerId: "cus_1",
     status: "ACCEPTED",
     requiredFields: [],
     // Stand-in for real SEP-12 PII: legal name, address, bank account.
     providedFields: { first_name: "Ada", bank_account_number: "1234567890" },
+    providedFieldStatus: [],
+    sentFields: [],
     message: null,
     lastSyncedAt: 1,
     updatedAt: 1,
@@ -34,12 +37,34 @@ describe("kycRoutes — authentication and scoping", () => {
     const container = await createTestContainer();
     const submitted: Record<string, string>[] = [];
     const seen: AnchorCustomer[] = [];
+    const seenOpts: Array<{ maxAgeMs?: number } | undefined> = [];
 
     const withKyc = {
       ...container,
+      config: { ...container.config, kycStatusCacheMs: 45_000 },
+      anchorDomain: "testanchor.stellar.org",
+      kycConsents: {
+        async list(sellerId: string) { return []; },
+        async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+        async active(sellerId: string, anchorDomain: string) { 
+          // Return a consent that covers all fields for testing
+          return { 
+            id: "cnc_1", 
+            sellerId, 
+            anchorDomain, 
+            fields: ["first_name", "bank_account_number"], 
+            grantedAt: Date.now(), 
+            revokedAt: null, 
+            grantedVia: "session", 
+            noticeVersion: "1.0" 
+          }; 
+        },
+        async revoke(sellerId: string, anchorDomain: string) { },
+      } as unknown as Container["kycConsents"],
       kyc: {
-        async status(customer: AnchorCustomer) {
+        async status(customer: AnchorCustomer, opts?: { maxAgeMs?: number }) {
           seen.push(customer);
+          seenOpts.push(opts);
           return record;
         },
         async submit(customer: AnchorCustomer, fields: Record<string, string>) {
@@ -62,7 +87,7 @@ describe("kycRoutes — authentication and scoping", () => {
       scopes,
     });
 
-    return { app, container: container as TestContainer, key: plaintext, seller, submitted, seen };
+    return { app, container: container as TestContainer, key: plaintext, seller, submitted, seen, seenOpts };
   }
 
   it("refuses an unauthenticated read of the seller's identity", async () => {
@@ -105,18 +130,29 @@ describe("kycRoutes — authentication and scoping", () => {
   });
 
   it("serves the authenticated seller, resolved from the token rather than getDefault()", async () => {
-    const { app, container, key, seller, seen } = await harness(["offramp:initiate"]);
+    const { app, container, key, seller, seen, seenOpts } = await harness(["offramp:initiate"]);
 
     const res = await app.request("/", { headers: { authorization: `Bearer ${key}` } });
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: "ACCEPTED" });
     expect(seen).toEqual([{ sellerId: seller.id, account: seller.wallet }]);
+    expect(seenOpts).toEqual([{ maxAgeMs: 45_000 }]);
+    container.client.close();
+  });
+
+  it("passes maxAgeMs 0 when refresh=1 is specified", async () => {
+    const { app, container, key, seenOpts } = await harness(["offramp:initiate"]);
+
+    const res = await app.request("/?refresh=1", { headers: { authorization: `Bearer ${key}` } });
+
+    expect(res.status).toBe(200);
+    expect(seenOpts).toEqual([{ maxAgeMs: 0 }]);
     container.client.close();
   });
 
   it("submits identity for the authenticated seller", async () => {
-    const { app, container, key, seller, submitted, seen } = await harness(["offramp:initiate"]);
+    const { app, container, key, seller, submitted, seen, seenOpts } = await harness(["offramp:initiate"]);
 
     const res = await app.request("/", {
       method: "PUT",
@@ -126,7 +162,14 @@ describe("kycRoutes — authentication and scoping", () => {
 
     expect(res.status).toBe(200);
     expect(submitted).toEqual([{ first_name: "Ada" }]);
-    expect(seen).toEqual([{ sellerId: seller.id, account: seller.wallet }]);
+    // status is called once for consent check, then submit is called
+    expect(seen).toEqual([
+      { sellerId: seller.id, account: seller.wallet },
+      { sellerId: seller.id, account: seller.wallet },
+    ]);
+    // PUT must always go to the anchor: neither the consent-check status() nor
+    // submit() may opt into the status cache (no maxAgeMs).
+    expect(seenOpts).toEqual([undefined]);
     container.client.close();
   });
 

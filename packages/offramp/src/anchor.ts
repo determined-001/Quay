@@ -1,5 +1,5 @@
-import { Asset, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
-import { OffRampJobNotFoundError } from "@checkout/core";
+import type { Keypair } from "@stellar/stellar-sdk";
+import { OffRampJobNotFoundError, targetPerSourceRate } from "@checkout/core";
 import type {
   AssetRef,
   OffRampInitiation,
@@ -8,96 +8,106 @@ import type {
   OffRampMode,
   OffRampPort,
   OffRampQuote,
-  PayoutFieldDescriptor,
+  OfframpRequirementTypes,
+  OffRampStateRepository,
   SellerPayoutRef,
+  StoredOffRampQuote,
+  WithdrawTransfer,
 } from "@checkout/core";
 import { getSep38Quote } from "./sep38";
 import { Sep24Client, type Sep24Transaction } from "./sep24";
 
 export interface AnchorOptions {
   homeDomain: string;
+  /** Used only to authenticate to the anchor (SEP-10). It never signs a payment. */
   sellerKeypair: Keypair;
-  horizonUrl?: string;
   /**
-   * Passphrase of the network the send-leg transaction is signed for.
-   *
-   * Required, and deliberately not inferred. This used to be derived with
-   * `horizonUrl.includes("public")`, which gets mainnet exactly backwards:
-   * the pubnet endpoint is `https://horizon.stellar.org` and contains no
-   * "public" at all, so a mainnet deployment would have signed every
-   * withdrawal with the TESTNET passphrase. Use `Networks.PUBLIC` /
-   * `Networks.TESTNET` from @stellar/stellar-sdk.
+   * Where quotes and jobs live. Required, with no in-memory default: a withdrawal's state has to
+   * survive a restart (a mid-withdrawal restart must not lose the quote its transfer is checked against).
    */
-  networkPassphrase: string;
+  state: OffRampStateRepository;
 }
 
-interface StoredQuote {
-  sellAsset: AssetRef;
-  sellAmount: string;
-  buyCurrency: string;
-  price: string;
+const MEMO_TYPES = ["text", "id", "hash"] as const;
+
+function transferMemoType(raw: string | undefined): WithdrawTransfer["memoType"] {
+  return (MEMO_TYPES as readonly string[]).includes(raw ?? "") ? (raw as WithdrawTransfer["memoType"]) : null;
 }
 
-interface StoredJob {
-  linkId: string;
-  /** Asset the withdrawal was quoted in — the send leg must pay this, not XLM. */
-  sellAsset: AssetRef;
-  targetCurrency: string;
-  targetAmount: string;
-  rate: string;
-  sendTxHash?: string;
-  sending?: boolean;
+/**
+ * Why a transfer must NOT be offered to the seller, or null when it is safe. Fails closed: this is the
+ * instruction the seller's wallet will be asked to send, so anything that cannot be checked against what
+ * was quoted is refused rather than guessed.
+ */
+function refuseTransfer(tx: Sep24Transaction, quote: StoredOffRampQuote | null): string | null {
+  if (!quote) {
+    return "No stored quote for this withdrawal, so the transfer cannot be checked against what was quoted";
+  }
+  if (!tx.amountIn) return "Missing amount_in in SEP-24 transaction";
+  const amountIn = Number(tx.amountIn);
+  if (!Number.isFinite(amountIn) || amountIn <= 0) {
+    return `Invalid amount_in ${JSON.stringify(tx.amountIn)} in SEP-24 transaction`;
+  }
+  if (amountIn > Number(quote.sellAmount)) {
+    return `Transfer amount ${tx.amountIn} exceeds quoted amount ${quote.sellAmount}`;
+  }
+  if (tx.withdrawMemo && tx.withdrawMemoType && transferMemoType(tx.withdrawMemoType) === null) {
+    return `Unsupported memo type ${JSON.stringify(tx.withdrawMemoType)} in SEP-24 transaction`;
+  }
+  return null;
 }
 
 export function mapSep24Status(status: string): OffRampJobStatus {
   if (status === "completed") return "settled";
   if (status === "error" || status === "refunded" || status === "expired") return "failed";
-  // pending_user_transfer_start, pending_anchor, pending_external, pending_user_info_required, incomplete
+  // The anchor is waiting for the SELLER's on-chain payment: distinct from one that already has the
+  // money and is paying out (matches the awaiting_transfer status the other adapters report).
+  if (status === "pending_user_transfer_start") return "awaiting_transfer";
+  // pending_anchor, pending_external, pending_user_info_required, incomplete
   return "pending";
 }
 
 /**
  * SEP-24 (interactive) off-ramp.
  *
- * DELIBERATELY NOT EXPORTED from `index.ts`, and not selectable via `OFFRAMP`.
- * `TestAnchorOffRamp` (SEP-6) is the adapter wired into the container for both
- * `OFFRAMP=testanchor` and `OFFRAMP=anchor`.
+ * Non-custodial: at `pending_user_transfer_start` it returns the anchor's transfer instructions and the
+ * SELLER'S WALLET signs and sends them. Nothing in this adapter signs or submits a payment.
  *
- * The blocker is state durability, not protocol support: quotes and jobs here
- * live in in-process `Map`s, while the SEP-6 adapter persists both through
- * `OffRampStateRepository`. On a restart mid-withdrawal this loses `sendTxHash`,
- * and money-adjacent state that does not survive a redeploy has no business on
- * pubnet. Port it onto `OffRampStateRepository` before exporting it.
+ * Still NOT exported from `index.ts` and not selectable via `OFFRAMP`: `TestAnchorOffRamp` (SEP-6) is the
+ * adapter wired into the container. Quotes and jobs now live in the injected `OffRampStateRepository`, which
+ * is required, so the old blocker (in-process state lost on restart) is gone. What remains before it could be
+ * exported is that it still authenticates to the anchor with one platform keypair instead of per-seller
+ * SEP-10 sessions like `TestAnchorOffRamp`.
  */
 export class AnchorOffRamp implements OffRampPort {
   readonly mode: OffRampMode = "seller_initiated";
 
   private readonly homeDomain: string;
   private readonly sellerKeypair: Keypair;
-  private readonly horizonUrl: string;
-  private readonly networkPassphrase: string;
   private readonly sep24: Sep24Client;
-  private readonly quotes = new Map<string, StoredQuote>();
-  private readonly jobs = new Map<string, StoredJob>();
+  private readonly state: OffRampStateRepository;
 
   constructor(opts: AnchorOptions) {
     this.homeDomain = opts.homeDomain;
     this.sellerKeypair = opts.sellerKeypair;
-    this.horizonUrl = opts.horizonUrl || "https://horizon-testnet.stellar.org";
-    this.networkPassphrase = opts.networkPassphrase;
+    if (!opts.state) {
+      throw new Error("AnchorOffRamp needs an OffRampStateRepository: withdrawal state must survive a restart");
+    }
+    this.state = opts.state;
     this.sep24 = new Sep24Client(opts.sellerKeypair, opts.homeDomain);
   }
 
   /**
    * SEP-24 is interactive — the anchor's own hosted UI collects payout details
-   * directly from the seller during `initiate()`, so there are no descriptors
-   * to fetch up front (issue #32).
+   * (and any rail choice) directly from the seller during `initiate()`, so
+   * there are no descriptors and no types to pick up front (issues #32, 5.24).
    */
-  async offrampRequirements(): Promise<PayoutFieldDescriptor[]> {
-    return [];
+  async offrampRequirements(): Promise<OfframpRequirementTypes> {
+    return { types: [], defaultType: null };
   }
 
   async quote(input: {
+    linkId?: string;
     sourceAsset: AssetRef;
     sourceAmount: string;
     targetCurrency: string;
@@ -111,11 +121,18 @@ export class AnchorOffRamp implements OffRampPort {
       buyCurrency: input.targetCurrency,
     });
 
-    this.quotes.set(q.id, {
+    const expiresAt = Date.parse(q.expiresAt);
+    const now = Date.now();
+
+    await this.state.saveQuote({
+      quoteId: q.id,
+      linkId: input.linkId ?? "",
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
       price: q.price,
+      expiresAt,
+      createdAt: now,
     });
 
     // Gross is what sourceAmount converts to at the quoted rate; buyAmount is
@@ -130,8 +147,10 @@ export class AnchorOffRamp implements OffRampPort {
       sourceAmount: input.sourceAmount,
       targetCurrency: input.targetCurrency,
       targetAmount: grossTargetAmount,
-      rate: q.price,
-      expiresAt: Date.parse(q.expiresAt),
+      // TARGET per source (issue 5.21) — SEP-38's price inverted; the raw
+      // price stays on the stored quote above.
+      rate: targetPerSourceRate(q.price),
+      expiresAt,
       fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
       netTargetAmount,
     };
@@ -142,7 +161,7 @@ export class AnchorOffRamp implements OffRampPort {
     quoteId: string;
     payout: SellerPayoutRef;
   }): Promise<OffRampInitiation> {
-    const q = this.quotes.get(input.quoteId);
+    const q = await this.state.getQuote(input.quoteId);
     if (!q) throw new Error("Unknown or expired quote");
 
     const interactiveResult = await this.sep24.startInteractiveWithdraw({
@@ -154,12 +173,30 @@ export class AnchorOffRamp implements OffRampPort {
       payoutFields: input.payout.fields,
     });
 
-    this.jobs.set(interactiveResult.id, {
+    const now = Date.now();
+    await this.state.saveJob({
+      jobId: interactiveResult.id,
       linkId: input.linkId,
-      sellAsset: q.sellAsset,
+      anchor: this.homeDomain,
+      // Authenticated with the platform keypair, not a seller's own SEP-10 session.
+      sellerId: null,
+      account: null,
       targetCurrency: q.buyCurrency,
       targetAmount: "",
-      rate: q.price,
+      rate: targetPerSourceRate(q.price),
+      status: "pending",
+      externalStatus: null,
+      lastError: null,
+      transferNotifiedAt: null,
+      transfer: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Save quote indexed by jobId as well for status() lookup
+    await this.state.saveQuote({
+      ...q,
+      quoteId: interactiveResult.id,
     });
 
     return {
@@ -170,38 +207,79 @@ export class AnchorOffRamp implements OffRampPort {
   }
 
   async status(jobId: string): Promise<OffRampJob> {
-    const stored = this.jobs.get(jobId);
+    const stored = await this.state.getJob(jobId);
     if (!stored) {
-      // In-memory only: a restart loses every job. Fabricating a placeholder
-      // here (as this used to) is worse than failing — the placeholder has no
-      // sellAsset and no sendTxHash, so the send leg below would re-fire and
-      // pay the anchor a SECOND time for a withdrawal already funded. Refuse
-      // instead, and let the caller treat it as unknown state.
       throw new OffRampJobNotFoundError(jobId);
     }
 
     const tx: Sep24Transaction = await this.sep24.getTransaction(jobId);
+    const jobStatus = mapSep24Status(tx.status);
 
-    // Handle Send Leg if anchor is waiting for user transfer
-    if (tx.status === "pending_user_transfer_start" && !stored.sendTxHash && !stored.sending && tx.withdrawAnchorAccount && tx.withdrawMemo) {
-      stored.sending = true;
-      try {
-        const hash = await this.sendWithdrawalPayment(
-          tx.withdrawAnchorAccount,
-          tx.withdrawMemo,
-          tx.withdrawMemoType || "text",
-          tx.amountIn || "0",
-          stored.sellAsset
-        );
-        stored.sendTxHash = hash;
-      } catch (err) {
-        console.error("Failed to send on-chain withdrawal payment to anchor:", err);
-      } finally {
-        stored.sending = false;
+    if (tx.status === "pending_user_transfer_start" && tx.withdrawAnchorAccount) {
+      const quote = await this.state.getQuote(jobId);
+      const refusal = refuseTransfer(tx, quote);
+      if (refusal || !quote) {
+        const reason = refusal ?? "No stored quote for this withdrawal";
+        await this.state.updateJob(jobId, {
+          status: "failed",
+          lastError: reason,
+          externalStatus: tx.status,
+          transfer: null,
+        });
+        return {
+          jobId: tx.id,
+          linkId: stored.linkId,
+          status: "failed",
+          targetCurrency: stored.targetCurrency,
+          targetAmount: tx.amountOut || stored.targetAmount,
+          rate: stored.rate,
+          reason,
+        };
       }
+
+      const transfer: WithdrawTransfer = {
+        destination: tx.withdrawAnchorAccount,
+        amount: tx.amountIn!, // checked by refuseTransfer above
+        asset: quote.sellAsset, // exactly what was quoted, never a guess
+        memo: tx.withdrawMemo ?? null,
+        memoType: transferMemoType(tx.withdrawMemoType),
+      };
+
+      await this.state.updateJob(jobId, {
+        targetAmount: tx.amountOut || stored.targetAmount,
+        status: "awaiting_transfer",
+        externalStatus: tx.status,
+        transfer,
+      });
+
+      return {
+        jobId: tx.id,
+        linkId: stored.linkId,
+        status: "awaiting_transfer",
+        targetCurrency: stored.targetCurrency,
+        targetAmount: tx.amountOut || stored.targetAmount,
+        rate: stored.rate,
+        reason: tx.message,
+        transfer,
+      };
     }
 
-    const jobStatus = mapSep24Status(tx.status);
+    if (stored.transfer) {
+      await this.state.updateJob(jobId, {
+        targetAmount: tx.amountOut || stored.targetAmount,
+        status: jobStatus,
+        externalStatus: tx.status,
+        lastError: jobStatus === "failed" ? (tx.message ?? null) : null,
+        transfer: null,
+      });
+    } else {
+      await this.state.updateJob(jobId, {
+        targetAmount: tx.amountOut || stored.targetAmount,
+        status: jobStatus,
+        externalStatus: tx.status,
+        lastError: jobStatus === "failed" ? (tx.message ?? null) : null,
+      });
+    }
 
     return {
       jobId: tx.id,
@@ -212,53 +290,5 @@ export class AnchorOffRamp implements OffRampPort {
       rate: stored.rate,
       reason: tx.message,
     };
-  }
-
-  private async sendWithdrawalPayment(
-    destination: string,
-    memoStr: string,
-    memoType: string,
-    amount: string,
-    sellAsset: AssetRef
-  ): Promise<string> {
-    const server = new Horizon.Server(this.horizonUrl);
-    const account = await server.loadAccount(this.sellerKeypair.publicKey());
-
-    let memo: Memo;
-    if (memoType === "id") {
-      memo = Memo.id(memoStr);
-    } else if (memoType === "hash") {
-      memo = Memo.hash(memoStr);
-    } else {
-      memo = Memo.text(memoStr);
-    }
-
-    // The send leg must pay the SAME asset the withdrawal was quoted in.
-    // This previously hardcoded `Asset.native()`, which sends XLM no matter
-    // what the seller is cashing out — on mainnet that hands the anchor the
-    // wrong asset for a USDC withdrawal, and the funds do not come back.
-    const asset =
-      sellAsset.issuer === null
-        ? Asset.native()
-        : new Asset(sellAsset.code, sellAsset.issuer);
-
-    const tx = new TransactionBuilder(account, {
-      fee: "10000",
-      networkPassphrase: this.networkPassphrase,
-    })
-      .addOperation(
-        Operation.payment({
-          destination,
-          asset,
-          amount,
-        })
-      )
-      .addMemo(memo)
-      .setTimeout(30)
-      .build();
-
-    tx.sign(this.sellerKeypair);
-    const res = await server.submitTransaction(tx);
-    return res.hash;
   }
 }

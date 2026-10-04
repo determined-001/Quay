@@ -209,6 +209,18 @@ sequenceDiagram
   end
 ```
 
+If `/sep6/withdraw` came back without `account_id` (SEP-6 allows this while the
+anchor is still reviewing), `initiate()` returns `kind: "fields"` and the modal
+tells the seller the send step will follow. The poller keeps reading
+`/sep6/transaction`; when the status reaches `pending_user_transfer_start` it
+carries `withdraw_anchor_account`, `withdraw_memo`, `withdraw_memo_type` and
+`amount_in`, and `status()` returns them as `OffRampJob.transfer`. They are
+stored on the job row (`offramp_jobs.transfer_json`; the sold asset and amount
+are in `sell_asset_code`, `sell_asset_issuer`, `sell_amount`) and the first
+appearance logs `cashout.transfer_required` (without the memo). An unknown
+`withdraw_memo_type` is rejected rather than guessed. Quay only relays the
+instructions; the seller's wallet still signs and sends.
+
 A seller with no live anchor session gets `403 anchor_auth_required` (and the
 circuit breaker does not count it — it says nothing about the anchor's health).
 
@@ -217,7 +229,7 @@ Every `CircuitBreakerOffRamp` call is instrumented (`anchor_calls_total`,
 consecutive failures, so a down anchor gets a 30s cooldown instead of being hit by every
 poll tick.
 
-### 4. Cash-out — SEP-24 interactive variant (not implemented — MAINTAINER.md roadmap item 1)
+### 4. Cash-out — SEP-24 interactive variant (per-anchor selection tracked in [#216](https://github.com/determined-001/Quay/issues/216); quote gaps in [#217](https://github.com/determined-001/Quay/issues/217)/[#219](https://github.com/determined-001/Quay/issues/219))
 
 ```mermaid
 sequenceDiagram
@@ -281,6 +293,13 @@ stateDiagram-v2
 Note the CI check only catches drift between `status.ts` and the `.mmd` file — it can't
 verify you also updated *this* pasted copy. If you touch `TRANSITIONS`, update both.
 
+The cash-out sub-state is **not** part of this diagram. While a link is `offramp_pending`,
+`link.offrampStatus` (typed `OffRampLinkStatus`) says what the anchor is waiting for:
+`awaiting_transfer` (the seller has not yet sent the USDC leg; SEP-6 `pending_user_transfer_start`
+or `incomplete`), `pending` (the anchor has it and is paying out), then `settled` or `failed`.
+`pollCashOuts()` refreshes it on every poll, not only on a terminal state, and the dashboard pill,
+the link timeline and the CSV export (`offramp_status`) all read it. No extra link transition is needed.
+
 ---
 
 ## How to add a new chain / anchor / rail
@@ -332,14 +351,11 @@ custody at the edges: the seller already holds the stablecoin, and cash-out is a
 explicitly authorized action. Flip to `inline` only with a licensed anchor relationship and
 a real compliance story — see the README's boundary note.
 
-**Why SEP-6 in `TestAnchorOffRamp`, not SEP-24.** SEP-24's interactive withdraw needs a
-redirect/popup concept somewhere upstream of the adapter — in the dashboard, in
-`LinkService`, in the API response shape. None of that existed when the reference adapter
-was built, and SEP-6 is fully field-driven (bank details go straight in the request body),
-so it needed zero changes anywhere else. `testanchor.ts`'s own header comment captures this
-rejection reasoning. The SEP-24 interactive diagram above is the shape that *would* need
-those changes — MAINTAINER.md's roadmap item 1 (`OffRampInitiation` union) is the first
-domino.
+**Why SEP-6 in `TestAnchorOffRamp`, not SEP-24.** Both protocols are supported —
+`OffRampInitiation`'s `interactive` arm, the API's `interactiveUrl`, and the dashboard's
+popup handling all exist — and the protocol is chosen per anchor from its SEP-1
+capabilities, preferring SEP-6 when both are declared. The full trade-offs and the
+decision live in [`docs/decisions/0001-sep6-vs-sep24.md`](decisions/0001-sep6-vs-sep24.md).
 
 **Why path-payment settlement is parked** (decided 2026-07-18, see `MAINTAINER.md`).
 Evaluated settling sellers in NGNC on-chain via Stellar path payments (buyer pays USDC,
