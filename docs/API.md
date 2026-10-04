@@ -44,6 +44,18 @@ that"; 404 means "nothing here that is yours."
   decimals. Internally compared in integer stroops, never floats.
 - Errors return `{ "error": "<code>", ... }` with an appropriate HTTP status.
   Validation failures return `400` with `{ "error": "invalid_body", "issues": [...] }`.
+- `error` is a machine-readable code; a human-readable `message` may accompany it.
+  Two codes cover failures we do not control the wording of:
+  - `anchor_error` (**502**) — the anchor answered a SEP call with an error, was
+    unreachable, or sent something unusable. `message` is fixed text such as
+    `"The anchor returned an error (SEP-6 withdraw, HTTP 400)."`. The anchor's
+    own response body is never returned: it is third-party content that can echo
+    the seller's KYC or bank fields, so it is written, truncated to about 2 KB, to
+    the server log (`event: "anchor.error"`) only. Returned by the cash-out,
+    cash-out quote, `offramp-preview`, `offramp-requirements`, `/seller/kyc`,
+    `/seller/anchor-auth` and `/offramp/info` routes.
+  - `internal_error` (**500**) — an unhandled server error. The body is exactly
+    `{ "error": "internal_error" }`: no message, no stack. Details are in the log.
 
 ## Idempotency
 
@@ -174,7 +186,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `link_status_transitions_total` | `to` |
 | `wallet_submissions_total` | `outcome` (`submitted`, `invalid_xdr`, `rejected`) |
 | `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
-| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` |
+| `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` (`ok`, `error`, `rejected`) |
 
 **Histograms**
 | Metric | Labels |
@@ -363,6 +375,57 @@ behind `GET /links/:id/detail`.
 
 ---
 
+## `GET /links/:id/detail`
+
+**Requires auth.** Fetch full link details for the merchant/dashboard, including payment
+request, webhook delivery history, and the current cash-out poll status. Scoped to the
+authenticated seller (returns 404 for links belonging to other sellers).
+
+**200**
+```json
+{
+  "link": {
+    "id": "lnk_...",
+    "reference": "...",
+    "status": "offramp_pending",
+    "title": "T-shirt",
+    "amount": "10.50",
+    "asset": { "code": "USDC", "issuer": "G..." },
+    "destination": "G...",
+    "expiresAt": 1750000000000
+  },
+  "request": {
+    "uri": "web+stellar:pay?destination=...&amount=...&memo=...",
+    "memo": "...",
+    "memoType": "text"
+  },
+  "deliveries": [
+    {
+      "webhookId": "whk_...",
+      "linkId": "lnk_...",
+      "event": "link.paid",
+      "statusCode": 200,
+      "ok": true,
+      "error": null,
+      "createdAt": 1750000000000
+    }
+  ],
+  "offrampPoll": {
+    "reason": "anchor_unreachable",
+    "message": "The anchor service is temporarily unavailable or returned an error.",
+    "at": 1750000005000
+  }
+}
+```
+- `offrampPoll` — present when the link is in `offramp_pending` and the background cash-out
+  poller encountered an error during its last poll attempt (e.g. `anchor_unreachable`,
+  `circuit_open`, `anchor_auth_required`, `unknown`). It is `null` when no error occurred or once
+  a subsequent poll succeeds. Never leaks raw anchor response bodies, tokens, or payout fields.
+
+**404** — `{ "error": "not_found" }`
+
+---
+
 ## `POST /links/:id/submit`
 
 **Public — no auth.** The buyer submits a transaction signed by their own wallet.
@@ -467,11 +530,21 @@ settled.
 ```json
 {
   "targetCurrency": "NGN",
-  "payoutFields": { "bank": "...", "accountNumber": "..." }
+  "payoutFields": { "bank": "...", "accountNumber": "..." },
+  "quoteId": "quote_..."
+  "withdrawType": "bank_account"
 }
 ```
 - `targetCurrency` — 3-letter code, defaults to `NGN`.
 - `payoutFields` — opaque string map handed to the anchor adapter.
+- `quoteId` — *optional*. The firm quote ID returned by `GET /links/:id/cash-out/quote`. When supplied, the withdrawal initiates against that exact quote with no re-quote. If omitted, a fresh quote is fetched and initiated atomically.
+- `withdrawType` — optional SEP-6 withdrawal type (`bank_account`, `cash`, …)
+  when the anchor offers several rails; the seller's choice, discovered from
+  `GET /links/:id/offramp-requirements`. Omitted, the adapter falls back to
+  the operator-wide `OFFRAMP_TYPE` default, or the anchor's only type.
+  An unknown type is **400** `{ "error": "unknown_withdraw_type",
+  "availableTypes": ["bank_account", "cash"] }` — the caller's mistake, never
+  the 502 a dead anchor gets.
 
 **200**
 ```json
@@ -479,7 +552,7 @@ settled.
   "job": {
     "jobId": "ofr_...",
     "linkId": "lnk_...",
-    "status": "pending",
+    "status": "awaiting_transfer",
     "targetCurrency": "NGN",
     "targetAmount": "17325.00",
     "rate": "1650"
@@ -494,6 +567,7 @@ settled.
   }
 }
 ```
+- `job.status` / `link.offrampStatus` — `"awaiting_transfer"` (anchor is waiting for seller's on-chain transfer), `"pending"` (anchor is processing payout to local rails), `"settled"` (completed), or `"failed"`.
 - `transfer` — **present when the anchor is waiting for the asset** (SEP-6,
   once it has named its deposit account). The seller's own wallet sends
   `amount` of `asset` to `destination` with exactly this memo; the anchor pays
@@ -507,11 +581,23 @@ settled.
   field is additive and a client that ignores it behaves as it did previously.
   It is always `https`; the dashboard refuses any other scheme.
 
-**409** — link is not in `paid` state: `{ "error": "Link must be paid to cash out (is \"pending\")" }`
+**409** — link is not in `paid` or `offramp_failed` state: `{ "error": "Link must be paid to cash out (is \"pending\")" }`. `offramp_settled` and every in-flight state are refused.
+**409** — `{ "error": "previous_withdrawal_active" }`. A retry from `offramp_failed` is refused while the previous job's stored status is not `failed`, so a slow anchor cannot end up with two live withdrawals for one payment.
+
+**Retrying a failed cash-out.** A link in `offramp_failed` can be quoted (`GET /links/:id/cash-out/quote`) and cashed out again with this same endpoint; it moves back to `offramp_pending` with a new job id. The rate, fee and net-amount fields of the failed attempt are cleared and replaced by the new attempt's values. A job whose state is no longer stored (the `job_state_lost` repair) has nothing left to be live and may be retried. The webhook payloads are unchanged; the API log carries `event: "cashout.retry"` with `previousJobId`, and `link.transition` carries `retry: true`. The dashboard shows "Retry cash-out" on failed links.
 **404** — `{ "error": "Link not found" }`
 **403** — `{ "error": "anchor_auth_required" }`. Only possible with a real anchor
 (`OFFRAMP=testanchor|anchor`): the seller has no live SEP-10 session with the
 anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
+**502** — `{ "error": "anchor_error", "message": "The anchor returned an error (SEP-6 withdraw, HTTP 400)." }`.
+The anchor failed or was unreachable; see Conventions. Nothing from the anchor's
+response body is included.
+
+**422** — `{ "error": "offramp_rejected", "message", "limits": { "minAmount", "maxAmount" }, "availableTypes": [] }`.
+The anchor refused the request on its merits: the amount is outside the limits it publishes
+(SEP-6 `/info`), the asset is not withdrawable, or a withdraw type is needed. This is the
+seller's to fix (change the amount), it is not an anchor outage, and it does not count towards the
+circuit breaker. The same 422 is returned by `GET /links/:id/cash-out/quote`.
 **403** — `{ "error": "kyc_required" }`. Only possible with a real anchor: the
 seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
 bank/routing info only — it is never used as a source of identity data.
@@ -542,6 +628,10 @@ and `DELETE` remain on the global per-IP limit.
 - `POST /seller/anchor-auth/challenge` → `{ "transaction": "<XDR>", "networkPassphrase": "..." }` — sign it with the wallet, never submit it.
 - `POST /seller/anchor-auth` `{ "transaction": "<signed XDR>" }` → `{ "connected": true, "anchor": "...", "expiresAt": 1750000000000 }`.
   **400** `challenge_rejected` if it is not the anchor's challenge for this seller's account.
+  `challenge_rejected` carries a fixed `message` per failure (wrong network, wrong
+  account, anchor refused the signed challenge, anchor could not be verified); the
+  anchor's own wording is logged, not returned. An anchor HTTP failure while
+  fetching the challenge is **502** `anchor_error`.
 - `DELETE /seller/anchor-auth` → **204**, forgets the session.
 
 ---
@@ -550,6 +640,8 @@ and `DELETE` remain on the global per-IP limit.
 
 **403** `{ "error": "anchor_auth_required" }` until the seller has signed in to
 the anchor (above).
+**502** `{ "error": "anchor_error", "message": "..." }` when the anchor fails or
+is unreachable (also on `PUT`); never a 500, and never the anchor's own text.
 
 Current SEP-12 requirements and status for the seller, re-synced from the anchor
 (`OFFRAMP=mock` always reports `ACCEPTED` — there's no real anchor to satisfy).
@@ -568,6 +660,11 @@ Current SEP-12 requirements and status for the seller, re-synced from the anchor
 }
 ```
 `status` is one of `unsubmitted | NEEDS_INFO | PROCESSING | ACCEPTED | REJECTED`.
+
+`unsubmitted` means the anchor has no customer for the seller's account. If a stored customer id is no longer
+known to the anchor (it returns 404 for it), Quay retries by account, keeps the id the anchor returns, and logs
+`kyc.customer_id.stale` (no PII) rather than reporting the seller as new. A status the anchor sends that Quay does not
+model is treated as `PROCESSING` and logged as `kyc.status.unknown` with the raw status string only.
 
 ---
 
@@ -591,6 +688,123 @@ discovery before any fields are known.
 ```
 Returned when a field the anchor is already known to require is missing —
 naming exactly which ones, never silently substituting a placeholder.
+
+---
+
+## `GET /seller/kyc/disclosures`
+
+List the authenticated seller's recorded SEP-12 disclosures by anchor. Requires a
+seller session and `offramp:initiate` scope; API keys are rejected. Each entry
+contains `anchorDomain`, `status`, `consent` (`grantedAt` and `revokedAt`), and
+`fields` with only `name`, `sentAt` (epoch milliseconds), and `anchorStatus`.
+The response never contains field values or anchor error text. Send times are
+recorded for successful submissions made after this endpoint is deployed;
+older sends cannot be dated reliably and are omitted.
+
+## `DELETE /seller/kyc/disclosures/:anchorDomain`
+
+Revoke consent, request [SEP-12 customer deletion](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md#customer-delete)
+at the configured anchor using the seller's own SEP-10 session, then erase the
+local KYC record and disclosure metadata for that anchor. Requires a seller
+session and `offramp:initiate` scope; API keys are rejected. The path must equal
+the configured anchor domain; arbitrary anchor URLs are never accepted. A
+successful response contains `anchorResult` (`deleted` or `not_found`) and
+`localDataErased: true`. If anchor authentication or deletion fails, local
+erasure is not reported as complete. This does not erase the seller's separate
+reusable profile or data held by another anchor.
+
+## `GET /seller/kyc/consent`
+
+List all consent records (active and revoked) for the authenticated seller.
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**200**
+```json
+{
+  "consents": [
+    {
+      "id": "cnc_1",
+      "anchorDomain": "testanchor.stellar.org",
+      "fields": ["first_name", "last_name", "email_address"],
+      "grantedAt": 1750000000000,
+      "revokedAt": null,
+      "grantedVia": "session",
+      "noticeVersion": "1.0"
+    }
+  ]
+}
+```
+`revokedAt` is `null` for active consents, an epoch-ms timestamp when revoked.
+
+---
+
+## `POST /seller/kyc/consent`
+
+Grant consent to share specific identity fields with an anchor. The server
+re-derives the fields the anchor currently requires from the latest KYC record
+and refuses any mismatch — the UI cannot consent to fields the anchor did not
+ask for. All required fields must be covered; optional fields may be omitted.
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**Request**
+```json
+{ "anchorDomain": "testanchor.stellar.org", "fields": ["first_name", "last_name", "email_address"] }
+```
+
+**201** — consent granted
+```json
+{
+  "id": "cnc_2",
+  "anchorDomain": "testanchor.stellar.org",
+  "fields": ["first_name", "last_name", "email_address"],
+  "grantedAt": 1750000001000,
+  "revokedAt": null,
+  "grantedVia": "session",
+  "noticeVersion": "1.0"
+}
+```
+
+**400** — validation errors
+- `{ "error": "invalid_fields", "message": "Consent request includes fields the anchor does not currently require", "fields": ["phone_number"] }`
+- `{ "error": "missing_required_fields", "message": "Consent must cover all required fields", "fields": ["last_name"] }`
+
+---
+
+## `DELETE /seller/kyc/consent/:anchorDomain`
+
+Revoke the active consent for an anchor. Revocation stops future data sends to
+that anchor; it does not erase data already held by the anchor (see issue 4.28).
+
+**Requires auth.** Session authentication only — API keys are rejected.
+
+**200**
+```json
+{
+  "revoked": true,
+  "anchorDomain": "testanchor.stellar.org",
+  "note": "Revocation stops future data sends to this anchor. It does not erase data already held by the anchor (see issue 4.28)."
+}
+```
+
+---
+
+## `PUT /seller/kyc` — consent enforcement
+
+Submit or update identity fields. **Before any field is sent to the anchor, the
+server checks that every field about to be sent is covered by an active consent
+for that anchor.** If any field lacks consent, the request is rejected with
+`403 consent_required`.
+
+**403**
+```json
+{ "error": "consent_required", "anchorDomain": "testanchor.stellar.org", "fields": ["last_name", "email_address"] }
+```
+The `fields` array names exactly which fields lack consent. The seller must
+grant consent via `POST /seller/kyc/consent` before retrying.
+
+**422** — same as before when a required field is missing from the request body.
 
 ---
 
@@ -742,14 +956,50 @@ registered URL.
 
 ### Events
 
-| Event             | Fired when                                  |
-| ----------------- | ------------------------------------------- |
-| `link.paid`       | a matching payment settled (exact or over)  |
-| `link.underpaid`  | a payment arrived for less than requested   |
-| `offramp.settled` | a cash-out job settled                       |
-| `offramp.failed`  | a cash-out job failed                        |
+| Event                   | Fired when                                          |
+| ----------------------- | --------------------------------------------------- |
+| `link.paid`             | a matching payment settled (exact or over)          |
+| `link.underpaid`        | a payment arrived for less than requested           |
+| `offramp.settled`       | a cash-out job settled                              |
+| `offramp.failed`        | a cash-out job failed                               |
+| `offramp.transfer_required` | anchor has published deposit instructions; the seller's wallet must send USDC to the anchor to fund the withdrawal |
+| `kyc.accepted`          | anchor accepted seller's KYC submission             |
+| `kyc.rejected`          | anchor rejected seller's KYC submission             |
+| `kyc.needs_info`        | anchor requested additional/missing fields          |
 
 ### Body
+
+#### Body for `offramp.transfer_required`
+```json
+{
+  "event": "offramp.transfer_required",
+  "data": {
+    "linkId": "lnk_...",
+    "reference": "...",
+    "status": "offramp_pending",
+    "amount": "10.50",
+    "paidAmount": "10.50",
+    "asset": { "code": "USDC", "issuer": "G..." },
+    "txHash": null,
+    "transfer": {
+      "destination": "GANCHOR...",
+      "amount": "10.50",
+      "asset": { "code": "USDC", "issuer": "G..." },
+      "memo": "withdrawal_123",
+      "memoType": "text"
+    },
+    "jobId": "job_..."
+  },
+  "id": "lnk_...",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+
+The `transfer` object contains the SEP-6 deposit instructions the seller's wallet must sign and submit. The integrator should display these to the seller or prompt their wallet to sign.
+
+**Note on sensitivity:** The transfer instructions contain no secrets — they are the public anchor account and memo the payer needs. However, integrators should not expose them to anyone but the seller.
+
+#### Payment link events (`link.*`, `offramp.settled`, `offramp.failed`)
 ```json
 {
   "event": "link.paid",
@@ -764,6 +1014,23 @@ registered URL.
     "overpaid": false
   },
   "id": "lnk_...",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+
+#### KYC events (`kyc.*`)
+For seller-level KYC events, `id` is the seller ID and the payload contains **no PII** (only status metadata and field names). `message` is populated only on `kyc.rejected` and is `null` for all other events:
+```json
+{
+  "event": "kyc.needs_info",
+  "data": {
+    "anchorDomain": "testanchor.stellar.org",
+    "status": "NEEDS_INFO",
+    "previousStatus": "PROCESSING",
+    "missingFields": ["id_document_front", "id_document_back"],
+    "message": null
+  },
+  "id": "sel_...",
   "sentAt": "2026-06-19T12:00:00.000Z"
 }
 ```

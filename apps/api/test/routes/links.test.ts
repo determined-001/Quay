@@ -224,6 +224,83 @@ describe("GET /links/:id", () => {
 });
 
 // ---------------------------------------------------------------------------
+//  GET /links/:id/detail — merchant link detail with offrampPoll
+// ---------------------------------------------------------------------------
+
+describe("GET /links/:id/detail", () => {
+  it("returns link, request, deliveries, and offrampPoll as null when no poll error exists", async () => {
+    const createRes = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Detail test", amount: "25" }),
+    });
+    const created = (await createRes.json()) as { link: { id: string } };
+    const linkId = created.link.id;
+
+    const res = await req(`/links/${linkId}/detail`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      link: Record<string, unknown>;
+      request: Record<string, unknown>;
+      deliveries: unknown[];
+      offrampPoll: unknown;
+    };
+    expect(body.link.id).toBe(linkId);
+    expect(body.request).toBeDefined();
+    expect(Array.isArray(body.deliveries)).toBe(true);
+    expect(body.offrampPoll).toBeNull();
+  });
+
+  it("returns offrampPoll when link is offramp_pending and has recorded poll error", async () => {
+    const createRes = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Detail poll error test", amount: "10" }),
+    });
+    const created = (await createRes.json()) as { link: { id: string } };
+    const linkId = created.link.id;
+
+    const link = await container.links.findById(linkId);
+    expect(link).toBeDefined();
+    link!.status = "offramp_pending";
+    link!.offrampJobId = `job_${linkId}`;
+    link!.offrampStatus = "pending";
+    await container.links.save(link!);
+
+    await container.offrampState.saveJob({
+      jobId: `job_${linkId}`,
+      linkId,
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: link!.sellerId,
+      account: link!.destination,
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: "The anchor service is temporarily unavailable or returned an error.",
+      lastPollErrorAt: 1700000000000,
+      lastPollReason: "anchor_unreachable",
+      transferNotifiedAt: null,
+    });
+
+    const res = await req(`/links/${linkId}/detail`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      offrampPoll: { reason: string; message: string; at: number } | null;
+    };
+    expect(body.offrampPoll).toEqual({
+      reason: "anchor_unreachable",
+      message: "The anchor service is temporarily unavailable or returned an error.",
+      at: 1700000000000,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 //  POST /links/:id/cash-out — trigger cash-out
 // ---------------------------------------------------------------------------
 
@@ -311,6 +388,49 @@ describe("POST /links/:id/cash-out", () => {
     expect(updated?.status).toBe("offramp_pending");
     expect(updated?.offrampJobId).toBeDefined();
   });
+
+  it("triggers cash-out successfully when a valid quoteId is provided", async () => {
+    const linkId = await createAndPayLink();
+
+    // 1. Get firm quote
+    const quoteRes = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`);
+    expect(quoteRes.status).toBe(200);
+    const quoteBody = (await quoteRes.json()) as Record<string, unknown>;
+    const quoteId = quoteBody.quoteId as string;
+    expect(quoteId).toBeDefined();
+
+    // 2. Commit cash-out with quoteId
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetCurrency: "NGN",
+        payoutFields: { bank: "GTBank", account: "1234567890" },
+        quoteId,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.job).toBeDefined();
+    expect((body.job as Record<string, unknown>).status).toBe("pending");
+  });
+
+  it("returns 409 when an expired or mismatched quoteId is provided", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_invalid_nonexistent",
+      }),
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("quote_mismatch");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -384,6 +504,108 @@ describe("GET /links/:id/cash-out/quote", () => {
     const stillPaid = await container.links.findById(linkId);
     expect(stillPaid?.status).toBe("paid");
     expect(stillPaid?.offrampJobId).toBeNull();
+  });
+
+  it("passes ?withdrawType= through to the adapter's quote (issue 5.24)", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN&withdrawType=cash`);
+    expect(res.status).toBe(200);
+    expect(container.offramp.lastQuoteWithdrawType).toBe("cash");
+  });
+
+  it("returns 400 with availableTypes for an unknown withdrawType — not a 502 (issue 5.24)", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN&withdrawType=mobile_money`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("unknown_withdraw_type");
+    expect(body.availableTypes).toEqual(["bank_account", "cash"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Withdrawal-type choice on the cash-out itself (issue 5.24)
+// ---------------------------------------------------------------------------
+
+describe("POST /links/:id/cash-out withdrawType", () => {
+  async function createAndPayLink(): Promise<string> {
+    const createRes = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Withdraw-type test", amount: "10" }),
+    });
+    const created = (await createRes.json()) as Record<string, unknown>;
+    const linkId = (created.link as Record<string, unknown>).id as string;
+    const link = await container.links.findById(linkId);
+    if (link) {
+      link.status = "paid";
+      link.txHash = `tx_wt_${linkId}`;
+      link.payer = "GBUYER";
+      link.paidAmount = "10";
+      await container.links.save(link);
+    }
+    return linkId;
+  }
+
+  it("GET /links/:id/offramp-requirements returns every type with descriptors and a defaultType", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/offramp-requirements`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      types: Array<{ name: string; descriptors: Array<{ name: string }> }>;
+      defaultType: string | null;
+      savedFields: Record<string, string> | null;
+    };
+    expect(body.types.map((t) => t.name)).toEqual(["bank_account", "cash"]);
+    expect(body.types[0]!.descriptors.map((d) => d.name)).toEqual(["dest", "dest_extra"]);
+    expect(body.defaultType).toBe("bank_account");
+    // savedFields survives the shape change (issue #32 masking untouched).
+    expect("savedFields" in body).toBe(true);
+  });
+
+  it("the seller's chosen type reaches the adapter's quote", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetCurrency: "NGN", withdrawType: "cash" }),
+    });
+    expect(res.status).toBe(200);
+    expect(container.offramp.lastQuoteWithdrawType).toBe("cash");
+  });
+
+  it("an unknown withdrawType is the caller's mistake: 400 with availableTypes, and the link is untouched", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetCurrency: "NGN", withdrawType: "mobile_money" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("unknown_withdraw_type");
+    expect(body.availableTypes).toEqual(["bank_account", "cash"]);
+
+    const still = await container.links.findById(linkId);
+    expect(still?.status).toBe("paid");
+    expect(still?.offrampJobId).toBeNull();
+  });
+
+  it("no withdrawType still works — the adapter falls back to its own default", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetCurrency: "NGN" }),
+    });
+    expect(res.status).toBe(200);
+    expect(container.offramp.lastQuoteWithdrawType).toBeUndefined();
   });
 });
 

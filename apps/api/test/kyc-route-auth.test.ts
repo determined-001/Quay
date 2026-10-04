@@ -19,12 +19,15 @@ import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord } from "@c
 describe("kycRoutes — authentication and scoping", () => {
   const record: KycRecord = {
     sellerId: "sel_x",
+    anchorDomain: "testanchor.stellar.org",
     account: null,
     customerId: "cus_1",
     status: "ACCEPTED",
     requiredFields: [],
     // Stand-in for real SEP-12 PII: legal name, address, bank account.
     providedFields: { first_name: "Ada", bank_account_number: "1234567890" },
+    providedFieldStatus: [],
+    sentFields: [],
     message: null,
     lastSyncedAt: 1,
     updatedAt: 1,
@@ -39,6 +42,25 @@ describe("kycRoutes — authentication and scoping", () => {
     const withKyc = {
       ...container,
       config: { ...container.config, kycStatusCacheMs: 45_000 },
+      anchorDomain: "testanchor.stellar.org",
+      kycConsents: {
+        async list(sellerId: string) { return []; },
+        async grant(consent: any) { return { ...consent, id: "cnc_1" }; },
+        async active(sellerId: string, anchorDomain: string) { 
+          // Return a consent that covers all fields for testing
+          return { 
+            id: "cnc_1", 
+            sellerId, 
+            anchorDomain, 
+            fields: ["first_name", "bank_account_number"], 
+            grantedAt: Date.now(), 
+            revokedAt: null, 
+            grantedVia: "session", 
+            noticeVersion: "1.0" 
+          }; 
+        },
+        async revoke(sellerId: string, anchorDomain: string) { },
+      } as unknown as Container["kycConsents"],
       kyc: {
         async status(customer: AnchorCustomer, opts?: { maxAgeMs?: number }) {
           seen.push(customer);
@@ -130,7 +152,7 @@ describe("kycRoutes — authentication and scoping", () => {
   });
 
   it("submits identity for the authenticated seller", async () => {
-    const { app, container, key, seller, submitted, seen } = await harness(["offramp:initiate"]);
+    const { app, container, key, seller, submitted, seen, seenOpts } = await harness(["offramp:initiate"]);
 
     const res = await app.request("/", {
       method: "PUT",
@@ -140,7 +162,14 @@ describe("kycRoutes — authentication and scoping", () => {
 
     expect(res.status).toBe(200);
     expect(submitted).toEqual([{ first_name: "Ada" }]);
-    expect(seen).toEqual([{ sellerId: seller.id, account: seller.wallet }]);
+    // status is called once for consent check, then submit is called
+    expect(seen).toEqual([
+      { sellerId: seller.id, account: seller.wallet },
+      { sellerId: seller.id, account: seller.wallet },
+    ]);
+    // PUT must always go to the anchor: neither the consent-check status() nor
+    // submit() may opt into the status cache (no maxAgeMs).
+    expect(seenOpts).toEqual([undefined]);
     container.client.close();
   });
 

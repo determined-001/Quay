@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const sellers = sqliteTable("sellers", {
   id: text("id").primaryKey(),
@@ -14,6 +14,7 @@ export const sellers = sqliteTable("sellers", {
    * completes their first cash-out. Deprecated in favor of payoutFieldsEncrypted.
    */
   payoutFieldsJson: text("payout_fields_json"),
+  lastActiveAt: integer("last_active_at"),
   /**
    * AES-256-GCM encrypted blob (iv || authTag || ciphertext) of the seller's
    * last-used payout fields at rest (issue 4.34).
@@ -98,7 +99,7 @@ export const webhooks = sqliteTable("webhooks", {
 export const webhookDeliveries = sqliteTable("webhook_deliveries", {
   id: text("id").primaryKey(),
   webhookId: text("webhook_id").notNull(),
-  linkId: text("link_id").notNull(),
+  linkId: text("link_id"),
   event: text("event").notNull(),
   /** Which attempt number this row records (1-based). */
   attempt: integer("attempt").notNull().default(1),
@@ -124,7 +125,7 @@ export const webhookDeliveries = sqliteTable("webhook_deliveries", {
 export const webhookQueue = sqliteTable("webhook_queue", {
   id: text("id").primaryKey(),
   webhookId: text("webhook_id").notNull(),
-  linkId: text("link_id").notNull(),
+  linkId: text("link_id"),
   event: text("event").notNull(),
   /** JSON-serialised event payload — the exact body that will be signed & sent. */
   payload: text("payload").notNull(),
@@ -146,6 +147,12 @@ export const offrampQuotes = sqliteTable("offramp_quotes", {
   sellAmount: text("sell_amount").notNull(),
   buyCurrency: text("buy_currency").notNull(),
   price: text("price").notNull(),
+  // The figures shown to the seller at quote time; null on pre-existing rows.
+  quotedRate: text("quoted_rate"),
+  quotedTargetAmount: text("quoted_target_amount"),
+  quotedFeeAmount: text("quoted_fee_amount"),
+  quotedFeeSource: text("quoted_fee_source"),
+  quotedNetTargetAmount: text("quoted_net_target_amount"),
   expiresAt: integer("expires_at").notNull(),
   createdAt: integer("created_at").notNull(),
 });
@@ -164,6 +171,22 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   status: text("status").notNull(),
   externalStatus: text("external_status"),
   lastError: text("last_error"),
+  // What was sold, so deposit instructions that arrive after the withdraw call
+  // can name the asset. NULL on rows from before these columns existed.
+  sellAssetCode: text("sell_asset_code"),
+  sellAssetIssuer: text("sell_asset_issuer"),
+  sellAmount: text("sell_amount"),
+  // JSON WithdrawTransfer the anchor published later (SEP-6
+  // pending_user_transfer_start). Payment instructions, not a secret, but the
+  // memo is not logged.
+  transferJson: text("transfer_json"),
+  lastPollError: text("last_poll_error"),
+  lastPollErrorAt: integer("last_poll_error_at"),
+  lastPollReason: text("last_poll_reason"),
+  // When the offramp.transfer_required webhook was first sent for this job.
+  // Null means the transfer instructions haven't been surfaced yet; once set,
+  // the webhook is not re-fired on subsequent polls or restarts.
+  transferNotifiedAt: integer("transfer_notified_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -171,8 +194,11 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
 // Keyed by seller (never by link) — identity is submitted once and reused
 // across every link. `fieldsEncrypted` is the only PII column: an AES-256-GCM
 // blob of the seller's submitted field values, opaque without KYC_ENCRYPTION_KEY.
+// Primary key (seller_id, anchor_domain) comes from BOOTSTRAP_SQL, as for anchor_sessions.
 export const sellerKyc = sqliteTable("seller_kyc", {
-  sellerId: text("seller_id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  // The anchor home domain this state belongs to; "legacy" for unattributable old rows.
+  anchorDomain: text("anchor_domain").notNull(),
   // The Stellar account `customer_id` belongs to at the anchor. Null on rows
   // written when every seller shared the platform's account.
   account: text("account"),
@@ -180,10 +206,24 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   status: text("status").notNull(),
   requiredFields: text("required_fields").notNull(), // JSON KycFieldSpec[] — not PII, just schema metadata
   fieldsEncrypted: text("fields_encrypted").notNull(), // AES-256-GCM blob of Record<string,string>
+  // Per-field status from the anchor's `provided_fields` (SEP-12). JSON array of ProvidedFieldStatus.
+  providedFieldStatus: text("provided_field_status"),
+  // Field names (not values) sent to the anchor in the last submission. JSON string[].
+  sentFields: text("sent_fields"),
   message: text("message"),
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),
 });
+
+/** Last successful send of each field to an anchor. Contains names and times only. */
+export const kycDisclosureFields = sqliteTable("kyc_disclosure_fields", {
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  fieldName: text("field_name").notNull(),
+  sentAt: integer("sent_at").notNull(),
+}, (table) => [
+  uniqueIndex("kyc_disclosure_field_unique").on(table.sellerId, table.anchorDomain, table.fieldName),
+]);
 
 // A seller's SEP-10 session with an anchor, issued to the seller's own wallet.
 // `tokenEncrypted` is a bearer credential for that seller at the anchor — it
@@ -290,4 +330,20 @@ export const apiKeys = sqliteTable("api_keys", {
   createdAt: integer("created_at").notNull(),
   /** Non-null when the key has been revoked. */
   revokedAt: integer("revoked_at"),
+});
+
+/**
+ * Per-anchor consent record for KYC field disclosure.
+ * No PII values in this table — only field names (from SEP-9 catalogue) and metadata.
+ * Primary key (seller_id, anchor_domain) enforced in BOOTSTRAP_SQL.
+ */
+export const kycConsents = sqliteTable("kyc_consents", {
+  id: text("id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  fields: text("fields").notNull(), // JSON string[] of SEP-9 field names
+  grantedAt: integer("granted_at").notNull(),
+  revokedAt: integer("revoked_at"),
+  grantedVia: text("granted_via").notNull(), // 'session'
+  noticeVersion: text("notice_version").notNull(),
 });
