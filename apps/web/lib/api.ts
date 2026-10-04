@@ -1,24 +1,37 @@
 import type {
   KycFieldSpec,
   KycStatus,
+  OffRampQuote,
   PaymentLink,
   PaymentRequest,
   PayoutFieldDescriptor,
   WithdrawTransfer,
 } from "@checkout/core";
 
-export type { PaymentLink, PaymentRequest, PayoutFieldDescriptor };
+export type { OffRampQuote, PaymentLink, PaymentRequest, PayoutFieldDescriptor };
 
 export interface LinkWithRequest {
   link: PaymentLink;
   request: PaymentRequest;
 }
 
-/** Anchor field descriptors + the seller's previously-saved (masked) payout
- *  fields for the cash-out form (issue #32). */
-export interface OfframpRequirements {
-  /** Anchor's field descriptors — drives the dynamic form. */
+/** One SEP-6 withdrawal type and the payout fields it needs (issue 5.24). */
+export interface WithdrawTypeOption {
+  /** The anchor's type name, e.g. "bank_account", "cash". */
+  name: string;
   descriptors: PayoutFieldDescriptor[];
+}
+
+/** Anchor withdrawal types (each with its field descriptors) + the seller's
+ *  previously-saved (masked) payout fields for the cash-out form (issues #32,
+ *  5.24). */
+export interface OfframpRequirements {
+  /** Every withdrawal type the anchor offers — drives the rail picker and,
+   *  per selected type, the dynamic form. */
+  types: WithdrawTypeOption[];
+  /** The type to preselect: the operator default when offered, or the only
+   *  type when there is exactly one, else null and the seller must choose. */
+  defaultType: string | null;
   /**
    * Previously-saved values, masked to last 4 chars server-side. Null on first
    * cash-out. The form uses these to show "already on file" and skips fields
@@ -42,6 +55,8 @@ export interface LinkDetail {
   link: PaymentLink;
   request: PaymentRequest;
   deliveries: WebhookDelivery[];
+  /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
+  offrampExternalStatus: string | null;
 }
 
 /** Fields exposed on the public receipt — never includes seller PII. */
@@ -72,6 +87,19 @@ export interface KycView {
   providedFields: Record<string, string>;
   message: string | null;
   lastSyncedAt: number | null;
+}
+
+/** Disclosure metadata only. Field values must never appear in this response. */
+export interface KycDisclosure {
+  anchorDomain: string;
+  status: KycStatus;
+  fields: Array<{
+    name: string;
+    sentAt: number;
+    anchorStatus: string;
+    error?: string | null;
+  }>;
+  consent: { grantedAt: number; revokedAt: number | null } | null;
 }
 
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
@@ -152,7 +180,13 @@ export type ApiErrorCode =
   | "missing_trustline"
   | "wrong_network"
   | "unreachable" // synthetic — fetch itself threw (DNS / network down)
-  | "server_error"; // 5xx or unexpected non-JSON response
+  | "server_error" // 5xx or unexpected non-JSON response
+  | "consent_required" // per-anchor consent missing for KYC fields
+  | "offramp_rejected" // anchor refused the amount/type; see `details.limits` and `details.availableTypes`
+  // Operator telemetry (issue 5.21):
+  | "unauthorized" // telemetry token rejected
+  | "telemetry_not_enabled" // deployment has no TELEMETRY_TOKEN configured
+  | "telemetry_error"; // any other telemetry-route failure
 
 /** Structured error thrown by http() so callers can branch on code. */
 export class CheckoutError extends Error {
@@ -170,6 +204,17 @@ export class CheckoutError extends Error {
   }
 }
 
+function describeOffRampRejected(err: CheckoutError): string {
+  const limits = (err.details.limits ?? {}) as { minAmount?: number; maxAmount?: number };
+  const { minAmount, maxAmount } = limits;
+  if (minAmount !== undefined && maxAmount !== undefined) {
+    return `The anchor only accepts cash-outs between ${minAmount} and ${maxAmount}. Adjust the amount and try again.`;
+  }
+  if (minAmount !== undefined) return `The anchor requires a cash-out of at least ${minAmount}.`;
+  if (maxAmount !== undefined) return `The anchor accepts cash-outs of at most ${maxAmount}.`;
+  return "The anchor can't process this cash-out as requested.";
+}
+
 /** Map an error code to copy suitable for a seller-facing dashboard. */
 export function describeError(err: CheckoutError): string {
   switch (err.code) {
@@ -181,6 +226,8 @@ export function describeError(err: CheckoutError): string {
       return "This action cannot be completed right now. The link may be in an unexpected state. Try refreshing.";
     case "kyc_required":
       return "Identity verification is required before you can cash out. See the panel above.";
+    case "offramp_rejected":
+      return describeOffRampRejected(err);
     case "anchor_auth_required":
       return "Sign in to the anchor with your wallet first. See the identity verification panel.";
     case "destination_cannot_receive":
@@ -199,6 +246,8 @@ export function describeError(err: CheckoutError): string {
       return "We can't reach the payment service right now. Check your connection and try again.";
     case "server_error":
       return "Something went wrong on the server. Please try again in a moment.";
+    case "consent_required":
+      return "You need to approve sharing these identity fields with the anchor before submitting.";
     default:
       return "An unexpected error occurred. Please try again.";
   }
@@ -235,8 +284,9 @@ export function setServerSkewForTest(ms: number): void {
 }
 
 async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: string; raw?: boolean }): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const headers: Record<string, string> = {
-    "content-type": "application/json",
+    ...(isFormData ? {} : { "content-type": "application/json" }),
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
   if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
@@ -292,6 +342,8 @@ async function http<T>(path: string, init?: RequestInit & { idempotencyKey?: str
                       ? "invalid_body"
                       : apiCode === "kyc_required"
                         ? "kyc_required"
+                        : apiCode === "offramp_rejected"
+                          ? "offramp_rejected"
                         : apiCode === "anchor_auth_required"
                           ? "anchor_auth_required"
                         : apiCode === "destination_cannot_receive"
@@ -422,32 +474,52 @@ export const api = {
 
   health: () => http<HealthResponse>("/health"),
 
-  quoteCashOut: (id: string, targetCurrency: string) =>
-    http<{
-      quoteId: string;
-      sourceAmount: string;
-      targetCurrency: string;
-      targetAmount: string; // Gross
-      rate: string;
-      fee: { amount: string; currency: string; source: string };
-      netTargetAmount: string; // Net
-    }>(`/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}`),
+  /** The route returns the whole OffRampQuote — including `expiresAt` (epoch
+   *  ms, the ANCHOR's own TTL) — so the type is the shared one rather than a
+   *  redeclaration that drops fields (issue 5.22 dropped exactly that one). */
+  quoteCashOut: (id: string, targetCurrency: string, withdrawType?: string) =>
+    http<OffRampQuote>(
+      `/links/${id}/cash-out/quote?targetCurrency=${targetCurrency}${
+        withdrawType ? `&withdrawType=${encodeURIComponent(withdrawType)}` : ""
+      }`,
+    ),
 
   cashOut: (
     id: string,
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
+    quoteId?: string,
+    withdrawType?: string,
   ) =>
     http<{
-      job: { jobId: string; status: string; targetAmount: string; targetCurrency: string };
+      job: {
+        jobId: string;
+        status: string;
+        targetAmount: string;
+        targetCurrency: string;
+        /** When the anchor's firm quote expires — epoch ms on the SERVER's
+         *  clock; compare against serverNow(), never Date.now() (issue 5.22). */
+        quoteExpiresAt: number;
+        quoteExpiresInSeconds: number;
+      };
       interactiveUrl?: string;
       /** The anchor's deposit instructions — the seller's wallet signs and sends this. */
       transfer?: WithdrawTransfer;
     }>(
       `/links/${id}/cash-out`,
-      { method: "POST", body: JSON.stringify({ targetCurrency, payoutFields }), idempotencyKey },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          targetCurrency,
+          payoutFields,
+          ...(quoteId ? { quoteId } : {}),
+          ...(withdrawType ? { withdrawType } : {}),
+        }),
+        idempotencyKey,
+      },
     ),
+
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
@@ -471,6 +543,10 @@ export const api = {
 
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: () => http<KycView>("/seller/kyc"),
+  getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
+  deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
+    `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },
+  ),
 
   // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
   // sign with the wallet -> completeAnchorAuth(). Quay never signs it.
@@ -487,6 +563,34 @@ export const api = {
 
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),
+
+  // KYC consent
+  listKycConsents: () =>
+    http<{ consents: Array<{
+      id: string;
+      anchorDomain: string;
+      fields: string[];
+      grantedAt: number;
+      revokedAt: number | null;
+      grantedVia: string;
+      noticeVersion: string;
+    }> }>("/seller/kyc/consent"),
+
+  grantKycConsent: (anchorDomain: string, fields: string[]) =>
+    http<{
+      id: string;
+      anchorDomain: string;
+      fields: string[];
+      grantedAt: number;
+      revokedAt: number | null;
+      grantedVia: string;
+      noticeVersion: string;
+    }>("/seller/kyc/consent", { method: "POST", body: JSON.stringify({ anchorDomain, fields }) }),
+
+  revokeKycConsent: (anchorDomain: string) =>
+    http<{ revoked: boolean; anchorDomain: string; note: string }>(`/seller/kyc/consent/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" }),
+  submitKycFiles: (formData: FormData) =>
+    http<KycView>("/seller/kyc/files", { method: "PUT", body: formData }),
 
   listWebhooks: () => http<{ webhooks: Webhook[] }>("/webhooks"),
 
@@ -523,3 +627,65 @@ export const api = {
   revokeApiKey: (id: string) =>
     http<{ id: string; revokedAt: number }>(`/api-keys/${id}`, { method: "DELETE" }),
 };
+
+// ── Operator telemetry (issue 5.21) ─────────────────────────────────────────
+// Token-per-call: the operator's TELEMETRY_TOKEN is typed into the ops page,
+// held ONLY in that page's memory, and attached here — never persisted, never
+// mixed with the seller session above.
+
+export interface TelemetrySummaryRow {
+  anchorDomain: string;
+  corridor: string;
+  count: number;
+  settledCount: number;
+  failedCount: number;
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+  meanSpread: number | null;
+}
+
+export interface TelemetryRow {
+  anchorDomain: string;
+  corridor: string;
+  sellAsset: string;
+  sellAmount: string;
+  quotedRate: string;
+  effectiveRate: string | null;
+  feeAmount: string | null;
+  quotedAt: number;
+  initiatedAt: number | null;
+  settledAt: number | null;
+  status: string;
+  failureReason: string | null;
+}
+
+async function telemetryFetch<T>(path: string, token: string): Promise<T> {
+  const res = await fetch(`${apiBase()}${path}`, {
+    headers: { authorization: `Bearer ${token}` },
+    cache: 'no-store',
+  });
+  if (res.status === 401) throw new CheckoutError('unauthorized', 401, 'That token was rejected.');
+  if (res.status === 404)
+    throw new CheckoutError(
+      'telemetry_not_enabled',
+      404,
+      'Telemetry is not enabled on this deployment (TELEMETRY_TOKEN unset).',
+    );
+  if (!res.ok) throw new CheckoutError('telemetry_error', res.status, `Telemetry request failed (${res.status}).`);
+  return (await res.json()) as T;
+}
+
+export function getTelemetrySummary(token: string): Promise<{ summary: TelemetrySummaryRow[] }> {
+  return telemetryFetch('/telemetry/summary', token);
+}
+
+export function getTelemetryRows(
+  token: string,
+  opts: { corridor?: string; limit?: number } = {},
+): Promise<{ rows: TelemetryRow[] }> {
+  const params = new URLSearchParams();
+  if (opts.corridor) params.set('corridor', opts.corridor);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const qs = params.toString();
+  return telemetryFetch(`/telemetry/rows${qs ? `?${qs}` : ''}`, token);
+}

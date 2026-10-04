@@ -80,7 +80,7 @@ a { color: inherit; }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .pill--active { color: var(--muted); }
 .pill--paid { color: var(--accent); }
-.pill--underpaid, .pill--offramp_pending { color: var(--amber); }
+.pill--underpaid, .pill--offramp_pending, .pill--offramp_awaiting_transfer { color: var(--amber); }
 .pill--offramp_settled { color: var(--accent); }
 .pill--offramp_failed, .pill--expired, .pill--cancelled { color: var(--red); }
 .pill--ok { color: var(--accent); }
