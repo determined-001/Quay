@@ -1,7 +1,7 @@
 import { and, eq, isNull, lt, or } from "drizzle-orm";
 import type { Logger } from "@checkout/core";
 import type { DB } from "../db/client";
-import { anchorSessions, links, sellerKyc, sellers } from "../db/schema";
+import { anchorSessions, kycDisclosureFields, links, sellerKyc, sellers } from "../db/schema";
 import { metrics } from "../metrics";
 
 export interface KycRetentionOptions {
@@ -25,6 +25,7 @@ export interface KycRetentionResult {
  * Reusable across retention sweeps and self-service privacy erasure requests.
  */
 export async function eraseSellerIdentityLocal(db: DB, sellerId: string): Promise<void> {
+  await db.delete(kycDisclosureFields).where(eq(kycDisclosureFields.sellerId, sellerId));
   await db.delete(sellerKyc).where(eq(sellerKyc.sellerId, sellerId));
   await db.delete(anchorSessions).where(eq(anchorSessions.sellerId, sellerId));
   await db.update(sellers).set({ payoutFieldsJson: null, payoutFieldsEncrypted: null }).where(eq(sellers.id, sellerId));

@@ -135,7 +135,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       return ctx.json(result);
     } catch (err) {
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 409 | 502);
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 404 | 409 | 502);
       throw err;
     }
   });
@@ -166,7 +166,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json(result);
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
-      if (err instanceof HttpError) return ctx.json({ error: err.message }, err.status as 404 | 403 | 502);
+      if (err instanceof HttpError) return ctx.json({ error: err.message, ...err.extra }, err.status as 404 | 403 | 502);
       throw err;
     }
   });
@@ -281,11 +281,18 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       return ctx.json({ error: "not_found" }, 404);
     }
     const deliveries = await c.webhooks.listDeliveriesByLinkId(result.link.id);
+    const offrampPoll = await c.service.getOfframpPollStatus(result.link);
     // Raw upstream status for the seller's interactive step (issue 5.20):
     // SEP-24 `incomplete` reads as "waiting on you" in the UI, while the
     // mapped offrampStatus stays `pending`.
     const offrampExternalStatus = await c.service.getOffRampExternalStatus(result.link);
-    return ctx.json({ link: result.link, request: result.request, deliveries, offrampExternalStatus });
+    return ctx.json({
+      link: result.link,
+      request: result.request,
+      deliveries,
+      offrampExternalStatus,
+      offrampPoll,
+    });
   });
 
   // Seller voids a link they created by mistake. Idempotent: cancelling an

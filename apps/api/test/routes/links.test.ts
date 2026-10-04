@@ -224,6 +224,83 @@ describe("GET /links/:id", () => {
 });
 
 // ---------------------------------------------------------------------------
+//  GET /links/:id/detail — merchant link detail with offrampPoll
+// ---------------------------------------------------------------------------
+
+describe("GET /links/:id/detail", () => {
+  it("returns link, request, deliveries, and offrampPoll as null when no poll error exists", async () => {
+    const createRes = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Detail test", amount: "25" }),
+    });
+    const created = (await createRes.json()) as { link: { id: string } };
+    const linkId = created.link.id;
+
+    const res = await req(`/links/${linkId}/detail`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      link: Record<string, unknown>;
+      request: Record<string, unknown>;
+      deliveries: unknown[];
+      offrampPoll: unknown;
+    };
+    expect(body.link.id).toBe(linkId);
+    expect(body.request).toBeDefined();
+    expect(Array.isArray(body.deliveries)).toBe(true);
+    expect(body.offrampPoll).toBeNull();
+  });
+
+  it("returns offrampPoll when link is offramp_pending and has recorded poll error", async () => {
+    const createRes = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Detail poll error test", amount: "10" }),
+    });
+    const created = (await createRes.json()) as { link: { id: string } };
+    const linkId = created.link.id;
+
+    const link = await container.links.findById(linkId);
+    expect(link).toBeDefined();
+    link!.status = "offramp_pending";
+    link!.offrampJobId = `job_${linkId}`;
+    link!.offrampStatus = "pending";
+    await container.links.save(link!);
+
+    await container.offrampState.saveJob({
+      jobId: `job_${linkId}`,
+      linkId,
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: link!.sellerId,
+      account: link!.destination,
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: "The anchor service is temporarily unavailable or returned an error.",
+      lastPollErrorAt: 1700000000000,
+      lastPollReason: "anchor_unreachable",
+      transferNotifiedAt: null,
+    });
+
+    const res = await req(`/links/${linkId}/detail`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      offrampPoll: { reason: string; message: string; at: number } | null;
+    };
+    expect(body.offrampPoll).toEqual({
+      reason: "anchor_unreachable",
+      message: "The anchor service is temporarily unavailable or returned an error.",
+      at: 1700000000000,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 //  POST /links/:id/cash-out — trigger cash-out
 // ---------------------------------------------------------------------------
 
@@ -310,6 +387,49 @@ describe("POST /links/:id/cash-out", () => {
     const updated = await container.links.findById(linkId);
     expect(updated?.status).toBe("offramp_pending");
     expect(updated?.offrampJobId).toBeDefined();
+  });
+
+  it("triggers cash-out successfully when a valid quoteId is provided", async () => {
+    const linkId = await createAndPayLink();
+
+    // 1. Get firm quote
+    const quoteRes = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`);
+    expect(quoteRes.status).toBe(200);
+    const quoteBody = (await quoteRes.json()) as Record<string, unknown>;
+    const quoteId = quoteBody.quoteId as string;
+    expect(quoteId).toBeDefined();
+
+    // 2. Commit cash-out with quoteId
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetCurrency: "NGN",
+        payoutFields: { bank: "GTBank", account: "1234567890" },
+        quoteId,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.job).toBeDefined();
+    expect((body.job as Record<string, unknown>).status).toBe("pending");
+  });
+
+  it("returns 409 when an expired or mismatched quoteId is provided", async () => {
+    const linkId = await createAndPayLink();
+
+    const res = await req(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_invalid_nonexistent",
+      }),
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("quote_mismatch");
   });
 });
 

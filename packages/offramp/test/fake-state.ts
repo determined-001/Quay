@@ -34,7 +34,7 @@ export class FakeOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
@@ -56,5 +56,17 @@ export class FakeAnchorSessionRepository implements AnchorSessionRepository {
 
   async delete(sellerId: string, anchorDomain: string): Promise<void> {
     this.sessions.delete(`${sellerId} ${anchorDomain}`);
+  }
+
+  async sweepExpired(now: number, graceMs: number): Promise<number> {
+    const cutoff = now - graceMs;
+    let count = 0;
+    for (const [key, s] of this.sessions.entries()) {
+      if (s.expiresAt < cutoff) {
+        this.sessions.delete(key);
+        count++;
+      }
+    }
+    return count;
   }
 }

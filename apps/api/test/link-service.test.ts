@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type RailPort, type WithdrawTransfer } from "@checkout/core";
+import { describe, expect, it, vi } from "vitest";
+import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampPort, type RailPort, type WithdrawTransfer } from "@checkout/core";
 import { MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
+import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 import {
   AlwaysAcceptedKyc,
   FakeLinkRepository,
@@ -36,7 +37,7 @@ const UNUSED_RAIL: RailPort = {
 
 function makeService(opts: {
   links: FakeLinkRepository;
-  offramp: ScriptedOffRamp | MockAnchorOffRamp;
+  offramp: OffRampPort;
   offrampState: FakeOffRampStateRepository;
   webhooks?: FakeWebhookRepository;
   kyc?: KycPort;
@@ -136,18 +137,111 @@ describe("LinkService.pollCashOuts", () => {
     expect(links.get("lnk_1")?.offrampStatus).toBe("failed");
   });
 
-  it("leaves the link pending on a transient (non-typed) error, to retry next tick", async () => {
+  it("leaves the link pending on a transient error, records classified error on offrampState, and clears it on success", async () => {
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_1",
+      linkId: "lnk_1",
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
+      transferNotifiedAt: null,
+    });
     const links = new FakeLinkRepository([
       makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
     ]);
     const offramp = new ScriptedOffRamp();
     offramp.statusImpl = async () => {
-      throw new Error("ECONNRESET");
+      throw new Error("ECONNRESET: failed to connect to anchor.stellar.org/sep6");
     };
 
-    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository() }).pollCashOuts();
+    const service = makeService({ links, offramp, offrampState });
+    await service.pollCashOuts();
 
     expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    const jobAfterError = await offrampState.getJob("job_1");
+    expect(jobAfterError?.lastPollReason).toBe("anchor_unreachable");
+    expect(jobAfterError?.lastPollError).toBe("The anchor could not be reached. We will keep trying.");
+    expect(jobAfterError?.lastPollErrorAt).toBeGreaterThan(0);
+
+    const status = await service.getOfframpPollStatus(links.get("lnk_1")!);
+    expect(status).toEqual({
+      reason: "anchor_unreachable",
+      message: "The anchor could not be reached. We will keep trying.",
+      at: jobAfterError!.lastPollErrorAt!,
+    });
+
+    // Now make statusImpl succeed
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "settled",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+    });
+
+    const realNow = Date.now.bind(Date);
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 10_000);
+    await service.pollCashOuts();
+    nowSpy.mockRestore();
+
+    expect(links.get("lnk_1")?.status).toBe("offramp_settled");
+    const jobAfterSuccess = await offrampState.getJob("job_1");
+    expect(jobAfterSuccess?.lastPollReason).toBeNull();
+    expect(jobAfterSuccess?.lastPollError).toBeNull();
+    expect(jobAfterSuccess?.lastPollErrorAt).toBeNull();
+
+    const statusAfterSettled = await service.getOfframpPollStatus(links.get("lnk_1")!);
+    expect(statusAfterSettled).toBeNull();
+  });
+
+  it("classifies anchor auth required errors accurately", async () => {
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_auth",
+      linkId: "lnk_1",
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
+      transferNotifiedAt: null,
+    });
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_auth", offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async () => {
+      throw new AnchorAuthRequiredError("testanchor.stellar.org");
+    };
+
+    const service = makeService({ links, offramp, offrampState });
+    await service.pollCashOuts();
+
+    const job = await offrampState.getJob("job_auth");
+    expect(job?.lastPollReason).toBe("anchor_auth_required");
+    expect(job?.lastPollError).toBe("Anchor session expired or required. Please reconnect your anchor session in settings.");
   });
 
   it("fails a link stuck at offramp_pending with no job id at all (can never resolve)", async () => {
@@ -559,6 +653,157 @@ describe("cash-out response flattening", () => {
   });
 });
 
+describe("LinkService.triggerCashOut — quoteId handling", () => {
+  it("initiates against the exact quote without calling offramp.quote when quoteId is provided", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid", amount: "10" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new ScriptedOffRamp();
+    let quoteCalled = false;
+    offramp.quoteImpl = async () => {
+      quoteCalled = true;
+      throw new Error("offramp.quote should not have been called!");
+    };
+    let initiatedQuoteId = "";
+    offramp.initiateImpl = async (input) => {
+      initiatedQuoteId = input.quoteId;
+      return { kind: "fields", jobId: "job_from_quote_123" };
+    };
+
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_valid_123",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "1650",
+      quotedAmounts: {
+        rate: "1650",
+        targetAmount: "16400.00",
+        feeAmount: "165.00",
+        feeSource: "anchor",
+        netTargetAmount: "16335.00",
+      },
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+
+    const service = makeService({ links, offramp, offrampState });
+    const { job, initiation } = await service.triggerCashOut("lnk_1", {
+      targetCurrency: "NGN",
+      payoutFields: {},
+      quoteId: "quote_valid_123",
+    });
+
+    expect(quoteCalled).toBe(false);
+    expect(initiatedQuoteId).toBe("quote_valid_123");
+    expect(initiation.kind).toBe("fields");
+    expect(job.jobId).toBe("job_from_quote_123");
+    expect(job.targetCurrency).toBe("NGN");
+    expect(job.rate).toBe("1650");
+    // The job carries the figures the seller was shown, not a recomputation.
+    expect(job.targetAmount).toBe("16400.00");
+
+    const savedLink = links.get("lnk_1");
+    expect(savedLink?.status).toBe("offramp_pending");
+    expect(savedLink?.offrampRate).toBe("1650");
+    expect(savedLink?.offrampTargetCurrency).toBe("NGN");
+  });
+
+  it("rejects with 409 quote_mismatch when quoteId does not exist", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_nonexistent",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rejects with 409 quote_mismatch when quoteId belongs to a different link", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_other_link",
+      linkId: "lnk_2",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "1650",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_other_link",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rejects with 409 quote_mismatch when quote target currency does not match requested currency", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_usd",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "USD",
+      price: "1",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_usd",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rejects with 409 quote_expired when quoteId is expired", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_expired_1",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "1650",
+      expiresAt: now - 10_000,
+      createdAt: now - 70_000,
+    });
+    const offramp = new ScriptedOffRamp();
+    const service = makeService({ links, offramp, offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", {
+        targetCurrency: "NGN",
+        payoutFields: {},
+        quoteId: "quote_expired_1",
+      }),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining("quote_expired") });
+  });
+});
+
 describe("LinkService cash-out — the seller is the anchor's customer", () => {
   it("asks the anchor about the seller's own wallet, not a platform account", async () => {
     const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
@@ -608,6 +853,33 @@ describe("LinkService cash-out — the seller is the anchor's customer", () => {
     await expect(
       service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
     ).rejects.toMatchObject({ status: 403, message: "anchor_auth_required" });
+  });
+
+  describe("getOfframpPreview with CircuitBreakerOffRamp", () => {
+    it("returns non-null preview when wrapped around MockAnchorOffRamp", async () => {
+      const links = new FakeLinkRepository([makeLink({ status: "paid", amount: "10" })]);
+      const offrampState = new FakeOffRampStateRepository();
+      const inner = new MockAnchorOffRamp({ state: offrampState });
+      const wrapped = new CircuitBreakerOffRamp(inner);
+      const service = makeService({ links, offramp: wrapped, offrampState });
+
+      const preview = await service.getOfframpPreview("lnk_1", "USD");
+      expect(preview).not.toBeNull();
+      expect(preview!.indicative).toBe(true);
+      expect(preview!.sourceAmount).toBe("10");
+      expect(preview!.prices.length).toBeGreaterThan(0);
+    });
+
+    it("returns null preview when wrapped around an adapter lacking indicativePrices", async () => {
+      const links = new FakeLinkRepository([makeLink({ status: "paid", amount: "10.0000000" })]);
+      const offrampState = new FakeOffRampStateRepository();
+      const inner = new ScriptedOffRamp(); // does not have indicativePrices
+      const wrapped = new CircuitBreakerOffRamp(inner);
+      const service = makeService({ links, offramp: wrapped, offrampState });
+
+      const preview = await service.getOfframpPreview("lnk_1", "USD");
+      expect(preview).toBeNull();
+    });
   });
 });
 
@@ -842,6 +1114,102 @@ describe("offramp.transfer_required webhook (4.22)", () => {
   });
 });
 
+describe("LinkService cash-out retry from offramp_failed", () => {
+  const stale = {
+    offrampJobId: "job_old",
+    offrampStatus: "failed" as const,
+    offrampRate: "1500",
+    offrampRateDelta: "0.5",
+    offrampFeeAmount: "9",
+    offrampFeeCurrency: "NGN",
+    offrampFeeSource: "estimated" as const,
+    offrampNetTargetAmount: "14991",
+  };
+
+  async function failedSetup(previousStatus: "failed" | "pending" | null, alwaysFail = false) {
+    const links = new FakeLinkRepository([makeLink({ status: "offramp_failed", ...stale })]);
+    const offrampState = new FakeOffRampStateRepository();
+    if (previousStatus) {
+      await offrampState.saveJob({
+        jobId: "job_old",
+        linkId: "lnk_1",
+        anchor: "mock",
+        sellerId: "sel_1",
+        account: null,
+        targetCurrency: "NGN",
+        targetAmount: "1",
+        rate: "1",
+        status: previousStatus,
+        externalStatus: null,
+        lastError: null,
+        transferNotifiedAt: null,
+        createdAt: 0,
+        updatedAt: 0,
+      } as never);
+    }
+    const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 60_000, alwaysFail });
+    return { links, service: makeService({ links, offramp, offrampState }) };
+  }
+
+  it("quotes and cashes out again after a failure, moving the link to offramp_pending", async () => {
+    const { links, service } = await failedSetup("failed");
+    const quote = await service.quoteCashOut("lnk_1", "NGN");
+    expect(quote.targetCurrency).toBe("NGN");
+
+    const { job } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    const link = links.get("lnk_1")!;
+    expect(link.status).toBe("offramp_pending");
+    expect(link.offrampJobId).toBe(job.jobId);
+    expect(link.offrampJobId).not.toBe("job_old");
+    // Per-attempt fields describe the new attempt, not the failed one.
+    expect(link.offrampRate).not.toBe("1500");
+    expect(link.offrampRateDelta).not.toBe("0.5");
+    expect(link.offrampFeeAmount).not.toBe("9");
+    expect(link.offrampNetTargetAmount).not.toBe("14991");
+  });
+
+  it("allows a retry when the previous job's state is gone (job_state_lost)", async () => {
+    const { links, service } = await failedSetup(null);
+    await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("refuses a retry while the previous job is still pending at the anchor", async () => {
+    const { links, service } = await failedSetup("pending");
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 409, message: "previous_withdrawal_active" });
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+    expect(links.get("lnk_1")?.offrampJobId).toBe("job_old");
+  });
+
+  it("a failing anchor fails the retry again and it can be retried once more", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 0, alwaysFail: true });
+    const service = makeService({ links, offramp, offrampState });
+
+    await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    await service.pollCashOuts();
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+
+    await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("still refuses offramp_settled and links that are not paid", async () => {
+    for (const status of ["offramp_settled", "offramp_pending", "active"] as const) {
+      const links = new FakeLinkRepository([makeLink({ status })]);
+      const offrampState = new FakeOffRampStateRepository();
+      const service = makeService({ links, offramp: new MockAnchorOffRamp({ state: offrampState }), offrampState });
+      await expect(service.quoteCashOut("lnk_1", "NGN")).rejects.toMatchObject({ status: 409 });
+      await expect(
+        service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+      ).rejects.toMatchObject({ status: 409 });
+    }
+  });
+});
+
 describe("LinkService cash-out — anchor rejections", () => {
   function rejecting(): ScriptedOffRamp {
     const offramp = new ScriptedOffRamp();
@@ -868,5 +1236,54 @@ describe("LinkService cash-out — anchor rejections", () => {
       service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
     ).rejects.toMatchObject({ status: 422, message: "offramp_rejected", extra: { limits: { maxAmount: 10 } } });
     expect(links.get("lnk_1")?.status).toBe("paid");
+  });
+
+  it("rejects with 409 quote_mismatch for a quote saved without its quoted amounts", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid", amount: "10" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_legacy",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "1650",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+    const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {}, quoteId: "quote_legacy" }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rejects with 409 quote_mismatch when the quoted sell amount is not what the link holds", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid", amount: "10" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "quote_other_amount",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "5",
+      buyCurrency: "NGN",
+      price: "1650",
+      quotedAmounts: {
+        rate: "1650",
+        targetAmount: "8250.00",
+        feeAmount: "0",
+        feeSource: "anchor",
+        netTargetAmount: "8250.00",
+      },
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+    const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {}, quoteId: "quote_other_amount" }),
+    ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
   });
 });

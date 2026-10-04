@@ -51,10 +51,17 @@ export interface WebhookDelivery {
   createdAt: number;
 }
 
+export interface OfframpPollStatus {
+  reason: string;
+  message: string;
+  at: number;
+}
+
 export interface LinkDetail {
   link: PaymentLink;
   request: PaymentRequest;
   deliveries: WebhookDelivery[];
+  offrampPoll?: OfframpPollStatus | null;
   /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
   offrampExternalStatus: string | null;
 }
@@ -87,6 +94,19 @@ export interface KycView {
   providedFields: Record<string, string>;
   message: string | null;
   lastSyncedAt: number | null;
+}
+
+/** Disclosure metadata only. Field values must never appear in this response. */
+export interface KycDisclosure {
+  anchorDomain: string;
+  status: KycStatus;
+  fields: Array<{
+    name: string;
+    sentAt: number;
+    anchorStatus: string;
+    error?: string | null;
+  }>;
+  consent: { grantedAt: number; revokedAt: number | null } | null;
 }
 
 // Browser calls go to NEXT_PUBLIC_API_URL; server-side calls fall back to API_URL.
@@ -476,6 +496,7 @@ export const api = {
     targetCurrency: string,
     payoutFields: Record<string, string> = {},
     idempotencyKey?: string,
+    quoteId?: string,
     withdrawType?: string,
   ) =>
     http<{
@@ -496,10 +517,16 @@ export const api = {
       `/links/${id}/cash-out`,
       {
         method: "POST",
-        body: JSON.stringify({ targetCurrency, payoutFields, ...(withdrawType ? { withdrawType } : {}) }),
+        body: JSON.stringify({
+          targetCurrency,
+          payoutFields,
+          ...(quoteId ? { quoteId } : {}),
+          ...(withdrawType ? { withdrawType } : {}),
+        }),
         idempotencyKey,
       },
     ),
+
 
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
@@ -523,6 +550,10 @@ export const api = {
 
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: () => http<KycView>("/seller/kyc"),
+  getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
+  deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
+    `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },
+  ),
 
   // The seller's own SEP-10 session with the anchor: getAnchorChallenge() ->
   // sign with the wallet -> completeAnchorAuth(). Quay never signs it.

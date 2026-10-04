@@ -77,34 +77,21 @@ function link(over: Partial<PaymentLink> = {}): PaymentLink {
 
 // ---------- fetch intercept --------------------------------------------------
 
-let fetchLog: { url: string; ok: boolean; status: number; body?: unknown }[] =
-  [];
+let fetchLog: { url: string; ok: boolean; status: number; body?: unknown }[] = [];
 
-function configureFetch(
-  handler: (url: string) => { ok: boolean; status?: number; body?: unknown },
-): void {
+function configureFetch(handler: (url: string) => { ok: boolean; status?: number; body?: unknown }): void {
   fetchLog = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn(
-      async (
-        input: string | URL | Request,
-        _init?: RequestInit,
-      ): Promise<Response> => {
-        const url =
-          typeof input === "string"
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url;
-        const { ok, status = ok ? 200 : 500, body } = handler(url);
-        fetchLog.push({ url, ok, status, body });
-        return new Response(body === undefined ? "" : JSON.stringify(body), {
-          status,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    ),
+    vi.fn(async (input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const { ok, status = ok ? 200 : 500, body } = handler(url);
+      fetchLog.push({ url, ok, status, body });
+      return new Response(body === undefined ? "" : JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    }),
   );
 }
 
@@ -120,12 +107,7 @@ afterEach(() => {
 
 describe("AnchorHealth (probe + circuit breaker)", () => {
   it("in a config-disabled mode (mock), probe always succeeds and stays closed without IO", async () => {
-    const h = new AnchorHealth({
-      enabled: false,
-      url: null,
-      homeDomain: null,
-      probeAccount: null,
-    });
+    const h = new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null });
     configureFetch(() => ({ ok: false, status: 500 }));
     const snap = await h.probe();
     expect(snap.state).toBe("closed");
@@ -136,22 +118,11 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
 
   it("happy path: TOML + SEP-10 challenge with transaction + /info all 200 -> closed, probes.all true", async () => {
     const url = "https://testanchor.stellar.org";
-    const h = new AnchorHealth({
-      enabled: true,
-      url,
-      homeDomain: "testanchor.stellar.org",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
-    });
+    const h = new AnchorHealth({ enabled: true, url, homeDomain: "testanchor.stellar.org" , probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY"});
     configureFetch((u) => {
       if (u.endsWith("/.well-known/stellar.toml")) return { ok: true };
       if (u.endsWith("/auth") || u.includes("/auth?")) {
-        return {
-          ok: true,
-          body: {
-            transaction: "AAAA...",
-            network_passphrase: "Test SDF Network ; September 2015",
-          },
-        };
+        return { ok: true, body: { transaction: "AAAA...", network_passphrase: "Test SDF Network ; September 2015" } };
       }
       if (u.endsWith("/info")) return { ok: true, body: { services: [] } };
       return { ok: false, status: 404 };
@@ -169,12 +140,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
   });
 
   it("failure threshold: 3 consecutive probes open the breaker", async () => {
-    const h = new AnchorHealth({
-      enabled: true,
-      url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
-    });
+    const h = new AnchorHealth({ enabled: true, url: "https://testanchor.stellar.org", homeDomain: "x.example" , probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY"});
     configureFetch(() => ({ ok: false, status: 502 }));
 
     await h.probe();
@@ -189,12 +155,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
   });
 
   it("opens immediately on hard errors (timeouts) and reports a sensible lastError", async () => {
-    const h = new AnchorHealth({
-      enabled: true,
-      url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
-    });
+    const h = new AnchorHealth({ enabled: true, url: "https://testanchor.stellar.org", homeDomain: "x.example" , probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY"});
     configureFetch(() => ({ ok: false, status: 599 })); // arbitrary failure code
     await h.probe();
     expect(h.snapshot().consecutiveFailures).toBe(1);
@@ -215,8 +176,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs,
     });
@@ -236,8 +196,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "testanchor.stellar.org",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      homeDomain: "testanchor.stellar.org", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs,
     });
@@ -248,8 +207,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
 
     configureFetch((u) => {
       if (u.endsWith("/.well-known/stellar.toml")) return { ok: true };
-      if (u.includes("/auth"))
-        return { ok: true, body: { transaction: "AAAA..." } };
+      if (u.includes("/auth")) return { ok: true, body: { transaction: "AAAA..." } };
       if (u.endsWith("/info")) return { ok: true };
       return { ok: false, status: 500 };
     });
@@ -263,8 +221,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs,
     });
@@ -292,8 +249,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
     const h = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "testanchor.stellar.org",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      homeDomain: "testanchor.stellar.org", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 2,
       cooldownMs: 1_000_000,
     });
@@ -305,8 +261,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
 
     configureFetch((u) => {
       if (u.endsWith("/.well-known/stellar.toml")) return { ok: true };
-      if (u.includes("/auth"))
-        return { ok: true, body: { transaction: "AAAA..." } };
+      if (u.includes("/auth")) return { ok: true, body: { transaction: "AAAA..." } };
       if (u.endsWith("/info")) return { ok: true };
       return { ok: false };
     });
@@ -321,9 +276,7 @@ describe("AnchorHealth (probe + circuit breaker)", () => {
 
 class FakeLinkRepoForAnchor implements LinkRepository {
   private byId = new Map<string, PaymentLink>();
-  async create(
-    input: Parameters<LinkRepository["create"]>[0],
-  ): Promise<PaymentLink> {
+  async create(input: Parameters<LinkRepository["create"]>[0]): Promise<PaymentLink> {
     const row: PaymentLink = {
       id: input.id,
       reference: input.reference,
@@ -414,11 +367,7 @@ class FakeSellerRepoForAnchor {
 class FakeWebhookRepoForAnchor implements WebhookRepository {
   stored: Webhook[] = [];
   enqueued: { event: string; linkId: string }[] = [];
-  async create(input: {
-    sellerId: string;
-    url: string;
-    secret: string;
-  }): Promise<Webhook> {
+  async create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook> {
     const w: Webhook = {
       id: "whk_x",
       sellerId: input.sellerId,
@@ -435,15 +384,11 @@ class FakeWebhookRepoForAnchor implements WebhookRepository {
     return w;
   }
   async listBySeller(sellerId: string): Promise<Webhook[]> {
-    return this.stored.filter(
-      (h) => h.sellerId === sellerId && h.deletedAt === null,
-    );
+    return this.stored.filter((h) => h.sellerId === sellerId && h.deletedAt === null);
   }
   /** Not exercised by these anchor-health tests — just satisfies the interface. */
   async getById(id: string, sellerId: string): Promise<Webhook | null> {
-    return (
-      this.stored.find((h) => h.id === id && h.sellerId === sellerId) ?? null
-    );
+    return this.stored.find((h) => h.id === id && h.sellerId === sellerId) ?? null;
   }
   /** Not exercised by these anchor-health tests — just satisfies the interface. */
   async rotateSecret(): Promise<Webhook | null> {
@@ -462,24 +407,9 @@ class FakeWebhookRepoForAnchor implements WebhookRepository {
   async findWebhookById(): Promise<null> {
     return null;
   }
-  async enqueue(e: {
-    id: string;
-    webhookId: string;
-    linkId: string;
-    event: string;
-    payload: string;
-    nextAttemptAt: number;
-    createdAt: number;
-  }) {
+  async enqueue(e: { id: string; webhookId: string; linkId: string; event: string; payload: string; nextAttemptAt: number; createdAt: number }) {
     this.enqueued.push({ event: e.event, linkId: e.linkId });
-    return {
-      ...e,
-      attempts: 0,
-      status: "pending" as const,
-      lastStatusCode: null,
-      lastError: null,
-      updatedAt: e.createdAt,
-    };
+    return { ...e, attempts: 0, status: "pending" as const, lastStatusCode: null, lastError: null, updatedAt: e.createdAt };
   }
   async claimDue(): Promise<never[]> {
     return [];
@@ -495,10 +425,7 @@ class FakeWebhookRepoForAnchor implements WebhookRepository {
     /* capture elsewhere via fetch interception */
   }
   /** Not exercised by these anchor-health tests — just satisfies the interface. */
-  async listDeliveries(): Promise<{
-    deliveries: WebhookDelivery[];
-    nextCursor: string | null;
-  }> {
+  async listDeliveries(): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }> {
     return { deliveries: [], nextCursor: null };
   }
 }
@@ -533,12 +460,7 @@ class FakeOffRampStateForAnchor implements OffRampStateRepository {
   }
   async updateJob(
     jobId: string,
-    patch: Partial<
-      Pick<
-        StoredOffRampJob,
-        "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt"
-      >
-    >,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
@@ -585,9 +507,7 @@ interface FlakyOffRampOpts {
 class FlakyOffRamp implements OffRampPort {
   readonly mode = "seller_initiated" as const;
   constructor(private readonly opts: FlakyOffRampOpts = {}) {}
-  async quote(
-    _input: Parameters<OffRampPort["quote"]>[0],
-  ): Promise<OffRampQuote> {
+  async quote(_input: Parameters<OffRampPort["quote"]>[0]): Promise<OffRampQuote> {
     if (this.opts.quoteShouldThrow) throw new Error("testanchor unreachable");
     return {
       quoteId: "q1",
@@ -601,23 +521,14 @@ class FlakyOffRamp implements OffRampPort {
       netTargetAmount: "16335",
     };
   }
-  async initiate(
-    _input: Parameters<OffRampPort["initiate"]>[0],
-  ): Promise<OffRampInitiation> {
+  async initiate(_input: Parameters<OffRampPort["initiate"]>[0]): Promise<OffRampInitiation> {
     return { kind: "fields", jobId: "ofr_1" };
   }
   async status(jobId: string): Promise<OffRampJob> {
     if (this.opts.statusShouldThrow) {
       throw new Error(this.opts.statusMessage ?? "transaction not found");
     }
-    return {
-      jobId,
-      linkId: "lnk_1",
-      status: this.opts.status ?? "pending",
-      targetCurrency: "NGN",
-      targetAmount: "16500",
-      rate: "1650",
-    };
+    return { jobId, linkId: "lnk_1", status: this.opts.status ?? "pending", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
   }
   async offrampRequirements(): Promise<OfframpRequirementTypes> {
     return { types: [], defaultType: null };
@@ -641,20 +552,9 @@ interface Svc {
 
 function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
   const repo = new FakeLinkRepoForAnchor();
-  const sellers = new FakeSellerRepoForAnchor({
-    id: "s_1",
-    name: "Demo",
-    wallet: DEST,
-    profileKind: "individual",
-    payoutFields: null,
-    createdAt: 1,
-  });
+  const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
   const webhooks = new FakeWebhookRepoForAnchor();
-  void webhooks.create({
-    sellerId: "s_1",
-    url: "https://example.com/h",
-    secret: "s",
-  });
+  void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
   const service = new LinkService({
     links: repo,
     sellers,
@@ -672,24 +572,13 @@ function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
   const captureRoute = new Hono();
   // Mirror the production cash-out route shape for HTTP-level assertions.
   captureRoute.post("/:id/cash-out", async (ctx) => {
-    const body = (await ctx.req.json().catch(() => ({}))) as Record<
-      string,
-      unknown
-    >;
+    const body = (await ctx.req.json().catch(() => ({}))) as Record<string, unknown>;
     try {
-      const { job, initiation } = await service.triggerCashOut(
-        ctx.req.param("id"),
-        {
-          targetCurrency:
-            typeof body.targetCurrency === "string"
-              ? body.targetCurrency
-              : "NGN",
-          payoutFields:
-            (body.payoutFields as Record<string, string> | undefined) ?? {},
-        },
-      );
-      const interactiveUrl =
-        initiation.kind === "interactive" ? initiation.url : undefined;
+      const { job, initiation } = await service.triggerCashOut(ctx.req.param("id"), {
+        targetCurrency: typeof body.targetCurrency === "string" ? body.targetCurrency : "NGN",
+        payoutFields: (body.payoutFields as Record<string, string> | undefined) ?? {},
+      });
+      const interactiveUrl = initiation.kind === "interactive" ? initiation.url : undefined;
       return ctx.json({ job, interactiveUrl }, 200);
     } catch (err) {
       if (err instanceof Error && "status" in err) {
@@ -730,8 +619,7 @@ describe("LinkService with AnchorHealth", () => {
     const health = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs: 1_000_000, // never auto-close during the test
     });
@@ -756,16 +644,8 @@ describe("LinkService with AnchorHealth", () => {
   });
 
   it("a 502 still wraps single-call upstream failures (NOT 503) when the breaker is closed", async () => {
-    const health = new AnchorHealth({
-      enabled: false,
-      url: null,
-      homeDomain: null,
-      probeAccount: null,
-    }); // always available
-    const built = buildSvcWithHealth(
-      health,
-      new FlakyOffRamp({ quoteShouldThrow: true }),
-    );
+    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }); // always available
+    const built = buildSvcWithHealth(health, new FlakyOffRamp({ quoteShouldThrow: true }));
     await built.repo.save(link({ status: "paid" }));
     const res = await built.captureRoute.request("http://x/lnk_1/cash-out", {
       method: "POST",
@@ -774,16 +654,13 @@ describe("LinkService with AnchorHealth", () => {
     });
     expect(res.status).toBe(502);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Off-ramp error");
+    // A code clients can branch on: the upstream's own message is logged,
+    // never returned (issue 4.36).
+    expect(body.error).toBe("anchor_error");
   });
 
   it("healthSnapshot reflects the breaker state and is exposed on the service", async () => {
-    const health = new AnchorHealth({
-      enabled: false,
-      url: null,
-      homeDomain: null,
-      probeAccount: null,
-    });
+    const health = new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null });
     const built = buildSvcWithHealth(health, new FlakyOffRamp());
     const snap = built.service.healthSnapshot();
     expect(snap.state).toBe("closed");
@@ -798,15 +675,13 @@ describe("GET /health exposes anchor state", () => {
     const health = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "testanchor.stellar.org",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      homeDomain: "testanchor.stellar.org", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs: 60_000,
     });
     configureFetch((u) => {
       if (u.endsWith("/.well-known/stellar.toml")) return { ok: true };
-      if (u.includes("/auth"))
-        return { ok: true, body: { transaction: "AAAA..." } };
+      if (u.includes("/auth")) return { ok: true, body: { transaction: "AAAA..." } };
       if (u.endsWith("/info")) return { ok: true };
       return { ok: false, status: 500 };
     });
@@ -830,11 +705,7 @@ describe("GET /health exposes anchor state", () => {
       ok: boolean;
       network: string;
       sellerWallet: string;
-      anchor: {
-        state: string;
-        url: string | null;
-        probes: Record<string, boolean>;
-      };
+      anchor: { state: string; url: string | null; probes: Record<string, boolean> };
     };
     expect(body.ok).toBe(true);
     expect(body.network).toBe("testnet");
@@ -850,8 +721,7 @@ describe("GET /health exposes anchor state", () => {
     const health = new AnchorHealth({
       enabled: true,
       url: "https://testanchor.stellar.org",
-      homeDomain: "x.example",
-      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      homeDomain: "x.example", probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       failureThreshold: 1,
       cooldownMs: 60_000,
     });
@@ -860,17 +730,9 @@ describe("GET /health exposes anchor state", () => {
 
     const built = buildSvcWithHealth(health, new FlakyOffRamp());
     const app = new Hono();
-    app.get("/health", (ctx) =>
-      ctx.json({ ok: true, anchor: built.service.healthSnapshot() }),
-    );
+    app.get("/health", (ctx) => ctx.json({ ok: true, anchor: built.service.healthSnapshot() }));
     const res = await app.request("http://x/health");
-    const body = (await res.json()) as {
-      anchor: {
-        state: string;
-        consecutiveFailures: number;
-        lastError: string | null;
-      };
-    };
+    const body = (await res.json()) as { anchor: { state: string; consecutiveFailures: number; lastError: string | null } };
     expect(body.anchor.state).toBe("open");
     expect(body.anchor.consecutiveFailures).toBe(1);
     expect(body.anchor.lastError).toContain("502");
@@ -882,24 +744,10 @@ describe("GET /health exposes anchor state", () => {
 describe("LinkService.pollCashOuts attribution", () => {
   it("records last_error per-link when status() throws and does NOT advance link status", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({
-      id: "s_1",
-      name: "Demo",
-      wallet: DEST,
-      profileKind: "individual",
-      payoutFields: null,
-      createdAt: 1,
-    });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
-    void webhooks.create({
-      sellerId: "s_1",
-      url: "https://example.com/h",
-      secret: "s",
-    });
-    const offramp = new FlakyOffRamp({
-      statusShouldThrow: true,
-      statusMessage: "anchor DNS resolution failed",
-    });
+    void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
+    const offramp = new FlakyOffRamp({ statusShouldThrow: true, statusMessage: "anchor DNS resolution failed" });
     const service = new LinkService({
       links: repo,
       sellers,
@@ -910,14 +758,9 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({
-        enabled: false,
-        url: null,
-        homeDomain: null,
-        probeAccount: null,
-      }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
-      webhookGuard: async () => ({ ok: true }) as const,
+    webhookGuard: async () => ({ ok: true }) as const,
     });
 
     await repo.save(
@@ -932,27 +775,14 @@ describe("LinkService.pollCashOuts attribution", () => {
     await service.pollCashOuts();
     const remained = await repo.findById("lnk_err");
     expect(remained!.status).toBe("offramp_pending"); // NOT flipped to failed by a probe error
-    expect(service.lastPollErrorFor("lnk_err")).toContain(
-      "anchor DNS resolution failed",
-    );
+    expect(service.lastPollErrorFor("lnk_err")).toContain("anchor DNS resolution failed");
   });
 
   it("clears last_error when a subsequent poll succeeds", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({
-      id: "s_1",
-      name: "Demo",
-      wallet: DEST,
-      profileKind: "individual",
-      payoutFields: null,
-      createdAt: 1,
-    });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
-    void webhooks.create({
-      sellerId: "s_1",
-      url: "https://example.com/h",
-      secret: "s",
-    });
+    void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
 
     let fail = true;
     const offramp = {
@@ -965,14 +795,7 @@ describe("LinkService.pollCashOuts attribution", () => {
       },
       async status(jobId: string): Promise<OffRampJob> {
         if (fail) throw new Error("first attempt fails");
-        return {
-          jobId,
-          linkId: "lnk_2",
-          status: "settled",
-          targetCurrency: "NGN",
-          targetAmount: "16500",
-          rate: "1650",
-        };
+        return { jobId, linkId: "lnk_2", status: "settled", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
       },
       async offrampRequirements(): Promise<OfframpRequirementTypes> {
         return { types: [], defaultType: null };
@@ -988,14 +811,9 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({
-        enabled: false,
-        url: null,
-        homeDomain: null,
-        probeAccount: null,
-      }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
-      webhookGuard: async () => ({ ok: true }) as const,
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
       link({
@@ -1016,9 +834,7 @@ describe("LinkService.pollCashOuts attribution", () => {
     // eats — the poll then hit the `now < next` skip and the error was never
     // cleared. Moving the clock makes the wait exact and the test instant.
     const realNow = Date.now.bind(Date);
-    const nowSpy = vi
-      .spyOn(Date, "now")
-      .mockImplementation(() => realNow() + 10_000);
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 10_000);
     fail = false;
     await service.pollCashOuts();
     nowSpy.mockRestore();
@@ -1028,20 +844,9 @@ describe("LinkService.pollCashOuts attribution", () => {
 
   it("a job whose status() returns `failed` is moved to offramp_failed and last_error stays null (the job self-reported)", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({
-      id: "s_1",
-      name: "Demo",
-      wallet: DEST,
-      profileKind: "individual",
-      payoutFields: null,
-      createdAt: 1,
-    });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
-    void webhooks.create({
-      sellerId: "s_1",
-      url: "https://example.com/h",
-      secret: "s",
-    });
+    void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
     const offramp = new FlakyOffRamp({ status: "failed" });
     const service = new LinkService({
       links: repo,
@@ -1053,59 +858,31 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({
-        enabled: false,
-        url: null,
-        homeDomain: null,
-        probeAccount: null,
-      }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
-      webhookGuard: async () => ({ ok: true }) as const,
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
-      link({
-        id: "lnk_3",
-        status: "offramp_pending",
-        offrampJobId: "ofr_x",
-        offrampTargetCurrency: "NGN",
-      }),
+      link({ id: "lnk_3", status: "offramp_pending", offrampJobId: "ofr_x", offrampTargetCurrency: "NGN" }),
     );
 
     await service.pollCashOuts();
     expect((await repo.findById("lnk_3"))!.status).toBe("offramp_failed");
     expect(service.lastPollErrorFor("lnk_3")).toBeNull();
-    expect(webhooks.enqueued).toContainEqual({
-      event: "offramp.failed",
-      linkId: "lnk_3",
-    });
+    expect(webhooks.enqueued).toContainEqual({ event: "offramp.failed", linkId: "lnk_3" });
   });
 
   it("backs off per job after consecutive poll failures (AC3 — does not hammer a downed anchor)", async () => {
     const repo = new FakeLinkRepoForAnchor();
-    const sellers = new FakeSellerRepoForAnchor({
-      id: "s_1",
-      name: "Demo",
-      wallet: DEST,
-      profileKind: "individual",
-      payoutFields: null,
-      createdAt: 1,
-    });
+    const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
     const webhooks = new FakeWebhookRepoForAnchor();
-    void webhooks.create({
-      sellerId: "s_1",
-      url: "https://example.com/h",
-      secret: "s",
-    });
+    void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
 
     let statusCalls = 0;
     const offramp = {
       mode: "seller_initiated" as const,
-      async quote(): Promise<OffRampQuote> {
-        throw new Error("unused");
-      },
-      async initiate(): Promise<OffRampInitiation> {
-        throw new Error("unused");
-      },
+      async quote(): Promise<OffRampQuote> { throw new Error("unused"); },
+      async initiate(): Promise<OffRampInitiation> { throw new Error("unused"); },
       async status(_jobId: string): Promise<OffRampJob> {
         statusCalls++;
         throw new Error("anchor 502");
@@ -1124,22 +901,12 @@ describe("LinkService.pollCashOuts attribution", () => {
       kyc: new FakeKycAlwaysAcceptedForAnchor(),
       stellar: STELLAR,
       telemetry: noopTelemetry,
-      health: new AnchorHealth({
-        enabled: false,
-        url: null,
-        homeDomain: null,
-        probeAccount: null,
-      }),
+      health: new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null }),
       correlation: "memo",
-      webhookGuard: async () => ({ ok: true }) as const,
+    webhookGuard: async () => ({ ok: true }) as const,
     });
     await repo.save(
-      link({
-        id: "lnk_bo",
-        status: "offramp_pending",
-        offrampJobId: "ofr_bo",
-        offrampTargetCurrency: "NGN",
-      }),
+      link({ id: "lnk_bo", status: "offramp_pending", offrampJobId: "ofr_bo", offrampTargetCurrency: "NGN" }),
     );
 
     // First poll hits status() and records the backoff; the link's
@@ -1174,12 +941,8 @@ describe("AnchorHealth probe account", () => {
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
       const url = String(input);
       seen.push(url);
-      if (url.includes("/.well-known/stellar.toml"))
-        return new Response("ok", { status: 200 });
-      if (url.includes("/auth"))
-        return new Response(JSON.stringify({ transaction: "AAA" }), {
-          status: 200,
-        });
+      if (url.includes("/.well-known/stellar.toml")) return new Response("ok", { status: 200 });
+      if (url.includes("/auth")) return new Response(JSON.stringify({ transaction: "AAA" }), { status: 200 });
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
@@ -1188,20 +951,15 @@ describe("AnchorHealth probe account", () => {
         enabled: true,
         url: "https://anchor.test",
         homeDomain: "anchor.test",
-        probeAccount:
-          "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+        probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       });
       const snap = await health.probe();
 
       const authCall = seen.find((u) => u.includes("/auth"));
       expect(authCall).toBeDefined();
-      expect(authCall).toContain(
-        "account=GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
-      );
+      expect(authCall).toContain("account=GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY");
       // The placeholder that caused the false outage must not reappear.
-      expect(authCall).not.toContain(
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK5KQ",
-      );
+      expect(authCall).not.toContain("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK5KQ");
       expect(snap.probes.sep10).toBe(true);
     } finally {
       globalThis.fetch = original;
@@ -1240,19 +998,13 @@ describe("AnchorHealth probe endpoints", () => {
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
       const url = String(input);
       seen.push(url);
-      if (url.includes("stellar.toml"))
-        return new Response("ok", { status: 200 });
-      if (url.includes("/auth"))
-        return new Response(JSON.stringify({ transaction: "AAA" }), {
-          status: 200,
-        });
+      if (url.includes("stellar.toml")) return new Response("ok", { status: 200 });
+      if (url.includes("/auth")) return new Response(JSON.stringify({ transaction: "AAA" }), { status: 200 });
       // Order matters: "/sep6/info" also ends with "/info", so the specific
       // path has to be matched first. Mirrors testanchor, where the bare path
       // does not exist.
-      if (url.includes("/sep6/info"))
-        return new Response("{}", { status: 200 });
-      if (url.endsWith("/info"))
-        return new Response("not found", { status: 404 });
+      if (url.includes("/sep6/info")) return new Response("{}", { status: 200 });
+      if (url.endsWith("/info")) return new Response("not found", { status: 404 });
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
@@ -1261,8 +1013,7 @@ describe("AnchorHealth probe endpoints", () => {
         enabled: true,
         url: "https://anchor.test",
         homeDomain: "anchor.test",
-        probeAccount:
-          "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+        probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       });
       const snap = await health.probe();
 
@@ -1281,12 +1032,8 @@ describe("AnchorHealth probe endpoints", () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
       const url = String(input);
-      if (url.includes("stellar.toml"))
-        return new Response("ok", { status: 200 });
-      if (url.includes("/auth"))
-        return new Response(JSON.stringify({ transaction: "AAA" }), {
-          status: 200,
-        });
+      if (url.includes("stellar.toml")) return new Response("ok", { status: 200 });
+      if (url.includes("/auth")) return new Response(JSON.stringify({ transaction: "AAA" }), { status: 200 });
       return new Response("upstream down", { status: 503 });
     }) as typeof fetch;
 
@@ -1295,8 +1042,7 @@ describe("AnchorHealth probe endpoints", () => {
         enabled: true,
         url: "https://anchor.test",
         homeDomain: "anchor.test",
-        probeAccount:
-          "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+        probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
       });
       const snap = await health.probe();
       expect(snap.probes.info).toBe(false);

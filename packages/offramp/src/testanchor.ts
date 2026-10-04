@@ -13,6 +13,7 @@ import {
   type OffRampStateRepository,
   type OfframpRequirementTypes,
   type SellerPayoutRef,
+  type WithdrawTransfer,
   type WithdrawTypeRequirements,
 } from "@checkout/core";
 import { NOOP_LOGGER, targetPerSourceRate } from "@checkout/core";
@@ -93,61 +94,39 @@ type Sep6TransactionStatus =
 
 interface Sep6StatusMapping {
   status: OffRampJobStatus;
+  /** Fallback failure reason when the anchor sends no `message`. */
   reason?: string;
+  /** The anchor is waiting on the seller (not terminal; link state is unchanged). */
   needsSellerAction?: boolean;
 }
 
 /** Explicit SEP-6 transaction-history status mapping. */
-export const SEP6_STATUS_MAP: Record<Sep6TransactionStatus, Sep6StatusMapping> =
-  {
-    pending_anchor: { status: "pending" },
-    pending_user_transfer_start: { status: "pending", needsSellerAction: true },
-    pending_user_transfer_complete: { status: "pending" },
-    pending_external: { status: "pending" },
-    on_hold: { status: "pending" },
-    pending_stellar: { status: "pending" },
-    pending_trust: { status: "pending" },
-    pending_user: { status: "pending", needsSellerAction: true },
-    pending_customer_info_update: {
-      status: "pending",
-      needsSellerAction: true,
-    },
-    pending_transaction_info_update: {
-      status: "pending",
-      needsSellerAction: true,
-    },
-    incomplete: { status: "pending" },
-    completed: { status: "settled" },
-    refunded: {
-      status: "failed",
-      reason: "withdrawal was refunded (refunded)",
-    },
-    expired: { status: "failed", reason: "withdrawal expired (expired)" },
-    error: { status: "failed", reason: "anchor reported an error (error)" },
-    no_market: {
-      status: "failed",
-      reason: "no market for the asset pair (no_market)",
-    },
-    too_small: {
-      status: "failed",
-      reason: "amount below the anchor's limit (too_small)",
-    },
-    too_large: {
-      status: "failed",
-      reason: "amount above the anchor's limit (too_large)",
-    },
-  };
+export const SEP6_STATUS_MAP: Record<Sep6TransactionStatus, Sep6StatusMapping> = {
+  pending_anchor: { status: "pending" },
+  pending_user_transfer_start: { status: "awaiting_transfer" },
+  pending_user_transfer_complete: { status: "pending" },
+  pending_external: { status: "pending" },
+  on_hold: { status: "pending" },
+  pending_stellar: { status: "pending" },
+  pending_trust: { status: "pending" },
+  pending_user: { status: "pending" },
+  pending_customer_info_update: { status: "pending", needsSellerAction: true },
+  pending_transaction_info_update: { status: "pending", needsSellerAction: true },
+  incomplete: { status: "awaiting_transfer" },
+  completed: { status: "settled" },
+  refunded: { status: "failed", reason: "withdrawal was refunded (refunded)" },
+  expired: { status: "failed", reason: "withdrawal expired (expired)" },
+  error: { status: "failed", reason: "anchor reported an error (error)" },
+  no_market: { status: "failed", reason: "no market for the asset pair (no_market)" },
+  too_small: { status: "failed", reason: "amount below the anchor's limit (too_small)" },
+  too_large: { status: "failed", reason: "amount above the anchor's limit (too_large)" },
+};
 
 export function mapSep6Status(status: string): Sep6StatusMapping {
   if (Object.hasOwn(SEP6_STATUS_MAP, status)) {
     return SEP6_STATUS_MAP[status as Sep6TransactionStatus];
   }
   return { status: "pending" };
-function mapSep6Status(status: string): OffRampJobStatus {
-  if (status === "completed") return "settled";
-  if (status === "error" || status === "refunded" || status === "expired") return "failed";
-  if (status === "pending_user_transfer_start" || status === "incomplete") return "awaiting_transfer";
-  return "pending"; // pending_anchor, pending_external, ...
 }
 
 export class TestAnchorOffRamp implements OffRampPort {
@@ -178,10 +157,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     this.anchorName = this.homeDomain;
     this.state = opts.state;
     this.preferredWithdrawType = opts.preferredWithdrawType;
-    this.logger = (opts.logger ?? NOOP_LOGGER).child({
-      component: "offramp.anchor",
-      anchor: this.anchorName,
-    });
+    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.anchor", anchor: this.anchorName });
   }
 
   private discover(): Promise<Sep1DiscoveryInfo> {
@@ -274,7 +250,7 @@ export class TestAnchorOffRamp implements OffRampPort {
         'This anchor only off-ramps USDC — create the link with assetCode "USDC" to cash out.',
       );
     }
-    const log = opts.logger ?? this.logger;
+    const log = (opts.logger ?? this.logger);
 
     // Validate amount against /sep6/info and discover the withdrawal type.
     // Sep6ValidationError propagates as-is so callers can surface anchor limits.
@@ -291,21 +267,21 @@ export class TestAnchorOffRamp implements OffRampPort {
     );
 
     const jwt = await this.auth.token(input.customer);
-    const q = await getSep38Quote(
-      d.anchorQuoteServer,
-      jwt,
-      {
-        sellAsset: input.sourceAsset,
-        sellAmount: input.sourceAmount,
-        buyCurrency: input.targetCurrency,
-        // Use the delivery method matching the resolved withdraw type when the
-        // anchor publishes one; fall back to omitting it so the anchor chooses.
-        buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
-      },
-      log,
-    );
+    const q = await getSep38Quote(d.anchorQuoteServer, jwt, {
+      sellAsset: input.sourceAsset,
+      sellAmount: input.sourceAmount,
+      buyCurrency: input.targetCurrency,
+      // Use the delivery method matching the resolved withdraw type when the
+      // anchor publishes one; fall back to omitting it so the anchor chooses.
+      buyDeliveryMethod: withdrawType === "bank_account" ? "WIRE" : undefined,
+    }, log);
 
     const expiresAt = Date.parse(q.expiresAt);
+    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
+    const netTargetAmount = q.buyAmount;
+    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+    const rate = targetPerSourceRate(q.price);
+
     await this.state.saveQuote({
       quoteId: q.id,
       linkId: input.linkId,
@@ -316,17 +292,17 @@ export class TestAnchorOffRamp implements OffRampPort {
       // Persisted so initiate() withdraws on the rail this price was quoted
       // for, rather than re-deriving it and possibly landing on another.
       withdrawType,
+      // What the seller is about to be shown, so a confirm-by-quoteId replays it.
+      quotedAmounts: {
+        rate,
+        targetAmount: grossTargetAmount,
+        feeAmount,
+        feeSource: "anchor",
+        netTargetAmount,
+      },
       expiresAt,
       createdAt: Date.now(),
     });
-
-    const grossTargetAmount = (
-      Number(input.sourceAmount) / Number(q.price)
-    ).toFixed(4);
-    const netTargetAmount = q.buyAmount;
-    const feeAmount = (
-      Number(grossTargetAmount) - Number(netTargetAmount)
-    ).toFixed(4);
 
     return {
       quoteId: q.id,
@@ -337,24 +313,15 @@ export class TestAnchorOffRamp implements OffRampPort {
       // OffRampQuote.rate is TARGET per source (issue 5.21); SEP-38's price
       // is the inverse. The raw price stays on the stored quote above —
       // this is a unit conversion at the boundary, not a loss of data.
-      rate: targetPerSourceRate(q.price),
+      rate,
       expiresAt,
-      fee: {
-        amount: feeAmount,
-        currency: input.targetCurrency,
-        source: "anchor",
-      },
+      fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
       netTargetAmount,
     };
   }
 
   async initiate(
-    input: {
-      linkId: string;
-      quoteId: string;
-      payout: SellerPayoutRef;
-      customer: AnchorCustomer;
-    },
+    input: { linkId: string; quoteId: string; payout: SellerPayoutRef; customer: AnchorCustomer },
     opts: { logger?: Logger } = {},
   ): Promise<OffRampInitiation> {
     const baseLog = opts.logger ?? this.logger;
@@ -370,30 +337,18 @@ export class TestAnchorOffRamp implements OffRampPort {
     // exactly what this PR exists to stop doing.
     const withdrawType =
       q.withdrawType ??
-      (
-        await resolveWithdrawType(
-          dsc.transferServer,
-          q.sellAsset.code,
-          q.sellAmount,
-          this.preferredWithdrawType,
-          baseLog,
-        )
-      ).type;
+      (await resolveWithdrawType(dsc.transferServer, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
+        .type;
 
-    const withdraw = await startSep6Withdraw(
-      dsc.transferServer,
-      jwt,
-      {
-        assetCode: q.sellAsset.code,
-        amount: q.sellAmount,
-        account: input.customer.account,
-        // The type discovered from /sep6/info at quote time — never assumed.
-        type: withdrawType,
-        dest: input.payout.fields.dest,
-        destExtra: input.payout.fields.dest_extra,
-      },
-      baseLog,
-    );
+    const withdraw = await startSep6Withdraw(dsc.transferServer, jwt, {
+      assetCode: q.sellAsset.code,
+      amount: q.sellAmount,
+      account: input.customer.account,
+      // The type discovered from /sep6/info at quote time — never assumed.
+      type: withdrawType,
+      dest: input.payout.fields.dest,
+      destExtra: input.payout.fields.dest_extra,
+    }, baseLog);
 
     const now = Date.now();
     const initialStatus: OffRampJobStatus = withdraw.accountId ? "awaiting_transfer" : "pending";
@@ -412,22 +367,21 @@ export class TestAnchorOffRamp implements OffRampPort {
       status: initialStatus,
       externalStatus: null,
       lastError: null,
+      sellAsset: q.sellAsset,
+      sellAmount: q.sellAmount,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
       transferNotifiedAt: null,
       createdAt: now,
       updatedAt: now,
     });
-    child.info(
-      {
-        event: "anchor.sep6.withdraw.init",
-        withdrawId: withdraw.id,
-        linkId: input.linkId,
-      },
-      "anchor withdraw init",
-    );
+    child.info({ event: "anchor.sep6.withdraw.init", withdrawId: withdraw.id, linkId: input.linkId }, "anchor withdraw init");
 
     // The anchor pays out only after it receives the asset, and only the
     // seller can send it. Hand back exactly what the anchor asked for; when it
-    // has not said yet (e.g. review pending) the job simply stays pending.
+    // has not said yet (e.g. review pending) the job stays pending and
+    // `status()` relays the instructions once the anchor publishes them.
     if (!withdraw.accountId) return { kind: "fields", jobId: withdraw.id };
     return {
       kind: "transfer",
@@ -442,10 +396,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     };
   }
 
-  async status(
-    jobId: string,
-    opts: { logger?: Logger } = {},
-  ): Promise<OffRampJob> {
+  async status(jobId: string, opts: { logger?: Logger } = {}): Promise<OffRampJob> {
     const job = await this.state.getJob(jobId);
     if (!job) throw new OffRampJobNotFoundError(jobId);
 
@@ -454,43 +405,49 @@ export class TestAnchorOffRamp implements OffRampPort {
     // is as unreachable as a lost one.
     if (!job.sellerId || !job.account) throw new OffRampJobNotFoundError(jobId);
 
-    const baseLog = opts.logger ?? this.logger;
+    const baseLog = (opts.logger ?? this.logger);
     const child = baseLog.child({ jobId, linkId: job.linkId });
-    const jwt = await this.auth.token({
-      sellerId: job.sellerId,
-      account: job.account,
-    });
-    const tx = await getSep6Transaction(
-      (await this.discover()).transferServer,
-      jwt,
-      jobId,
-      baseLog,
-    );
+    const jwt = await this.auth.token({ sellerId: job.sellerId, account: job.account });
+    const tx = await getSep6Transaction((await this.discover()).transferServer, jwt, jobId, baseLog);
     const mappedStatus = mapSep6Status(tx.status);
-    if (
-      !Object.hasOwn(SEP6_STATUS_MAP, tx.status) &&
-      !this.unknownStatusesLogged.has(jobId)
-    ) {
+    if (!Object.hasOwn(SEP6_STATUS_MAP, tx.status) && !this.unknownStatusesLogged.has(jobId)) {
       this.unknownStatusesLogged.add(jobId);
-      child.warn(
-        { event: "anchor.sep6.status.unknown", status: tx.status },
-        "unknown SEP-6 transaction status",
-      );
+      child.warn({ event: "anchor.sep6.status.unknown", status: tx.status }, "unknown SEP-6 transaction status");
     }
     const status = mappedStatus.status;
     const targetAmount = tx.amountOut ?? job.targetAmount;
     const reason =
-      status === "failed"
-        ? tx.message ||
-          mappedStatus.reason ||
-          `${this.anchorName}: withdrawal failed`
-        : null;
+      status === "failed" ? tx.message || mappedStatus.reason || `${this.anchorName}: withdrawal failed` : null;
+
+    // SEP-6 lets the anchor leave the deposit instructions out of /withdraw and
+    // publish them here, at pending_user_transfer_start. Without relaying them
+    // nothing would ever ask the seller to send the asset.
+    let transfer: WithdrawTransfer | undefined;
+    if (tx.status === "pending_user_transfer_start" && tx.withdrawAnchorAccount) {
+      if (!job.sellAsset) {
+        // Row from before the asset was stored; we cannot name what to send.
+        child.warn(
+          { event: "anchor.sep6.transfer.unresolvable", jobId },
+          "anchor published deposit instructions but the job has no sell asset",
+        );
+      } else {
+        transfer = {
+          destination: tx.withdrawAnchorAccount,
+          amount: tx.amountIn ?? job.sellAmount ?? "",
+          asset: job.sellAsset,
+          memo: tx.withdrawMemo ?? null,
+          memoType: tx.withdrawMemoType ?? null,
+        };
+        if (!transfer.amount) transfer = undefined;
+      }
+    }
 
     await this.state.updateJob(jobId, {
       targetAmount,
       status,
       externalStatus: tx.status,
       lastError: reason,
+      ...(transfer ? { transfer } : {}),
     });
 
     return {
@@ -501,6 +458,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       targetAmount,
       rate: job.rate,
       reason: reason ?? undefined,
+      ...(transfer ? { transfer } : {}),
       ...(mappedStatus.needsSellerAction ? { needsSellerAction: true } : {}),
     };
   }

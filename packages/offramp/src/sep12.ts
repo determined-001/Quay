@@ -1,5 +1,6 @@
 import type { KycFieldSpec, KycStatus, ProvidedFieldStatus } from "@checkout/core";
 import { endpointUrl } from "./sep1";
+import { anchorHttpError } from "./anchor-error";
 
 // SEP-12: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
 //
@@ -33,6 +34,7 @@ export interface Sep12CustomerResult {
   requiredFields: KycFieldSpec[];
   providedFieldStatus: ProvidedFieldStatus[];
   message: string | null;
+  staleCustomerId?: boolean;
 }
 
 function toFieldSpecs(fields: Record<string, RawFieldSpec> | undefined): KycFieldSpec[] {
@@ -62,39 +64,59 @@ function toKycStatus(status: string): KycStatus {
   if (status === "ACCEPTED" || status === "REJECTED" || status === "NEEDS_INFO" || status === "PROCESSING") {
     return status;
   }
+  console.warn(JSON.stringify({ event: "kyc.status.unknown", status }));
   return "PROCESSING";
 }
 
 /** Discovers required fields and current status for a customer, identified by
- *  the anchor-assigned `customerId` once one exists, else by `account`.
- *  `kycServer` is the SEP-1 `KYC_SERVER`; paths are joined onto it, not over it. */
+ *  `kycServer` is the SEP-1 `KYC_SERVER`; paths are joined onto it, not over it.
+ *  If looking up by `customerId` returns 404 (stale ID), retries once by `account`. */
 export async function getSep12Customer(
   kycServer: string,
   jwt: string,
   params: { account: string; customerId?: string | null },
 ): Promise<Sep12CustomerResult> {
-  const url = endpointUrl(kycServer, "customer");
+  const fetchCustomer = (searchKey: "id" | "account", searchValue: string) => {
+    const url = endpointUrl(kycServer, "customer");
+    url.searchParams.set(searchKey, searchValue);
+    return fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
+  };
+
+  let res: Response;
+  let usedAccountFallback = false;
   if (params.customerId) {
-    url.searchParams.set("id", params.customerId);
+    res = await fetchCustomer("id", params.customerId);
+    if (res.status === 404) {
+      res = await fetchCustomer("account", params.account);
+      usedAccountFallback = true;
+    }
   } else {
-    url.searchParams.set("account", params.account);
+    res = await fetchCustomer("account", params.account);
   }
 
-  const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (res.status === 404) {
-    // No customer record yet — every field is required, nothing on file.
-    return { customerId: null, status: "unsubmitted" as KycStatus, requiredFields: [], providedFieldStatus: [], message: null };
+    // The anchor has no customer for this account (a stale id was already retried by account).
+    // `staleCustomerId` tells the caller the stored id was dead.
+    return {
+      customerId: null,
+      status: "unsubmitted",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+      ...(usedAccountFallback ? { staleCustomerId: true } : {}),
+    };
   }
   if (!res.ok) {
-    throw new Error(`SEP-12 customer GET failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("12", "customer GET", res);
   }
   const body = (await res.json()) as RawGetCustomerResponse;
   return {
-    customerId: body.id ?? params.customerId ?? null,
+    customerId: body.id ?? (usedAccountFallback ? null : params.customerId) ?? null,
     status: toKycStatus(body.status),
     requiredFields: toFieldSpecs(body.fields),
     providedFieldStatus: toProvidedFieldStatus(body.provided_fields),
     message: body.message ?? null,
+    ...(usedAccountFallback ? { staleCustomerId: true } : {}),
   };
 }
 
@@ -113,10 +135,21 @@ export async function putSep12Customer(
     }),
   });
   if (!res.ok) {
-    throw new Error(`SEP-12 customer PUT failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("12", "customer PUT", res);
   }
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };
+}
+
+/** Ask one anchor to erase the authenticated seller's SEP-12 customer data. */
+export async function deleteSep12Customer(kycServer: string, jwt: string, account: string): Promise<"deleted" | "not_found"> {
+  const res = await fetch(endpointUrl(kycServer, `customer/${encodeURIComponent(account)}`), {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${jwt}` },
+  });
+  if (res.status === 404) return "not_found";
+  if (!res.ok) throw new Error(`SEP-12 customer DELETE failed: ${res.status}`);
+  return "deleted";
 }
 
 export interface Sep12FileField {
@@ -160,9 +193,8 @@ export async function putSep12CustomerMultipart(
     body: formData,
   });
   if (!res.ok) {
-    throw new Error(`SEP-12 customer PUT failed: ${res.status} ${await res.text()}`);
+    throw await anchorHttpError("12", "customer PUT (files)", res);
   }
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };
 }
-

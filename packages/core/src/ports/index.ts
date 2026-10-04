@@ -76,11 +76,7 @@ export interface WatcherPort {
   latestCursor(account: string): Promise<string | null>;
 
   /** Incoming payments to `account` strictly after `cursor`, oldest-first. */
-  fetchSince(
-    account: string,
-    cursor: string,
-    limit?: number,
-  ): Promise<NormalizedPayment[]>;
+  fetchSince(account: string, cursor: string, limit?: number): Promise<NormalizedPayment[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,10 +143,7 @@ export class QuoteExpiredError extends Error {
  * Returns true when a quote is expired or has an unparsable expiresAt (NaN).
  * NaN comparisons always return false in JS, so we must guard explicitly.
  */
-export function isQuoteExpired(
-  quote: OffRampQuote,
-  now: number = Date.now(),
-): boolean {
+export function isQuoteExpired(quote: OffRampQuote, now: number = Date.now()): boolean {
   if (Number.isNaN(quote.expiresAt)) return true;
   return now >= quote.expiresAt;
 }
@@ -190,6 +183,13 @@ export interface OffRampJob {
   targetAmount: string;
   rate: string;
   reason?: string; // set when failed
+  /**
+   * Where the seller must send the asset, when the anchor published it only
+   * after `initiate()` (e.g. once its own KYC review finished). Set only while
+   * the anchor is waiting for that payment. Quay relays it; the seller's
+   * wallet signs.
+   */
+  transfer?: WithdrawTransfer;
   needsSellerAction?: boolean;
 }
 
@@ -213,9 +213,7 @@ export interface AnchorCustomer {
  */
 export class AnchorAuthRequiredError extends Error {
   constructor(readonly anchorDomain: string) {
-    super(
-      `No active session with anchor ${anchorDomain}; the seller must sign in to it with their wallet`,
-    );
+    super(`No active session with anchor ${anchorDomain}; the seller must sign in to it with their wallet`);
     this.name = "AnchorAuthRequiredError";
   }
 }
@@ -277,12 +275,7 @@ export interface OffRampPort {
     opts?: { logger?: Logger },
   ): Promise<OffRampQuote>;
   initiate(
-    input: {
-      linkId: string;
-      quoteId: string;
-      payout: SellerPayoutRef;
-      customer: AnchorCustomer;
-    },
+    input: { linkId: string; quoteId: string; payout: SellerPayoutRef; customer: AnchorCustomer },
     opts?: { logger?: Logger },
   ): Promise<OffRampInitiation>;
   /** Throws {@link OffRampJobNotFoundError} when `jobId` has no known state — a
@@ -381,6 +374,18 @@ export interface StoredOffRampQuote {
   sellAmount: string;
   buyCurrency: string;
   price: string;
+  /** What the seller was shown at quote time. A later `quoteId` confirm replays
+   *  these verbatim — it must never recompute them, or the job would record
+   *  figures the seller never agreed to. Absent on rows saved before they were
+   *  persisted; those cannot be confirmed by id. */
+  quotedAmounts?: {
+    /** OffRampQuote.rate — target per source, which is not always `price`. */
+    rate: string;
+    targetAmount: string;
+    feeAmount: string;
+    feeSource: "anchor" | "estimated";
+    netTargetAmount: string;
+  };
   expiresAt: number;
   createdAt: number;
 }
@@ -400,6 +405,16 @@ export interface StoredOffRampJob {
   status: OffRampJobStatus;
   externalStatus: string | null; // raw upstream status string, for debugging
   lastError: string | null;
+  /** What was sold. Kept on the job (not looked up from the quote, which the job
+   *  does not reference) so deposit instructions that arrive later can name the
+   *  asset and fall back to the quoted amount. Absent on older rows. */
+  sellAsset?: AssetRef | null;
+  sellAmount?: string | null;
+  /** Deposit instructions the anchor published after the withdraw call. */
+  transfer?: WithdrawTransfer | null;
+  lastPollError?: string | null;
+  lastPollErrorAt?: number | null;
+  lastPollReason?: string | null;
   /** When the offramp.transfer_required webhook was first sent for this job.
    *  Null means the transfer instructions haven't been surfaced yet; once set,
    *  the webhook is not re-fired on subsequent polls or restarts. */
@@ -415,7 +430,7 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
   ): Promise<void>;
 }
 
@@ -426,11 +441,7 @@ export interface OffRampStateRepository {
 // consumes it yet; it exists to accumulate the dataset — cheap to record now,
 // impossible to backfill later. Writes must never block the cash-out path.
 
-export type OffRampTelemetryStatus =
-  | "quoted"
-  | "initiated"
-  | "settled"
-  | "failed";
+export type OffRampTelemetryStatus = "quoted" | "initiated" | "settled" | "failed";
 
 export interface OffRampTelemetryRow {
   id: string;
@@ -484,12 +495,7 @@ export interface OffRampTelemetryRepository {
 // the anchor's own compliance requirements, even though custody never moves
 // through us.
 
-export type KycStatus =
-  | "unsubmitted"
-  | "NEEDS_INFO"
-  | "PROCESSING"
-  | "ACCEPTED"
-  | "REJECTED";
+export type KycStatus = "unsubmitted" | "NEEDS_INFO" | "PROCESSING" | "ACCEPTED" | "REJECTED";
 
 export interface KycFieldSpec {
   name: string; // e.g. "first_name"
@@ -634,6 +640,7 @@ export interface AnchorSessionRepository {
   get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null>;
   save(session: AnchorSession): Promise<void>;
   delete(sellerId: string, anchorDomain: string): Promise<void>;
+  sweepExpired(now: number, graceMs: number): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -761,10 +768,7 @@ export interface Webhook {
 }
 
 /** Fields safe to return from any API route — never includes secret material. */
-export type PublicWebhook = Omit<
-  Webhook,
-  "secretEncrypted" | "previousSecretEncrypted"
->;
+export type PublicWebhook = Omit<Webhook, "secretEncrypted" | "previousSecretEncrypted">;
 
 export interface WebhookDelivery {
   id: string;
@@ -807,19 +811,11 @@ export interface WebhookQueueEntry {
 }
 
 export interface WebhookRepository {
-  create(input: {
-    sellerId: string;
-    url: string;
-    secret: string;
-  }): Promise<Webhook>;
+  create(input: { sellerId: string; url: string; secret: string }): Promise<Webhook>;
   /** Active (non-deleted) webhooks for a seller. Used for both dispatch and listing. */
   listBySeller(sellerId: string): Promise<Webhook[]>;
   /** Scoped to the owning seller to prevent cross-tenant access (IDOR). */
-  getById(
-    id: string,
-    sellerId: string,
-    opts?: { includeDeleted?: boolean },
-  ): Promise<Webhook | null>;
+  getById(id: string, sellerId: string, opts?: { includeDeleted?: boolean }): Promise<Webhook | null>;
   /**
    * Unscoped lookup by id. Only for the delivery worker, which runs outside any
    * request and therefore has no seller context; never reachable from a route.
@@ -830,12 +826,7 @@ export interface WebhookRepository {
    * `overlapMs` so in-flight receivers can be redeployed without dropping
    * events (see WebhookSender, which signs with both during the overlap).
    */
-  rotateSecret(
-    id: string,
-    sellerId: string,
-    newSecret: string,
-    overlapMs: number,
-  ): Promise<Webhook | null>;
+  rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null>;
   /** Soft delete — keeps delivery history browsable after removal. */
   softDelete(id: string, sellerId: string): Promise<boolean>;
   recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void>;
@@ -847,12 +838,7 @@ export interface WebhookRepository {
 
   // --- Queue operations ---
   /** Insert a new pending queue entry. */
-  enqueue(
-    entry: Omit<
-      WebhookQueueEntry,
-      "attempts" | "status" | "lastStatusCode" | "lastError" | "updatedAt"
-    >,
-  ): Promise<WebhookQueueEntry>;
+  enqueue(entry: Omit<WebhookQueueEntry, "attempts" | "status" | "lastStatusCode" | "lastError" | "updatedAt">): Promise<WebhookQueueEntry>;
   /**
    * Atomically claim up to `limit` rows that are due for delivery.
    * "Due" means status = 'pending' AND next_attempt_at <= now.
@@ -862,10 +848,7 @@ export interface WebhookRepository {
   /** Persist the result of one delivery attempt onto the queue entry. */
   updateQueueEntry(
     id: string,
-    patch: Pick<
-      WebhookQueueEntry,
-      "status" | "attempts" | "nextAttemptAt" | "lastStatusCode" | "lastError"
-    >,
+    patch: Pick<WebhookQueueEntry, "status" | "attempts" | "nextAttemptAt" | "lastStatusCode" | "lastError">,
   ): Promise<void>;
   /** Look up a single queue entry by id (for replay). */
   findQueueEntry(id: string): Promise<WebhookQueueEntry | null>;
@@ -896,11 +879,7 @@ export interface WatcherStateRepository {
   getCursor(account: string): Promise<string | null>;
   setCursor(account: string, cursor: string): Promise<void>;
   isProcessed(txHash: string, operationId: string): Promise<boolean>;
-  markProcessed(
-    txHash: string,
-    operationId: string,
-    linkId: string | null,
-  ): Promise<void>;
+  markProcessed(txHash: string, operationId: string, linkId: string | null): Promise<void>;
 }
 
 /** Session-JWT revocation, keyed by the token's own `jti` — logout and
