@@ -4,4 +4,8 @@ export * from "./testanchor";
 export * from "./kyc";
 export * from "./sep6";
 export * from "./sep1";
+export * from "./rates";
 export * from "./anchor-session";
+export * from "./sep12";
+export * from "./sep12-callback";
+export * from "./anchor-error";

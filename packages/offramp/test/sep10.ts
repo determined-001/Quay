@@ -2,6 +2,23 @@ import { Keypair, Transaction, TransactionBuilder, WebAuth } from "@stellar/stel
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 
+// ===========================================================================
+//  TEST-ONLY SEP-10 client reference.
+// ===========================================================================
+// Issue #207 moved this out of `src/`. It signs an anchor's SEP-10 challenge
+// with a `Keypair` the caller supplies, which is exactly the design the
+// per-seller anchor identity fix removed from Quay: a runtime module holding a
+// key that logs in as a seller. It is not wrong for a *client* to do this — the
+// seller's wallet does it in production — but nothing that ships may import it,
+// so it lives beside the tests that exercise it and is not exported from
+// `packages/offramp/src/index.ts` (nor from the package's `exports` map).
+//
+// The runtime paths that must be used instead:
+//   - `anchor-session.ts` (`SellerAnchorAuth`) fetches and verifies the
+//     challenge, then relays the seller's wallet-signed transaction.
+//   - `apps/web/lib/wallet.ts` is the actual signer in production.
+// `scripts/check-no-server-signing.mjs` fails CI if a signing path reappears
+// under `packages/offramp/src` or `apps/api/src`.
 export interface Sep10Options {
   baseUrl: string;
   homeDomain: string;

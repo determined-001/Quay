@@ -200,6 +200,7 @@ export class FakeOffRampPort implements OffRampPort {
           feeAmount: "0",
           feeSource: "estimated",
           netTargetAmount: targetAmount,
+          quoteKind: "firm",
         },
         expiresAt,
         createdAt: Date.now(),
@@ -216,6 +217,7 @@ export class FakeOffRampPort implements OffRampPort {
       expiresAt,
       fee: { amount: "0", currency: input.targetCurrency, source: "estimated" },
       netTargetAmount: targetAmount,
+      quoteKind: "indicative",
     };
   }
 
@@ -277,6 +279,7 @@ export interface TestContainer extends Container {
   links: DrizzleLinkRepository;
   sellers: DrizzleSellerRepository;
   webhooks: DrizzleWebhookRepository;
+  offrampState: DrizzleOffRampStateRepository;
   state: DrizzleWatcherStateRepository;
   rail: FakeRailPort;
   watcher: FakeWatcherPort;
@@ -327,6 +330,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     sellers: repos.sellers,
     webhooks: repos.webhooks,
     apiKeys,
+    offrampState,
     state: repos.state,
     rail,
     watcher,
@@ -341,7 +345,9 @@ export async function createTestContainer(): Promise<TestContainer> {
       async revoke(sellerId: string, anchorDomain: string) { },
     } as unknown as Container["kycConsents"],
     anchorDomain: "testanchor.stellar.org",
+    kycRepo: null,
     anchorAuth: null,
+    deleteAnchorCustomer: null,
     telemetry,
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),

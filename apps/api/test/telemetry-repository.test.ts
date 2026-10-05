@@ -30,6 +30,16 @@ function row(over: Partial<OffRampTelemetryRow> = {}): OffRampTelemetryRow {
 }
 
 describe("DrizzleOfframpTelemetryRepository", () => {
+  it("get returns the row for an id, null when absent, and does not match other ids", async () => {
+    const repo = await freshRepo();
+    await repo.upsert(row({ id: "tel_job_1", quotedRate: "1650" }));
+    await repo.upsert(row({ id: "tel_job_2", quotedRate: "1700" }));
+
+    expect((await repo.get("tel_job_1"))?.quotedRate).toBe("1650");
+    expect((await repo.get("tel_job_2"))?.quotedRate).toBe("1700");
+    expect(await repo.get("tel_missing")).toBeNull();
+  });
+
   it("upsert is keyed by id: lifecycle transitions update in place, snapshot columns stay put", async () => {
     const repo = await freshRepo();
 

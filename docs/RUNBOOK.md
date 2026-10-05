@@ -654,6 +654,69 @@ would invert the values back to wrong. Historical `fee_amount` on pre-fix
 non-mock rows was computed across the mixed units and stays unreliable; the
 script deliberately does not rewrite it.
 
+## Legacy shared-account rows (issue 4.18)
+
+Before withdrawals ran per seller, every seller authenticated to the anchor as
+one platform account. The fix added nullable columns and left old rows NULL:
+`offramp_jobs.seller_id` / `account` and `seller_kyc.account`. The runtime is
+safe with them (a legacy job cannot be polled, so its link is failed as
+`job_state_lost`; a legacy KYC row's `customer_id` is never reused), but nothing
+told an operator what that left behind. This report does.
+
+**When to run it:** once after upgrading a database that predates per-seller
+anchor identity, when a seller asks why a cash-out failed as `job_state_lost`,
+and before deleting or archiving old `offramp_jobs` rows.
+
+```bash
+# Take a backup first, then a dry run (the default; writes nothing):
+pnpm db:backup
+pnpm --filter @checkout/api exec tsx scripts/report-legacy-anchor-rows.ts
+pnpm --filter @checkout/api exec tsx scripts/report-legacy-anchor-rows.ts --json   # machine-readable
+```
+
+It reads `DATABASE_URL` / `DATABASE_AUTH_TOKEN` like the other scripts. It never
+decrypts or prints `seller_kyc.fields_encrypted`, and for KYC rows it only says
+whether a `customer_id` is still stored, not what it is.
+
+**Reading the output**
+
+- *offramp_jobs*: one entry per job with `seller_id` or `account` NULL, with its
+  link's current status and seller, the job status, `external_status` and
+  timestamps. Flags:
+  - `auto-failed as job_state_lost`: the link is still `offramp_pending`, so the
+    poller fails it on its next tick (the anchor lookup throws
+    `OffRampJobNotFoundError`).
+  - `FUNDS MAY HAVE BEEN SENT`: transfer instructions were surfaced
+    (`transfer_notified_at` set) or the anchor reported a post-transfer status
+    (`pending_anchor`, `pending_external`, `completed`, ...). This is a
+    heuristic from local data; the anchor is the source of truth.
+  - `settled: needs reconciliation`: a legacy job that finished. The payout went
+    out under the platform account, so check the records line up.
+- *seller_kyc*: rows with `account` NULL. `customer_id set` means the row may
+  still carry the shared platform customer's id, which another seller's identity
+  could have overwritten. The row's encrypted profile is fine to keep.
+
+**Cleaning up** (`--apply` alone is refused; it needs `--confirm` too):
+
+```bash
+pnpm --filter @checkout/api exec tsx scripts/report-legacy-anchor-rows.ts --apply --confirm
+```
+
+- Legacy `seller_kyc` rows: `customer_id` is cleared and `status` returns to
+  `unsubmitted`, so the next sync starts from the seller's own account. The
+  encrypted reusable profile is kept.
+- Legacy `offramp_jobs` rows: `last_error` is set to `legacy_shared_account`
+  where it was empty. Nothing else on the row changes; the rows are the audit
+  trail.
+- Only legacy rows are touched, and a second `--apply --confirm` changes nothing.
+  It prints what it changed.
+
+**A legacy job that had funds sent:** do not retry it from Quay; the job's state
+is gone. Contact the anchor with the job id (`job_id` is the anchor's
+transaction id) and the platform account. The platform account, not the seller,
+is the anchor customer for that transfer, so the anchor must refund or credit
+against that customer.
+
 ## Stuck `offramp_pending` job
 
 Symptom: a link has been `offramp_pending` far longer than the anchor's
@@ -675,8 +738,50 @@ typical settlement time.
    channel whether the off-ramp actually executed, and manually transition
    the link's status (`offramp_settled` or `offramp_failed`, per
    `packages/core/src/domain/status.ts`'s allowed transitions) to match
-   reality. `offramp_failed` can transition back to `offramp_pending` to
-   retry.
+   reality. A link in `offramp_failed` does not need a database edit to retry:
+   the seller can use "Retry cash-out" on the dashboard (or `POST
+   /links/:id/cash-out`), provided the previous job is terminal (see
+   `previous_withdrawal_active` in `docs/API.md`).
+
+## Reconciliation report (issue 4.32)
+
+A cash-out has three records that should agree: Quay's withdrawal
+(`offramp_jobs` + the link's quoted net amount), the seller's on-chain transfer
+to the anchor, and the anchor's payout. The report answers "did every withdrawal
+get exactly one matching transfer, and did the anchor pay what it quoted?"
+Use it when an anchor partner or a seller disputes a payout.
+
+```bash
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --to 2026-09-30
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --csv out.csv   # also write a CSV
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --json          # JSON on stdout
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --tolerance 1   # payout_short threshold, percent
+```
+
+It is read-only (no database writes) and reads Horizon at the same
+`STELLAR_NETWORK` / `HORIZON_URL` the API uses. `--to` covers the whole day and
+defaults to now. The exit code is 1 when any job is `transfer_mismatch`,
+`no_transfer` or `payout_short`. Output has link, job and seller ids and Stellar
+public keys/hashes only: no anchor tokens, payout fields, KYC data or memo values.
+
+Where the data comes from: the seller's browser reports the hash after sending
+(`POST /links/:id/cash-out/transfer-sent`, stored as `offramp_jobs.seller_tx_hash`).
+That hash is a claim, never proof; the report checks it on Horizon. The anchor's
+`amount_in`, `amount_fee` and `stellar_transaction_id` are stored from its SEP-6
+transaction each time the job is polled. Amounts are compared as exact decimals.
+Jobs older than this feature have no claimed hash and report as `no_transfer` once
+completed; that is a gap in the records, not necessarily a missing payment.
+
+| Status | Meaning | What to do |
+| --- | --- | --- |
+| `matched` | The claimed transfer is on Horizon with the right source, destination, asset, amount and memo, and the payout is within tolerance of the quote. | Nothing. |
+| `pending` | Not completed yet (no transfer claimed, or transfer verified and the anchor has not paid). | Wait; see "Stuck `offramp_pending` job" if it lingers. |
+| `no_transfer` | The anchor completed (or the job failed) but no transfer hash was ever reported. | Ask the seller for the hash; check the anchor's `stellar_transaction_id` on a Horizon explorer. |
+| `transfer_mismatch` | A claimed hash differs on the fields listed in `mismatch_fields`: `hash` (not found), `tx_failed`, `destination`, `source`, `asset`, `amount`, `memo`, `anchor_tx_id` (anchor cites a different transaction), `duplicate_claim` (another job claims the same hash). | Compare against the anchor's record; a wrong memo means the anchor may not be able to credit it. |
+| `payout_short` | Completed, but `amount_out` is below the quoted net by more than the tolerance (default 0.5%). | Raise with the anchor; `shortfall` and `shortfall_pct` give the exact gap. |
+| `failed_after_transfer` | The transfer is on-chain but the anchor withdrawal failed or was refunded. | Confirm the refund reached the seller. |
+| `status_drift` | The anchor says `completed` but the local job is not `settled`. | Run the poller once (see "Stuck `offramp_pending` job"). |
+| `unverified` | Could not decide: Horizon unreachable, no stored deposit instructions and the anchor does not cite the hash, or the quote/payout amount is missing. See `detail` and `unchecked`. | Re-run later, or check by hand. |
 
 ## KYC and Identity Data Retention Policy (NDPA Compliance)
 

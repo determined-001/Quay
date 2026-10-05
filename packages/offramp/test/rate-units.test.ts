@@ -12,8 +12,9 @@ import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-
 //  1 unit of source asset. SEP-38's `price` is the opposite (sell per buy),
 //  and passing it through is what made telemetry's spread meaningless for
 //  real anchors while the mock happened to line up. Offline: every anchor
-//  response is a stubbed fetch (toml made to fail so discovery falls back
-//  to the configured base URL).
+//  response is a stubbed fetch, and the TOML served declares
+//  ANCHOR_QUOTE_SERVER — this suite is about the SEP-38 path, and since issue
+//  3.22 an anchor that declares no quote server is never quoted at all.
 // ---------------------------------------------------------------------------
 
 const PRICE = "1.02"; // sell (USDC) per buy (USD): 1 USD costs 1.02 USDC
@@ -45,7 +46,23 @@ function stubAnchorFetch(): void {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/.well-known/stellar.toml")) throw new Error("offline test: no toml");
+      if (url.includes("/.well-known/stellar.toml")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({}),
+          text: async () =>
+            [
+              'VERSION = "2.0.0"',
+              `NETWORK_PASSPHRASE = "${Networks.TESTNET}"`,
+              `WEB_AUTH_ENDPOINT = "${currentBase}/auth"`,
+              `TRANSFER_SERVER = "${currentBase}/sep6"`,
+              `ANCHOR_QUOTE_SERVER = "${currentBase}/sep38"`,
+              'SIGNING_KEY = "GSIGNINGKEY"',
+              "",
+            ].join("\n"),
+        } as Response;
+      }
       const body = url.includes("/info")
         ? INFO_BODY
         : url.includes("/quote")
@@ -62,11 +79,16 @@ function stubAnchorFetch(): void {
   );
 }
 
+/** Base URL of the anchor the current test stands in for. */
+let currentBase = "";
+
 let counter = 0;
 function offrampWithSession() {
   const n = ++counter;
   const homeDomain = `rate-units-${n}.test`;
-  const discovery = new AnchorDiscovery({ homeDomain, fallbackBaseUrl: `https://anchor-ru-${n}.test` });
+  const fallbackBaseUrl = `https://anchor-ru-${n}.test`;
+  currentBase = fallbackBaseUrl;
+  const discovery = new AnchorDiscovery({ homeDomain, fallbackBaseUrl });
   const sessions = new FakeAnchorSessionRepository();
   const auth = new SellerAnchorAuth({ discovery, sessions, networkPassphrase: Networks.TESTNET });
   const offramp = new TestAnchorOffRamp({ discovery, auth, state: new FakeOffRampStateRepository() });

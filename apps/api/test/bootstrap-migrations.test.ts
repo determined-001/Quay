@@ -368,7 +368,7 @@ describe("bootstrap() rebuilds seller_kyc keyed by (seller_id, anchor_domain)", 
   it("leaves no rebuild scratch table behind", async () => {
     const client = await legacyDb();
     await bootstrap(client, { kycAnchorDomain: "a.example" });
-    const tables = (await client.execute("SELECT name FROM sqlite_master WHERE name LIKE 'seller_kyc%'")).rows;
+    const tables = (await client.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'seller_kyc%'")).rows;
     expect(tables.map((t) => t.name)).toEqual(["seller_kyc"]);
   });
 });

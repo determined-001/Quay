@@ -57,14 +57,26 @@ function fakeContainer(): Container {
   return {
     service: {
       getLink: async (id: string) => (id === ownedLink.id ? { link: ownedLink, request: {} as any } : null),
+      getOffRampExternalStatus: async () => "incomplete",
+      getOfframpPollStatus: async () => null,
       createLink: async () => ({ link: ownedLink, request: {} as any }),
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
+      getCashOutTransfer: async (id: string) =>
+        id === ownedLink.id
+          ? {
+              destination: "GANCHORACCOUNT123",
+              amount: "10",
+              asset: { code: "USDC", issuer: "GISSUER" },
+              memo: "test-memo",
+              memoType: "text",
+            }
+          : null,
     } as unknown as Container["service"],
     logger: NOOP_LOGGER,
     links: {} as Container["links"],
     sellers: sellers as unknown as Container["sellers"],
-    webhooks: {} as Container["webhooks"],
+    webhooks: { listDeliveriesByLinkId: async () => [] } as unknown as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: owner.wallet },
     auth: { session, sellers, revocations } as unknown as Container["auth"],
     apiKeys: {} as Container["apiKeys"],
@@ -172,6 +184,31 @@ describe("POST /links/:id/cancel — ownership", () => {
   });
 });
 
+describe("GET /links/:id/detail — seller reconciliation view", () => {
+  it("includes the anchor-reported external status for the owner", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/detail`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>).offrampExternalStatus).toBe("incomplete");
+  });
+
+  it("returns 404 when a different seller requests the detail view", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, other.id);
+
+    const res = await app.request(`/${ownedLink.id}/detail`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("POST /links/:id/submit — public wallet relay", () => {
   it("returns 400 for a malformed submit payload without invoking the service", async () => {
     const app = linkRoutes(fakeContainer(), async (_c, next) => next());
@@ -237,5 +274,70 @@ describe("cash-out routes — offramp_rejected", () => {
     });
     expect(res.status).toBe(422);
     expect(await res.json()).toMatchObject({ error: "offramp_rejected", limits: { maxAmount: 10 } });
+  });
+});
+
+describe("GET /links/:id/cash-out/transfer — non-custodial transfer instructions", () => {
+  it("rejects with 401 when no token is provided", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`);
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 when requested by a different seller (IDOR protection)", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, other.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as Record<string, unknown>).error).toBe("not_found");
+  });
+
+  it("returns 404 when link does not exist", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/lnk_does_not_exist/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns transfer instructions (200) for the owning seller", async () => {
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { transfer: { destination: string; amount: string; memo: string } };
+    expect(body.transfer).toBeDefined();
+    expect(body.transfer.destination).toBe("GANCHORACCOUNT123");
+    expect(body.transfer.amount).toBe("10");
+    expect(body.transfer.memo).toBe("test-memo");
+  });
+
+  it.each([
+    [409, "Link must be offramp_pending to fetch transfer instructions"],
+    [403, "anchor_auth_required"],
+  ])("passes the service's %i through (not offramp_pending / no anchor session)", async (status, message) => {
+    const container = fakeContainer();
+    (container.service as unknown as Record<string, unknown>).getCashOutTransfer = async () => {
+      throw new HttpError(status, message);
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/transfer`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(status);
+    expect(((await res.json()) as Record<string, unknown>).error).toBe(message);
   });
 });

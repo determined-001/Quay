@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getSep12Customer, putSep12Customer } from "../src/sep12";
+import {
+  deleteSep12Customer,
+  getSep12Customer,
+  putSep12Callback,
+  putSep12Customer,
+  putSep12CustomerMultipart,
+} from "../src/sep12";
 
 const BASE_URL = "https://testanchor.stellar.org";
 const JWT = "jwt-token";
@@ -11,6 +17,24 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("deleteSep12Customer", () => {
+  it("uses the authenticated account at the anchor and accepts an already absent customer", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await deleteSep12Customer(`${BASE_URL}/sep12`, JWT, ACCOUNT)).toBe("deleted");
+    expect(await deleteSep12Customer(`${BASE_URL}/sep12`, JWT, ACCOUNT)).toBe("not_found");
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe(`${BASE_URL}/sep12/customer/${ACCOUNT}`);
+    expect(init).toEqual({ method: "DELETE", headers: { authorization: `Bearer ${JWT}` } });
+  });
+
+  it("does not report deletion when the anchor rejects the request", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 401 })));
+    await expect(deleteSep12Customer(BASE_URL, JWT, ACCOUNT)).rejects.toThrow(/401/);
+  });
 });
 
 describe("putSep12Customer", () => {
@@ -116,5 +140,170 @@ describe("getSep12Customer", () => {
     await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
     const [urlWithAccount] = fetchMock.mock.calls[1] as [URL];
     expect(urlWithAccount.searchParams.get("account")).toBe(ACCOUNT);
+  });
+
+  it("keeps the anchor's field list when a customer it does not know yet gets 200 NEEDS_INFO (#222)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        status: "NEEDS_INFO",
+        fields: {
+          first_name: { type: "string", description: "Given name" },
+          email_address: { type: "string", description: "Email", optional: true },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // by account straight away, no retry
+    expect(result.status).toBe("NEEDS_INFO");
+    expect(result.staleCustomerId).toBeUndefined();
+    expect(result.requiredFields.map((f) => f.name)).toEqual(["first_name", "email_address"]);
+    expect(result.requiredFields.find((f) => f.name === "email_address")?.optional).toBe(true);
+  });
+
+  it("retries by account when query by customerId returns 404 and returns 200 with new id (#222)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+      .mockResolvedValueOnce(jsonResponse({ id: "cust_new", status: "ACCEPTED" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_stale" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstCallUrl] = fetchMock.mock.calls[0] as [URL];
+    const [secondCallUrl] = fetchMock.mock.calls[1] as [URL];
+    expect(firstCallUrl.searchParams.get("id")).toBe("cust_stale");
+    expect(secondCallUrl.searchParams.get("account")).toBe(ACCOUNT);
+
+    expect(result).toEqual({
+      customerId: "cust_new",
+      status: "ACCEPTED",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+      staleCustomerId: true,
+    });
+  });
+
+  it("retries by account when query by customerId returns 404 and returns unsubmitted if account also 404s (#222)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_stale" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      customerId: null,
+      status: "unsubmitted",
+      requiredFields: [],
+      providedFieldStatus: [],
+      message: null,
+      staleCustomerId: true,
+    });
+  });
+
+  it("logs a warning when status is unrecognised and falls back to PROCESSING (#222)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+          status: "NEEDS_VERIFICATION",
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.status).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: "NEEDS_VERIFICATION" }),
+    );
+  });
+});
+
+describe("putSep12Callback", () => {
+  const CALLBACK_URL = "https://api.example.com/anchor-callbacks/sep12/anchor.example/tok";
+
+  it("PUTs the callback url (and customer id when known) to /customer/callback with the seller's JWT", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Callback(BASE_URL, JWT, { customerId: "cust_1", url: CALLBACK_URL });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(String(url)).toBe(`${BASE_URL}/customer/callback`);
+    expect(init.method).toBe("PUT");
+    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${JWT}`);
+    expect(JSON.parse(init.body as string)).toEqual({ url: CALLBACK_URL, id: "cust_1" });
+  });
+
+  it("omits the id when no customer id exists yet", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Callback(BASE_URL, JWT, { customerId: null, url: CALLBACK_URL });
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ url: CALLBACK_URL });
+  });
+
+  it("throws on a non-2xx response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("nope", { status: 400 })));
+    await expect(putSep12Callback(BASE_URL, JWT, { url: CALLBACK_URL })).rejects.toThrow(/callback PUT failed: 400/);
+  });
+});
+
+describe("putSep12CustomerMultipart", () => {
+  it("orders text fields before binary file fields as specified in SEP-12", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_mult" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fileBlob = new Blob(["fake-image-bytes"], { type: "image/jpeg" });
+    await putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      fields: { first_name: "Ada", last_name: "Lovelace" },
+      files: [{ name: "photo_id_front", blob: fileBlob, filename: "id_front.jpg" }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe("https://testanchor.stellar.org/customer");
+    expect(init.method).toBe("PUT");
+    expect(init.headers).toEqual({ authorization: `Bearer ${JWT}` });
+
+    const formData = init.body as FormData;
+    expect(formData).toBeInstanceOf(FormData);
+    const keys = Array.from(formData.keys());
+    expect(keys).toEqual(["account", "first_name", "last_name", "photo_id_front"]);
+    expect(formData.get("account")).toBe(ACCOUNT);
+    expect(formData.get("first_name")).toBe("Ada");
+    expect(formData.get("last_name")).toBe("Lovelace");
+    const file = formData.get("photo_id_front") as File;
+    expect(file).toBeDefined();
+    expect(file.name).toBe("id_front.jpg");
+  });
+
+  it("addresses by customerId when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_mult_id" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fileBlob = new Blob(["fake-image-bytes"], { type: "image/png" });
+    const res = await putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      customerId: "cust_existing",
+      files: [{ name: "photo_id_back", blob: fileBlob, filename: "back.png" }],
+    });
+
+    expect(res.customerId).toBe("cust_mult_id");
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const formData = init.body as FormData;
+    expect(formData.get("id")).toBe("cust_existing");
+    expect(formData.get("account")).toBeNull();
   });
 });

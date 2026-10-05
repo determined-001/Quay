@@ -13,6 +13,10 @@
  *   6. "Confirm cash-out" → POST /cash-out with the quoteId (so the API initiates against
  *      exactly the quote the seller saw) and an Idempotency-Key reused across retries.
  *   7. Any unmet required field → cash-out button is disabled with explanatory text.
+ *   8. Anchor interactive flow (SEP-24) → "interactive" step: the seller opens
+ *      the anchor's page from a real click, and the modal polls
+ *      GET /links/:id/detail until the link settles/fails or is dismissed.
+ *      The modal never auto-closes on a (possibly blocked) popup.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -27,12 +31,14 @@ import {
   type PayoutFieldDescriptor,
 } from "../../lib/api";
 import { fmtCountdown, quoteMsRemaining } from "../../lib/quote-countdown";
-import { sendAnchorTransfer, shortAddress } from "../../lib/wallet";
 import {
-  checkPaymentPreflight,
-  type PaymentPreflightResult,
-} from "../../lib/payment-preflight";
-import { useSellerWallet } from "./SessionGate";
+  anchorLabelForUrl,
+  describeInteractiveStatus,
+  interactivePollDelayMs,
+  isInteractiveTerminalStatus,
+  parseInteractiveUrl,
+} from "../../lib/interactive-cashout";
+import TransferStep from "./TransferStep";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,6 +62,8 @@ type ModalStep =
   | "quote"
   | "submitting"
   | "transfer"
+  | "interactive"
+  | "awaiting_anchor"
   | "error";
 
 interface QuotePreview {
@@ -65,6 +73,10 @@ interface QuotePreview {
   targetCurrency: string;
   /** epoch ms when this quote expires on the anchor side */
   expiresAt?: number;
+  /** The anchor quoted this number, or we computed it (issue 3.22). Absent is
+   *  treated as firm: responses from before this field existed were always the
+   *  anchor's own quote. */
+  quoteKind?: "firm" | "indicative";
 }
 
 // ---------------------------------------------------------------------------
@@ -148,63 +160,18 @@ export default function CashOutModal({
   const idempotencyKeyRef = useRef<string | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  // Set only when the anchor asked for an interactive flow and the popup was
-  // blocked — the seller needs a link they can open themselves.
+  // Set when the anchor asked for an interactive flow — the seller opens it
+  // from the "interactive" step's click-to-open button, never from a popup
+  // fired after `await` (browsers block those outside the click gesture).
   const [interactiveUrl, setInteractiveUrl] = useState<string | null>(null);
+  // Plain-words rendering of the anchor-reported status while polling.
+  const [interactiveStatus, setInteractiveStatus] = useState<string | null>(null);
+  const interactivePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const interactiveOpenedAtRef = useRef<number>(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Set when the anchor is waiting for the asset. Only the seller's wallet can
-  // send it; the payout does not start until they do.
-  const wallet = useSellerWallet();
+  // Set when the anchor is waiting for the asset. TransferStep (shared with
+  // the resume flow) owns the wallet send; the payout starts once it is sent.
   const [transfer, setTransfer] = useState<WithdrawTransfer | null>(null);
-  const [sending, setSending] = useState(false);
-  const [sentHash, setSentHash] = useState<string | null>(null);
-  const [transferError, setTransferError] = useState<string | null>(null);
-  const [preflight, setPreflight] = useState<PaymentPreflightResult | null>(null);
-  const [checkingPreflight, setCheckingPreflight] = useState(false);
-
-  const runPreflight = useCallback(async () => {
-    if (!transfer || !wallet) return;
-    setCheckingPreflight(true);
-    setTransferError(null);
-    try {
-      const stellar = await import("@stellar/stellar-sdk");
-      const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
-      const horizonUrl =
-        process.env.NEXT_PUBLIC_HORIZON_URL ??
-        (network === "public" ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org");
-      const server = new stellar.Horizon.Server(horizonUrl);
-      let account: Awaited<ReturnType<typeof server.loadAccount>> | null = null;
-      try {
-        account = await server.loadAccount(wallet);
-      } catch {
-        account = null;
-      }
-      const result = checkPaymentPreflight(
-        account,
-        {
-          code: transfer.asset.code,
-          issuer: transfer.asset.issuer,
-        },
-        transfer.amount,
-        {
-          connectedAddress: wallet,
-          expectedAddress: wallet,
-          feeStroops: BigInt(stellar.BASE_FEE),
-        },
-      );
-      setPreflight(result);
-    } catch {
-      setPreflight(null);
-    } finally {
-      setCheckingPreflight(false);
-    }
-  }, [transfer, wallet]);
-
-  useEffect(() => {
-    if (step === "transfer" && transfer && wallet) {
-      void runPreflight();
-    }
-  }, [step, transfer, wallet, runPreflight]);
 
   // ---- fetch requirements on mount ----------------------------------------
   useEffect(() => {
@@ -249,6 +216,48 @@ export default function CashOutModal({
     };
   }, []);
 
+  // ---- interactive polling -------------------------------------------------
+  // While the interactive step is open, poll the link detail for the
+  // anchor-reported status. Steady 5 s cadence, backing off to 30 s after
+  // 2 minutes. Closes with onSuccess() only on terminal offrampStatus —
+  // completion is detected by polling, never by watching a popup (noopener
+  // popups are unobservable by design).
+  useEffect(() => {
+    if (step !== "interactive") return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const detail = await api.getDetail(linkId);
+        if (cancelled) return;
+        setInteractiveStatus(describeInteractiveStatus(detail.offrampExternalStatus));
+        if (isInteractiveTerminalStatus(detail.link.offrampStatus)) {
+          onSuccess();
+          return;
+        }
+        // A SEP-24 anchor only names its deposit account after the seller finishes its form (issue 3.18).
+        // Once it does, the seller's wallet has a transfer to send: switch to the existing transfer step.
+        const late = await api.getCashOutTransfer(linkId).catch(() => null); // 404 until instructions exist
+        if (cancelled) return;
+        if (late?.transfer) {
+          setTransfer(late.transfer);
+          setStep("transfer");
+          return;
+        }
+      } catch {
+        // A failed poll must not close the step or strand the seller — the
+        // next tick retries, and the server-side poller settles the link.
+      }
+      if (cancelled) return;
+      const delay = interactivePollDelayMs(Date.now() - interactiveOpenedAtRef.current);
+      interactivePollRef.current = setTimeout(() => void poll(), delay);
+    };
+    interactivePollRef.current = setTimeout(() => void poll(), interactivePollDelayMs(0));
+    return () => {
+      cancelled = true;
+      if (interactivePollRef.current) clearTimeout(interactivePollRef.current);
+    };
+  }, [step, linkId, onSuccess]);
+
   // ---- form interactions ---------------------------------------------------
   function handleChange(name: string, value: string) {
     setValues((prev) => ({ ...prev, [name]: value }));
@@ -270,40 +279,24 @@ export default function CashOutModal({
   }
 
   /**
-   * Opens the anchor's SEP-24 interactive flow.
+   * Opens the anchor's SEP-24 interactive flow from a real click, inside the
+   * user gesture — popups fired after `await api.cashOut(...)` land outside
+   * the gesture window and browsers routinely block them.
    *
-   * Two things this deliberately does not do naively:
-   *
-   * `url` is third-party data — it comes from the anchor, through our API, and
-   * lands in a DOM sink. Anything but https is refused: `javascript:` in
-   * `window.open` would execute against this page, and plain http would
-   * downgrade a flow the seller is about to enter bank details into.
-   *
-   * The call also happens after `await api.cashOut(...)`, so it is outside the
-   * click's user-gesture window and browsers routinely block it. A blocked
-   * popup must not silently swallow the URL — the seller would be left on a
-   * link stuck in `offramp_pending` with nothing to act on — so we keep it and
-   * render it as a link they can click themselves.
+   * Best-effort only: per the HTML spec `window.open` with `noopener` always
+   * returns null, so opened vs. blocked cannot be told apart and the return
+   * value is ignored entirely. The plain link below the button is the real
+   * fallback, and status polling (not popup watching) detects completion.
+   * `noopener` also keeps the anchor's page from reaching back through
+   * window.opener to navigate this one.
    */
-  function openInteractive(url: string): void {
-    let parsed: URL;
+  function handleContinueClick(): void {
+    if (!interactiveUrl) return;
     try {
-      parsed = new URL(url);
+      window.open(interactiveUrl, "_blank", "width=600,height=700,noopener,noreferrer");
     } catch {
-      setInteractiveUrl(null);
-      setErrorMsg("The anchor returned an unusable interactive URL. Contact support before retrying.");
-      return;
+      // A throwing opener changes nothing — the plain link stays usable.
     }
-    if (parsed.protocol !== "https:") {
-      setInteractiveUrl(null);
-      setErrorMsg("The anchor returned a non-HTTPS interactive URL, which was refused.");
-      return;
-    }
-
-    // `noopener` also keeps the anchor's page from reaching back through
-    // window.opener to navigate this one.
-    const popup = window.open(parsed.href, "_blank", "width=600,height=700,noopener,noreferrer");
-    if (!popup) setInteractiveUrl(parsed.href);
   }
 
   async function handleGetQuote() {
@@ -344,26 +337,46 @@ export default function CashOutModal({
         firmQuote.quoteId,
         withdrawType ?? undefined,
       );
-      if (result.interactiveUrl) {
-        openInteractive(result.interactiveUrl);
-      }
       const j = result.job;
       const preview: QuotePreview = {
         jobId: j.jobId,
         sourceAmount: linkAmount,
         targetAmount: j.targetAmount,
         targetCurrency: j.targetCurrency,
+        quoteKind: j.quoteKind,
       };
       setQuote(preview);
       setFirmQuote(null);
       // The anchor's real quote expiry, straight from the response. When the
       // API sends none, startCountdown shows no countdown at all.
       startCountdown(j.quoteExpiresAt);
-      // If the anchor now needs the asset, keep the modal open for the seller
-      // to send it; otherwise go straight to success.
-      if (result.transfer) {
+      // Cash-out is initiated at this point (the seller already confirmed the quote). An interactive anchor URL is a modal state, not a
+      // success: the seller must finish in the anchor's window, and the modal
+      // must stay open (a blocked-popup fallback rendered after onSuccess
+      // would unmount with the modal in the same tick). If the anchor now
+      // needs the asset, keep the modal open for the seller to send it;
+      // otherwise go straight to success.
+      if (result.interactiveUrl) {
+        const parsed = parseInteractiveUrl(result.interactiveUrl);
+        if (!parsed.ok) {
+          setInteractiveUrl(null);
+          setErrorMsg(parsed.error);
+          setStep("form");
+          return;
+        }
+        setInteractiveUrl(parsed.href);
+        setInteractiveStatus(null);
+        interactiveOpenedAtRef.current = Date.now();
+        setStep("interactive");
+      } else if (result.transfer) {
         setTransfer(result.transfer);
         setStep("transfer");
+      } else if (!result.interactiveUrl) {
+        // `kind: "fields"`: the anchor accepted the withdrawal but has not said
+        // where to send the asset yet (e.g. it is still reviewing KYC). Closing
+        // silently would leave the seller thinking nothing more is needed, so
+        // say what happens next instead.
+        setStep("awaiting_anchor");
       } else {
         onSuccess();
       }
@@ -374,21 +387,6 @@ export default function CashOutModal({
       // forced to zero so the panel offers a fresh quote instead.
       if (/quote_expired|quote_mismatch/.test(msg)) setCountdown(0);
       setStep("quote");
-    }
-  }
-
-  async function handleSendTransfer() {
-    if (!transfer || !wallet) return;
-    setTransferError(null);
-    setSending(true);
-    try {
-      setSentHash(await sendAnchorTransfer(wallet, transfer, wallet));
-    } catch (e: unknown) {
-      setTransferError(
-        e instanceof Error && e.message ? `The payment was not sent: ${e.message}` : "The payment was not sent.",
-      );
-    } finally {
-      setSending(false);
     }
   }
 
@@ -665,7 +663,8 @@ export default function CashOutModal({
                   marginBottom: 10,
                 }}
               >
-                Firm quote {isMock && <span style={{ color: "var(--amber)" }}>(simulated)</span>}
+                {firmQuote.quoteKind === "indicative" ? "Indicative quote" : "Firm quote"}{" "}
+                {isMock && <span style={{ color: "var(--amber)" }}>(simulated)</span>}
               </div>
               <Row label="You send" value={`${firmQuote.sourceAmount} ${assetCode}`} mono />
               <Row label="Gross amount" value={`${firmQuote.targetAmount} ${firmQuote.targetCurrency}`} mono />
@@ -685,6 +684,13 @@ export default function CashOutModal({
                 value={`1 ${assetCode} = ${firmQuote.rate} ${firmQuote.targetCurrency}`}
                 mono
               />
+              {/* Issue 3.22: the seller commits on THIS step, so the estimate
+                  disclaimer has to be here, not only on the receipt. */}
+              {firmQuote.quoteKind === "indicative" && (
+                <div style={{ marginTop: 10, fontSize: 12, color: "var(--amber)" }} role="status">
+                  Indicative rate — the anchor sets the final amount.
+                </div>
+              )}
               {countdown !== null && (
                 <div
                   style={{ marginTop: 12, fontSize: 12, color: quoteExpired ? "var(--red)" : "var(--muted)" }}
@@ -747,113 +753,58 @@ export default function CashOutModal({
           </div>
         )}
 
-        {/* The anchor is waiting for the asset. The seller's wallet sends it
-            straight to the anchor; nothing passes through Quay. */}
-        {step === "transfer" && transfer && (
+        {step === "awaiting_anchor" && (
           <div>
-            {sentHash ? (
-              <>
-                <div className="kyc-note kyc-note--ok" style={{ marginBottom: 12 }}>
-                  Sent. The anchor pays out once it sees the payment on the ledger.
-                </div>
-                <p className="muted mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
-                  {sentHash}
-                </p>
-                <button className="btn btn--primary btn--block" onClick={onSuccess}>
-                  Done
-                </button>
-              </>
-            ) : (
-              <>
-                <p style={{ marginTop: 0 }}>
-                  The anchor is ready. Send{" "}
-                  <strong>
-                    {transfer.amount} {transfer.asset.code}
-                  </strong>{" "}
-                  from your wallet to finish the cash-out.
-                </p>
-                <dl className="muted" style={{ fontSize: 13, margin: "0 0 12px" }}>
-                  <dt>To</dt>
-                  <dd className="mono" title={transfer.destination}>
-                    {shortAddress(transfer.destination)}
-                  </dd>
-                  {transfer.memo !== null && (
-                    <>
-                      <dt>Memo ({transfer.memoType ?? "text"})</dt>
-                      <dd className="mono">{transfer.memo}</dd>
-                    </>
-                  )}
-                </dl>
-                <p className="muted" style={{ fontSize: 12 }}>
-                  Keep this open until the payment is sent. The memo is how the anchor matches it to
-                  your withdrawal.
-                </p>
-
-                {checkingPreflight && (
-                  <p className="muted" style={{ fontSize: 12 }}>
-                    Checking wallet balance…
-                  </p>
-                )}
-
-                {preflight && !preflight.ok && (
-                  <div className="err" role="alert" style={{ marginBottom: 12 }}>
-                    {preflight.message}
-                  </div>
-                )}
-
-                {preflight && !preflight.ok && preflight.reason === "missing_trustline" ? (
-                  <button
-                    type="button"
-                    className="btn btn--block"
-                    onClick={() => void runPreflight()}
-                    disabled={checkingPreflight}
-                  >
-                    {checkingPreflight ? "Checking…" : "Check again"}
-                  </button>
-                ) : (
-                  <>
-                    <button
-                      className="btn btn--primary btn--block"
-                      onClick={() => void handleSendTransfer()}
-                      disabled={sending || !wallet || checkingPreflight || (preflight !== null && !preflight.ok)}
-                      aria-disabled={preflight !== null && !preflight.ok}
-                    >
-                      {sending ? "Waiting for wallet…" : "Send with my wallet"}
-                    </button>
-                    {preflight && !preflight.ok && (
-                      <button
-                        type="button"
-                        className="btn btn--block"
-                        style={{ marginTop: 8 }}
-                        onClick={() => void runPreflight()}
-                        disabled={checkingPreflight}
-                      >
-                        {checkingPreflight ? "Checking…" : "Check again"}
-                      </button>
-                    )}
-                  </>
-                )}
-                {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
-              </>
-            )}
+            <div className="kyc-note" style={{ marginBottom: 12 }}>
+              The anchor will tell us where to send the USDC once it has finished its checks. We will show the send
+              step on this link when it does.
+            </div>
+            <button className="btn btn--primary btn--block" onClick={onSuccess}>
+              Done
+            </button>
           </div>
         )}
 
-        {/* The anchor needs the seller in a browser and the popup was blocked —
-            give them the link rather than stranding the withdrawal. */}
-        {interactiveUrl && (
-          <div className="banner banner--warn" style={{ marginTop: 12 }}>
-            <p style={{ margin: "0 0 8px" }}>
-              Your anchor needs one more step in a browser window, which this browser blocked.
+        {/* The anchor is waiting for the asset. The seller's wallet sends it
+            straight to the anchor; nothing passes through Quay. */}
+        {step === "transfer" && transfer && (
+          <TransferStep transfer={transfer} linkId={linkId} onDone={onSuccess} />
+        )}
+
+        {/* The anchor needs the seller in its own window. Opened from a real
+            click (inside the user gesture); the plain link below covers
+            blocked popups. Completion is detected by polling, never by
+            watching the popup. */}
+        {step === "interactive" && interactiveUrl && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              Your anchor needs one more step in its own window. Continue there, then come back —
+              this closes itself once the payout settles.
             </p>
-            <a
-              className="btn btn--primary"
-              href={interactiveUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              className="btn btn--primary btn--block"
+              onClick={handleContinueClick}
             >
-              Continue with the anchor
-            </a>
+              Continue with {anchorLabelForUrl(interactiveUrl)}
+            </button>
+            <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+              Popup blocked?{" "}
+              <a href={interactiveUrl} target="_blank" rel="noopener noreferrer">
+                Open the anchor page directly
+              </a>
+            </p>
+            <p className="muted" style={{ fontSize: 12 }} role="status" aria-live="polite">
+              {interactiveStatus ?? "Waiting for the anchor…"}
+            </p>
+            <button
+              type="button"
+              className="btn btn--block"
+              style={{ marginTop: 8 }}
+              onClick={onClose}
+            >
+              Dismiss
+            </button>
           </div>
         )}
 
@@ -1041,6 +992,23 @@ function QuoteSummary({
 
       <Row label="You send" value={`${quote.sourceAmount} USDC`} mono />
       <Row label={`You receive (~${targetCurrency})`} value={`${quote.targetAmount} ${targetCurrency}`} mono accent />
+
+      {/* Issue 3.22: when the anchor has no SEP-38, this number is our
+          arithmetic on a configured rate plus the anchor's published fees, not
+          the anchor's promise. The seller hears that here, at the moment they
+          commit — not when the payout lands at a different figure. */}
+      {quote.quoteKind === "indicative" && (
+        <div
+          style={{
+            marginTop: 10,
+            fontSize: 12,
+            color: "var(--amber)",
+          }}
+          role="status"
+        >
+          Indicative rate — the anchor sets the final amount.
+        </div>
+      )}
 
       {countdown !== null && (
         <div
