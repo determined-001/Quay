@@ -252,3 +252,60 @@ describe("TestAnchorOffRamp.status() — instructions that arrive after /withdra
     expect((await state.getJob("wd_1"))?.transfer ?? null).toBeNull();
   });
 });
+
+// Reconciliation (issue 4.32): amount_in, amount_fee and stellar_transaction_id
+// are kept so the report can compare the anchor's record with the seller's transfer.
+describe("reconciliation fields", () => {
+  const HASH = "a".repeat(64);
+
+  it("getSep6Transaction reads amount_in, amount_fee and stellar_transaction_id at any status, verbatim", async () => {
+    stubAnchor();
+    transactionBody = {
+      id: "wd_1",
+      status: "completed",
+      amount_in: "10.0000000",
+      amount_out: "9900.00",
+      amount_fee: "0.5",
+      stellar_transaction_id: HASH,
+    };
+    const tx = await getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1");
+    expect(tx).toMatchObject({ amountIn: "10.0000000", amountOut: "9900.00", amountFee: "0.5", stellarTransactionId: HASH });
+  });
+
+  it("ignores values that are not strings instead of failing the poll", async () => {
+    stubAnchor();
+    transactionBody = { id: "wd_1", status: "completed", amount_in: 10, amount_fee: null, stellar_transaction_id: {} };
+    const tx = await getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1");
+    expect(tx.amountIn).toBeUndefined();
+    expect(tx.amountFee).toBeUndefined();
+    expect(tx.stellarTransactionId).toBeUndefined();
+  });
+
+  it("status() persists them on the job, and a later poll without them keeps what was stored", async () => {
+    stubAnchor();
+    const { discovery, auth, state } = setup();
+    await signIn(auth);
+    const offramp = new TestAnchorOffRamp({ discovery, auth, state });
+    await startWithdrawal(offramp);
+
+    transactionBody = {
+      id: "wd_1",
+      status: "completed",
+      amount_in: "10",
+      amount_out: "9900",
+      amount_fee: "0.5",
+      stellar_transaction_id: HASH,
+    };
+    await offramp.status("wd_1");
+    expect(await state.getJob("wd_1")).toMatchObject({
+      amountIn: "10",
+      amountFee: "0.5",
+      stellarTransactionId: HASH,
+      targetAmount: "9900",
+    });
+
+    transactionBody = { id: "wd_1", status: "completed", amount_out: "9900" };
+    await offramp.status("wd_1");
+    expect(await state.getJob("wd_1")).toMatchObject({ amountIn: "10", stellarTransactionId: HASH });
+  });
+});

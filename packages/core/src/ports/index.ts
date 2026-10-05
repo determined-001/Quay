@@ -484,6 +484,13 @@ export interface StoredOffRampJob {
    *  Null means the transfer instructions haven't been surfaced yet; once set,
    *  the webhook is not re-fired on subsequent polls or restarts. */
   transferNotifiedAt: number | null;
+  /** The seller's CLAIM of the on-chain transfer hash to the anchor. Unverified
+   *  here; the reconciliation report checks it on Horizon. */
+  sellerTxHash?: string | null;
+  /** What the anchor's SEP-6 transaction reported (decimal strings, as sent). */
+  amountIn?: string | null;
+  amountFee?: string | null;
+  stellarTransactionId?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -495,7 +502,7 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId">>,
   ): Promise<void>;
 }
 
@@ -544,6 +551,8 @@ export interface OffRampTelemetrySummary {
 }
 
 export interface OffRampTelemetryRepository {
+  /** Point lookup by row id (`tel_<jobId>`); null when absent. */
+  get(id: string): Promise<OffRampTelemetryRow | null>;
   upsert(row: OffRampTelemetryRow): Promise<void>;
   summary(): Promise<OffRampTelemetrySummary[]>;
   /** Anonymised dump — seller/link identities excluded — for CSV export. */

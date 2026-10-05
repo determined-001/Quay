@@ -1,4 +1,4 @@
-import { OffRampJobNotFoundError, targetPerSourceRate } from "@checkout/core";
+import { OffRampJobNotFoundError, OffRampRejectedError, targetPerSourceRate } from "@checkout/core";
 import type {
   AnchorCustomer,
   AssetRef,
@@ -10,13 +10,23 @@ import type {
   OffRampQuote,
   OfframpRequirementTypes,
   OffRampStateRepository,
+  RateSourcePort,
   SellerPayoutRef,
   StoredOffRampQuote,
   WithdrawTransfer,
 } from "@checkout/core";
+import { randomBytes } from "node:crypto";
+import { computeIndicativeAmounts } from "./quote-math";
 import { getSep38Quote } from "./sep38";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { Sep24Client, type Sep24Transaction } from "./sep24";
+import {
+  estimateSep24Fee,
+  getSep24Info,
+  Sep24Client,
+  validateSep24Withdraw,
+  type Sep24AssetInfo,
+  type Sep24Transaction,
+} from "./sep24";
 
 export interface AnchorOptions {
   discovery: AnchorDiscovery;
@@ -30,6 +40,12 @@ export interface AnchorOptions {
    * survive a restart (a mid-withdrawal restart must not lose the quote its transfer is checked against).
    */
   state: OffRampStateRepository;
+  /**
+   * Optional FX rate for anchors with no SEP-38 quote server. With it, `quote()` returns an
+   * indicative quote whose fee is estimated from the anchor's SEP-24 /info; without it, such an
+   * anchor is refused rather than quoted from an invented rate. Never consulted when SEP-38 exists.
+   */
+  rateSource?: RateSourcePort;
 }
 
 const MEMO_TYPES = ["text", "id", "hash"] as const;
@@ -90,6 +106,7 @@ export class AnchorOffRamp implements OffRampPort {
   private readonly auth: SellerAnchorAuth;
   private readonly sep24: Sep24Client;
   private readonly state: OffRampStateRepository;
+  private readonly rateSource: RateSourcePort | undefined;
 
   constructor(opts: AnchorOptions) {
     this.homeDomain = opts.discovery.homeDomain;
@@ -98,6 +115,7 @@ export class AnchorOffRamp implements OffRampPort {
       throw new Error("AnchorOffRamp needs an OffRampStateRepository: withdrawal state must survive a restart");
     }
     this.state = opts.state;
+    this.rateSource = opts.rateSource;
     this.sep24 = new Sep24Client(opts.discovery);
   }
 
@@ -118,18 +136,22 @@ export class AnchorOffRamp implements OffRampPort {
     customer: AnchorCustomer;
   }): Promise<OffRampQuote> {
     const discovery = await this.sep24.getDiscoveryInfo();
-    const token = await this.auth.token(input.customer);
 
-    // No SEP-38, no firm quote. This adapter is the SEP-24 one and is not
-    // exported (issue #32); the indicative path lives on the SEP-6 adapter
-    // (issue 3.22), which is the adapter production anchors use. Refuse here
-    // rather than guess a quote server — a wrong number is worse than none.
+    // The anchor's published limits come first: an amount it will refuse is rejected here (422
+    // offramp_rejected, carrying the limits) before a session is opened or a SEP-38 quote burned.
+    const assetInfo = validateSep24Withdraw(
+      await getSep24Info(discovery.transferServerSep24),
+      input.sourceAsset.code,
+      input.sourceAmount,
+    );
+
+    // No SEP-38, no firm quote: fall back to an indicative one from the rate source, with the fee
+    // estimated from /info. No rate source configured means refuse, not guess.
     if (!discovery.anchorQuoteServer) {
-      throw new Error(
-        `Anchor ${discovery.homeDomain} declares no ANCHOR_QUOTE_SERVER, so it cannot produce a SEP-24 quote. ` +
-          `Configure a rate source (OFFRAMP_RATE_SOURCE) or use the SEP-6 adapter.`,
-      );
+      return this.indicativeQuote(input, assetInfo, discovery.homeDomain);
     }
+
+    const token = await this.auth.token(input.customer);
 
     const q = await getSep38Quote(discovery.anchorQuoteServer, token, {
       sellAsset: input.sourceAsset,
@@ -140,6 +162,12 @@ export class AnchorOffRamp implements OffRampPort {
     const expiresAt = Date.parse(q.expiresAt);
     const now = Date.now();
 
+    // Gross is what sourceAmount converts to at the quoted rate; buyAmount is
+    // what the anchor actually pays out — the difference is its fee (issue 1.5).
+    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
+    const netTargetAmount = q.buyAmount;
+    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
+
     await this.state.saveQuote({
       quoteId: q.id,
       linkId: input.linkId ?? "",
@@ -147,15 +175,18 @@ export class AnchorOffRamp implements OffRampPort {
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
       price: q.price,
+      // What the seller is about to be shown, so a confirm-by-quoteId replays it.
+      quotedAmounts: {
+        rate: targetPerSourceRate(q.price),
+        targetAmount: grossTargetAmount,
+        feeAmount,
+        feeSource: "anchor",
+        netTargetAmount,
+        quoteKind: "firm",
+      },
       expiresAt,
       createdAt: now,
     });
-
-    // Gross is what sourceAmount converts to at the quoted rate; buyAmount is
-    // what the anchor actually pays out — the difference is its fee (issue 1.5).
-    const grossTargetAmount = (Number(input.sourceAmount) / Number(q.price)).toFixed(4);
-    const netTargetAmount = q.buyAmount;
-    const feeAmount = (Number(grossTargetAmount) - Number(netTargetAmount)).toFixed(4);
 
     return {
       quoteId: q.id,
@@ -173,6 +204,89 @@ export class AnchorOffRamp implements OffRampPort {
     };
   }
 
+  /**
+   * Indicative quote for an anchor with no SEP-38: the configured rate source's rate, and a fee
+   * estimated from /info (`max(fee_minimum, fee_fixed + amount * fee_percent / 100)` in the sell
+   * asset, converted at the same rate). Exact decimal math; the net rounds down so it is never
+   * overstated. When /info publishes no fee fields the fee is unknown, and an unknown fee is not a
+   * zero fee, so this refuses rather than show a net that may be too high.
+   */
+  private async indicativeQuote(
+    input: { linkId?: string; sourceAsset: AssetRef; sourceAmount: string; targetCurrency: string },
+    asset: Sep24AssetInfo,
+    anchorDomain: string,
+  ): Promise<OffRampQuote> {
+    if (!this.rateSource) {
+      throw new Error(
+        `Anchor ${anchorDomain} declares no ANCHOR_QUOTE_SERVER and no rate source is configured ` +
+          `(OFFRAMP_RATE_SOURCE). Refusing to quote rather than inventing a rate.`,
+      );
+    }
+    if (estimateSep24Fee(asset, input.sourceAmount) === null) {
+      throw new Error(
+        `Anchor ${anchorDomain} publishes no fee for ${input.sourceAsset.code} in /sep24/info and has no SEP-38 quote ` +
+          `server, so the payout cannot be estimated without risking an overstated amount.`,
+      );
+    }
+
+    const fx = await this.rateSource.rate({
+      anchorDomain,
+      sourceAsset: input.sourceAsset,
+      targetCurrency: input.targetCurrency,
+    });
+    const amounts = computeIndicativeAmounts({
+      amount: input.sourceAmount,
+      rate: fx.rate,
+      feeFixed: asset.feeFixed,
+      feePercent: asset.feePercent,
+      feeMinimum: asset.feeMinimum,
+    });
+    if (!amounts.ok) {
+      // Never the rate or the fee schedule in the message: it reaches the client.
+      throw new OffRampRejectedError(
+        amounts.reason === "non_positive_net"
+          ? "The anchor's fees are at least as large as this amount, so nothing would be paid out. Try a larger amount."
+          : "This amount is too small to produce a payout at the current rate. Try a larger amount.",
+      );
+    }
+    const { targetAmount, feeAmount, netTargetAmount } = amounts;
+
+    // Locally generated: initiate() never sends it to the anchor, where it would mean nothing.
+    const quoteId = `q_${randomBytes(10).toString("hex")}`;
+    await this.state.saveQuote({
+      quoteId,
+      linkId: input.linkId ?? "",
+      sellAsset: input.sourceAsset,
+      sellAmount: input.sourceAmount,
+      buyCurrency: input.targetCurrency,
+      // Source per target, as on the SEP-38 path.
+      price: String(1 / Number(fx.rate)),
+      quotedAmounts: {
+        rate: fx.rate,
+        targetAmount,
+        feeAmount,
+        feeSource: "estimated",
+        netTargetAmount,
+        quoteKind: "indicative",
+      },
+      expiresAt: fx.expiresAt,
+      createdAt: Date.now(),
+    });
+
+    return {
+      quoteId,
+      sourceAsset: input.sourceAsset,
+      sourceAmount: input.sourceAmount,
+      targetCurrency: input.targetCurrency,
+      targetAmount,
+      rate: fx.rate,
+      expiresAt: fx.expiresAt,
+      fee: { amount: feeAmount, currency: input.targetCurrency, source: "estimated" },
+      netTargetAmount,
+      quoteKind: "indicative",
+    };
+  }
+
   async initiate(input: {
     linkId: string;
     quoteId: string;
@@ -187,7 +301,8 @@ export class AnchorOffRamp implements OffRampPort {
       assetIssuer: q.sellAsset.issuer || undefined,
       amount: q.sellAmount,
       account: input.customer.account,
-      quoteId: input.quoteId,
+      // An indicative quote id is local; the anchor never issued it.
+      quoteId: q.quotedAmounts?.quoteKind === "indicative" ? undefined : input.quoteId,
       payoutFields: input.payout.fields,
     });
 

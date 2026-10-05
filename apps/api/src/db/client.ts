@@ -92,6 +92,7 @@ const BOOTSTRAP_SQL = [
      sell_asset_code TEXT, sell_asset_issuer TEXT, sell_amount TEXT, transfer_json TEXT,
      last_poll_error TEXT, last_poll_error_at INTEGER, last_poll_reason TEXT,
      transfer_notified_at INTEGER,
+     seller_tx_hash TEXT, amount_in TEXT, amount_fee TEXT, stellar_transaction_id TEXT,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS seller_kyc (
@@ -241,6 +242,12 @@ const ADDITIVE_MIGRATIONS = [
   // Track whether the offramp.transfer_required webhook has been sent for a job.
   // Null means not yet sent; epoch-ms when sent.
   `ALTER TABLE offramp_jobs ADD COLUMN transfer_notified_at INTEGER`,
+  // Reconciliation report (4.32): the seller's claimed transfer hash and the
+  // anchor's reported amounts / Stellar transaction id.
+  `ALTER TABLE offramp_jobs ADD COLUMN seller_tx_hash TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN amount_in TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN amount_fee TEXT`,
+  `ALTER TABLE offramp_jobs ADD COLUMN stellar_transaction_id TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN callback_token_hash TEXT`,
   `CREATE INDEX IF NOT EXISTS seller_kyc_callback_token_hash_idx ON seller_kyc (callback_token_hash)`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has

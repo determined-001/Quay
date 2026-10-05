@@ -317,11 +317,12 @@ export class FakeOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
-    this.jobs.set(jobId, { ...job, ...patch, updatedAt: Date.now() });
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    this.jobs.set(jobId, { ...job, ...defined, updatedAt: Date.now() });
   }
 }
 
@@ -400,6 +401,11 @@ export class ScriptedKyc implements KycPort {
  *  so tests can assert on the passive telemetry trail without a database. */
 export class FakeTelemetryRepository implements OffRampTelemetryRepository {
   readonly rows: OffRampTelemetryRow[] = [];
+
+  async get(id: string): Promise<OffRampTelemetryRow | null> {
+    const found = this.rows.find((r) => r.id === id);
+    return found ? { ...found } : null;
+  }
 
   async upsert(row: OffRampTelemetryRow): Promise<void> {
     const existing = this.rows.findIndex((r) => r.id === row.id);

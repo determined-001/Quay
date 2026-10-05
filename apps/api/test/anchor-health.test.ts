@@ -32,6 +32,7 @@ import { Hono } from "hono";
 
 /** No-op telemetry stub — tests that predate #20 don't assert on telemetry writes. */
 const noopTelemetry = {
+  get: async () => null,
   upsert: async () => {},
   findById: async () => null,
   findByJobId: async () => null,

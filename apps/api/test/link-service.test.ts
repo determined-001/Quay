@@ -520,6 +520,81 @@ describe("LinkService.triggerCashOut — KYC gate", () => {
   });
 });
 
+describe("off-ramp telemetry hot path (issue 4.33)", () => {
+  function allThrows(t: FakeTelemetryRepository): void {
+    t.all = async () => {
+      throw new Error("telemetry.all() must not be called on the cash-out path");
+    };
+  }
+
+  it("initiate then settle land on one tel_<jobId> row without ever calling all()", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const telemetry = new FakeTelemetryRepository();
+    allThrows(telemetry);
+    const offramp = new MockAnchorOffRamp({ state: offrampState, settleAfterMs: 0 });
+    const service = makeService({ links, offramp, offrampState, telemetry });
+
+    const { job } = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    await vi.waitFor(() => expect(telemetry.rows).toHaveLength(1));
+    expect(telemetry.rows[0]?.id).toBe(`tel_${job.jobId}`);
+    expect(telemetry.rows[0]?.status).toBe("initiated");
+    const quotedRate = telemetry.rows[0]?.quotedRate;
+
+    await service.pollCashOuts();
+
+    expect(telemetry.rows).toHaveLength(1);
+    expect(telemetry.rows[0]?.id).toBe(`tel_${job.jobId}`);
+    expect(telemetry.rows[0]?.status).toBe("settled");
+    expect(telemetry.rows[0]?.quotedRate).toBe(quotedRate);
+  });
+
+  it("a failed job merges into the existing row, and a missing row still yields a fresh one", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
+    ]);
+    const telemetry = new FakeTelemetryRepository();
+    allThrows(telemetry);
+    await telemetry.upsert({
+      id: "tel_job_1",
+      anchorDomain: "a.example",
+      corridor: "USDC/NGN",
+      sellAsset: "USDC",
+      sellAmount: "10",
+      indicativeRate: null,
+      quotedRate: "1650",
+      quotedAt: 1,
+      initiatedAt: 2,
+      settledAt: null,
+      effectiveRate: null,
+      feeAmount: null,
+      status: "initiated",
+      failureReason: null,
+    });
+    const offramp = new ScriptedOffRamp();
+    offramp.statusImpl = async (jobId) => ({
+      jobId,
+      linkId: "lnk_1",
+      status: "failed",
+      targetCurrency: "NGN",
+      targetAmount: "0",
+      rate: "1650",
+      reason: "bank_rejected",
+    });
+
+    await makeService({ links, offramp, offrampState: new FakeOffRampStateRepository(), telemetry }).pollCashOuts();
+
+    expect(telemetry.rows).toHaveLength(1);
+    expect(telemetry.rows[0]).toMatchObject({
+      id: "tel_job_1",
+      status: "failed",
+      failureReason: "bank_rejected",
+      anchorDomain: "a.example",
+      quotedRate: "1650",
+    });
+  });
+});
+
 describe("LinkService + MockAnchorOffRamp — restart survives (integration)", () => {
   it("a cash-out initiated pre-restart still settles once a fresh service/adapter pair polls it", async () => {
     const links = new FakeLinkRepository([makeLink({ status: "paid" })]);

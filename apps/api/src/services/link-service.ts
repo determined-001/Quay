@@ -1186,6 +1186,26 @@ export class LinkService {
     }
   }
 
+  /**
+   * Record the seller's CLAIM that they sent the on-chain transfer to the
+   * anchor (issue 4.32). Stored unverified for the reconciliation report to
+   * check on Horizon. The first claim wins: a second, different hash is
+   * refused so evidence of a duplicate transfer is not overwritten; the same
+   * hash again is a no-op.
+   */
+  async recordTransferSent(linkId: string, hash: string): Promise<{ jobId: string; hash: string }> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "not_found");
+    if (!link.offrampJobId) throw new HttpError(409, "no_cashout_in_progress");
+    const job = await this.deps.offrampState.getJob(link.offrampJobId);
+    if (!job) throw new HttpError(409, "no_cashout_in_progress");
+    if (job.sellerTxHash && job.sellerTxHash !== hash) {
+      throw new HttpError(409, "transfer_already_recorded");
+    }
+    if (!job.sellerTxHash) await this.deps.offrampState.updateJob(job.jobId, { sellerTxHash: hash });
+    return { jobId: job.jobId, hash };
+  }
+
   /** Advance any pending cash-outs by polling the off-ramp adapter. */
   async pollCashOuts(opts: ServiceCallOptions = {}): Promise<void> {
     const log = (opts.logger ?? this.deps.logger!);
@@ -1311,8 +1331,7 @@ export class LinkService {
         // Awaited (errors are swallowed inside recordTelemetry) rather than
         // fire-and-forget, so a slow store can't race past the write.
         {
-          const existingRows = await this.deps.telemetry.all().catch(() => []);
-          const existing = existingRows.find((r) => r.id === `tel_${link.offrampJobId}`);
+          const existing = await this.deps.telemetry.get(`tel_${link.offrampJobId}`).catch(() => null);
           const quotedRate = existing?.quotedRate ?? job.rate;
           const sourceAmount = link.paidAmount ?? link.amount;
           // Both rates are TARGET per source (issue 5.21): quote.rate is
@@ -1386,7 +1405,7 @@ export class LinkService {
   ): Promise<void> {
     try {
       const id = `tel_${jobId}`;
-      const existing = (await this.deps.telemetry.all()).find((r) => r.id === id);
+      const existing = await this.deps.telemetry.get(id);
       const base: OffRampTelemetryRow = existing ?? {
         id,
         anchorDomain: "unknown",
