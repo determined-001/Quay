@@ -906,6 +906,7 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
             feeAmount: row.quotedFeeAmount,
             feeSource: row.quotedFeeSource === "anchor" ? ("anchor" as const) : ("estimated" as const),
             netTargetAmount: row.quotedNetTargetAmount,
+            quoteKind: row.quotedKind === "indicative" ? ("indicative" as const) : ("firm" as const),
           },
         }
       : {}),
@@ -957,6 +958,7 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       quotedFeeAmount: quote.quotedAmounts?.feeAmount ?? null,
       quotedFeeSource: quote.quotedAmounts?.feeSource ?? null,
       quotedNetTargetAmount: quote.quotedAmounts?.netTargetAmount ?? null,
+      quotedKind: quote.quotedAmounts?.quoteKind ?? null,
       expiresAt: quote.expiresAt,
       createdAt: quote.createdAt,
     });

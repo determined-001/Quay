@@ -27,6 +27,7 @@ import type {
   OffRampStateRepository,
   OffRampTelemetryRepository,
   RailPort,
+  RateSourcePort,
   SellerProfileRepository,
   WebhookRepository,
 } from "@checkout/core";
@@ -70,6 +71,8 @@ import type { StellarTomlConfig } from "../routes/well-known";
 import { CircuitBreakerOffRamp } from "./circuit-breaker";
 import { WebhookWorker } from "../worker/webhook-worker";
 import { assertKeyConfigured } from "./secret-crypto";
+import { createRateSource } from "./rate-source";
+import { guardWebhookUrl } from "./ssrf-guard";
 import { runKycRetentionSweep } from "./kyc-retention";
 
 export interface Container {
@@ -223,7 +226,23 @@ export async function createContainer(): Promise<Container> {
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : pollingWatcher;
   const anchor = createAnchor(db, logger, stellar.networkPassphrase, anchorSessionsRepo);
-  const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger));
+  // Built before the off-ramp so a misconfigured rate source is a boot failure.
+  const rateSource = await createRateSource({
+    kind: env.offrampRateSource,
+    anchorDomain: anchor?.discovery.homeDomain ?? null,
+    offramp: env.offramp,
+    ...(env.offrampRate ? { rate: env.offrampRate } : {}),
+    ...(env.offrampRateExpiresAt ? { rateExpiresAt: env.offrampRateExpiresAt } : {}),
+    ...(env.offrampRateCurrency ? { currency: env.offrampRateCurrency } : {}),
+    ...(env.offrampRateSourceAsset ? { sourceAsset: env.offrampRateSourceAsset } : {}),
+    ...(env.offrampRateUrl ? { url: env.offrampRateUrl } : {}),
+    ...(env.offrampRateJsonPath ? { jsonPath: env.offrampRateJsonPath } : {}),
+    // Same SSRF guard as seller-supplied webhook URLs: operator config is still
+    // an outbound request to a hostname.
+    guard: guardWebhookUrl,
+    resolveQuoteServer: async () => (await anchor?.discovery.get())?.anchorQuoteServer ?? null,
+  });
+  const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger, rateSource));
   const kycAnchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
   const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
   const kyc = createKyc(anchor, kycRepo, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain, logger);
@@ -532,7 +551,12 @@ function createAnchor(
  * in whether the endpoint is the SDF sandbox or an operator-supplied
  * production anchor.
  */
-function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepository, logger: Logger): OffRampPort {
+function createOffRamp(
+  anchor: AnchorWiring | null,
+  state: OffRampStateRepository,
+  logger: Logger,
+  rateSource: RateSourcePort | null,
+): OffRampPort {
   if (env.offramp === "none") {
     // No cash-out leg. Every method throws OffRampDisabledError, which the
     // routes translate to 501 — see packages/offramp/src/disabled.ts.
@@ -547,6 +571,10 @@ function createOffRamp(anchor: AnchorWiring | null, state: OffRampStateRepositor
     auth: anchor.auth,
     state,
     preferredWithdrawType: env.offrampType,
+    // Present only when OFFRAMP_RATE_SOURCE is configured. With no rate source,
+    // an anchor that declares no ANCHOR_QUOTE_SERVER refuses to quote rather
+    // than being handed a made-up number.
+    ...(rateSource ? { rateSource } : {}),
     logger,
   });
 }

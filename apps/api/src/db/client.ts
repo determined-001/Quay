@@ -201,6 +201,7 @@ const ADDITIVE_MIGRATIONS = [
   `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_amount TEXT`,
   `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_source TEXT`,
   `ALTER TABLE offramp_quotes ADD COLUMN quoted_net_target_amount TEXT`,
+  `ALTER TABLE offramp_quotes ADD COLUMN quoted_kind TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
   `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,

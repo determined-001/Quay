@@ -171,6 +171,7 @@ export class MockAnchorOffRamp implements OffRampPort {
         feeAmount,
         feeSource: "estimated",
         netTargetAmount,
+        quoteKind: "firm",
       },
       expiresAt,
       createdAt: now,
@@ -187,6 +188,12 @@ export class MockAnchorOffRamp implements OffRampPort {
       expiresAt,
       fee: { amount: feeAmount, currency: input.targetCurrency, source: "estimated" },
       netTargetAmount,
+      // "firm" here means "the counterparty behind this quote is deterministic":
+      // the mock IS the anchor and its number is a pure function of the
+      // request, and the dashboard already labels every mock cash-out
+      // (simulated). The fee stays "estimated" — the mock derives it rather
+      // than quoting it.
+      quoteKind: "firm",
     };
   }
 

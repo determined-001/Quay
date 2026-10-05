@@ -73,6 +73,10 @@ interface QuotePreview {
   targetCurrency: string;
   /** epoch ms when this quote expires on the anchor side */
   expiresAt?: number;
+  /** The anchor quoted this number, or we computed it (issue 3.22). Absent is
+   *  treated as firm: responses from before this field existed were always the
+   *  anchor's own quote. */
+  quoteKind?: "firm" | "indicative";
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +343,7 @@ export default function CashOutModal({
         sourceAmount: linkAmount,
         targetAmount: j.targetAmount,
         targetCurrency: j.targetCurrency,
+        quoteKind: j.quoteKind,
       };
       setQuote(preview);
       setFirmQuote(null);
@@ -658,7 +663,8 @@ export default function CashOutModal({
                   marginBottom: 10,
                 }}
               >
-                Firm quote {isMock && <span style={{ color: "var(--amber)" }}>(simulated)</span>}
+                {firmQuote.quoteKind === "indicative" ? "Indicative quote" : "Firm quote"}{" "}
+                {isMock && <span style={{ color: "var(--amber)" }}>(simulated)</span>}
               </div>
               <Row label="You send" value={`${firmQuote.sourceAmount} ${assetCode}`} mono />
               <Row label="Gross amount" value={`${firmQuote.targetAmount} ${firmQuote.targetCurrency}`} mono />
@@ -678,6 +684,13 @@ export default function CashOutModal({
                 value={`1 ${assetCode} = ${firmQuote.rate} ${firmQuote.targetCurrency}`}
                 mono
               />
+              {/* Issue 3.22: the seller commits on THIS step, so the estimate
+                  disclaimer has to be here, not only on the receipt. */}
+              {firmQuote.quoteKind === "indicative" && (
+                <div style={{ marginTop: 10, fontSize: 12, color: "var(--amber)" }} role="status">
+                  Indicative rate — the anchor sets the final amount.
+                </div>
+              )}
               {countdown !== null && (
                 <div
                   style={{ marginTop: 12, fontSize: 12, color: quoteExpired ? "var(--red)" : "var(--muted)" }}
@@ -979,6 +992,23 @@ function QuoteSummary({
 
       <Row label="You send" value={`${quote.sourceAmount} USDC`} mono />
       <Row label={`You receive (~${targetCurrency})`} value={`${quote.targetAmount} ${targetCurrency}`} mono accent />
+
+      {/* Issue 3.22: when the anchor has no SEP-38, this number is our
+          arithmetic on a configured rate plus the anchor's published fees, not
+          the anchor's promise. The seller hears that here, at the moment they
+          commit — not when the payout lands at a different figure. */}
+      {quote.quoteKind === "indicative" && (
+        <div
+          style={{
+            marginTop: 10,
+            fontSize: 12,
+            color: "var(--amber)",
+          }}
+          role="status"
+        >
+          Indicative rate — the anchor sets the final amount.
+        </div>
+      )}
 
       {countdown !== null && (
         <div

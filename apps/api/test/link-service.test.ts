@@ -574,6 +574,7 @@ describe("LinkService.triggerCashOut — discriminated union return", () => {
       expiresAt: Date.now() + 60_000,
       fee: { amount: "16.50", currency: input.targetCurrency, source: "anchor" },
       netTargetAmount: "1633.50",
+      quoteKind: "indicative",
     });
     offramp.initiateImpl = async () => ({
       kind: "interactive",
@@ -608,6 +609,7 @@ describe("LinkService.triggerCashOut — discriminated union return", () => {
       expiresAt: Date.now() + 60_000,
       fee: { amount: "16.50", currency: input.targetCurrency, source: "anchor" },
       netTargetAmount: "1633.50",
+      quoteKind: "firm",
     });
     offramp.initiateImpl = async () => ({
       kind: "transfer",
@@ -683,6 +685,7 @@ describe("LinkService.triggerCashOut — quoteId handling", () => {
         feeAmount: "165.00",
         feeSource: "anchor",
         netTargetAmount: "16335.00",
+        quoteKind: "firm",
       },
       expiresAt: now + 60_000,
       createdAt: now,
@@ -708,6 +711,44 @@ describe("LinkService.triggerCashOut — quoteId handling", () => {
     expect(savedLink?.status).toBe("offramp_pending");
     expect(savedLink?.offrampRate).toBe("1650");
     expect(savedLink?.offrampTargetCurrency).toBe("NGN");
+  });
+
+  it("confirms an indicative quote by id and replays quoteKind=indicative (no quote_mismatch)", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid", amount: "10" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async () => {
+      throw new Error("offramp.quote should not have been called!");
+    };
+    offramp.initiateImpl = async () => ({ kind: "fields", jobId: "job_indicative_1" });
+    const now = Date.now();
+    await offrampState.saveQuote({
+      quoteId: "q_indicative_1",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: "GISSUER" },
+      sellAmount: "10",
+      buyCurrency: "NGN",
+      price: "0.000606",
+      quotedAmounts: {
+        rate: "1650",
+        targetAmount: "16500.0000",
+        feeAmount: "165.0000",
+        feeSource: "estimated",
+        netTargetAmount: "16335.0000",
+        quoteKind: "indicative",
+      },
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+
+    const service = makeService({ links, offramp, offrampState });
+    const { job } = await service.triggerCashOut("lnk_1", {
+      targetCurrency: "NGN",
+      payoutFields: {},
+      quoteId: "q_indicative_1",
+    });
+    expect(job.quoteKind).toBe("indicative");
+    expect(job.targetAmount).toBe("16500.0000");
   });
 
   it("rejects with 409 quote_mismatch when quoteId does not exist", async () => {
@@ -942,6 +983,7 @@ describe("offramp.transfer_required webhook (4.22)", () => {
       expiresAt: Date.now() + 300000,
       fee: { amount: "0", currency: "NGN", source: "estimated" },
       netTargetAmount: "16500",
+      quoteKind: "indicative",
     });
     offramp.initiateImpl = async () => ({ kind: "transfer", jobId: "job_1", transfer });
 
@@ -983,6 +1025,7 @@ describe("offramp.transfer_required webhook (4.22)", () => {
       expiresAt: Date.now() + 300000,
       fee: { amount: "0", currency: "NGN", source: "estimated" },
       netTargetAmount: "16500",
+      quoteKind: "indicative",
     });
     offramp.initiateImpl = async () => ({ kind: "fields", jobId: "job_1" });
 
@@ -1294,6 +1337,7 @@ describe("LinkService cash-out — anchor rejections", () => {
         feeAmount: "0",
         feeSource: "anchor",
         netTargetAmount: "8250.00",
+        quoteKind: "firm",
       },
       expiresAt: now + 60_000,
       createdAt: now,

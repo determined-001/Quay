@@ -129,6 +129,17 @@ export class AnchorOffRamp implements OffRampPort {
 
     const token = await this.auth.token(input.customer);
 
+    // No SEP-38, no firm quote. This adapter is the SEP-24 one and is not
+    // exported (issue #32); the indicative path lives on the SEP-6 adapter
+    // (issue 3.22), which is the adapter production anchors use. Refuse here
+    // rather than guess a quote server — a wrong number is worse than none.
+    if (!discovery.anchorQuoteServer) {
+      throw new Error(
+        `Anchor ${discovery.homeDomain} declares no ANCHOR_QUOTE_SERVER, so it cannot produce a SEP-24 quote. ` +
+          `Configure a rate source (OFFRAMP_RATE_SOURCE) or use the SEP-6 adapter.`,
+      );
+    }
+
     const q = await getSep38Quote(discovery.anchorQuoteServer, token, {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
@@ -167,6 +178,7 @@ export class AnchorOffRamp implements OffRampPort {
       expiresAt,
       fee: { amount: feeAmount, currency: input.targetCurrency, source: "anchor" },
       netTargetAmount,
+      quoteKind: "firm",
     };
   }
 

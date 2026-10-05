@@ -153,6 +153,9 @@ export const offrampQuotes = sqliteTable("offramp_quotes", {
   quotedFeeAmount: text("quoted_fee_amount"),
   quotedFeeSource: text("quoted_fee_source"),
   quotedNetTargetAmount: text("quoted_net_target_amount"),
+  // "firm" | "indicative"; null on rows saved before indicative quotes existed
+  // (all of which were firm).
+  quotedKind: text("quoted_kind"),
   expiresAt: integer("expires_at").notNull(),
   createdAt: integer("created_at").notNull(),
 });
