@@ -13,6 +13,7 @@ import { authRoutes } from "./routes/auth";
 import { wellKnownRoutes } from "./routes/well-known";
 import { kycRoutes } from "./routes/kyc";
 import { profileRoutes } from "./routes/profile";
+import { privacyRoutes, privacyExportRateLimit } from "./routes/privacy";
 import { anchorAuthRoutes } from "./routes/anchor-auth";
 import { anchorCallbacksRoutes } from "./routes/anchor-callbacks";
 import { demoRoutes } from "./routes/demo";
@@ -93,6 +94,11 @@ async function main(): Promise<void> {
     store: rateLimitStore,
     keyFor: (ctx) => `anchor-auth:${ctx.get("seller").id}`,
   });
+
+  // The data-subject export reads every table that holds a seller's personal
+  // data, so it gets its own small budget per seller (issue 4.27), not the shared
+  // strict one: 5 per hour, regardless of IP.
+  const privacyExportLimit = privacyExportRateLimit(rateLimitStore);
 
   // Anchor SEP-12 callbacks are unauthenticated and, once the token matches,
   // trigger an outbound stellar.toml fetch. Bucket by client IP on the strict budget.
@@ -201,6 +207,10 @@ async function main(): Promise<void> {
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
   app.route("/seller/kyc", kycRoutes(container));
+  // Before profileRoutes: both live under /seller/profile, and the first router
+  // to match answers, so /export is handled here and never reaches the profile
+  // router's auth + store guards.
+  app.route("/seller/profile/export", privacyRoutes(container, privacyExportLimit));
   app.route("/seller/profile", profileRoutes(container));
   app.route("/seller/anchor-auth", anchorAuthRoutes(container, anchorAuthLimit));
   app.use("/anchor-callbacks/*", anchorCallbackLimit);

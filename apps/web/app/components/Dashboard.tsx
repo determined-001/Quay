@@ -22,6 +22,7 @@ import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
 import RegistrationForm from "./RegistrationForm";
 import ErasePanel from "./ErasePanel";
+import ExportPanel from "./ExportPanel";
 import type { KycLoadState } from "../../lib/kyc-load";
 import DisclosuresPanel from "./DisclosuresPanel";
 import CashOutModal from "./CashOutModal";
@@ -782,6 +783,8 @@ export default function Dashboard() {
           </button>
         </div>
       </section>
+
+      <ExportPanel />
 
       <ErasePanel />
 
