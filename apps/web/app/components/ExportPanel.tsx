@@ -5,8 +5,8 @@ import { api, CheckoutError } from "../../lib/api";
 
 /** What the file holds, shown before downloading; mirrors the API's export sections. */
 const EXPORT_CONTENTS =
-  "your profile, KYC records and consents, anchor connections, saved payout details, links and payments, " +
-  "webhook URLs and API key names. It never contains passwords, tokens, secrets or key hashes.";
+  "your profile, KYC records, consents and disclosure history, anchor connections, saved payout details, " +
+  "links, payments and cash-outs, webhook URLs and API key names. It never contains passwords, tokens, secrets or key hashes.";
 
 function exportErrorText(e: unknown): string {
   if (e instanceof CheckoutError && e.status === 429) {

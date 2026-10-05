@@ -15,6 +15,7 @@ import {
 } from "../src/repos/index";
 import { generateApiKey, hashApiKey } from "../src/services/api-keys";
 import type { Container } from "../src/services/container";
+import { kycDisclosureFields, offrampJobs } from "../src/db/schema";
 import { createTestContainer } from "./setup";
 
 const WALLET_B = "GACXZYIBHOK5EGU6CTXOT7EQ24JANLH5C6QNWFGV5BUWLDTOZCP3BTNM";
@@ -80,8 +81,8 @@ async function seedSeller(
     status: "ACCEPTED",
     requiredFields: [],
     providedFields: { first_name: `First-${tag}`, bank_account_number: `acct-${tag}` },
-    providedFieldStatus: [],
-    sentFields: [],
+    providedFieldStatus: [{ name: "first_name", status: "ACCEPTED", error: null }],
+    sentFields: ["first_name"],
     callbackTokenHash: `cbhash-${tag}`,
     message: `message ${tag}`,
     lastSyncedAt: 1_700_000_000_500,
@@ -103,6 +104,28 @@ async function seedSeller(
     token: bearer(tag),
     expiresAt: 1_900_000_000_000,
     createdAt: 1_700_000_000_000,
+  });
+  await container.db.insert(kycDisclosureFields).values({
+    sellerId: seller.id,
+    anchorDomain: "testanchor.stellar.org",
+    fieldName: "first_name",
+    sentAt: 1_700_000_000_800,
+  });
+  await container.db.insert(offrampJobs).values({
+    jobId: `job_${tag}`,
+    linkId: `lnk_${tag}`,
+    anchor: "testanchor.stellar.org",
+    sellerId: seller.id,
+    account: seller.wallet,
+    targetCurrency: "NGN",
+    targetAmount: "1000",
+    rate: "1500",
+    status: "completed",
+    transferJson: JSON.stringify({ memo: `memo-${tag}` }),
+    lastError: `err-${tag}`,
+    sellerTxHash: `sellertx_${tag}`,
+    createdAt: 1_700_000_000_900,
+    updatedAt: 1_700_000_001_000,
   });
   await deps.sellers.savePayoutFields(seller.id, { bank_account_number: `payout-${tag}` });
   return { apiKeyPlaintext: apiKey.plaintext, apiKeyHash: keyHash };
@@ -170,9 +193,11 @@ describe("GET /seller/profile/export (issue 4.27)", () => {
         "anchorConnections",
         "apiKeys",
         "consents",
+        "disclosures",
         "generatedAt",
         "kyc",
         "links",
+        "offrampJobs",
         "payments",
         "payoutFields",
         "profile",
@@ -256,13 +281,37 @@ describe("GET /seller/profile/export (issue 4.27)", () => {
     expect(body.kyc).toEqual([
       {
         anchorDomain: "testanchor.stellar.org",
+        account: h.sellerA.wallet,
         customerId: "cust_alpha",
         status: "ACCEPTED",
         message: "message alpha",
         providedFields: { first_name: "First-alpha", bank_account_number: "acct-alpha" },
+        providedFieldStatus: [{ name: "first_name", status: "ACCEPTED", error: null }],
+        sentFields: ["first_name"],
         lastSyncedAt: new Date(1_700_000_000_500).toISOString(),
       },
     ]);
+    h.container.client.close();
+  });
+
+  it("includes disclosure history and off-ramp jobs, without anchor instructions or error text", async () => {
+    const h = await harness();
+    await h.seedA();
+    await h.seedB();
+
+    const res = await h.app.request("/seller/profile/export", { headers: h.headersA });
+    const text = await res.text();
+    const body = JSON.parse(text) as Record<string, any>;
+
+    expect(body.disclosures).toEqual([
+      { anchorDomain: "testanchor.stellar.org", fieldName: "first_name", sentAt: new Date(1_700_000_000_800).toISOString() },
+    ]);
+    expect(body.offrampJobs).toHaveLength(1);
+    expect(body.offrampJobs[0]).toMatchObject({ jobId: "job_alpha", sellerTxHash: "sellertx_alpha", status: "completed" });
+    expect(text).not.toContain("memo-alpha");
+    expect(text).not.toContain("err-alpha");
+    expect(text).not.toContain("job_bravo");
+    expect(body.truncated).toBeUndefined();
     h.container.client.close();
   });
 
@@ -332,6 +381,7 @@ describe("GET /seller/profile/export (issue 4.27)", () => {
 
     expect(res.headers.get("content-type")).toMatch(/^application\/json/);
     expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     const day = new Date().toISOString().slice(0, 10);
     expect(res.headers.get("content-disposition")).toBe(
       `attachment; filename="quay-export-${h.sellerA.id}-${day}.json"`,

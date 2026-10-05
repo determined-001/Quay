@@ -1280,9 +1280,12 @@ and `Cache-Control: no-store`. Timestamps are ISO 8601 strings.
   "seller": { "id": "sel_...", "name": "...", "wallet": "G...", "createdAt": "..." },
   "profile": [{ "field": "given_name", "value": "Ada", "source": "seller", "updatedAt": "..." }],
   "kyc": [{
-    "anchorDomain": "testanchor.stellar.org", "customerId": "...", "status": "ACCEPTED",
-    "message": null, "providedFields": { "first_name": "Ada" }, "lastSyncedAt": "..."
+    "anchorDomain": "testanchor.stellar.org", "account": "G...", "customerId": "...", "status": "ACCEPTED",
+    "message": null, "providedFields": { "first_name": "Ada" },
+    "providedFieldStatus": [{ "name": "first_name", "status": "ACCEPTED", "error": null }],
+    "sentFields": ["first_name"], "lastSyncedAt": "..."
   }],
+  "disclosures": [{ "anchorDomain": "testanchor.stellar.org", "fieldName": "first_name", "sentAt": "..." }],
   "consents": [{
     "anchorDomain": "testanchor.stellar.org", "fields": ["first_name"],
     "grantedAt": "...", "revokedAt": null, "noticeVersion": "..."
@@ -1297,6 +1300,12 @@ and `Cache-Control: no-store`. Timestamps are ISO 8601 strings.
     "linkId": "...", "txHash": "...", "payer": "G...", "amount": "10", "asset": "USDC",
     "ledger": 123, "createdAt": "..."
   }],
+  "offrampJobs": [{
+    "jobId": "...", "linkId": "...", "anchor": "...", "account": "G...", "targetCurrency": "NGN",
+    "targetAmount": "1000", "rate": "1500", "status": "completed", "sellAsset": "USDC:G...",
+    "sellAmount": "1", "sellerTxHash": null, "amountIn": null, "amountFee": null,
+    "createdAt": "...", "updatedAt": "..."
+  }],
   "webhooks": [{ "id": "...", "url": "https://...", "createdAt": "..." }],
   "apiKeys": [{ "id": "...", "name": "...", "scopes": ["links:read"], "createdAt": "...", "lastUsedAt": null }]
 }
@@ -1309,7 +1318,13 @@ and `Cache-Control: no-store`. Timestamps are ISO 8601 strings.
 - `payoutFields` is `null` until the seller has saved payout details.
 - `webhooks` lists live webhooks; deleted ones are not included.
 - **Never included:** the anchor SEP-10 token, webhook secrets, API key
-  hashes or prefixes, the KYC callback token hash.
+  hashes or prefixes, the KYC callback token hash, the anchor's deposit
+  instructions or raw error text on off-ramp jobs. Also left out because they
+  are operational records rather than data about the seller: off-ramp quotes,
+  webhook delivery logs, idempotency keys, watcher and telemetry state.
+- Each list section is capped at 10,000 rows so one request cannot read an
+  unbounded table. A section that was cut is named in a top-level
+  `"truncated": ["payments", ...]` array (absent when nothing was cut).
 
 Each export logs `event: "privacy.export"` with the `sellerId` only, never its
 contents. The dashboard offers it as **Download my data**.

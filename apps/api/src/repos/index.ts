@@ -282,7 +282,7 @@ export class DrizzleLinkRepository implements LinkRepository {
   }
 
   /** Every payment recorded against any of the seller's links, newest first (privacy export). */
-  async listPaymentsBySeller(sellerId: string): Promise<SellerPaymentRow[]> {
+  async listPaymentsBySeller(sellerId: string, limit = 10_001): Promise<SellerPaymentRow[]> {
     const rows = await this.db
       .select({
         linkId: linkPayments.linkId,
@@ -297,7 +297,8 @@ export class DrizzleLinkRepository implements LinkRepository {
       .from(linkPayments)
       .innerJoin(links, eq(links.id, linkPayments.linkId))
       .where(eq(links.sellerId, sellerId))
-      .orderBy(desc(linkPayments.createdAt));
+      .orderBy(desc(linkPayments.createdAt))
+      .limit(limit);
     return rows.map((r) => ({ ...r, ledger: r.ledger ?? null }));
   }
 }

@@ -68,8 +68,11 @@ export function privacyRoutes(
     getLogger(ctx).info({ event: "privacy.export", sellerId: seller.id }, "seller data export generated");
 
     const day = new Date(now).toISOString().slice(0, 10);
-    ctx.header("Content-Disposition", `attachment; filename="quay-export-${seller.id}-${day}.json"`);
+    // Ids are generated, but never let one reach a header unfiltered.
+    const safeId = seller.id.replace(/[^A-Za-z0-9_-]/g, "_");
+    ctx.header("Content-Disposition", `attachment; filename="quay-export-${safeId}-${day}.json"`);
     ctx.header("Cache-Control", "no-store");
+    ctx.header("X-Content-Type-Options", "nosniff");
     return ctx.json(body);
   });
 

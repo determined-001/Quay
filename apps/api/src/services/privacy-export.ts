@@ -1,6 +1,15 @@
+import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Seller } from "@checkout/core";
 import type { Container } from "./container";
 import { DrizzleAnchorSessionRepository } from "../repos/index";
+import { kycDisclosureFields, links as linksTable, offrampJobs } from "../db/schema";
+
+/**
+ * Hard ceiling per list section, so one request cannot read an unbounded table
+ * into memory. A section cut at the ceiling is named in `truncated`; the seller
+ * can ask the operator for the remainder.
+ */
+export const EXPORT_SECTION_LIMIT = 10_000;
 
 /**
  * The seller's data-subject export (NDPA 2023 right of access, issue 4.27).
@@ -15,6 +24,11 @@ import { DrizzleAnchorSessionRepository } from "../repos/index";
  * read selects no token column), webhook secrets, API key hashes and prefixes,
  * the KYC callback token hash.
  *
+ * Deliberately not exported (not personal data about the seller, or derived from
+ * what is exported): off-ramp quotes, the anchor's deposit instructions and raw
+ * error text on off-ramp jobs, webhook delivery logs and queue, idempotency keys,
+ * revoked session ids, watcher cursors and telemetry.
+ *
  * A section whose store is not configured on this deployment (the encrypted
  * profile and KYC stores need a real anchor and KYC_ENCRYPTION_KEY) is omitted
  * rather than reported empty, so an empty array always means "nothing held".
@@ -25,12 +39,17 @@ export interface SellerExport {
   profile?: { field: string; value: string; source: string; updatedAt: string }[];
   kyc?: {
     anchorDomain: string;
+    account: string | null;
     customerId: string | null;
     status: string;
     message: string | null;
     providedFields: Record<string, string>;
+    providedFieldStatus: { name: string; status: string | null; error: string | null }[];
+    sentFields: string[];
     lastSyncedAt: string | null;
   }[];
+  /** When each field's value was last sent to each anchor (names and times, never values). */
+  disclosures: { anchorDomain: string; fieldName: string; sentAt: string }[];
   consents: {
     anchorDomain: string;
     fields: string[];
@@ -59,8 +78,27 @@ export interface SellerExport {
     ledger: number | null;
     createdAt: string;
   }[];
+  offrampJobs: {
+    jobId: string;
+    linkId: string;
+    anchor: string;
+    account: string | null;
+    targetCurrency: string;
+    targetAmount: string;
+    rate: string;
+    status: string;
+    sellAsset: string | null;
+    sellAmount: string | null;
+    sellerTxHash: string | null;
+    amountIn: string | null;
+    amountFee: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }[];
   webhooks: { id: string; url: string; createdAt: string }[];
   apiKeys: { id: string; name: string; scopes: string[]; createdAt: string; lastUsedAt: string | null }[];
+  /** Names of list sections cut at {@link EXPORT_SECTION_LIMIT}; omitted when nothing was cut. */
+  truncated?: string[];
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -87,11 +125,84 @@ async function kycSection(c: ExportDeps, sellerId: string): Promise<SellerExport
   const records = await c.kycRepo.list(sellerId);
   return records.map((r) => ({
     anchorDomain: r.anchorDomain,
+    account: r.account,
     customerId: r.customerId,
     status: r.status,
     message: r.message,
     providedFields: r.providedFields,
+    providedFieldStatus: r.providedFieldStatus.map((p) => ({ name: p.name, status: p.status, error: p.error })),
+    sentFields: [...r.sentFields],
     lastSyncedAt: isoOrNull(r.lastSyncedAt),
+  }));
+}
+
+async function disclosuresSection(c: ExportDeps, sellerId: string): Promise<SellerExport["disclosures"]> {
+  const rows = await c.db
+    .select({
+      anchorDomain: kycDisclosureFields.anchorDomain,
+      fieldName: kycDisclosureFields.fieldName,
+      sentAt: kycDisclosureFields.sentAt,
+    })
+    .from(kycDisclosureFields)
+    .where(eq(kycDisclosureFields.sellerId, sellerId))
+    .orderBy(asc(kycDisclosureFields.anchorDomain), asc(kycDisclosureFields.fieldName))
+    .limit(EXPORT_SECTION_LIMIT + 1);
+  return rows.map((r) => ({ anchorDomain: r.anchorDomain, fieldName: r.fieldName, sentAt: iso(r.sentAt) }));
+}
+
+/**
+ * Off-ramp jobs the seller ran: by the job's own seller id, or (older rows with
+ * no seller id) through a link the seller owns. Explicit column list: the anchor's
+ * transfer instructions (memo) and raw error text are not selected.
+ */
+async function offrampJobsSection(c: ExportDeps, sellerId: string): Promise<SellerExport["offrampJobs"]> {
+  const rows = await c.db
+    .select({
+      jobId: offrampJobs.jobId,
+      linkId: offrampJobs.linkId,
+      anchor: offrampJobs.anchor,
+      account: offrampJobs.account,
+      targetCurrency: offrampJobs.targetCurrency,
+      targetAmount: offrampJobs.targetAmount,
+      rate: offrampJobs.rate,
+      status: offrampJobs.status,
+      sellAssetCode: offrampJobs.sellAssetCode,
+      sellAssetIssuer: offrampJobs.sellAssetIssuer,
+      sellAmount: offrampJobs.sellAmount,
+      sellerTxHash: offrampJobs.sellerTxHash,
+      amountIn: offrampJobs.amountIn,
+      amountFee: offrampJobs.amountFee,
+      createdAt: offrampJobs.createdAt,
+      updatedAt: offrampJobs.updatedAt,
+    })
+    .from(offrampJobs)
+    .where(
+      or(
+        eq(offrampJobs.sellerId, sellerId),
+        and(
+          isNull(offrampJobs.sellerId),
+          inArray(offrampJobs.linkId, c.db.select({ id: linksTable.id }).from(linksTable).where(eq(linksTable.sellerId, sellerId))),
+        ),
+      ),
+    )
+    .orderBy(desc(offrampJobs.createdAt))
+    .limit(EXPORT_SECTION_LIMIT + 1);
+  return rows.map((r) => ({
+    jobId: r.jobId,
+    linkId: r.linkId,
+    anchor: r.anchor,
+    account: r.account,
+    targetCurrency: r.targetCurrency,
+    targetAmount: r.targetAmount,
+    rate: r.rate,
+    status: r.status,
+    sellAsset: r.sellAssetCode ? (r.sellAssetIssuer ? `${r.sellAssetCode}:${r.sellAssetIssuer}` : r.sellAssetCode) : null,
+    sellAmount: r.sellAmount,
+    sellerTxHash: r.sellerTxHash,
+    amountIn: r.amountIn,
+    amountFee: r.amountFee,
+    createdAt: iso(r.createdAt),
+    updatedAt: iso(r.updatedAt),
   }));
 }
 
@@ -133,7 +244,7 @@ async function linksSection(c: ExportDeps, sellerId: string): Promise<SellerExpo
 }
 
 async function paymentsSection(c: ExportDeps, sellerId: string): Promise<SellerExport["payments"]> {
-  const payments = await c.links.listPaymentsBySeller(sellerId);
+  const payments = await c.links.listPaymentsBySeller(sellerId, EXPORT_SECTION_LIMIT + 1);
   return payments.map((p) => ({
     linkId: p.linkId,
     txHash: p.txHash,
@@ -168,28 +279,41 @@ export async function buildSellerExport(
   now: number = Date.now(),
 ): Promise<SellerExport> {
   const id = seller.id;
-  const [profile, kyc, consents, anchorConnections, links, payments, webhooks, apiKeys] = await Promise.all([
-    profileSection(c, id),
-    kycSection(c, id),
-    consentsSection(c, id),
-    anchorConnectionsSection(c, id),
-    linksSection(c, id),
-    paymentsSection(c, id),
-    webhooksSection(c, id),
-    apiKeysSection(c, id),
-  ]);
+  const [profile, kyc, disclosures, consents, anchorConnections, links, payments, jobs, webhooks, apiKeys] =
+    await Promise.all([
+      profileSection(c, id),
+      kycSection(c, id),
+      disclosuresSection(c, id),
+      consentsSection(c, id),
+      anchorConnectionsSection(c, id),
+      linksSection(c, id),
+      paymentsSection(c, id),
+      offrampJobsSection(c, id),
+      webhooksSection(c, id),
+      apiKeysSection(c, id),
+    ]);
+
+  const truncated: string[] = [];
+  const cap = <T>(name: string, rows: T[]): T[] => {
+    if (rows.length <= EXPORT_SECTION_LIMIT) return rows;
+    truncated.push(name);
+    return rows.slice(0, EXPORT_SECTION_LIMIT);
+  };
 
   return {
     generatedAt: iso(now),
     seller: { id, name: seller.name, wallet: seller.wallet, createdAt: iso(seller.createdAt) },
     ...(profile ? { profile } : {}),
     ...(kyc ? { kyc } : {}),
+    disclosures: cap("disclosures", disclosures),
     consents,
     anchorConnections,
     payoutFields: seller.payoutFields,
-    links,
-    payments,
+    links: cap("links", links),
+    payments: cap("payments", payments),
+    offrampJobs: cap("offrampJobs", jobs),
     webhooks,
     apiKeys,
+    ...(truncated.length > 0 ? { truncated } : {}),
   };
 }
