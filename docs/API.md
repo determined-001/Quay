@@ -1236,6 +1236,64 @@ function verify(rawBody, header, secret) {
 
 ---
 
+## `GET /seller/profile/export`
+
+Data-subject export (NDPA 2023 right of access): a machine-readable copy of
+the personal data Quay holds about the authenticated seller.
+
+**Requires auth.** Session authentication only. API keys get `403`; an
+integrator's key must not be able to pull a seller's full identity. The export
+is scoped to the session's own seller and cannot name another.
+
+**Rate limit.** 5 requests per seller per hour (`429` `rate_limited` with a
+`Retry-After` header afterwards). Requests that fail authentication do not
+count.
+
+**200** is `application/json`, sent as an attachment with
+`Content-Disposition: attachment; filename="quay-export-<sellerId>-<YYYY-MM-DD>.json"`
+and `Cache-Control: no-store`. Timestamps are ISO 8601 strings.
+```json
+{
+  "generatedAt": "2026-10-05T12:00:00.000Z",
+  "seller": { "id": "sel_...", "name": "...", "wallet": "G...", "createdAt": "..." },
+  "profile": [{ "field": "given_name", "value": "Ada", "source": "seller", "updatedAt": "..." }],
+  "kyc": [{
+    "anchorDomain": "testanchor.stellar.org", "customerId": "...", "status": "ACCEPTED",
+    "message": null, "providedFields": { "first_name": "Ada" }, "lastSyncedAt": "..."
+  }],
+  "consents": [{
+    "anchorDomain": "testanchor.stellar.org", "fields": ["first_name"],
+    "grantedAt": "...", "revokedAt": null, "noticeVersion": "..."
+  }],
+  "anchorConnections": [{ "anchorDomain": "testanchor.stellar.org", "account": "G...", "expiresAt": "..." }],
+  "payoutFields": { "bank_account_number": "..." },
+  "links": [{
+    "id": "...", "reference": "...", "title": "...", "amount": "10", "asset": "USDC",
+    "assetIssuer": "G...", "status": "paid", "createdAt": "..."
+  }],
+  "payments": [{
+    "linkId": "...", "txHash": "...", "payer": "G...", "amount": "10", "asset": "USDC",
+    "ledger": 123, "createdAt": "..."
+  }],
+  "webhooks": [{ "id": "...", "url": "https://...", "createdAt": "..." }],
+  "apiKeys": [{ "id": "...", "name": "...", "scopes": ["links:read"], "createdAt": "...", "lastUsedAt": null }]
+}
+```
+
+- `profile` and `kyc` are decrypted for the export. They are omitted entirely
+  (not returned empty) on a deployment without a real anchor and
+  `KYC_ENCRYPTION_KEY`, because that is where the encrypted stores live.
+  Every other section is always present; an empty array means nothing is held.
+- `payoutFields` is `null` until the seller has saved payout details.
+- `webhooks` lists live webhooks; deleted ones are not included.
+- **Never included:** the anchor SEP-10 token, webhook secrets, API key
+  hashes or prefixes, the KYC callback token hash.
+
+Each export logs `event: "privacy.export"` with the `sellerId` only, never its
+contents. The dashboard offers it as **Download my data**.
+
+---
+
 ## `DELETE /seller/profile`
 
 Right to erasure (NDPA 2023) for the authenticated seller's identity data.
