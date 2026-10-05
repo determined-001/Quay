@@ -1,13 +1,13 @@
 {
   "targets": {
     "api": {
-      "consecutiveFailures": 0,
-      "lastStatus": "up",
-      "lastCheckedAt": "2026-10-04T23:03:10.120Z",
+      "consecutiveFailures": 1,
+      "lastStatus": "down",
+      "lastCheckedAt": "2026-10-05T01:53:33.297Z",
       "today": {
-        "date": "2026-10-04",
-        "up": 1,
-        "down": 0
+        "date": "2026-10-05",
+        "up": 0,
+        "down": 1
       },
       "history": [
         {
@@ -121,14 +121,14 @@
           "down": 4
         }
       ],
-      "lastError": null
+      "lastError": "This operation was aborted"
     },
     "web": {
       "consecutiveFailures": 0,
       "lastStatus": "up",
-      "lastCheckedAt": "2026-10-04T23:03:10.273Z",
+      "lastCheckedAt": "2026-10-05T01:53:33.544Z",
       "today": {
-        "date": "2026-10-04",
+        "date": "2026-10-05",
         "up": 1,
         "down": 0
       },
@@ -249,9 +249,9 @@
     "synthetic": {
       "consecutiveFailures": 441,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-10-04T23:03:10.535Z",
+      "lastCheckedAt": "2026-10-05T01:53:48.546Z",
       "today": {
-        "date": "2026-10-04",
+        "date": "2026-10-05",
         "up": 0,
         "down": 1
       },
@@ -367,14 +367,14 @@
           "down": 8
         }
       ],
-      "lastError": "POST https://quay-api.onrender.com/links -> HTTP 401 and no API key is configured. Add a least-privilege API key (links:read + links:write) as the UPTIME_API_KEY repo secret (UPTIME_MAINNET_API_KEY for mainnet)."
+      "lastError": "This operation was aborted"
     },
     "mainnet-api": {
       "consecutiveFailures": 1,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-10-04T23:03:25.537Z",
+      "lastCheckedAt": "2026-10-05T01:54:03.547Z",
       "today": {
-        "date": "2026-10-04",
+        "date": "2026-10-05",
         "up": 0,
         "down": 1
       },
