@@ -16,7 +16,7 @@ import type {
 } from "@checkout/core";
 import { getSep38Quote } from "./sep38";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { Sep24Client, type Sep24Transaction } from "./sep24";
+import { getSep24Info, Sep24Client, validateSep24Withdraw, type Sep24Transaction } from "./sep24";
 
 export interface AnchorOptions {
   discovery: AnchorDiscovery;
@@ -118,6 +118,15 @@ export class AnchorOffRamp implements OffRampPort {
     customer: AnchorCustomer;
   }): Promise<OffRampQuote> {
     const discovery = await this.sep24.getDiscoveryInfo();
+
+    // The anchor's published limits come first: an amount it will refuse is rejected here (422
+    // offramp_rejected, carrying the limits) before a session is opened or a SEP-38 quote burned.
+    validateSep24Withdraw(
+      await getSep24Info(discovery.transferServerSep24),
+      input.sourceAsset.code,
+      input.sourceAmount,
+    );
+
     const token = await this.auth.token(input.customer);
 
     const q = await getSep38Quote(discovery.anchorQuoteServer, token, {
