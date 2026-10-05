@@ -164,3 +164,99 @@ describe("AnchorOffRamp.quote limit enforcement", () => {
     expect(fetchFn).toHaveBeenCalledTimes(1); // /info only, no SEP-38 quote
   });
 });
+
+describe("AnchorOffRamp.quote estimated fee (no SEP-38)", () => {
+  const USDC = { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" };
+  const customer = { sellerId: "s1", account: "GSELLER" };
+
+  function build(opts: { quoteServer?: string; rate?: string | null } = {}) {
+    const token = vi.fn(async () => "jwt");
+    const rate = vi.fn(async () => ({
+      rate: opts.rate ?? "1500",
+      source: "static",
+      asOf: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    }));
+    const discovery = {
+      homeDomain: "anchor.example",
+      get: async () => ({ transferServerSep24: BASE, anchorQuoteServer: opts.quoteServer }),
+    } as unknown as AnchorDiscovery;
+    const state = new FakeOffRampStateRepository();
+    const offramp = new AnchorOffRamp({
+      discovery,
+      auth: { token } as unknown as SellerAnchorAuth,
+      state,
+      ...(opts.rate === null ? {} : { rateSource: { rate } }),
+    });
+    return { offramp, rate, token, state };
+  }
+  const quote = (o: AnchorOffRamp, amount = "100") =>
+    o.quote({ sourceAsset: USDC, sourceAmount: amount, targetCurrency: "NGN", customer });
+
+  it("quotes indicatively with the fee converted at the same rate, net rounded down", async () => {
+    stubFetch(infoBody({ fee_fixed: 1, fee_percent: 0.5, fee_minimum: undefined }));
+    const { offramp, state } = build();
+    const q = await quote(offramp);
+    // fee 1 + 0.5 = 1.5 USDC -> 2250 NGN; gross 150000; net 147750
+    expect(q.quoteKind).toBe("indicative");
+    expect(q.fee).toEqual({ amount: "2250.0000", currency: "NGN", source: "estimated" });
+    expect(q.netTargetAmount).toBe("147750.0000");
+    expect(q.targetAmount).toBe("150000.0000");
+    const stored = await state.getQuote(q.quoteId);
+    expect(stored?.quotedAmounts).toMatchObject({
+      feeSource: "estimated",
+      quoteKind: "indicative",
+      netTargetAmount: "147750.0000",
+    });
+  });
+
+  it("takes fee_minimum when it exceeds the computed fee", async () => {
+    stubFetch(infoBody({ fee_fixed: 1, fee_percent: 0.5, fee_minimum: 5 }));
+    const q = await quote(build().offramp);
+    expect(q.fee.amount).toBe("7500.0000");
+    expect(q.netTargetAmount).toBe("142500.0000");
+  });
+
+  it("refuses when /info publishes no fee fields (unknown fee is not zero)", async () => {
+    stubFetch(infoBody({ fee_fixed: undefined, fee_percent: undefined, fee_minimum: undefined }));
+    const { offramp, rate } = build();
+    await expect(quote(offramp)).rejects.toThrow(/publishes no fee/);
+    expect(rate).not.toHaveBeenCalled();
+  });
+
+  it("rejects with an OffRampRejectedError when the fee swallows the amount", async () => {
+    stubFetch(infoBody({ min_amount: 1, fee_fixed: 10, fee_percent: 0, fee_minimum: undefined }));
+    await expect(quote(build().offramp, "5")).rejects.toBeInstanceOf(OffRampRejectedError);
+  });
+
+  it("rejects when the rounded net is zero", async () => {
+    stubFetch(infoBody({ min_amount: 1, fee_fixed: 0, fee_percent: 0, fee_minimum: 0 }));
+    await expect(quote(build({ rate: "0.00001" }).offramp, "1")).rejects.toBeInstanceOf(OffRampRejectedError);
+  });
+
+  it("refuses without a rate source rather than inventing a rate", async () => {
+    stubFetch(infoBody());
+    await expect(quote(build({ rate: null }).offramp)).rejects.toThrow(/no rate source/);
+  });
+
+  it("does not open a session for the rate-source path", async () => {
+    stubFetch(infoBody());
+    const { offramp, token } = build();
+    await quote(offramp);
+    expect(token).not.toHaveBeenCalled();
+  });
+
+  it("never consults the rate source when SEP-38 exists", async () => {
+    stubFetch(infoBody());
+    const { offramp, rate } = build({ quoteServer: "https://anchor.example/sep38" });
+    await quote(offramp).catch(() => undefined); // the stubbed SEP-38 reply is not a quote; only routing matters
+    expect(rate).not.toHaveBeenCalled();
+  });
+
+  it("enforces limits before consulting the rate source", async () => {
+    stubFetch(infoBody());
+    const { offramp, rate } = build();
+    await expect(quote(offramp, "1")).rejects.toBeInstanceOf(OffRampRejectedError);
+    expect(rate).not.toHaveBeenCalled();
+  });
+});

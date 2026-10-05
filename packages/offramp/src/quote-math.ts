@@ -58,7 +58,7 @@ export type IndicativeAmounts =
   | { ok: false; reason: "non_positive_net" | "zero_quote" };
 
 /**
- *   fee = (feeFixed + amount × feePercent/100) × rate     (fees are in the SELL asset)
+ *   fee = max(feeMinimum, feeFixed + amount × feePercent/100) × rate   (fees are in the SELL asset)
  *   net = amount × rate − fee
  *
  * Returns `ok: false` rather than a figure when the seller would receive
@@ -70,13 +70,20 @@ export function computeIndicativeAmounts(input: {
   rate: string;
   feeFixed?: number | undefined;
   feePercent?: number | undefined;
+  /** Floor on the fee in the SELL asset (SEP-24 `fee_minimum`). Compared exactly, so the larger fee always wins. */
+  feeMinimum?: number | undefined;
 }): IndicativeAmounts {
   const amount = parseDecimal(input.amount);
   const rate = parseDecimal(input.rate);
   const feeFixed = parseDecimal(input.feeFixed ?? 0);
   const feePct = parseDecimal(input.feePercent ?? 0);
 
-  const feeSell = add(feeFixed, mul(mul(amount, feePct), { n: 1n, d: 100n }));
+  let feeSell = add(feeFixed, mul(mul(amount, feePct), { n: 1n, d: 100n }));
+  if (input.feeMinimum !== undefined) {
+    const min = parseDecimal(input.feeMinimum);
+    // min > feeSell  <=>  min.n * feeSell.d > feeSell.n * min.d (denominators are positive)
+    if (min.n * feeSell.d > feeSell.n * min.d) feeSell = min;
+  }
   const fee = mul(feeSell, rate);
   const gross = mul(amount, rate);
   const net = add(gross, { n: -fee.n, d: fee.d });
