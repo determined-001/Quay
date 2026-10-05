@@ -280,6 +280,38 @@ export class DrizzleLinkRepository implements LinkRepository {
     const total = rows.reduce((sum, r) => sum + toStroops(r.amount), 0n);
     return fromStroops(total);
   }
+
+  /** Every payment recorded against any of the seller's links, newest first (privacy export). */
+  async listPaymentsBySeller(sellerId: string): Promise<SellerPaymentRow[]> {
+    const rows = await this.db
+      .select({
+        linkId: linkPayments.linkId,
+        txHash: linkPayments.txHash,
+        payer: linkPayments.payer,
+        amount: linkPayments.amount,
+        assetCode: linkPayments.assetCode,
+        assetIssuer: linkPayments.assetIssuer,
+        ledger: linkPayments.ledger,
+        createdAt: linkPayments.createdAt,
+      })
+      .from(linkPayments)
+      .innerJoin(links, eq(links.id, linkPayments.linkId))
+      .where(eq(links.sellerId, sellerId))
+      .orderBy(desc(linkPayments.createdAt));
+    return rows.map((r) => ({ ...r, ledger: r.ledger ?? null }));
+  }
+}
+
+/** A payment as the seller's data export reports it. */
+export interface SellerPaymentRow {
+  linkId: string;
+  txHash: string;
+  payer: string;
+  amount: string;
+  assetCode: string;
+  assetIssuer: string | null;
+  ledger: number | null;
+  createdAt: number;
 }
 
 function rowToSeller(
@@ -1058,6 +1090,16 @@ export class DrizzleKycRepository implements KycRepository {
     return rows[0] ? this.rowToRecord(rows[0]) : null;
   }
 
+  /** Every anchor's KYC row for the seller, decrypted (privacy export). */
+  async list(sellerId: string): Promise<KycRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(sellerKyc)
+      .where(eq(sellerKyc.sellerId, sellerId))
+      .orderBy(asc(sellerKyc.anchorDomain));
+    return rows.map((row) => this.rowToRecord(row));
+  }
+
   async delete(sellerId: string, anchorDomain?: string): Promise<void> {
     await this.db
       .delete(sellerKyc)
@@ -1302,6 +1344,24 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
       .insert(anchorSessions)
       .values(row)
       .onConflictDoUpdate({ target: [anchorSessions.sellerId, anchorSessions.anchorDomain], set: row });
+  }
+
+  /**
+   * Which anchors the seller is connected to. Selects only the non-secret
+   * columns: the bearer token is never read, let alone returned (privacy export).
+   */
+  async listBySeller(
+    sellerId: string,
+  ): Promise<{ anchorDomain: string; account: string; expiresAt: number }[]> {
+    return this.db
+      .select({
+        anchorDomain: anchorSessions.anchorDomain,
+        account: anchorSessions.account,
+        expiresAt: anchorSessions.expiresAt,
+      })
+      .from(anchorSessions)
+      .where(eq(anchorSessions.sellerId, sellerId))
+      .orderBy(asc(anchorSessions.anchorDomain));
   }
 
   async delete(sellerId: string, anchorDomain: string): Promise<void> {
