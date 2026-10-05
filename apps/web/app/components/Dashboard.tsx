@@ -20,6 +20,7 @@ import {
 } from "../../lib/anchor-session";
 import ApiKeys from "./ApiKeys";
 import KycPanel from "./KycPanel";
+import ErasePanel from "./ErasePanel";
 import type { KycLoadState } from "../../lib/kyc-load";
 import DisclosuresPanel from "./DisclosuresPanel";
 import CashOutModal from "./CashOutModal";
@@ -779,6 +780,8 @@ export default function Dashboard() {
           </button>
         </div>
       </section>
+
+      <ErasePanel />
 
       {/* Cash-out modal — rendered when a link's "Cash out" button is clicked */}
       {OFFRAMP_ENABLED && cashOutLinkId && cashOutLink && (

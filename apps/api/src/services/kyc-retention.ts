@@ -1,7 +1,15 @@
 import { and, eq, isNull, lt, or } from "drizzle-orm";
 import type { Logger } from "@checkout/core";
 import type { DB } from "../db/client";
-import { anchorSessions, kycDisclosureFields, links, sellerKyc, sellers } from "../db/schema";
+import {
+  anchorSessions,
+  kycConsents,
+  kycDisclosureFields,
+  links,
+  sellerKyc,
+  sellerProfile,
+  sellers,
+} from "../db/schema";
 import { metrics } from "../metrics";
 
 export interface KycRetentionOptions {
@@ -21,14 +29,27 @@ export interface KycRetentionResult {
 }
 
 /**
- * Erases a seller's identity, KYC records, anchor sessions, and stored payout fields locally.
+ * Erases a seller's identity data locally, in ONE transaction (all or nothing):
+ * the reusable profile (`seller_profile`), per-anchor KYC rows (`seller_kyc`,
+ * including the encrypted fields and the callback token hash), disclosure
+ * history, consent rows (`kyc_consents`), anchor sessions and stored payout
+ * fields. Always scoped to `sellerId`. Never touches the `sellers` row, links,
+ * link payments or off-ramp jobs (financial records kept for accounting).
  * Reusable across retention sweeps and self-service privacy erasure requests.
  */
 export async function eraseSellerIdentityLocal(db: DB, sellerId: string): Promise<void> {
-  await db.delete(kycDisclosureFields).where(eq(kycDisclosureFields.sellerId, sellerId));
-  await db.delete(sellerKyc).where(eq(sellerKyc.sellerId, sellerId));
-  await db.delete(anchorSessions).where(eq(anchorSessions.sellerId, sellerId));
-  await db.update(sellers).set({ payoutFieldsJson: null, payoutFieldsEncrypted: null }).where(eq(sellers.id, sellerId));
+  // db.batch is a single atomic libSQL transaction (all statements commit or none do).
+  await db.batch([
+    db.delete(sellerProfile).where(eq(sellerProfile.sellerId, sellerId)),
+    db.delete(kycDisclosureFields).where(eq(kycDisclosureFields.sellerId, sellerId)),
+    db.delete(sellerKyc).where(eq(sellerKyc.sellerId, sellerId)),
+    db.delete(kycConsents).where(eq(kycConsents.sellerId, sellerId)),
+    db.delete(anchorSessions).where(eq(anchorSessions.sellerId, sellerId)),
+    db
+      .update(sellers)
+      .set({ payoutFieldsJson: null, payoutFieldsEncrypted: null })
+      .where(eq(sellers.id, sellerId)),
+  ]);
 }
 
 /**

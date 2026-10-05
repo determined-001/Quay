@@ -247,6 +247,12 @@ export function classifyError(status: number, body: Record<string, unknown>): Ap
 }
 
 /** Structured error thrown by http() so callers can branch on code. */
+export interface ErasureResult {
+  erased: string[];
+  anchors: Array<{ anchorDomain: string; result: string }>;
+  retained: Array<{ what: string; why: string }>;
+}
+
 export class CheckoutError extends Error {
   constructor(
     readonly code: ApiErrorCode,
@@ -587,6 +593,9 @@ export const api = {
   logout: () => http<{ ok: true }>("/auth/logout", { method: "POST" }).finally(() => setSessionToken(null)),
   getKyc: (opts?: { refresh?: boolean }) =>
     http<KycView>(`/seller/kyc${opts?.refresh ? "?refresh=1" : ""}`),
+  /** Right to erasure (NDPA). Session auth only; `confirm` must be the seller's wallet address. */
+  eraseProfile: (confirm: string) =>
+    http<ErasureResult>("/seller/profile", { method: "DELETE", body: JSON.stringify({ confirm }) }),
   getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
   deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
     `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },

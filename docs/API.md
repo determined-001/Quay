@@ -1220,3 +1220,47 @@ function verify(rawBody, header, secret) {
   });
 }
 ```
+
+---
+
+## `DELETE /seller/profile`
+
+Right to erasure (NDPA 2023) for the authenticated seller's identity data.
+
+**Requires auth.** Session authentication only. API keys get `403`; the
+request is scoped to the session's own seller and cannot name another.
+
+**Request**
+```json
+{ "confirm": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" }
+```
+`confirm` must equal the seller's wallet address, otherwise **400**
+`invalid_confirmation` and nothing is changed.
+
+**What happens**
+1. If the deployment has a real anchor, Quay asks it to erase the seller
+   (`DELETE {KYC_SERVER}/customer/{account}`, SEP-12) using the seller's own
+   anchor session, before that session is removed. Quay signs nothing for the
+   seller. A missing session does not block local erasure.
+2. In one database transaction Quay deletes the seller's `seller_profile`
+   rows, `seller_kyc` rows (including the encrypted fields and the callback
+   token hash), disclosure history, `kyc_consents` rows and `anchor_sessions`
+   rows, and clears the saved payout fields.
+
+**200**
+```json
+{
+  "erased": ["profile", "kyc", "consents", "anchor_sessions", "payout_fields"],
+  "anchors": [{ "anchorDomain": "testanchor.stellar.org", "result": "erased" }],
+  "retained": [
+    { "what": "payment history", "why": "public on the Stellar ledger" },
+    { "what": "links and payment records", "why": "kept for the merchant's own accounting" },
+    { "what": "seller account (wallet login identity)", "why": "deleting the account is a separate decision" },
+    { "what": "database backups", "why": "expire after BACKUP_RETENTION_DAYS" }
+  ]
+}
+```
+`anchors[].result` is `erased`, `not_held` (the anchor answered 404),
+`refused:<status>` or `not_attempted:no_session` (connect to the anchor and
+erase again to remove what it holds). `anchors` is empty when no real anchor
+is configured. The anchor may be legally required to retain KYC records.
