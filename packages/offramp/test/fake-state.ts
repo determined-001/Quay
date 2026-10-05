@@ -34,11 +34,13 @@ export class FakeOffRampStateRepository implements OffRampStateRepository {
 
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId">>,
   ): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
-    this.jobs.set(jobId, { ...job, ...patch, updatedAt: Date.now() });
+    // Like the real repository, an undefined value leaves the stored one alone.
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    this.jobs.set(jobId, { ...job, ...defined, updatedAt: Date.now() });
   }
 }
 

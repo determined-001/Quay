@@ -102,6 +102,13 @@ export default function TransferStep({ transfer, linkId, onSent, onDone, onClose
     (hash: string) => {
       rememberSentHash(linkId, transfer, hash);
       setSentHash(hash);
+      // Best effort: the payment is already on-chain, so a failed report must
+      // not disturb the seller. The hash is only a claim for reconciliation.
+      if (linkId) {
+        void Promise.resolve()
+          .then(() => api.recordTransferSent(linkId, hash))
+          .catch(() => undefined);
+      }
       onSent?.(hash);
     },
     [linkId, transfer, onSent],

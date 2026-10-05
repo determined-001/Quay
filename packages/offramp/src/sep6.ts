@@ -229,6 +229,10 @@ export interface Sep6TransactionResult {
   withdrawMemoType?: "text" | "id" | "hash";
   /** What the anchor expects to receive, when it says so (SEP-6 `amount_in`). */
   amountIn?: string;
+  /** SEP-6 `amount_fee`, as the anchor sent it (a decimal string). */
+  amountFee?: string;
+  /** SEP-6 `stellar_transaction_id`: the on-chain payment the anchor matched to this withdrawal. */
+  stellarTransactionId?: string;
 }
 
 /** Thrown when an anchor's transaction carries a value we refuse to guess at. */
@@ -311,6 +315,8 @@ export async function getSep6Transaction(
       amount_out?: string;
       message?: string;
       amount_in?: string;
+      amount_fee?: string;
+      stellar_transaction_id?: string;
       withdraw_anchor_account?: string;
       withdraw_memo?: string;
       withdraw_memo_type?: string;
@@ -323,6 +329,13 @@ export async function getSep6Transaction(
     amountOut: tx.amount_out,
     message: tx.message,
   };
+  // Reconciliation fields (4.32): kept verbatim and only when they are strings,
+  // so an odd value cannot wedge the poller.
+  if (typeof tx.amount_in === "string" && tx.amount_in) out.amountIn = tx.amount_in;
+  if (typeof tx.amount_fee === "string" && tx.amount_fee) out.amountFee = tx.amount_fee;
+  if (typeof tx.stellar_transaction_id === "string" && tx.stellar_transaction_id) {
+    out.stellarTransactionId = tx.stellar_transaction_id;
+  }
   // The deposit instructions only mean something while the anchor is waiting
   // for the seller's payment. Reading them at any other status would also let
   // an odd value on, say, a completed transaction wedge the poller for a job

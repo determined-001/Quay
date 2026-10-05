@@ -614,6 +614,10 @@ export class TestAnchorOffRamp implements OffRampPort {
       externalStatus: tx.status,
       lastError: reason,
       ...(transfer ? { transfer } : {}),
+      // Kept for the reconciliation report; undefined leaves a stored value alone.
+      amountIn: tx.amountIn,
+      amountFee: tx.amountFee,
+      stellarTransactionId: tx.stellarTransactionId,
     });
 
     return {

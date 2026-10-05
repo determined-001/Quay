@@ -594,6 +594,14 @@ export const api = {
   getCashOutTransfer: (id: string) =>
     http<{ transfer: WithdrawTransfer }>(`/links/${id}/cash-out/transfer`),
 
+  /** Tell the API the hash of the transfer the seller just sent to the anchor.
+   *  A claim the reconciliation report later verifies on Horizon (issue 4.32). */
+  recordTransferSent: (id: string, hash: string) =>
+    http<{ ok: boolean; jobId: string; hash: string }>(`/links/${id}/cash-out/transfer-sent`, {
+      method: "POST",
+      body: JSON.stringify({ hash }),
+    }),
+
   exportCsv: (from?: string, to?: string): Promise<Blob> => {
     const params = new URLSearchParams();
     if (from) params.set("from", from);

@@ -743,6 +743,46 @@ typical settlement time.
    /links/:id/cash-out`), provided the previous job is terminal (see
    `previous_withdrawal_active` in `docs/API.md`).
 
+## Reconciliation report (issue 4.32)
+
+A cash-out has three records that should agree: Quay's withdrawal
+(`offramp_jobs` + the link's quoted net amount), the seller's on-chain transfer
+to the anchor, and the anchor's payout. The report answers "did every withdrawal
+get exactly one matching transfer, and did the anchor pay what it quoted?"
+Use it when an anchor partner or a seller disputes a payout.
+
+```bash
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --to 2026-09-30
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --csv out.csv   # also write a CSV
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --json          # JSON on stdout
+pnpm --filter @checkout/api reconcile --from 2026-09-01 --tolerance 1   # payout_short threshold, percent
+```
+
+It is read-only (no database writes) and reads Horizon at the same
+`STELLAR_NETWORK` / `HORIZON_URL` the API uses. `--to` covers the whole day and
+defaults to now. The exit code is 1 when any job is `transfer_mismatch`,
+`no_transfer` or `payout_short`. Output has link, job and seller ids and Stellar
+public keys/hashes only: no anchor tokens, payout fields, KYC data or memo values.
+
+Where the data comes from: the seller's browser reports the hash after sending
+(`POST /links/:id/cash-out/transfer-sent`, stored as `offramp_jobs.seller_tx_hash`).
+That hash is a claim, never proof; the report checks it on Horizon. The anchor's
+`amount_in`, `amount_fee` and `stellar_transaction_id` are stored from its SEP-6
+transaction each time the job is polled. Amounts are compared as exact decimals.
+Jobs older than this feature have no claimed hash and report as `no_transfer` once
+completed; that is a gap in the records, not necessarily a missing payment.
+
+| Status | Meaning | What to do |
+| --- | --- | --- |
+| `matched` | The claimed transfer is on Horizon with the right source, destination, asset, amount and memo, and the payout is within tolerance of the quote. | Nothing. |
+| `pending` | Not completed yet (no transfer claimed, or transfer verified and the anchor has not paid). | Wait; see "Stuck `offramp_pending` job" if it lingers. |
+| `no_transfer` | The anchor completed (or the job failed) but no transfer hash was ever reported. | Ask the seller for the hash; check the anchor's `stellar_transaction_id` on a Horizon explorer. |
+| `transfer_mismatch` | A claimed hash differs on the fields listed in `mismatch_fields`: `hash` (not found), `tx_failed`, `destination`, `source`, `asset`, `amount`, `memo`, `anchor_tx_id` (anchor cites a different transaction), `duplicate_claim` (another job claims the same hash). | Compare against the anchor's record; a wrong memo means the anchor may not be able to credit it. |
+| `payout_short` | Completed, but `amount_out` is below the quoted net by more than the tolerance (default 0.5%). | Raise with the anchor; `shortfall` and `shortfall_pct` give the exact gap. |
+| `failed_after_transfer` | The transfer is on-chain but the anchor withdrawal failed or was refunded. | Confirm the refund reached the seller. |
+| `status_drift` | The anchor says `completed` but the local job is not `settled`. | Run the poller once (see "Stuck `offramp_pending` job"). |
+| `unverified` | Could not decide: Horizon unreachable, no stored deposit instructions and the anchor does not cite the hash, or the quote/payout amount is missing. See `detail` and `unchecked`. | Re-run later, or check by hand. |
+
 ## KYC and Identity Data Retention Policy (NDPA Compliance)
 
 The Nigeria Data Protection Act 2023 (NDPA) requires that personal identity data is not kept longer than necessary for its purpose. To minimize exposure in the event of credential compromise, Quay implements an automated data retention policy for inactive sellers.

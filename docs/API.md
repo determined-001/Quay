@@ -661,6 +661,28 @@ waiting for the anchor to see it" instead of the send button.
 
 ---
 
+## `POST /links/:id/cash-out/transfer-sent`
+
+**Requires auth** and the `offramp:initiate` scope (404 if the link belongs to a
+different seller). The seller's browser calls it right after sending the
+on-chain transfer to the anchor, with the transaction hash:
+
+```json
+{ "hash": "<64 hex characters>" }
+```
+
+The hash is stored on the cash-out job (lowercased) as a **claim**: the server
+does not treat it as proof. The reconciliation report checks it on Horizon
+(`docs/RUNBOOK.md`, "Reconciliation report").
+
+**200** — `{ "ok": true, "jobId": "...", "hash": "..." }`. Repeating the same hash is a no-op.
+**400** — `invalid_body`: not a 64-character hex hash.
+**404** — unknown link or another seller's link.
+**409** — `no_cashout_in_progress` (the link has no cash-out job), or
+`transfer_already_recorded` (a different hash was already reported; the first claim is kept so a duplicate transfer stays visible).
+
+---
+
 ## `/seller/anchor-auth`
 
 **Requires auth** and the `offramp:initiate` scope. The seller's own SEP-10

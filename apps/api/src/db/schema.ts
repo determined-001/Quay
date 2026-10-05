@@ -190,6 +190,14 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   // Null means the transfer instructions haven't been surfaced yet; once set,
   // the webhook is not re-fired on subsequent polls or restarts.
   transferNotifiedAt: integer("transfer_notified_at"),
+  // Reconciliation (4.32). `sellerTxHash` is the seller's CLAIM of the on-chain
+  // transfer to the anchor: never proof, the report checks it on Horizon.
+  // The anchor_* columns are what the anchor's SEP-6 transaction reported,
+  // verbatim decimal strings. All NULL until known.
+  sellerTxHash: text("seller_tx_hash"),
+  amountIn: text("amount_in"),
+  amountFee: text("amount_fee"),
+  stellarTransactionId: text("stellar_transaction_id"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });

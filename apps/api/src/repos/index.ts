@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -935,6 +935,10 @@ function rowToJob(row: OffRampJobRow): StoredOffRampJob {
     lastPollErrorAt: row.lastPollErrorAt ?? null,
     lastPollReason: row.lastPollReason ?? null,
     transferNotifiedAt: row.transferNotifiedAt ?? null,
+    sellerTxHash: row.sellerTxHash ?? null,
+    amountIn: row.amountIn ?? null,
+    amountFee: row.amountFee ?? null,
+    stellarTransactionId: row.stellarTransactionId ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -990,6 +994,10 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       lastPollErrorAt: job.lastPollErrorAt ?? null,
       lastPollReason: job.lastPollReason ?? null,
       transferNotifiedAt: job.transferNotifiedAt,
+      sellerTxHash: job.sellerTxHash ?? null,
+      amountIn: job.amountIn ?? null,
+      amountFee: job.amountFee ?? null,
+      stellarTransactionId: job.stellarTransactionId ?? null,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
     });
@@ -1000,9 +1008,19 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
     return rows[0] ? rowToJob(rows[0]) : null;
   }
 
+  /** Jobs created in [from, to] (epoch ms, inclusive), oldest first. Read-only; feeds the reconciliation report. */
+  async listJobsCreatedBetween(from: number, to: number): Promise<StoredOffRampJob[]> {
+    const rows = await this.db
+      .select()
+      .from(offrampJobs)
+      .where(and(gte(offrampJobs.createdAt, from), lte(offrampJobs.createdAt, to)))
+      .orderBy(asc(offrampJobs.createdAt));
+    return rows.map(rowToJob);
+  }
+
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId">>,
   ): Promise<void> {
     const { transfer, ...columns } = patch;
     await this.db
