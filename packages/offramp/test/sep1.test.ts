@@ -65,6 +65,18 @@ describe("parseStellarToml", () => {
     const p = parseStellarToml(`SIGNING_KEY = "GABC" # the anchor's key\n`, "anchor.example");
     expect(p.signingKey).toBe("GABC");
   });
+
+  it("accepts the alternate key spellings some anchors publish", () => {
+    // WEB_AUTH_URL and TRANSFER_SERVER_SEP24 are the same two endpoints under
+    // the names anchors actually use; removing the SEP-24 adapter (#207) must
+    // not remove the parsing of its discovery key with it.
+    const p = parseStellarToml(
+      `WEB_AUTH_URL = "https://anchor.example/auth"\nTRANSFER_SERVER_SEP24 = "https://anchor.example/sep24"\n`,
+      "anchor.example",
+    );
+    expect(p.webAuthEndpoint).toBe("https://anchor.example/auth");
+    expect(p.transferServerSep24).toBe("https://anchor.example/sep24");
+  });
 });
 
 describe("fetchStellarToml", () => {

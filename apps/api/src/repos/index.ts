@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -15,9 +15,12 @@ import type {
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
+  ProfileField,
+  ProfileFieldSource,
   ProvidedFieldStatus,
   Seller,
   SellerProfileKind,
+  SellerProfileRepository,
   SellerRepository,
   TokenRevocationRepository,
   StoredOffRampJob,
@@ -32,6 +35,7 @@ import type {
   OffRampTelemetryStatus,
   OffRampTelemetrySummary,
   AssetRef,
+  WithdrawTransfer,
 } from "@checkout/core";
 import type { DB } from "../db/client";
 import {
@@ -51,8 +55,9 @@ import {
   offrampTelemetry,
   apiKeys,
   kycConsents,
+  sellerProfile,
 } from "../db/schema";
-import { fromStroops, toStroops } from "@checkout/core";
+import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
 import { computeKeyId, decryptPii, encryptPii, getBlobKeyId, type PiiKeyring } from "../crypto/pii";
 import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
@@ -275,6 +280,39 @@ export class DrizzleLinkRepository implements LinkRepository {
     const total = rows.reduce((sum, r) => sum + toStroops(r.amount), 0n);
     return fromStroops(total);
   }
+
+  /** Every payment recorded against any of the seller's links, newest first (privacy export). */
+  async listPaymentsBySeller(sellerId: string, limit = 10_001): Promise<SellerPaymentRow[]> {
+    const rows = await this.db
+      .select({
+        linkId: linkPayments.linkId,
+        txHash: linkPayments.txHash,
+        payer: linkPayments.payer,
+        amount: linkPayments.amount,
+        assetCode: linkPayments.assetCode,
+        assetIssuer: linkPayments.assetIssuer,
+        ledger: linkPayments.ledger,
+        createdAt: linkPayments.createdAt,
+      })
+      .from(linkPayments)
+      .innerJoin(links, eq(links.id, linkPayments.linkId))
+      .where(eq(links.sellerId, sellerId))
+      .orderBy(desc(linkPayments.createdAt))
+      .limit(limit);
+    return rows.map((r) => ({ ...r, ledger: r.ledger ?? null }));
+  }
+}
+
+/** A payment as the seller's data export reports it. */
+export interface SellerPaymentRow {
+  linkId: string;
+  txHash: string;
+  payer: string;
+  amount: string;
+  assetCode: string;
+  assetIssuer: string | null;
+  ledger: number | null;
+  createdAt: number;
 }
 
 function rowToSeller(
@@ -901,6 +939,7 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
             feeAmount: row.quotedFeeAmount,
             feeSource: row.quotedFeeSource === "anchor" ? ("anchor" as const) : ("estimated" as const),
             netTargetAmount: row.quotedNetTargetAmount,
+            quoteKind: row.quotedKind === "indicative" ? ("indicative" as const) : ("firm" as const),
           },
         }
       : {}),
@@ -922,7 +961,17 @@ function rowToJob(row: OffRampJobRow): StoredOffRampJob {
     status: row.status as StoredOffRampJob["status"],
     externalStatus: row.externalStatus ?? null,
     lastError: row.lastError ?? null,
+    sellAsset: row.sellAssetCode ? { code: row.sellAssetCode, issuer: row.sellAssetIssuer ?? null } : null,
+    sellAmount: row.sellAmount ?? null,
+    transfer: row.transferJson ? (JSON.parse(row.transferJson) as WithdrawTransfer) : null,
+    lastPollError: row.lastPollError ?? null,
+    lastPollErrorAt: row.lastPollErrorAt ?? null,
+    lastPollReason: row.lastPollReason ?? null,
     transferNotifiedAt: row.transferNotifiedAt ?? null,
+    sellerTxHash: row.sellerTxHash ?? null,
+    amountIn: row.amountIn ?? null,
+    amountFee: row.amountFee ?? null,
+    stellarTransactionId: row.stellarTransactionId ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -946,6 +995,7 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       quotedFeeAmount: quote.quotedAmounts?.feeAmount ?? null,
       quotedFeeSource: quote.quotedAmounts?.feeSource ?? null,
       quotedNetTargetAmount: quote.quotedAmounts?.netTargetAmount ?? null,
+      quotedKind: quote.quotedAmounts?.quoteKind ?? null,
       expiresAt: quote.expiresAt,
       createdAt: quote.createdAt,
     });
@@ -969,7 +1019,18 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       status: job.status,
       externalStatus: job.externalStatus,
       lastError: job.lastError,
+      sellAssetCode: job.sellAsset?.code ?? null,
+      sellAssetIssuer: job.sellAsset?.issuer ?? null,
+      sellAmount: job.sellAmount ?? null,
+      transferJson: job.transfer ? JSON.stringify(job.transfer) : null,
+      lastPollError: job.lastPollError ?? null,
+      lastPollErrorAt: job.lastPollErrorAt ?? null,
+      lastPollReason: job.lastPollReason ?? null,
       transferNotifiedAt: job.transferNotifiedAt,
+      sellerTxHash: job.sellerTxHash ?? null,
+      amountIn: job.amountIn ?? null,
+      amountFee: job.amountFee ?? null,
+      stellarTransactionId: job.stellarTransactionId ?? null,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
     });
@@ -980,13 +1041,30 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
     return rows[0] ? rowToJob(rows[0]) : null;
   }
 
+  /** Jobs created in [from, to] (epoch ms, inclusive), oldest first. Read-only; feeds the reconciliation report. */
+  async listJobsCreatedBetween(from: number, to: number): Promise<StoredOffRampJob[]> {
+    const rows = await this.db
+      .select()
+      .from(offrampJobs)
+      .where(and(gte(offrampJobs.createdAt, from), lte(offrampJobs.createdAt, to)))
+      .orderBy(asc(offrampJobs.createdAt));
+    return rows.map(rowToJob);
+  }
+
   async updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId">>,
   ): Promise<void> {
+    const { transfer, ...columns } = patch;
     await this.db
       .update(offrampJobs)
-      .set({ ...patch, updatedAt: Date.now() })
+      .set({
+        ...columns,
+        // `undefined` leaves the stored instructions alone; only an explicit
+        // value (or null) rewrites them.
+        ...(transfer !== undefined ? { transferJson: transfer ? JSON.stringify(transfer) : null } : {}),
+        updatedAt: Date.now(),
+      })
       .where(eq(offrampJobs.jobId, jobId));
   }
 }
@@ -1015,6 +1093,7 @@ export class DrizzleKycRepository implements KycRepository {
       providedFields: JSON.parse(decryptPii(row.fieldsEncrypted, this.keyring)) as Record<string, string>,
       providedFieldStatus: row.providedFieldStatus ? JSON.parse(row.providedFieldStatus) as ProvidedFieldStatus[] : [],
       sentFields: row.sentFields ? JSON.parse(row.sentFields) as string[] : [],
+      callbackTokenHash: row.callbackTokenHash ?? null,
       message: row.message ?? null,
       lastSyncedAt: row.lastSyncedAt ?? null,
       updatedAt: row.updatedAt,
@@ -1030,6 +1109,16 @@ export class DrizzleKycRepository implements KycRepository {
     return rows[0] ? this.rowToRecord(rows[0]) : null;
   }
 
+  /** Every anchor's KYC row for the seller, decrypted (privacy export). */
+  async list(sellerId: string): Promise<KycRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(sellerKyc)
+      .where(eq(sellerKyc.sellerId, sellerId))
+      .orderBy(asc(sellerKyc.anchorDomain));
+    return rows.map((row) => this.rowToRecord(row));
+  }
+
   async delete(sellerId: string, anchorDomain?: string): Promise<void> {
     await this.db
       .delete(sellerKyc)
@@ -1040,7 +1129,21 @@ export class DrizzleKycRepository implements KycRepository {
       );
   }
 
+  async getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null> {
+    const rows = await this.db.select().from(sellerKyc).where(eq(sellerKyc.callbackTokenHash, tokenHash)).limit(1);
+    return rows[0] ? this.rowToRecord(rows[0]) : null;
+  }
+
   async save(record: KycRecord): Promise<void> {
+    const binaryFieldNames = new Set(
+      record.requiredFields.filter((f) => f.type === "binary").map((f) => f.name),
+    );
+    for (const key of Object.keys(record.providedFields)) {
+      if (binaryFieldNames.has(key)) {
+        throw new Error(`Binary field ${key} must never be persisted in KYC providedFields`);
+      }
+    }
+
     const row = {
       sellerId: record.sellerId,
       anchorDomain: record.anchorDomain,
@@ -1051,6 +1154,7 @@ export class DrizzleKycRepository implements KycRepository {
       fieldsEncrypted: encryptPii(JSON.stringify(record.providedFields), this.keyring),
       providedFieldStatus: record.providedFieldStatus?.length ? JSON.stringify(record.providedFieldStatus) : null,
       sentFields: record.sentFields?.length ? JSON.stringify(record.sentFields) : null,
+      callbackTokenHash: record.callbackTokenHash ?? null,
       message: record.message,
       lastSyncedAt: record.lastSyncedAt,
       updatedAt: record.updatedAt,
@@ -1075,6 +1179,150 @@ export class DrizzleKycRepository implements KycRepository {
     return count;
   }
 }
+
+export interface KycProfileMigrationResult {
+  /** `seller_kyc` rows examined. */
+  rows: number;
+  /** Profile fields inserted by this run. */
+  migrated: number;
+  /** Rows whose blob could not be decrypted or parsed (skipped, never fatal). */
+  failed: number;
+}
+
+/**
+ * Reusable, anchor-independent profile (issue 4.23): one encrypted value per
+ * (seller, SEP-9 field). Field names are plaintext and are not PII; values are
+ * encrypted with the same keyring as {@link DrizzleKycRepository}.
+ *
+ * Unknown field names and binary-typed fields are refused at this boundary, so
+ * binary data is never persisted whatever the caller does (issue 3.13).
+ */
+export class DrizzleSellerProfileRepository implements SellerProfileRepository {
+  constructor(
+    private readonly db: DB,
+    private readonly keyring: Buffer | PiiKeyring,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /** Maps a caller's field name (canonical or alias) to the canonical name, or throws. */
+  private canonical(name: string): string {
+    const entry = sep9Field(name);
+    if (!entry) throw new ProfileFieldRejectedError(name, "unknown_field");
+    if (entry.type === "binary") throw new ProfileFieldRejectedError(name, "binary_field");
+    return entry.name;
+  }
+
+  async list(sellerId: string): Promise<ProfileField[]> {
+    const rows = await this.db
+      .select()
+      .from(sellerProfile)
+      .where(eq(sellerProfile.sellerId, sellerId))
+      .orderBy(asc(sellerProfile.field));
+    return rows.map((row) => ({
+      field: row.field,
+      value: decryptPii(row.valueEncrypted, this.keyring),
+      source: row.source as ProfileFieldSource,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  async upsert(
+    sellerId: string,
+    fields: Record<string, string>,
+    source: ProfileFieldSource,
+  ): Promise<void> {
+    // Resolve every name first: one bad field must not leave the rest half-written.
+    const wanted = new Map<string, string>();
+    for (const [name, value] of Object.entries(fields)) wanted.set(this.canonical(name), value);
+    if (wanted.size === 0) return;
+
+    const existing = new Map(
+      (await this.list(sellerId)).map((f) => [f.field, f.value] as const),
+    );
+    const now = this.now();
+    for (const [field, value] of wanted) {
+      if (existing.get(field) === value) continue; // unchanged: keep updated_at and source
+      const row = {
+        sellerId,
+        field,
+        valueEncrypted: encryptPii(value, this.keyring),
+        source,
+        updatedAt: now,
+      };
+      await this.db
+        .insert(sellerProfile)
+        .values(row)
+        .onConflictDoUpdate({ target: [sellerProfile.sellerId, sellerProfile.field], set: row });
+    }
+  }
+
+  async remove(sellerId: string, fields: string[]): Promise<void> {
+    const names = fields.map((name) => sep9Field(name)?.name ?? name);
+    if (names.length === 0) return;
+    await this.db
+      .delete(sellerProfile)
+      .where(and(eq(sellerProfile.sellerId, sellerId), inArray(sellerProfile.field, names)));
+  }
+
+  async removeAll(sellerId: string): Promise<void> {
+    await this.db.delete(sellerProfile).where(eq(sellerProfile.sellerId, sellerId));
+  }
+
+  /**
+   * One-time, idempotent boot migration: lifts the known SEP-9 keys out of each
+   * `seller_kyc.fields_encrypted` blob into the profile with source
+   * `migrated_from_seller_kyc`, but only for fields the seller has no profile row
+   * for yet, so it never overwrites a value the seller entered and a second run
+   * inserts nothing. Returns counts only; values are never logged or returned.
+   */
+  async migrateFromSellerKyc(): Promise<KycProfileMigrationResult> {
+    const kycRows = await this.db
+      .select({
+        sellerId: sellerKyc.sellerId,
+        fieldsEncrypted: sellerKyc.fieldsEncrypted,
+        updatedAt: sellerKyc.updatedAt,
+      })
+      .from(sellerKyc);
+
+    const result: KycProfileMigrationResult = { rows: kycRows.length, migrated: 0, failed: 0 };
+    for (const row of kycRows) {
+      let blob: unknown;
+      try {
+        blob = JSON.parse(decryptPii(row.fieldsEncrypted, this.keyring));
+      } catch {
+        result.failed++;
+        continue;
+      }
+      if (typeof blob !== "object" || blob === null || Array.isArray(blob)) {
+        result.failed++;
+        continue;
+      }
+      for (const [name, value] of Object.entries(blob as Record<string, unknown>)) {
+        const entry = sep9Field(name);
+        if (!entry || entry.type === "binary" || typeof value !== "string" || value === "") continue;
+        const inserted = await this.db
+          .insert(sellerProfile)
+          .values({
+            sellerId: row.sellerId,
+            field: entry.name,
+            valueEncrypted: encryptPii(value, this.keyring),
+            source: "migrated_from_seller_kyc",
+            updatedAt: row.updatedAt,
+          })
+          .onConflictDoNothing({ target: [sellerProfile.sellerId, sellerProfile.field] });
+        result.migrated += inserted.rowsAffected;
+      }
+    }
+    return result;
+  }
+}
+
+/**
+ * Grace period after expiration before an anchor session row is swept at rest.
+ * A grace period of 24h keeps "your session expired" distinguishable from
+ * "never connected" for the dashboard reconnection prompt.
+ */
+export const ANCHOR_SESSION_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Sellers' SEP-10 sessions with the anchor. The token is a bearer credential,
@@ -1117,10 +1365,43 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
       .onConflictDoUpdate({ target: [anchorSessions.sellerId, anchorSessions.anchorDomain], set: row });
   }
 
+  /**
+   * Which anchors the seller is connected to. Selects only the non-secret
+   * columns: the bearer token is never read, let alone returned (privacy export).
+   */
+  async listBySeller(
+    sellerId: string,
+  ): Promise<{ anchorDomain: string; account: string; expiresAt: number }[]> {
+    return this.db
+      .select({
+        anchorDomain: anchorSessions.anchorDomain,
+        account: anchorSessions.account,
+        expiresAt: anchorSessions.expiresAt,
+      })
+      .from(anchorSessions)
+      .where(eq(anchorSessions.sellerId, sellerId))
+      .orderBy(asc(anchorSessions.anchorDomain));
+  }
+
   async delete(sellerId: string, anchorDomain: string): Promise<void> {
     await this.db
       .delete(anchorSessions)
       .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
+  }
+
+  /**
+   * Delete anchor session rows that expired longer than graceMs ago.
+   *
+   * @param now Current timestamp in epoch ms.
+   * @param graceMs Minimum elapsed ms past expiresAt before deletion.
+   * @returns The number of deleted rows.
+   */
+  async sweepExpired(now: number, graceMs: number = ANCHOR_SESSION_SWEEP_GRACE_MS): Promise<number> {
+    const cutoff = now - graceMs;
+    const res = await this.db
+      .delete(anchorSessions)
+      .where(lt(anchorSessions.expiresAt, cutoff));
+    return res.rowsAffected ?? 0;
   }
 }
 
@@ -1158,6 +1439,15 @@ function percentile(sortedAsc: number[], p: number): number | null {
  */
 export class DrizzleOfframpTelemetryRepository implements OffRampTelemetryRepository {
   constructor(private readonly db: DB) {}
+
+  async get(id: string): Promise<OffRampTelemetryRow | null> {
+    const rows = await this.db
+      .select()
+      .from(offrampTelemetry)
+      .where(eq(offrampTelemetry.id, id))
+      .limit(1);
+    return rows[0] ? rowToTelemetry(rows[0]) : null;
+  }
 
   async upsert(row: OffRampTelemetryRow): Promise<void> {
     const dbRow: typeof offrampTelemetry.$inferInsert = {

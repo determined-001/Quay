@@ -16,6 +16,7 @@ function makeQuote(expiresAt: number): OffRampQuote {
     expiresAt,
     fee: { amount: "165", currency: "NGN", source: "estimated" },
     netTargetAmount: "16335",
+    quoteKind: "indicative",
   };
 }
 

@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { api, type WebhookDelivery, type PaymentLink } from "../../../lib/api";
-import { TimelineClient } from "./TimelineClient";
+import { api, type WebhookDelivery, type PaymentLink, type OfframpPollStatus } from "../../../lib/api";
+import { TimelineClient, PendingTransferAction } from "./TimelineClient";
 
 interface TimelineEvent {
   id: string;
@@ -9,9 +9,14 @@ interface TimelineEvent {
   label: string;
   detail?: string;
   meta?: Record<string, string | null>;
+  pollStatus?: OfframpPollStatus | null;
 }
 
-function buildTimeline(link: PaymentLink, deliveries: WebhookDelivery[]): TimelineEvent[] {
+function buildTimeline(
+  link: PaymentLink,
+  deliveries: WebhookDelivery[],
+  offrampPoll?: OfframpPollStatus | null
+): TimelineEvent[] {
   const events: TimelineEvent[] = [];
 
   // Created
@@ -52,6 +57,7 @@ function buildTimeline(link: PaymentLink, deliveries: WebhookDelivery[]): Timeli
       detail: link.offrampTargetCurrency
         ? `Cash-out to ${link.offrampTargetCurrency}`
         : undefined,
+      pollStatus: link.status === "offramp_pending" ? offrampPoll : null,
     });
 
     if (link.offrampStatus === "pending") {
@@ -158,10 +164,12 @@ export default async function LinkDetailPage({ params }: { params: Promise<{ id:
 
   let link: PaymentLink;
   let deliveries: WebhookDelivery[];
+  let offrampPoll: OfframpPollStatus | null | undefined;
   try {
     const detail = await api.getDetail(id);
     link = detail.link;
     deliveries = detail.deliveries;
+    offrampPoll = detail.offrampPoll;
   } catch {
     return (
       <main className="shell shell--narrow">
@@ -177,7 +185,7 @@ export default async function LinkDetailPage({ params }: { params: Promise<{ id:
   // Determine network from the environment (default to testnet)
   const network = (process.env.STELLAR_NETWORK ?? "testnet") === "public" ? "public" : "testnet";
 
-  const events = buildTimeline(link, deliveries);
+  const events = buildTimeline(link, deliveries, offrampPoll);
 
   return (
     <main className="shell">
@@ -206,6 +214,13 @@ export default async function LinkDetailPage({ params }: { params: Promise<{ id:
             <span className="mono">{link.paidAmount} {link.asset.code}</span>
           </div>
         )}
+        {link.status === "offramp_pending" &&
+          link.offrampStatus === "awaiting_transfer" &&
+          (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "mock" && (
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+              <PendingTransferAction linkId={link.id} />
+            </div>
+          )}
       </section>
 
       {/* Timeline */}
@@ -239,6 +254,20 @@ export default async function LinkDetailPage({ params }: { params: Promise<{ id:
                       </a>
                     ) : (
                       <span className="mono muted">{ev.detail}</span>
+                    )}
+                  </div>
+                )}
+                {ev.pollStatus && (
+                  <div className="tl-event-detail">
+                    <span className="muted" style={{ color: "var(--amber, #e8b84b)" }}>
+                      Last check failed: {ev.pollStatus.message}
+                    </span>
+                    {ev.pollStatus.reason === "anchor_auth_required" && (
+                      <div style={{ marginTop: 6 }}>
+                        <Link href="/settings" className="linkbtn" style={{ fontSize: 12, padding: "2px 8px" }}>
+                          Reconnect anchor in settings →
+                        </Link>
+                      </div>
                     )}
                   </div>
                 )}

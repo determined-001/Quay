@@ -242,15 +242,13 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
       `ANCHOR_PROBE_DISABLED=1` (docs/RUNBOOK.md). Still the right call to set
       it once mainnet is payments-only, since the probe then watches a
       dependency the product no longer has. Flipping the variable is yours.
-- [ ] **`AnchorOffRamp` (SEP-24, `packages/offramp/src/anchor.ts`) must stay
-      unexported** until its quotes and jobs are persisted through
-      `OffRampStateRepository`. It keeps them in in-process `Map`s, so a restart
-      mid-withdrawal loses `sendTxHash` — money-adjacent state that does not
-      survive a redeploy has no business on pubnet. Four money bugs in it were
-      fixed on 2026-08-21 (wrong network passphrase, network inferred from a
-      substring that pubnet does not contain, send leg hardcoded to XLM
-      regardless of the asset withdrawn, and a fabricated placeholder job that
-      could re-send a payment); the state-durability blocker remains.
+- [x] ~~**`AnchorOffRamp` (SEP-24, `packages/offramp/src/anchor.ts`) must stay
+      unexported**~~ — its server-key signing is gone (issue #207). It used to sign the
+      seller's send leg (`tx.sign(sellerKeypair)`) and log in with `Sep10Client`; it now
+      runs on per-seller `SellerAnchorAuth` sessions and returns transfer instructions
+      for the seller's wallet. It stays unwired (SEP-6 `TestAnchorOffRamp` is the
+      selected adapter). `scripts/check-no-server-signing.mjs` fails CI if a signing
+      path comes back.
 - [ ] **`db-backup.yml` has no database to back up yet.** (Corrected 2026-09-05:
       it does not point at testnet — it reads `PROD_DATABASE_URL` /
       `BACKUP_ENCRYPTION_KEY` from repo secrets and self-skips with a warning

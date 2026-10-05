@@ -28,7 +28,7 @@ export function requestContext(rootLogger: Logger): MiddlewareHandler<AppEnv> {
     const child = rootLogger.child({
       requestId,
       method: ctx.req.method,
-      path: ctx.req.path,
+      path: loggablePath(ctx.req.path),
     });
     ctx.set("requestId", requestId);
     ctx.set("logger", child);
@@ -62,4 +62,12 @@ export function getLogger<E extends { Variables: RequestContextVariables }>(ctx:
 
 export function getRequestId<E extends { Variables: RequestContextVariables }>(ctx: Context<E>): string {
   return ctx.get("requestId");
+}
+
+/**
+ * The path as it is safe to log. `/anchor-callbacks/sep12/:anchor/:token` carries a secret
+ * per-seller token in the URL, so the token segment is masked.
+ */
+export function loggablePath(path: string): string {
+  return path.replace(/^(\/anchor-callbacks\/[^/]+\/[^/]+\/)[^/]+/, "$1[redacted]");
 }

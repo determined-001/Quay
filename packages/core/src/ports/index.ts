@@ -110,6 +110,18 @@ export interface PayoutFieldDescriptor {
 
 export type OffRampMode = "seller_initiated" | "inline";
 
+/**
+ * Whether a quote is a promise by the anchor or our own arithmetic (issue 3.22).
+ *
+ * `firm` — the anchor quoted it (SEP-38 POST /quote). The number is what the
+ * seller receives unless the anchor breaks it.
+ *
+ * `indicative` — we computed it from a configured rate source plus the fees the
+ * anchor published in /sep6/info. The anchor sets the final amount, so the
+ * seller must be told the figure is an estimate before they commit, not after.
+ */
+export type OffRampQuoteKind = "firm" | "indicative";
+
 export interface OffRampQuote {
   quoteId: string;
   sourceAsset: AssetRef;
@@ -129,6 +141,55 @@ export interface OffRampQuote {
   expiresAt: number; // epoch ms — after this the quote is void
   fee: { amount: string; currency: string; source: "anchor" | "estimated" };
   netTargetAmount: string; // what the seller actually receives
+  /**
+   * Required, not optional: every adapter must state which kind of number it is
+   * handing a seller, and the dashboard renders the disclaimer from it (3.22).
+   */
+  quoteKind: OffRampQuoteKind;
+}
+
+/**
+ * One FX rate observation. The direction is stated once, here, because this
+ * codebase has historically mixed two (issue 5.21): SEP-38's `price` is SOURCE
+ * per TARGET, while {@link OffRampQuote.rate} is TARGET per SOURCE.
+ */
+export interface FxRate {
+  /** TARGET units per 1 SOURCE unit. Multiply sourceAmount by this for the
+   *  gross target amount. */
+  rate: string;
+  /** Where it came from, e.g. "sep38", "static", "https://anchor.example/rates".
+   *  Logged and persisted; never assumed to be authoritative. */
+  source: string;
+  asOf: number; // epoch ms the rate was observed
+  /** Epoch ms. A rate source must be willing to say when it stops being true —
+   *  an open-ended rate is a guess wearing a timestamp. */
+  expiresAt: number;
+}
+
+/**
+ * Where an FX rate comes from when the anchor has no SEP-38 quote server.
+ *
+ * Real anchors overwhelmingly do not implement `ANCHOR_QUOTE_SERVER` (see
+ * ROADMAP.md), and there is no standard alternative: the rate is the product's
+ * unsolved problem, not a configuration detail. So it is a port — an anchor
+ * integration plugs in here and nothing in the engine has to know which.
+ *
+ * Implementations must refuse rather than guess. A stale rate quoted as though
+ * it were live is worse than no quote at all, because the seller commits to a
+ * number the anchor never agreed to.
+ */
+export interface RateSourcePort {
+  /**
+   * Units of `targetCurrency` per 1 unit of `sourceAsset` (see {@link FxRate}).
+   *
+   * Throws when no rate is available, when the rate it holds has expired, or
+   * when it is not configured for this anchor.
+   */
+  rate(input: {
+    anchorDomain: string;
+    sourceAsset: AssetRef;
+    targetCurrency: string;
+  }): Promise<FxRate>;
 }
 
 /** Thrown when a quote's expiresAt has passed or is unparsable (NaN). */
@@ -183,6 +244,14 @@ export interface OffRampJob {
   targetAmount: string;
   rate: string;
   reason?: string; // set when failed
+  /**
+   * Where the seller must send the asset, when the anchor published it only
+   * after `initiate()` (e.g. once its own KYC review finished). Set only while
+   * the anchor is waiting for that payment. Quay relays it; the seller's
+   * wallet signs.
+   */
+  transfer?: WithdrawTransfer;
+  needsSellerAction?: boolean;
 }
 
 /**
@@ -377,6 +446,10 @@ export interface StoredOffRampQuote {
     feeAmount: string;
     feeSource: "anchor" | "estimated";
     netTargetAmount: string;
+    /** firm vs indicative, replayed on confirm-by-id so an indicative quote
+     *  is never upgraded to "firm" on the way back to the seller. Rows saved
+     *  before this field existed were all firm (no indicative path then). */
+    quoteKind: OffRampQuoteKind;
   };
   expiresAt: number;
   createdAt: number;
@@ -397,10 +470,27 @@ export interface StoredOffRampJob {
   status: OffRampJobStatus;
   externalStatus: string | null; // raw upstream status string, for debugging
   lastError: string | null;
+  /** What was sold. Kept on the job (not looked up from the quote, which the job
+   *  does not reference) so deposit instructions that arrive later can name the
+   *  asset and fall back to the quoted amount. Absent on older rows. */
+  sellAsset?: AssetRef | null;
+  sellAmount?: string | null;
+  /** Deposit instructions the anchor published after the withdraw call. */
+  transfer?: WithdrawTransfer | null;
+  lastPollError?: string | null;
+  lastPollErrorAt?: number | null;
+  lastPollReason?: string | null;
   /** When the offramp.transfer_required webhook was first sent for this job.
    *  Null means the transfer instructions haven't been surfaced yet; once set,
    *  the webhook is not re-fired on subsequent polls or restarts. */
   transferNotifiedAt: number | null;
+  /** The seller's CLAIM of the on-chain transfer hash to the anchor. Unverified
+   *  here; the reconciliation report checks it on Horizon. */
+  sellerTxHash?: string | null;
+  /** What the anchor's SEP-6 transaction reported (decimal strings, as sent). */
+  amountIn?: string | null;
+  amountFee?: string | null;
+  stellarTransactionId?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -412,7 +502,7 @@ export interface OffRampStateRepository {
   getJob(jobId: string): Promise<StoredOffRampJob | null>;
   updateJob(
     jobId: string,
-    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transferNotifiedAt">>,
+    patch: Partial<Pick<StoredOffRampJob, "targetAmount" | "status" | "externalStatus" | "lastError" | "transfer" | "transferNotifiedAt" | "lastPollError" | "lastPollErrorAt" | "lastPollReason" | "sellerTxHash" | "amountIn" | "amountFee" | "stellarTransactionId">>,
   ): Promise<void>;
 }
 
@@ -461,6 +551,8 @@ export interface OffRampTelemetrySummary {
 }
 
 export interface OffRampTelemetryRepository {
+  /** Point lookup by row id (`tel_<jobId>`); null when absent. */
+  get(id: string): Promise<OffRampTelemetryRow | null>;
   upsert(row: OffRampTelemetryRow): Promise<void>;
   summary(): Promise<OffRampTelemetrySummary[]>;
   /** Anonymised dump — seller/link identities excluded — for CSV export. */
@@ -510,6 +602,8 @@ export interface KycRecord {
   providedFieldStatus: ProvidedFieldStatus[];
   /** Field names (not values) sent to the anchor in the last submission. */
   sentFields: string[];
+  /** SHA-256 hash of the per-seller SEP-12 callback endpoint token. */
+  callbackTokenHash?: string | null;
   /** Anchor's status/rejection message, verbatim. */
   message: string | null;
   lastSyncedAt: number | null;
@@ -533,13 +627,32 @@ export class KycRequiredError extends Error {
   }
 }
 
+export interface KycStatusOptions {
+  /**
+   * Maximum acceptable age (ms) of a cached KYC record.
+   * If provided and the stored record's `lastSyncedAt` is within `maxAgeMs`
+   * (and its account matches `customer.account`), implementations may return
+   * the cached record without querying the anchor.
+   */
+  maxAgeMs?: number;
+}
+
+export interface KycUploadFile {
+  name: string;
+  blob: Blob;
+  filename: string;
+}
+
 export interface KycPort {
   /** Refreshes from the anchor (if applicable) and persists the result.
    *  Throws {@link AnchorAuthRequiredError} without a live anchor session. */
-  status(customer: AnchorCustomer): Promise<KycRecord>;
+  status(customer: AnchorCustomer, opts?: KycStatusOptions): Promise<KycRecord>;
   /** Submits/updates fields. Throws {@link KycRequiredError} if a required
    *  field is still missing after merging with what's already on file. */
   submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord>;
+  /** Submits binary/file fields directly to the anchor via multipart/form-data.
+   *  Never persists binary file data. */
+  submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord>;
 }
 
 /** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
@@ -547,6 +660,7 @@ export interface KycPort {
  *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
   get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
+  getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
   /** Removes the seller's record for one anchor, or for every anchor when omitted. */
   delete(sellerId: string, anchorDomain?: string): Promise<void>;
@@ -613,6 +727,7 @@ export interface AnchorSessionRepository {
   get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null>;
   save(session: AnchorSession): Promise<void>;
   delete(sellerId: string, anchorDomain: string): Promise<void>;
+  sweepExpired(now: number, graceMs: number): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -675,6 +790,59 @@ export interface LinkRepository {
   /** Ledger a recorded payment settled in; null if the tx isn't on the ledger
    *  table, or predates the column. */
   paymentLedger(txHash: string): Promise<number | null>;
+}
+
+/**
+ * Where a stored profile value came from. `seller` means the seller typed it;
+ * `migrated_from_seller_kyc` means it was lifted from the older single-blob
+ * `seller_kyc` row (issue 4.23). Anchor-echoed values are never written here.
+ */
+export type ProfileFieldSource = "seller" | "migrated_from_seller_kyc";
+
+/** One anchor-independent identity value the seller owns (issue 4.23). */
+export interface ProfileField {
+  /** Canonical SEP-9 field name (aliases are normalised on write). */
+  field: string;
+  /** PII. Encrypted at rest; never log it or put it on a webhook. */
+  value: string;
+  source: ProfileFieldSource;
+  /** Epoch ms of the last change to `value`. Unchanged by a re-save of the same value. */
+  updatedAt: number;
+}
+
+/** Thrown when a field cannot be stored: not a SEP-9 field, or binary-typed. */
+export class ProfileFieldRejectedError extends Error {
+  constructor(
+    readonly field: string,
+    readonly reason: "unknown_field" | "binary_field",
+  ) {
+    super(
+      reason === "unknown_field"
+        ? `"${field}" is not a SEP-9 field`
+        : `"${field}" is a binary field; binary data is never persisted`,
+    );
+    this.name = "ProfileFieldRejectedError";
+  }
+}
+
+/**
+ * The seller's reusable, anchor-independent profile: one encrypted value per
+ * (seller, SEP-9 field). Distinct from {@link KycRepository}, which holds the
+ * anchor's view of the seller.
+ */
+export interface SellerProfileRepository {
+  /** Every stored field for the seller, ordered by field name. */
+  list(sellerId: string): Promise<ProfileField[]>;
+  /**
+   * Insert or update fields. Only bumps `updatedAt` (and `source`) for fields
+   * whose value actually changed. Throws {@link ProfileFieldRejectedError}
+   * before writing anything if any field is unknown or binary-typed.
+   */
+  upsert(sellerId: string, fields: Record<string, string>, source: ProfileFieldSource): Promise<void>;
+  /** Delete the named fields (canonical names or aliases). Missing ones are ignored. */
+  remove(sellerId: string, fields: string[]): Promise<void>;
+  /** Delete everything stored for the seller. */
+  removeAll(sellerId: string): Promise<void>;
 }
 
 export type SellerProfileKind = "individual" | "organization";

@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const sellers = sqliteTable("sellers", {
   id: text("id").primaryKey(),
@@ -153,6 +153,9 @@ export const offrampQuotes = sqliteTable("offramp_quotes", {
   quotedFeeAmount: text("quoted_fee_amount"),
   quotedFeeSource: text("quoted_fee_source"),
   quotedNetTargetAmount: text("quoted_net_target_amount"),
+  // "firm" | "indicative"; null on rows saved before indicative quotes existed
+  // (all of which were firm).
+  quotedKind: text("quoted_kind"),
   expiresAt: integer("expires_at").notNull(),
   createdAt: integer("created_at").notNull(),
 });
@@ -171,10 +174,30 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   status: text("status").notNull(),
   externalStatus: text("external_status"),
   lastError: text("last_error"),
+  // What was sold, so deposit instructions that arrive after the withdraw call
+  // can name the asset. NULL on rows from before these columns existed.
+  sellAssetCode: text("sell_asset_code"),
+  sellAssetIssuer: text("sell_asset_issuer"),
+  sellAmount: text("sell_amount"),
+  // JSON WithdrawTransfer the anchor published later (SEP-6
+  // pending_user_transfer_start). Payment instructions, not a secret, but the
+  // memo is not logged.
+  transferJson: text("transfer_json"),
+  lastPollError: text("last_poll_error"),
+  lastPollErrorAt: integer("last_poll_error_at"),
+  lastPollReason: text("last_poll_reason"),
   // When the offramp.transfer_required webhook was first sent for this job.
   // Null means the transfer instructions haven't been surfaced yet; once set,
   // the webhook is not re-fired on subsequent polls or restarts.
   transferNotifiedAt: integer("transfer_notified_at"),
+  // Reconciliation (4.32). `sellerTxHash` is the seller's CLAIM of the on-chain
+  // transfer to the anchor: never proof, the report checks it on Horizon.
+  // The anchor_* columns are what the anchor's SEP-6 transaction reported,
+  // verbatim decimal strings. All NULL until known.
+  sellerTxHash: text("seller_tx_hash"),
+  amountIn: text("amount_in"),
+  amountFee: text("amount_fee"),
+  stellarTransactionId: text("stellar_transaction_id"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -198,10 +221,21 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   providedFieldStatus: text("provided_field_status"),
   // Field names (not values) sent to the anchor in the last submission. JSON string[].
   sentFields: text("sent_fields"),
+  callbackTokenHash: text("callback_token_hash"),
   message: text("message"),
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),
 });
+
+/** Last successful send of each field to an anchor. Contains names and times only. */
+export const kycDisclosureFields = sqliteTable("kyc_disclosure_fields", {
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  fieldName: text("field_name").notNull(),
+  sentAt: integer("sent_at").notNull(),
+}, (table) => [
+  uniqueIndex("kyc_disclosure_field_unique").on(table.sellerId, table.anchorDomain, table.fieldName),
+]);
 
 // A seller's SEP-10 session with an anchor, issued to the seller's own wallet.
 // `tokenEncrypted` is a bearer credential for that seller at the anchor — it
@@ -324,4 +358,18 @@ export const kycConsents = sqliteTable("kyc_consents", {
   revokedAt: integer("revoked_at"),
   grantedVia: text("granted_via").notNull(), // 'session'
   noticeVersion: text("notice_version").notNull(),
+});
+
+/**
+ * A seller's reusable identity values, one row per (seller, field) (issue 4.23).
+ * Field names are canonical SEP-9 names and are not PII; `valueEncrypted` is an
+ * AES-256-GCM blob of exactly one value and never plaintext.
+ * Primary key (seller_id, field) comes from BOOTSTRAP_SQL, as for processed_tx.
+ */
+export const sellerProfile = sqliteTable("seller_profile", {
+  sellerId: text("seller_id").notNull(),
+  field: text("field").notNull(),
+  valueEncrypted: text("value_encrypted").notNull(),
+  source: text("source").notNull(), // 'seller' | 'migrated_from_seller_kyc'
+  updatedAt: integer("updated_at").notNull(),
 });

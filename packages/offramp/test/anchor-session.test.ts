@@ -132,7 +132,7 @@ function stubAnchor(
     return new Response("unexpected", { status: 500 });
   });
   vi.stubGlobal("fetch", fetchMock);
-  return { customers, withdrawals };
+  return { customers, withdrawals, fetchMock };
 }
 
 function setup() {
@@ -345,11 +345,14 @@ describe("TestAnchorKyc — per seller", () => {
     // A row from before per-seller identity: no account, somebody else's customer.
     await repo.save({
       sellerId: ALICE.sellerId,
+      anchorDomain: HOME,
       account: null,
       customerId: "cus_platform",
       status: "ACCEPTED",
       requiredFields: [],
       providedFields: { first_name: "Alice" },
+      providedFieldStatus: [],
+      sentFields: [],
       message: null,
       lastSyncedAt: null,
       updatedAt: 0,
@@ -364,6 +367,114 @@ describe("TestAnchorKyc — per seller", () => {
     expect(record.account).toBe(alice.publicKey());
     // What she had on file is still there to resubmit — the reusable profile.
     expect(record.providedFields.first_name).toBe("Alice");
+  });
+
+  /** A stored record in dev's per-anchor shape, synced `ageMs` ago. */
+  function cachedRecord(overrides: Partial<import("@checkout/core").KycRecord> & { ageMs: number }) {
+    const { ageMs, ...rest } = overrides;
+    return {
+      sellerId: ALICE.sellerId,
+      anchorDomain: HOME,
+      account: alice.publicKey(),
+      customerId: "cus_alice",
+      status: "ACCEPTED" as const,
+      requiredFields: [],
+      providedFields: { first_name: "Alice" },
+      providedFieldStatus: [],
+      sentFields: [],
+      message: null,
+      lastSyncedAt: Date.now() - ageMs,
+      updatedAt: Date.now() - ageMs,
+      ...rest,
+    };
+  }
+
+  /** Counts calls so a test can prove the repo was (not) written. */
+  function countingRepo() {
+    const repo = new InMemoryKycRepo();
+    const calls = { save: 0 };
+    const save = repo.save.bind(repo);
+    repo.save = async (record) => {
+      calls.save++;
+      await save(record);
+    };
+    return { repo, calls };
+  }
+
+  it("serves cached status without querying anchor or writing the repo if within maxAgeMs", async () => {
+    const anchor = stubAnchor();
+    const { discovery, auth } = setup();
+    const { repo, calls } = countingRepo();
+    await repo.save(cachedRecord({ ageMs: 5000 }));
+    calls.save = 0;
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    // Alice has NOT signed in, so querying the anchor would throw AnchorAuthRequiredError.
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.customerId).toBe("cus_alice");
+    expect(anchor.fetchMock).not.toHaveBeenCalled();
+    expect(calls.save).toBe(0);
+  });
+
+  it("re-syncs from anchor, and writes lastSyncedAt, if cached record is older than maxAgeMs", async () => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const { repo, calls } = countingRepo();
+    await repo.save(cachedRecord({ ageMs: 70_000 }));
+    calls.save = 0;
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.lastSyncedAt).toBeGreaterThan(Date.now() - 5000);
+    expect(calls.save).toBe(1);
+  });
+
+  it("caps maxAgeMs to 15s when record is PROCESSING", async () => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    // older than the 15s cap, but younger than the 60s maxAgeMs
+    await repo.save(cachedRecord({ status: "PROCESSING", ageMs: 20_000 }));
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(record.lastSyncedAt).toBeGreaterThan(Date.now() - 5000);
+  });
+
+  it("never serves a record that belongs to a different account from the cache", async () => {
+    const anchor = stubAnchor();
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    // Fresh, ACCEPTED, but synced for the seller's previous wallet.
+    await repo.save(cachedRecord({ account: Keypair.random().publicKey(), ageMs: 1000 }));
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+    anchor.fetchMock.mockClear();
+
+    const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
+    expect(anchor.fetchMock).toHaveBeenCalled();
+    expect(record.account).toBe(alice.publicKey());
+    // The anchor has never seen this account, so the stale ACCEPTED is not reused.
+    expect(record.status).toBe("unsubmitted");
+  });
+
+  it.each([[0], [undefined]])("always hits the anchor when maxAgeMs is %s", async (maxAgeMs) => {
+    const anchor = stubAnchor();
+    anchor.customers.set(alice.publicKey(), { id: "cus_alice", fields: { first_name: "Alice" } });
+    const { discovery, auth } = setup();
+    const repo = new InMemoryKycRepo();
+    await repo.save(cachedRecord({ ageMs: 1000 }));
+    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    await signIn(auth, ALICE, alice);
+    anchor.fetchMock.mockClear();
+
+    await kyc.status(ALICE, maxAgeMs === undefined ? undefined : { maxAgeMs });
+    expect(anchor.fetchMock).toHaveBeenCalled();
   });
 });
 
@@ -436,7 +547,7 @@ describe("TestAnchorOffRamp — per seller", () => {
 
 class InMemoryKycRepo {
   private readonly rows = new Map<string, import("@checkout/core").KycRecord>();
-  async get(sellerId: string) {
+  async get(sellerId: string, _anchorDomain?: string) {
     return this.rows.get(sellerId) ?? null;
   }
   async save(record: import("@checkout/core").KycRecord) {

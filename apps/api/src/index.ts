@@ -12,7 +12,10 @@ import { metricsRoutes } from "./routes/metrics";
 import { authRoutes } from "./routes/auth";
 import { wellKnownRoutes } from "./routes/well-known";
 import { kycRoutes } from "./routes/kyc";
+import { profileRoutes } from "./routes/profile";
+import { privacyRoutes, privacyExportRateLimit } from "./routes/privacy";
 import { anchorAuthRoutes } from "./routes/anchor-auth";
+import { anchorCallbacksRoutes } from "./routes/anchor-callbacks";
 import { demoRoutes } from "./routes/demo";
 import { telemetryRoutes } from "./routes/telemetry";
 import { testOnlyRoutes } from "./routes/test-only";
@@ -20,6 +23,7 @@ import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
 import { requestContext } from "./request-context";
 import { buildAuthMiddleware, apiKeyRateLimitKey } from "./middleware/auth";
+import { installErrorHandler } from "./error-handler";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
 
@@ -28,6 +32,7 @@ async function main(): Promise<void> {
   const logger = container.logger;
 
   const app = new Hono();
+  installErrorHandler(app, logger);
   const rateLimitStore = env.redisUrl ? new RedisStore(env.redisUrl) : new MemoryStore();
   // MUST be installed before rate-limit (and everything else) so a 429 still
   // carries a requestId, and every route handler can call getLogger(ctx).
@@ -39,13 +44,17 @@ async function main(): Promise<void> {
   // matters more here than in a typical API: the settlement watcher runs in
   // this same process, so an OOM does not merely return 502 for a minute — it
   // stops payments being marked paid until the instance comes back.
-  app.use(
-    "*",
-    bodyLimit({
-      maxSize: 64 * 1024,
-      onError: (ctx) => ctx.json({ error: "payload_too_large" }, 413),
-    }),
-  );
+  const defaultBodyLimit = bodyLimit({
+    maxSize: 64 * 1024,
+    onError: (ctx) => ctx.json({ error: "payload_too_large" }, 413),
+  });
+  app.use("*", async (ctx, next) => {
+    // /seller/kyc/files enforces its own configurable KYC_MAX_UPLOAD_BYTES limit
+    if (ctx.req.path === "/seller/kyc/files") {
+      return next();
+    }
+    return defaultBodyLimit(ctx, next);
+  });
   app.use(
     "*",
     cors({
@@ -84,6 +93,20 @@ async function main(): Promise<void> {
     max: env.rateLimitStrictMax,
     store: rateLimitStore,
     keyFor: (ctx) => `anchor-auth:${ctx.get("seller").id}`,
+  });
+
+  // The data-subject export reads every table that holds a seller's personal
+  // data, so it gets its own small budget per seller (issue 4.27), not the shared
+  // strict one: 5 per hour, regardless of IP.
+  const privacyExportLimit = privacyExportRateLimit(rateLimitStore);
+
+  // Anchor SEP-12 callbacks are unauthenticated and, once the token matches,
+  // trigger an outbound stellar.toml fetch. Bucket by client IP on the strict budget.
+  const anchorCallbackLimit = rateLimit({
+    windowMs: env.rateLimitStrictWindowMs,
+    max: env.rateLimitStrictMax,
+    store: rateLimitStore,
+    trustProxyHops: env.trustProxyHops,
   });
 
   // Liveness: the process is up and answering HTTP at all.
@@ -184,7 +207,14 @@ async function main(): Promise<void> {
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
   app.route("/seller/kyc", kycRoutes(container));
+  // Before profileRoutes: both live under /seller/profile, and the first router
+  // to match answers, so /export is handled here and never reaches the profile
+  // router's auth + store guards.
+  app.route("/seller/profile/export", privacyRoutes(container, privacyExportLimit));
+  app.route("/seller/profile", profileRoutes(container));
   app.route("/seller/anchor-auth", anchorAuthRoutes(container, anchorAuthLimit));
+  app.use("/anchor-callbacks/*", anchorCallbackLimit);
+  app.route("/anchor-callbacks", anchorCallbacksRoutes(container));
   app.route("/demo", demoRoutes(container));
   // Operator-only off-ramp telemetry (issue #20, 3.8). The routes gate
   // themselves on TELEMETRY_TOKEN (404 when unset), so mounting them

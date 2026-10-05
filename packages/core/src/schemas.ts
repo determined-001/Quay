@@ -49,3 +49,15 @@ export const cashOutSchema = z.object({
 });
 export type CashOutBody = z.infer<typeof cashOutSchema>;
 
+
+/** Body of POST /links/:id/cash-out/transfer-sent: the seller's claimed hash of
+ *  the on-chain payment to the anchor. A Stellar transaction hash is 32 bytes
+ *  of hex; it is stored lowercase. A claim only, never proof (issue 4.32). */
+export const transferSentSchema = z.object({
+  hash: z
+    .string()
+    .trim()
+    .regex(/^[0-9a-fA-F]{64}$/, "hash must be a 64-character hex Stellar transaction hash")
+    .transform((h) => h.toLowerCase()),
+});
+export type TransferSentBody = z.infer<typeof transferSentSchema>;

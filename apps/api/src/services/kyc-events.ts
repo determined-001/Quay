@@ -3,6 +3,7 @@ import type {
   KycPort,
   KycRecord,
   KycRepository,
+  KycUploadFile,
   WebhookRepository,
 } from "@checkout/core";
 import type { WebhookSender } from "./webhook-sender";
@@ -53,6 +54,13 @@ export class KycEvents implements KycPort {
   async submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord> {
     const previous = await this.repo.get(customer.sellerId, this.anchorDomain);
     const result = await this.inner.submit(customer, fields);
+    await this.emitIfTransitioned(customer.sellerId, previous, result);
+    return result;
+  }
+
+  async submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord> {
+    const previous = await this.repo.get(customer.sellerId, this.anchorDomain);
+    const result = await this.inner.submitFiles(customer, files);
     await this.emitIfTransitioned(customer.sellerId, previous, result);
     return result;
   }
