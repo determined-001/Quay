@@ -624,6 +624,13 @@ export const api = {
   /** Right to erasure (NDPA). Session auth only; `confirm` must be the seller's wallet address. */
   eraseProfile: (confirm: string) =>
     http<ErasureResult>("/seller/profile", { method: "DELETE", body: JSON.stringify({ confirm }) }),
+  /**
+   * Data-subject export (NDPA right of access): every personal-data section the
+   * API holds for the seller, as a JSON file. Session auth only; rate-limited to
+   * a few downloads an hour, so callers should expect a 429 `rate_limited`.
+   */
+  exportMyData: (): Promise<Blob> =>
+    http<Blob>("/seller/profile/export", { raw: true, headers: { accept: "application/json" } }),
   getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
   deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
     `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },
