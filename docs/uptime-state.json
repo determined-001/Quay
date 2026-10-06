@@ -3,7 +3,7 @@
     "api": {
       "consecutiveFailures": 1,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-10-06T02:58:23.013Z",
+      "lastCheckedAt": "2026-10-06T10:04:28.883Z",
       "today": {
         "date": "2026-10-06",
         "up": 0,
@@ -126,7 +126,7 @@
     "web": {
       "consecutiveFailures": 0,
       "lastStatus": "up",
-      "lastCheckedAt": "2026-10-06T02:58:23.349Z",
+      "lastCheckedAt": "2026-10-06T10:04:29.332Z",
       "today": {
         "date": "2026-10-06",
         "up": 1,
@@ -249,7 +249,7 @@
     "synthetic": {
       "consecutiveFailures": 441,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-10-06T02:58:38.351Z",
+      "lastCheckedAt": "2026-10-06T10:04:44.334Z",
       "today": {
         "date": "2026-10-06",
         "up": 0,
@@ -372,14 +372,14 @@
     "mainnet-api": {
       "consecutiveFailures": 1,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-10-06T02:58:53.351Z",
+      "lastCheckedAt": "2026-10-06T10:04:54.469Z",
       "today": {
         "date": "2026-10-06",
         "up": 0,
         "down": 1
       },
       "history": [],
-      "lastError": "This operation was aborted"
+      "lastError": "https://quay-api-mainnet.onrender.com/health -> HTTP 503"
     }
   }
 }
