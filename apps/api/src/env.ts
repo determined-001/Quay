@@ -235,7 +235,8 @@ export const env = {
   // per-process without it — see the guard in services/container.ts.
   singleInstance: (process.env.SINGLE_INSTANCE ?? "false") === "true",
   // Seller wallet that receives funds. If unset on testnet, the app generates a
-  // throwaway keypair on first boot and prints it. Required on public network.
+  // throwaway keypair on first boot and prints it. Optional on public network:
+  // sellers sign in with their own wallet.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
   defaultSellerName: process.env.DEFAULT_SELLER_NAME || "Demo Seller",
   offramp,
