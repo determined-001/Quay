@@ -7,7 +7,8 @@ import {
   type WatcherStateRepository,
   NOOP_LOGGER,
 } from "@checkout/core";
-import { AnchorHealth, type LinkService } from "../services/link-service";
+import type { AnchorHealthRegistry } from "../services/anchor-health";
+import { type LinkService } from "../services/link-service";
 import { env } from "../env";
 import { metrics } from "../metrics";
 
@@ -504,13 +505,13 @@ export function startCashOutPoller(service: LinkService, intervalMs: number, log
  * the breaker state is correct on first request rather than after one interval
  * has elapsed. Probe failures never throw; AnchorHealth records every outcome.
  */
-export function startAnchorProbeTimer(health: AnchorHealth, intervalMs: number): () => void {
+export function startAnchorProbeTimer(health: AnchorHealthRegistry, intervalMs: number): () => void {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   const tick = async () => {
     if (stopped) return;
     try {
-      await health.probe();
+      await health.probeAll();
     } catch {
       // AnchorHealth.probe() is contractually non-throwing; defensive only.
     }

@@ -7,7 +7,7 @@ import {
   type AnchorSessionRepository,
   type Logger,
 } from "@checkout/core";
-import { fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
+import { clearStellarTomlCache, fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
 import { anchorHttpError } from "./anchor-error";
 
 // ===========================================================================
@@ -29,6 +29,8 @@ const EXPIRY_SKEW_MS = 60_000;
 const CLAIM_SKEW_MS = 60_000;
 /** Longest session we will store, whatever `exp` claims. */
 const MAX_TOKEN_LIFETIME_MS = 7 * 24 * 60 * 60_000;
+/** SEP-1 discovery is re-read at most this often, so a rotated SIGNING_KEY lands. */
+const DISCOVERY_TTL_MS = 5 * 60_000;
 
 export interface AnchorDiscoveryOptions {
   homeDomain: string;
@@ -45,6 +47,7 @@ export class AnchorDiscovery {
   private readonly expectedNetworkPassphrase: string | undefined;
   private readonly logger: Logger;
   private pending: Promise<Sep1DiscoveryInfo> | null = null;
+  private pendingAt = 0;
 
   constructor(opts: AnchorDiscoveryOptions) {
     this.homeDomain = opts.homeDomain;
@@ -54,11 +57,15 @@ export class AnchorDiscovery {
   }
 
   /**
-   * Resolved once and cached (sep1.ts expires its own cache after five
-   * minutes). A rejected discovery is never cached as the answer.
+   * Resolved and cached for `DISCOVERY_TTL_MS`. An anchor that rotates its
+   * SIGNING_KEY publishes a new TOML; without a TTL the old key stays cached
+   * for the life of the process and every challenge fails verification until a
+   * restart. A rejected discovery is never cached as the answer.
    */
   get(): Promise<Sep1DiscoveryInfo> {
-    if (!this.pending) {
+    const stale = this.pending !== null && Date.now() - this.pendingAt >= DISCOVERY_TTL_MS;
+    if (!this.pending || stale) {
+      this.pendingAt = Date.now();
       this.pending = fetchStellarToml(this.homeDomain, {
         expectedNetworkPassphrase: this.expectedNetworkPassphrase,
         logger: this.logger,
@@ -84,6 +91,17 @@ export class AnchorDiscovery {
       });
     }
     return this.pending;
+  }
+
+  /**
+   * Drop both layers of SEP-1 caching (this class and sep1.ts) so the next
+   * `get()` re-reads stellar.toml. Called when the health probe sees the anchor
+   * advertise a different SIGNING_KEY than the one we cached (issue 3.23).
+   */
+  invalidate(): void {
+    this.pending = null;
+    this.pendingAt = 0;
+    clearStellarTomlCache(this.homeDomain);
   }
 }
 

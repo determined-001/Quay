@@ -54,7 +54,8 @@ import {
   DrizzleKycConsentRepository,
   DrizzleSellerProfileRepository,
 } from "../repos/index";
-import { LinkService, AnchorHealth } from "./link-service";
+import { LinkService } from "./link-service";
+import { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
 import {
   WatcherLoop,
   startCashOutPoller,
@@ -242,18 +243,26 @@ export async function createContainer(): Promise<Container> {
     guard: guardWebhookUrl,
     resolveQuoteServer: async () => (await anchor?.discovery.get())?.anchorQuoteServer ?? null,
   });
-  const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger, rateSource));
+  const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger, rateSource), {
+    anchor: anchor?.discovery.homeDomain,
+  });
   const kycAnchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
   const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
   const kyc = createKyc(anchor, kycRepo, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain, logger);
   const sellerProfileRepo = await createSellerProfile(anchor, db, logger);
   const anchorDomain = anchor?.auth.anchorDomain ?? null;
 
-  // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
-  // off-ramp the probe is disabled and short-circuits to "always available" so
-  // the surface still works offline; for testanchor/anchor we hit the real
-  // anchor.
-  const anchorHealth = buildAnchorHealth(env.offramp, sellerWallet);
+  // Anchor health probe + circuit breaker (issue #19, 3.7; per-anchor registry
+  // issue 3.23). With mock or no off-ramp the probe is disabled and
+  // short-circuits to "always available" so the surface still works offline;
+  // for testanchor/anchor we hit the real anchor.
+  const anchorHealth = buildAnchorHealth(
+    env.offramp,
+    sellerWallet,
+    anchor?.discovery ?? null,
+    anchor?.discovery.homeDomain ?? null,
+    logger,
+  );
 
   // The platform's stable SEP-10 identity: the key wallets authenticate
   // against and the SIGNING_KEY advertised in stellar.toml.
@@ -271,6 +280,7 @@ export async function createContainer(): Promise<Container> {
     operatorWallet: sellerWallet ?? undefined,
     telemetry: telemetryRepo,
     health: anchorHealth,
+    anchorDomain: anchor?.discovery.homeDomain,
     correlation: env.correlation,
     interactiveTimeoutMs: env.offrampInteractiveTimeoutMs,
     logger,
@@ -446,29 +456,40 @@ export async function createContainer(): Promise<Container> {
 }
 
 /**
- * Build an AnchorHealth with sensible defaults anchored at the public Stellar
- * testnet reference sandbox. Caller can override via env (read raw — we keep
- * the surface minimal and don't pollute env.ts which lives outside the
- * scope of issue 3.7).
+ * Build the per-anchor health registry, with sensible defaults anchored at the
+ * public Stellar testnet reference sandbox. Caller can override via env (read
+ * raw — we keep the surface minimal and don't pollute env.ts which lives
+ * outside the scope of issue 3.7). Issue 3.23 keys the registry by home domain
+ * so a second anchor gets its own breaker.
  */
-function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string | null): AnchorHealth {
+function buildAnchorHealth(
+  offrampKind: OffRampKind,
+  probeAccount: string | null,
+  discovery: AnchorDiscovery | null,
+  domain: string | null,
+  logger: Logger,
+): AnchorHealthRegistry {
   const enabled = offrampKind === "testanchor" || offrampKind === "anchor";
   // For OFFRAMP=anchor env.ts already required both of these, so the ??
   // fallbacks only ever apply to the testanchor sandbox preset.
   const url = enabled ? env.anchorUrl ?? TESTANCHOR_BASE_URL : null;
-  const homeDomain = enabled ? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN : null;
+  const homeDomain = enabled ? domain ?? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN : null;
   const failureThreshold = Number(process.env.ANCHOR_PROBE_FAILURE_THRESHOLD ?? "3");
   const cooldownMs = Number(process.env.ANCHOR_PROBE_COOLDOWN_MS ?? "30000");
-  return new AnchorHealth({
+  const health = new AnchorHealth({
     enabled,
     url,
     homeDomain,
     // The configured seller wallet is a real, funded account, which is what the
-    // anchor requires to issue a challenge.
+    // anchor requires to issue a challenge. With no wallet configured the probe
+    // generates one per tick and reports SEP-10 as "skipped" if declined.
     probeAccount: enabled ? probeAccount : null,
     failureThreshold: Number.isFinite(failureThreshold) && failureThreshold > 0 ? failureThreshold : 3,
     cooldownMs: Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : 30_000,
+    ...(discovery ? { discovery } : {}),
+    logger,
   });
+  return new AnchorHealthRegistry(homeDomain ? [{ domain: homeDomain, health }] : []);
 }
 
 /**

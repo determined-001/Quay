@@ -554,3 +554,56 @@ class InMemoryKycRepo {
     this.rows.set(record.sellerId, record);
   }
 }
+
+// ---------------------------------------------------------------------------
+//  SEP-1 discovery caching (issue 3.23).
+//
+//  An anchor that rotates its SIGNING_KEY republishes stellar.toml. Without a
+//  TTL and an explicit invalidate(), the old key stays cached for the life of
+//  the process and every seller's challenge fails verification until a restart.
+// ---------------------------------------------------------------------------
+describe("AnchorDiscovery caching", () => {
+  it("re-reads stellar.toml after invalidate(), picking up a rotated SIGNING_KEY", async () => {
+    const anchor = stubAnchor();
+    const discovery = new AnchorDiscovery({ homeDomain: HOME, fallbackBaseUrl: ORIGIN });
+    expect((await discovery.get()).signingKey).toBe(anchorKey.publicKey());
+
+    const rotated = Keypair.random();
+    anchor.fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/.well-known/stellar.toml") {
+        return new Response(TOML.replace(anchorKey.publicKey(), rotated.publicKey()));
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+
+    // Still cached: this is the behaviour that strands the process.
+    expect((await discovery.get()).signingKey).toBe(anchorKey.publicKey());
+
+    discovery.invalidate();
+    expect((await discovery.get()).signingKey).toBe(rotated.publicKey());
+  });
+
+  it("re-reads stellar.toml once the five-minute TTL elapses", async () => {
+    const anchor = stubAnchor();
+    const discovery = new AnchorDiscovery({ homeDomain: HOME, fallbackBaseUrl: ORIGIN });
+    expect((await discovery.get()).signingKey).toBe(anchorKey.publicKey());
+
+    const rotated = Keypair.random();
+    anchor.fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/.well-known/stellar.toml") {
+        return new Response(TOML.replace(anchorKey.publicKey(), rotated.publicKey()));
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+
+    const realNow = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 6 * 60_000);
+    try {
+      expect((await discovery.get()).signingKey).toBe(rotated.publicKey());
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

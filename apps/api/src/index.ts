@@ -122,8 +122,10 @@ async function main(): Promise<void> {
       horizon: container.horizonStatus(),
       // Anchor health probe + circuit breaker (issue #19, 3.7) so an operator
       // can tell "the anchor is down" apart from "the API is down" without
-      // tailing logs.
+      // tailing logs. `anchors` reports every configured anchor's breaker
+      // side by side (issue 3.23); `anchor` stays for the primary anchor.
       anchor: container.service.healthSnapshot(),
+      anchors: container.service.healthSnapshots(),
     });
   });
 

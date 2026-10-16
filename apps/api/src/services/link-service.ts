@@ -43,7 +43,13 @@ import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/ste
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
+import { AnchorHealthRegistry, type AnchorHealth, type AnchorHealthSnapshot } from "./anchor-health";
 import { metrics } from "../metrics";
+
+// Re-exported for callers that historically imported them from LinkService
+// (issue 3.23 moved the implementation into ./anchor-health).
+export { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
+export type { AnchorHealthSnapshot, CircuitState, Sep10Probe, AnchorProbeConfig } from "./anchor-health";
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -55,205 +61,14 @@ export interface ServiceCallOptions {
   logger?: Logger;
 }
 
-// ---------------------------------------------------------------------------
-// AnchorHealth — background probe + circuit breaker (issue #19, 3.7).
-// ---------------------------------------------------------------------------
-// A live `AnchorHealth` distinguishes a dead anchor from a slow one. A
-// background timer pings TOML + SEP-10 + /info every `intervalMs`. After
-// `failureThreshold` consecutive failures the breaker opens; while open,
-// `triggerCashOut` fails fast with 503 "anchor_unavailable" instead of
-// hammering a dead endpoint. After `cooldownMs` the breaker transitions to
-// `half_open` and the very next probe decides whether we go back to `closed`
-// (success) or stay `open` (another failure).
-
-export type CircuitState = "closed" | "open" | "half_open";
-
-export interface AnchorHealthSnapshot {
-  state: CircuitState;
-  consecutiveFailures: number;
-  lastCheckedAt: number | null;
-  lastSuccessAt: number | null;
-  lastError: string | null;
-  url: string | null;
-  probes: { toml: boolean; sep10: boolean; info: boolean };
-}
-
-export interface AnchorProbeConfig {
-  /** When false (mock mode), `probe()` short-circuits to a success without any network IO. */
-  enabled: boolean;
-  /** Anchor base URL (e.g. https://testanchor.stellar.org). */
-  url: string | null;
-  /** Home domain used for TOML and SEP-10. */
-  homeDomain: string | null;
-  /**
-   * Account the SEP-10 liveness probe asks for a challenge for. Must be a real
-   * Stellar account: anchors validate the `account` parameter and reject a
-   * placeholder, which makes every probe fail and looks exactly like an outage.
-   */
-  probeAccount: string | null;
-  /** Defaults to 3. */
-  failureThreshold?: number;
-  /** Defaults to 30_000 ms. */
-  cooldownMs?: number;
-  /** Defaults to 5_000 ms per individual probe HTTP call. */
-  requestTimeoutMs?: number;
-}
-
-export class AnchorHealth {
-  private state: CircuitState = "closed";
-  private consecutiveFailures = 0;
-  private openedAt: number | null = null;
-  private lastCheckedAt: number | null = null;
-  private lastSuccessAt: number | null = null;
-  private lastError: string | null = null;
-  private probes = { toml: false, sep10: false, info: false };
-
-  private readonly enabled: boolean;
-  private readonly url: string | null;
-  private readonly homeDomain: string | null;
-  private readonly probeAccount: string | null;
-  private readonly failureThreshold: number;
-  private readonly cooldownMs: number;
-  private readonly requestTimeoutMs: number;
-
-  constructor(cfg: AnchorProbeConfig) {
-    this.enabled = cfg.enabled;
-    this.url = cfg.url;
-    this.homeDomain = cfg.homeDomain;
-    this.probeAccount = cfg.probeAccount;
-    this.failureThreshold = cfg.failureThreshold ?? 3;
-    this.cooldownMs = cfg.cooldownMs ?? 30_000;
-    this.requestTimeoutMs = cfg.requestTimeoutMs ?? 5_000;
-  }
-
-  /**
-   * Snapshot of the current breaker state. The returned `state` reflects the
-   * promotion (open → half_open on cooldown expiry) — see `tickState` for the
-   * explicit time-advance mutation this triggers.
-   */
-  snapshot(): AnchorHealthSnapshot {
-    this.tickState();
-    return {
-      state: this.state,
-      consecutiveFailures: this.consecutiveFailures,
-      lastCheckedAt: this.lastCheckedAt,
-      lastSuccessAt: this.lastSuccessAt,
-      lastError: this.lastError,
-      url: this.url,
-      probes: { ...this.probes },
-    };
-  }
-
-  /**
-   * `true` when cash-out traffic is allowed. `closed` and `half_open` are both
-   * "try it"; only `open` (within the cooldown window) blocks traffic. This
-   * method mutates the stored state on cooldown expiry so callers always see
-   * the most recent decision; the side-effect is explicit in `tickState`.
-   */
-  isAvailable(): boolean {
-    this.tickState();
-    return this.state !== "open";
-  }
-
-  /**
-   * Time-based advance of the breaker. Promotes `open → half_open` once the
-   * cooldown has elapsed, so the next probe becomes a "trial shot". Exposed as
-   * a public helper so callers can be explicit about the mutation if they
-   * want to; we still call it from getters in this file because that's the
-   * sanest policy for snap/decide ergonomics.
-   */
-  tickState(): void {
-    if (
-      this.state === "open" &&
-      this.openedAt !== null &&
-      Date.now() - this.openedAt >= this.cooldownMs
-    ) {
-      this.state = "half_open";
-    }
-  }
-
-  /** Run one probe cycle: TOML → SEP-10 challenge → /info. */
-  async probe(): Promise<AnchorHealthSnapshot> {
-    if (!this.enabled || !this.url || !this.homeDomain || !this.probeAccount) {
-      // Mock mode or unconfigured: short-circuit to a healthy state without IO.
-      this.tickState();
-      this.recordSuccess();
-      return this.snapshot();
-    }
-    // Time-advance before we measure: if the cooldown just elapsed, we want
-    // this probe to count as the half-open trial shot rather than get blocked
-    // by an out-of-date "open" state.
-    this.tickState();
-    this.lastCheckedAt = Date.now();
-    const probes = { toml: false, sep10: false, info: false };
-    try {
-      // 1. TOML reachable.
-      const tomlUrl = `https://${this.homeDomain}/.well-known/stellar.toml`;
-      const tomlRes = await fetchWithTimeout(tomlUrl, this.requestTimeoutMs);
-      probes.toml = tomlRes.ok;
-      if (!tomlRes.ok) throw new Error(`TOML probe returned ${tomlRes.status}`);
-
-      // 2. SEP-10 challenge obtainable (no signing — this is a liveness check).
-      const sep10Url = new URL("/auth", this.url);
-      // A real account, not a placeholder. testanchor answers `400 {"error":
-      // "Invalid account."}` for the all-zero address, so probing with one made
-      // the breaker open on a healthy anchor and fail cash-outs with 503.
-      sep10Url.searchParams.set("account", this.probeAccount);
-      sep10Url.searchParams.set("home_domain", this.homeDomain);
-      const sep10Res = await fetchWithTimeout(sep10Url.toString(), this.requestTimeoutMs);
-      probes.sep10 = sep10Res.ok;
-      if (!sep10Res.ok) throw new Error(`SEP-10 challenge returned ${sep10Res.status}`);
-      const sep10Body = (await sep10Res.json()) as { transaction?: string };
-      if (!sep10Body.transaction) throw new Error("SEP-10 challenge missing transaction");
-
-      // 3. /info 200.
-      // The SAME path the adapter uses (packages/offramp/src/sep6.ts). A probe
-      // that checks an endpoint the product never calls tells you nothing when
-      // it passes and lies when it fails: testanchor answers 404 on /info and
-      // 200 on /sep6/info, so this reported an outage against a healthy anchor.
-      const infoUrl = new URL("/sep6/info", this.url);
-      const infoRes = await fetchWithTimeout(infoUrl.toString(), this.requestTimeoutMs);
-      probes.info = infoRes.ok;
-      if (!infoRes.ok) throw new Error(`/info returned ${infoRes.status}`);
-
-      this.probes = probes;
-      this.recordSuccess();
-    } catch (err) {
-      this.probes = probes;
-      this.recordFailure(err);
-    }
-    return this.snapshot();
-  }
-
-  private recordSuccess(): void {
-    this.state = "closed";
-    this.consecutiveFailures = 0;
-    this.openedAt = null;
-    this.lastSuccessAt = Date.now();
-    this.lastError = null;
-  }
-
-  private recordFailure(err: unknown): void {
-    this.consecutiveFailures++;
-    this.lastError = err instanceof Error ? err.message : String(err);
-    if (this.state === "half_open" || this.consecutiveFailures >= this.failureThreshold) {
-      this.state = "open";
-      this.openedAt = Date.now();
-    }
-  }
-}
-
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-  return fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-}
-
 export class LinkService {
   private readonly sender: WebhookSender;
   // Ephemeral: cash-out start time for the quote-to-settlement histogram. A
   // process restart mid-cash-out just loses that one latency sample — the
   // link's own status/offrampStatus fields remain the durable source of truth.
   private readonly cashOutStartedAt = new Map<string, number>();
-  private readonly health: AnchorHealth;
+  private readonly health: AnchorHealthRegistry;
+  private readonly anchorDomain: string | undefined;
   /** Per-link last poll error (in-memory; survives only until restart). */
   private readonly lastPollErrorByLinkId = new Map<string, string>();
   /**
@@ -296,10 +111,17 @@ export class LinkService {
       operatorWallet?: string;
       telemetry: OffRampTelemetryRepository;
       /**
-       * Optional anchor health probe. When omitted we default to a no-op
-       * "always available" probe so existing test fixtures stay lightweight.
+       * Optional anchor health probe(s). Accepts a bare `AnchorHealth` (single
+       * anchor) or an `AnchorHealthRegistry` keyed by home domain (issue 3.23).
+       * When omitted every anchor reads as available, so existing test fixtures
+       * stay lightweight.
        */
-      health?: AnchorHealth;
+      health?: AnchorHealth | AnchorHealthRegistry;
+      /**
+       * The anchor this deployment cashes out through. Used to select the right
+       * breaker from `health`; omitted means "the only/first anchor".
+       */
+      anchorDomain?: string;
       // "memo" (default) or "muxed" — see packages/stellar/src/stellar-rail.ts.
       correlation: "memo" | "muxed";
       /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
@@ -319,7 +141,12 @@ export class LinkService {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
     this.sender = new WebhookSender(deps.webhooks, { guard: deps.webhookGuard, logger: this.deps.logger });
     this.health =
-      deps.health ?? new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null });
+      deps.health instanceof AnchorHealthRegistry
+        ? deps.health
+        : new AnchorHealthRegistry(
+            deps.health ? [{ domain: deps.health.domain, health: deps.health }] : [],
+          );
+    this.anchorDomain = deps.anchorDomain;
   }
 
   /** Undelivered rows in the durable webhook queue. Since the queue landed this
@@ -876,7 +703,7 @@ export class LinkService {
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
     assertCanCashOut(link);
-    if (!this.health.isAvailable()) {
+    if (!this.health.isAvailable(this.anchorDomain)) {
       throw new HttpError(503, "anchor_unavailable");
     }
     const seller = await this.deps.sellers.findById(link.sellerId);
@@ -930,7 +757,7 @@ export class LinkService {
 
     // Fail fast when the breaker is open: never attempt to call a known-dead
     // anchor. The HTTP layer maps this to 503 anchor_unavailable.
-    if (!this.health.isAvailable()) {
+    if (!this.health.isAvailable(this.anchorDomain)) {
       throw new HttpError(503, "anchor_unavailable");
     }
 
@@ -1168,7 +995,7 @@ export class LinkService {
     if (!link.offrampJobId) return null;
     try {
       // Circuit breaker open: do not add load to a struggling anchor; the stored copy below answers.
-      if (!this.health.isAvailable()) throw new Error("anchor_unavailable");
+      if (!this.health.isAvailable(this.anchorDomain)) throw new Error("anchor_unavailable");
       const job = await this.deps.offramp.status(link.offrampJobId, opts);
       return job.transfer ?? null;
     } catch (err) {
@@ -1462,7 +1289,15 @@ export class LinkService {
    * from the seller-facing dashboard in a follow-up).
    */
   healthSnapshot(): AnchorHealthSnapshot {
-    return this.health.snapshot();
+    return this.health.snapshot(this.anchorDomain);
+  }
+
+  /**
+   * Every configured anchor's breaker snapshot, so `/health` can report them
+   * side by side once more than one anchor exists (issue 3.23).
+   */
+  healthSnapshots(): AnchorHealthSnapshot[] {
+    return this.health.snapshots();
   }
 
   /**

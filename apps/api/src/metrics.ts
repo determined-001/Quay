@@ -231,8 +231,8 @@ const webhookAttemptsTotal = registry.counter(
 
 const anchorCallsTotal = registry.counter(
   "anchor_calls_total",
-  'Off-ramp adapter calls by method (quote~SEP-38, initiate/status~SEP-6) and result.',
-  ["method", "status"], // status: "ok" | "error" | "rejected"
+  'Off-ramp adapter calls by anchor, method (quote~SEP-38, initiate/status~SEP-6) and result.',
+  ["anchor", "method", "status"], // status: "ok" | "error" | "rejected"
 );
 
 const watcherTickDurationSeconds = registry.histogram(
@@ -249,9 +249,9 @@ const paymentToPaidLatencySeconds = registry.histogram(
 
 const anchorCallDurationSeconds = registry.histogram(
   "anchor_call_duration_seconds",
-  "Off-ramp adapter call latency by method.",
+  "Off-ramp adapter call latency by anchor and method.",
   [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60],
-  ["method"],
+  ["anchor", "method"],
 );
 
 const quoteToSettlementDurationSeconds = registry.histogram(
@@ -269,7 +269,8 @@ const webhookQueueDepth = registry.gauge(
 );
 const circuitBreakerState = registry.gauge(
   "offramp_circuit_breaker_state",
-  "Off-ramp adapter circuit breaker state: 0=closed, 1=half_open, 2=open.",
+  "Off-ramp adapter circuit breaker state per anchor: 0=closed, 1=half_open, 2=open.",
+  ["anchor"],
 );
 const watcherLagSeconds = registry.gauge(
   "watcher_lag_seconds",
