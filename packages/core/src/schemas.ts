@@ -38,8 +38,15 @@ export const listWebhookDeliveriesQuerySchema = z.object({
 });
 export type ListWebhookDeliveriesQuery = z.infer<typeof listWebhookDeliveriesQuerySchema>;
 
+/** Three-letter ISO 4217 currency code (e.g. NGN, USD, KES), normalized to uppercase. */
+export const currencyCodeSchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^[A-Z]{3}$/, "currency code must be a 3-letter ISO 4217 code");
+
 export const cashOutSchema = z.object({
-  targetCurrency: z.string().trim().length(3).toUpperCase().default("NGN"),
+  targetCurrency: currencyCodeSchema.default("NGN"),
   // Opaque payout fields handed to the anchor adapter (e.g. bank, account number).
   payoutFields: z.record(z.string(), z.string()).default({}),
   quoteId: z.string().min(1).optional(),
@@ -48,6 +55,12 @@ export const cashOutSchema = z.object({
   withdrawType: z.string().trim().min(1).optional(),
 });
 export type CashOutBody = z.infer<typeof cashOutSchema>;
+
+export const cashOutQuoteQuerySchema = z.object({
+  targetCurrency: currencyCodeSchema,
+  withdrawType: z.string().trim().min(1).optional(),
+});
+export type CashOutQuoteQuery = z.infer<typeof cashOutQuoteQuerySchema>;
 
 
 /** Body of POST /links/:id/cash-out/transfer-sent: the seller's claimed hash of

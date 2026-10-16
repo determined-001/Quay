@@ -2,6 +2,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import {
   createLinkSchema,
   cashOutSchema,
+  cashOutQuoteQuerySchema,
   transferSentSchema,
   submitPaymentSchema,
   OffRampDisabledError,
@@ -177,11 +178,16 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
   // this exercises the same KYC/health gates and hits the anchor for real.
   app.get("/:id/cash-out/quote", auth, requireScope("links:read"), async (ctx) => {
     const linkId = ctx.req.param("id");
-    const targetCurrency = ctx.req.query("targetCurrency");
-    if (!targetCurrency) return ctx.json({ error: "invalid_query", message: "targetCurrency is required" }, 400);
-    // The seller's rail choice (issue 5.24); optional — adapters fall back to
-    // the operator default. An unknown type comes back 400 with availableTypes.
-    const withdrawType = ctx.req.query("withdrawType") || undefined;
+    const rawTargetCurrency = ctx.req.query("targetCurrency");
+    if (!rawTargetCurrency) return ctx.json({ error: "invalid_query", message: "targetCurrency is required" }, 400);
+
+    const parsedQuery = cashOutQuoteQuerySchema.safeParse({
+      targetCurrency: rawTargetCurrency,
+      withdrawType: ctx.req.query("withdrawType") || undefined,
+    });
+    if (!parsedQuery.success) return ctx.json({ error: "invalid_query", issues: parsedQuery.error.issues }, 400);
+
+    const { targetCurrency, withdrawType } = parsedQuery.data;
     try {
       const existing = await c.service.getLink(linkId);
       if (!existing) return ctx.json({ error: "not_found" }, 404);
