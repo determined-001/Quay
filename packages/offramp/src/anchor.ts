@@ -28,7 +28,7 @@ import {
   type Sep24Transaction,
 } from "./sep24";
 
-export interface AnchorOptions {
+export interface Sep24OffRampOptions {
   discovery: AnchorDiscovery;
   /**
    * Per-seller anchor sessions. The seller's own wallet signs the SEP-10 challenge in the browser and
@@ -96,8 +96,9 @@ export function mapSep24Status(status: string): OffRampJobStatus {
  * Authenticates per seller, exactly like `TestAnchorOffRamp`: every call runs with the JWT of the seller's own
  * session (`SellerAnchorAuth`), never a server-held key (issue #207; `pnpm check:no-server-signing` enforces it).
  *
- * Still NOT exported from `index.ts` and not selectable via `OFFRAMP`: `TestAnchorOffRamp` (SEP-6) is the
- * adapter wired into the container. See docs/decisions/0001-sep6-vs-sep24.md for why SEP-24 stays unwired.
+ * Exported from `index.ts` (issue 3.16), but not selectable via `OFFRAMP` yet: `TestAnchorOffRamp` (SEP-6) is
+ * the adapter wired into the container, so choosing between the two stays issue 3.19. See
+ * docs/decisions/0001-sep6-vs-sep24.md for the protocol comparison.
  */
 export class AnchorOffRamp implements OffRampPort {
   readonly mode: OffRampMode = "seller_initiated";
@@ -108,7 +109,7 @@ export class AnchorOffRamp implements OffRampPort {
   private readonly state: OffRampStateRepository;
   private readonly rateSource: RateSourcePort | undefined;
 
-  constructor(opts: AnchorOptions) {
+  constructor(opts: Sep24OffRampOptions) {
     this.homeDomain = opts.discovery.homeDomain;
     this.auth = opts.auth;
     if (!opts.state) {
@@ -157,6 +158,9 @@ export class AnchorOffRamp implements OffRampPort {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
       buyCurrency: input.targetCurrency,
+      // A SEP-24 withdrawal can only spend a quote minted for the SEP-24
+      // context; the SEP-6 default would be rejected by the anchor.
+      context: "sep24",
     });
 
     const expiresAt = Date.parse(q.expiresAt);
@@ -310,7 +314,9 @@ export class AnchorOffRamp implements OffRampPort {
     await this.state.saveJob({
       jobId: interactiveResult.id,
       linkId: input.linkId,
-      anchor: this.homeDomain,
+      // Suffixed so telemetry and the poller can tell a SEP-24 job from a
+      // SEP-6 one at the same anchor (issue 3.16).
+      anchor: `${this.homeDomain}#sep24`,
       sellerId: input.customer.sellerId,
       account: input.customer.account,
       targetCurrency: q.buyCurrency,

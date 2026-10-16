@@ -85,6 +85,12 @@ export async function getSep38Quote(
     buyCurrency: string;
     /** Delivery method for the buy asset. Discovered from /sep6/info or configured explicitly. */
     buyDeliveryMethod?: string;
+    /**
+     * SEP-38 context the quote is requested for. A quote id is only valid for
+     * the protocol that requested it, so the SEP-24 adapter passes "sep24" and
+     * the SEP-6 adapter keeps the default (issue 3.16).
+     */
+    context?: "sep6" | "sep24";
   },
   logger?: Logger,
 ): Promise<Sep38QuoteResult> {
@@ -109,7 +115,7 @@ export async function getSep38Quote(
       ...(input.buyDeliveryMethod
         ? { buy_delivery_method: input.buyDeliveryMethod }
         : {}),
-      context: "sep6",
+      context: input.context ?? "sep6",
     }),
   });
   if (!res.ok) {

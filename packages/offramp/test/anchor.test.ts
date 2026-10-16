@@ -1,13 +1,19 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
+import type { AnchorCustomer } from "@checkout/core";
 import { AnchorOffRamp, mapSep24Status } from "../src/anchor";
 import type { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
+import { getSep38Quote } from "../src/sep38";
+import { clearSep24InfoCache } from "../src/sep24";
 import { parseStellarToml } from "../src/sep1";
 import { FakeOffRampStateRepository } from "./fake-state";
 
 const CUSTOMER = { sellerId: "seller-1", account: "GSELLERACCOUNT1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ" };
+const ALICE: AnchorCustomer = { sellerId: "seller-alice", account: Keypair.random().publicKey() };
+const BOB: AnchorCustomer = { sellerId: "seller-bob", account: Keypair.random().publicKey() };
 // The adapter only needs a seller's JWT; the real SellerAnchorAuth (wallet-signed SEP-10) is covered in anchor-session.test.ts.
 const discovery = { homeDomain: "testanchor.stellar.org", get: async () => ({}) } as unknown as AnchorDiscovery;
 const auth = { token: async () => "seller-jwt" } as unknown as SellerAnchorAuth;
@@ -18,6 +24,11 @@ const USDC_TESTNET_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZL
 describe("AnchorOffRamp (offline)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    clearSep24InfoCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("parseStellarToml parses SEP-1 discovery endpoints correctly", () => {
@@ -392,6 +403,166 @@ describe("AnchorOffRamp (offline)", () => {
 
     await state.updateJob("job-x", { sellerId: null, account: null });
     await expect(offramp.status("job-x")).rejects.toThrow(/not found|unknown/i);
+  });
+
+  // ---- SEP-24 quotes are minted for the sep24 context, jobs are tagged (issue 3.16) ---------------
+
+  function discoveryFor(anchorQuoteServer?: string): AnchorDiscovery {
+    return {
+      homeDomain: "anchor.example",
+      get: async () => ({
+        homeDomain: "anchor.example",
+        transferServerSep24: "https://anchor.example/sep24",
+        ...(anchorQuoteServer ? { anchorQuoteServer } : {}),
+      }),
+    } as unknown as AnchorDiscovery;
+  }
+
+  it("asks SEP-38 for the quote in the sep24 context and persists it", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/sep24/info")) return Response.json({ withdraw: { USDC: { enabled: true } } });
+        if (url.includes("/sep38/quote")) {
+          bodies.push(JSON.parse(init!.body as string) as Record<string, unknown>);
+          return Response.json({
+            id: "q-1",
+            price: "1",
+            sell_amount: "10",
+            buy_amount: "9.5",
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+          });
+        }
+        return new Response("unexpected", { status: 404 });
+      }),
+    );
+    const state = new FakeOffRampStateRepository();
+    const offramp = new AnchorOffRamp({
+      discovery: discoveryFor("https://anchor.example/sep38"),
+      auth: { token: async () => "jwt" } as unknown as SellerAnchorAuth,
+      state,
+    });
+
+    const quote = await offramp.quote({
+      linkId: "lnk-1",
+      sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+      sourceAmount: "10",
+      targetCurrency: "NGN",
+      customer: CUSTOMER,
+    });
+
+    expect(bodies).toHaveLength(1);
+    // A sep6 quote id is not spendable on a SEP-24 withdrawal.
+    expect(bodies[0]!.context).toBe("sep24");
+    expect(await state.getQuote(quote.quoteId)).not.toBeNull();
+  });
+
+  it("initiate() posts each seller's own account and token, and tags the job with #sep24", async () => {
+    const calls: Array<{ auth: string | null; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("transactions/withdraw/interactive")) {
+          calls.push({
+            auth: new Headers(init!.headers).get("authorization"),
+            body: JSON.parse(init!.body as string) as Record<string, unknown>,
+          });
+          return Response.json({
+            id: `wd_${calls.length}`,
+            url: "https://anchor.example/ui",
+            type: "interactive_customer_info_needed",
+          });
+        }
+        return new Response("unexpected", { status: 404 });
+      }),
+    );
+    const tokens = new Map([
+      [ALICE.sellerId, "jwt-alice"],
+      [BOB.sellerId, "jwt-bob"],
+    ]);
+    const auth = {
+      token: async (customer: AnchorCustomer) => tokens.get(customer.sellerId)!,
+    } as unknown as SellerAnchorAuth;
+    const state = new FakeOffRampStateRepository();
+    const offramp = new AnchorOffRamp({ discovery: discoveryFor(), auth, state });
+
+    for (const seller of [ALICE, BOB]) {
+      await state.saveQuote({
+        quoteId: `q_${seller.sellerId}`,
+        linkId: "lnk-1",
+        sellAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sellAmount: "10",
+        buyCurrency: "NGN",
+        price: "1",
+        expiresAt: Date.now() + 60_000,
+        createdAt: Date.now(),
+      });
+    }
+
+    const aliceJob = await offramp.initiate({
+      linkId: "lnk-1",
+      quoteId: `q_${ALICE.sellerId}`,
+      payout: { currency: "NGN", fields: {} },
+      customer: ALICE,
+    });
+    const bobJob = await offramp.initiate({
+      linkId: "lnk-1",
+      quoteId: `q_${BOB.sellerId}`,
+      payout: { currency: "NGN", fields: {} },
+      customer: BOB,
+    });
+
+    // Neither seller's call carries the other's token or account.
+    expect(calls[0]!.auth).toBe("Bearer jwt-alice");
+    expect(calls[0]!.body.account).toBe(ALICE.account);
+    expect(calls[1]!.auth).toBe("Bearer jwt-bob");
+    expect(calls[1]!.body.account).toBe(BOB.account);
+
+    expect(await state.getJob(aliceJob.jobId)).toMatchObject({
+      sellerId: ALICE.sellerId,
+      account: ALICE.account,
+      anchor: "anchor.example#sep24",
+    });
+    expect(await state.getJob(bobJob.jobId)).toMatchObject({
+      sellerId: BOB.sellerId,
+      account: BOB.account,
+    });
+  });
+
+  it("getSep38Quote defaults to the sep6 context and honours an explicit sep24 one", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(init!.body as string) as Record<string, unknown>);
+        return Response.json({
+          id: "q-1",
+          price: "1",
+          sell_amount: "1",
+          buy_amount: "1",
+          expires_at: "2030-01-01T00:00:00Z",
+        });
+      }),
+    );
+
+    await getSep38Quote("https://anchor.example/sep38", "jwt", {
+      sellAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+      sellAmount: "1",
+      buyCurrency: "NGN",
+    });
+    await getSep38Quote("https://anchor.example/sep38", "jwt", {
+      sellAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+      sellAmount: "1",
+      buyCurrency: "NGN",
+      context: "sep24",
+    });
+
+    // The SEP-6 adapter omits context, so its default must not have moved.
+    expect(bodies[0]!.context).toBe("sep6");
+    expect(bodies[1]!.context).toBe("sep24");
   });
 
   it("requires a state repository: there is no in-memory default to lose on restart", () => {
