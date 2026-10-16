@@ -39,6 +39,7 @@ import { metrics } from "../metrics";
 import { createLogger } from "../logger";
 import { WebhookSender } from "./webhook-sender";
 import { KycEvents } from "./kyc-events";
+import { createClientDomainSigner } from "./client-domain-signer";
 import {
   DrizzleLinkRepository,
   DrizzleSellerRepository,
@@ -225,7 +226,11 @@ export async function createContainer(): Promise<Container> {
     env.watchMode === "stream"
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : pollingWatcher;
-  const anchor = createAnchor(db, logger, stellar.networkPassphrase, anchorSessionsRepo);
+  // The platform's stable SEP-10 identity: the key wallets authenticate
+  // against and the SIGNING_KEY advertised in stellar.toml. Resolved before the
+  // anchor wiring so the SEP-10 client_domain co-signer can be built from it.
+  const serverKeypair = resolveServerSigningKeypair();
+  const anchor = createAnchor(db, logger, stellar.networkPassphrase, serverKeypair, anchorSessionsRepo);
   // Built before the off-ramp so a misconfigured rate source is a boot failure.
   const rateSource = await createRateSource({
     kind: env.offrampRateSource,
@@ -254,10 +259,6 @@ export async function createContainer(): Promise<Container> {
   // the surface still works offline; for testanchor/anchor we hit the real
   // anchor.
   const anchorHealth = buildAnchorHealth(env.offramp, sellerWallet);
-
-  // The platform's stable SEP-10 identity: the key wallets authenticate
-  // against and the SIGNING_KEY advertised in stellar.toml.
-  const serverKeypair = resolveServerSigningKeypair();
 
   const service = new LinkService({
     links: linksRepo,
@@ -524,6 +525,7 @@ function createAnchor(
   db: DB,
   logger: Logger,
   networkPassphrase: string,
+  serverSigningKeypair: Keypair,
   sessions: DrizzleAnchorSessionRepository = new DrizzleAnchorSessionRepository(db),
 ): AnchorWiring | null {
   if (env.offramp !== "testanchor" && env.offramp !== "anchor") return null;
@@ -537,11 +539,26 @@ function createAnchor(
     expectedNetworkPassphrase: networkPassphrase,
     logger,
   });
+  // SEP-10 client_domain (issue 3.12): off by default. When on, the anchor is
+  // asked for a client_domain op and Quay's SEP-10 identity co-signs it so the
+  // anchor can attribute the seller. The signer holds Quay's login key, which
+  // moves no funds; see client-domain-signer.ts.
+  const clientDomain = env.anchorClientDomain
+    ? {
+        clientDomain: env.homeDomain,
+        signClientDomain: createClientDomainSigner({
+          keypair: serverSigningKeypair,
+          networkPassphrase,
+          clientDomain: env.homeDomain,
+        }),
+      }
+    : {};
   const auth = new SellerAnchorAuth({
     discovery,
     networkPassphrase,
     sessions,
     logger,
+    ...clientDomain,
   });
   return { discovery, auth };
 }
