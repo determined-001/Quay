@@ -262,13 +262,19 @@ async function main(): Promise<void> {
     const forceExit = setTimeout(() => {
       logger.warn({ event: "api.shutdown.forced" }, "shutdown grace period elapsed - forcing exit");
       process.exit(1);
-    }, 10_000);
+    }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
     server.close(() => {
-      container.stop();
-      clearTimeout(forceExit);
-      process.exit(0);
+      void (async () => {
+        try {
+          await container.stop();
+        } catch (err) {
+          logger.warn({ event: "api.shutdown.stop_failed", err }, "container stop failed during shutdown");
+        }
+        clearTimeout(forceExit);
+        process.exit(0);
+      })();
     });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));

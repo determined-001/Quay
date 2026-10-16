@@ -119,7 +119,7 @@ export interface Container {
     allowedOrigins: string[];
   };
   start(): void;
-  stop(): void;
+  stop(): void | Promise<void>;
   /** Readiness probe: can this instance actually serve traffic right now (i.e. is the database reachable)? Distinct from liveness (`/health`) - a process can be alive but not yet/no-longer able to serve. */
   ready(): Promise<boolean>;
   getWatcherCircuitBreakerStatus(): AccountCircuitBreakerStatus[];
