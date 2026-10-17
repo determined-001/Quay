@@ -267,6 +267,10 @@ const webhookQueueDepth = registry.gauge(
   "webhook_deliveries_in_flight",
   "Webhook deliveries currently being attempted, including in-progress retries.",
 );
+const offrampJobsAwaitingAnchorAuth = registry.gauge(
+  "offramp_jobs_awaiting_anchor_auth",
+  "Cash-out jobs whose polling is blocked because the seller's anchor session is missing or expired.",
+);
 const circuitBreakerState = registry.gauge(
   "offramp_circuit_breaker_state",
   "Off-ramp adapter circuit breaker state: 0=closed, 1=half_open, 2=open.",
@@ -298,6 +302,7 @@ export const metrics = {
   accountsWatched,
   pendingCashOuts,
   webhookQueueDepth,
+  offrampJobsAwaitingAnchorAuth,
   circuitBreakerState,
   watcherLagSeconds,
   kycRetentionPurgedTotal,

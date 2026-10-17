@@ -274,6 +274,7 @@ export async function createContainer(): Promise<Container> {
     correlation: env.correlation,
     interactiveTimeoutMs: env.offrampInteractiveTimeoutMs,
     logger,
+    hasLiveAnchorSession: anchor ? (customer) => anchor.auth.sessionExpiry(customer) !== null : undefined,
   });
 
   // A link stuck in `offramp_pending` whose job has no row in offramp_jobs was

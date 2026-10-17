@@ -83,13 +83,17 @@ export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandle
     if (!auth) return ctx.json({ error: "no_anchor" }, 404);
     const parsed = completeSchema.safeParse(await ctx.req.json().catch(() => ({})));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+    const customer = customerOf(ctx.get("seller"));
     try {
-      const { expiresAt } = await auth.complete(customerOf(ctx.get("seller")), parsed.data.transaction);
+      const { expiresAt } = await auth.complete(customer, parsed.data.transaction);
+      // The seller's session is live again, so any cash-out poll blocked on
+      // this seller's expired session can resume immediately (issue 4.16).
+      c.links.clearAnchorAuthBlock(customer);
       return ctx.json({ connected: true, anchor: auth.anchorDomain, expiresAt });
     } catch (err) {
       if (err instanceof AnchorChallengeError) {
         getLogger(ctx).warn({ event: "anchor.challenge.rejected", kind: err.kind, reason: err.message }, "challenge rejected");
-        return ctx.json({ error: "challenge_rejected", message: CHALLENGE_MESSAGES[err.kind] }, 400);
+        return ctx.json({ error: "challenge_rejected", message: CHALLENGE_MESSAGEES[err.kind] }, 400);
       }
       if (err instanceof AnchorHttpError) {
         const failure = anchorFailure(err, getLogger(ctx));

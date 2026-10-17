@@ -29,6 +29,7 @@ const BOOTSTRAP_SQL = [
      offramp_indicative_rate TEXT, offramp_rate TEXT, offramp_rate_delta TEXT,
      offramp_fee_amount TEXT, offramp_fee_currency TEXT, offramp_fee_source TEXT,
      offramp_net_target_amount TEXT, is_demo INTEGER NOT NULL DEFAULT 0,
+     poll_blocked_reason TEXT,
      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
    )`,
   // Cumulative payment ledger (issue 1.4) — one row per payment ever recorded
@@ -237,6 +238,10 @@ const ADDITIVE_MIGRATIONS = [
   `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error_at INTEGER`,
   `ALTER TABLE offramp_jobs ADD COLUMN last_poll_reason TEXT`,
+  // 4.16: typed reason a cash-out poll is blocked (e.g. "anchor_auth_required"),
+  // distinct from the free-text last_poll_error. Persisted so the block survives
+  // restarts; cleared when the seller re-authenticates.
+  `ALTER TABLE links ADD COLUMN poll_blocked_reason TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
   `ALTER TABLE sellers ADD COLUMN last_active_at INTEGER`,
   // Track whether the offramp.transfer_required webhook has been sent for a job.
@@ -248,6 +253,10 @@ const ADDITIVE_MIGRATIONS = [
   `ALTER TABLE offramp_jobs ADD COLUMN amount_in TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN amount_fee TEXT`,
   `ALTER TABLE offramp_jobs ADD COLUMN stellar_transaction_id TEXT`,
+  // 4.16: typed reason a cash-out poll is blocked (e.g. "anchor_auth_required"),
+  // distinct from the free-text last_poll_error. Persisted so the block survives
+  // restarts; cleared when the seller re-authenticates.
+  `ALTER TABLE offramp_jobs ADD COLUMN poll_blocked_reason TEXT`,
   `ALTER TABLE seller_kyc ADD COLUMN callback_token_hash TEXT`,
   `CREATE INDEX IF NOT EXISTS seller_kyc_callback_token_hash_idx ON seller_kyc (callback_token_hash)`,
   // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has

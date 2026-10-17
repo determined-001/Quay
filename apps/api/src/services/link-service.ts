@@ -276,6 +276,14 @@ export class LinkService {
    */
   static readonly DEFAULT_INTERACTIVE_TIMEOUT_MS = 3_600_000;
   private readonly consecutivePollErrorsByLinkId = new Map<string, number>();
+  /**
+   * Per-link "blocked until re-auth" marker (issue 4.16). Set when a poll hits
+   * `AnchorAuthRequiredError`; cleared when the seller completes
+   * `POST /seller/anchor-auth`. While set, `pollCashOuts()` skips the link
+   * entirely instead of backing off and re-calling `status()` every minute.
+   * In-memory only; the durable copy lives on `offramp_jobs.last_poll_reason`.
+   */
+  private readonly anchorAuthBlockedLinkIds = new Set<string>();
 
   constructor(
     private readonly deps: {
@@ -1222,6 +1230,10 @@ export class LinkService {
       // tick. Skip links whose `next_try_at` is still in the future.
       const next = this.nextPollAtByLinkId.get(link.id);
       if (next !== undefined && now < next) continue;
+      // Blocked on the seller's anchor session (issue 4.16): nothing will
+      // change until they re-authenticate, so skip without calling status().
+      // The block is cleared by `clearAnchorAuthBlock()` on successful sign-in.
+      if (this.anchorAuthBlockedLinkIds.has(link.id)) continue;
 
       const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
       let job: OffRampJob;
@@ -1274,6 +1286,33 @@ export class LinkService {
               lastPollReason: null,
             });
           }
+          continue;
+        }
+        // Anchor session expired for this seller (issue 4.16). This is not a
+        // transient anchor fault: retrying will keep returning the same error
+        // until the seller signs in again. Record a typed reason, log once per
+        // blocked episode, and skip the link until re-auth clears the block.
+        if (err instanceof AnchorAuthRequiredError) {
+          const { reason, message: safeMessage } = classifyPollError(err);
+          if (link.offrampJobId) {
+            await this.deps.offrampState.updateJob(link.offrampJobId, {
+              lastPollError: safeMessage,
+              lastPollErrorAt: Date.now(),
+              lastPollReason: reason,
+            });
+          }
+          if (!this.anchorAuthBlockedLinkIds.has(link.id)) {
+            this.anchorAuthBlockedLinkIds.add(link.id);
+            metrics.offrampJobsAwaitingAnchorAuth.inc();
+            child.info(
+              { event: "cashout.poll.anchor_auth_required", linkId: link.id, jobId: link.offrampJobId },
+              "cash-out poll blocked: seller anchor session required",
+            );
+          }
+          // Do not back off — the block is cleared explicitly on re-auth, at
+          // which point the next tick should poll immediately.
+          this.nextPollAtByLinkId.delete(link.id);
+          this.consecutivePollErrorsByLinkId.delete(link.id);
           continue;
         }
         // Classify the poll error into a sanitized, seller-safe reason and message.
@@ -1433,6 +1472,27 @@ export class LinkService {
     if (startedAt === undefined) return; // process restarted mid-cash-out — no sample
     this.cashOutStartedAt.delete(linkId);
     metrics.quoteToSettlementDurationSeconds.observe({ outcome }, (Date.now() - startedAt) / 1000);
+  }
+
+  /**
+   * Clear the "blocked until re-auth" marker for a seller's links (issue 4.16).
+   * Called from `POST /seller/anchor-auth` on successful sign-in so the next
+   * `pollCashOuts()` tick polls the job immediately and normal settle/fail
+   * handling resumes. Returns the number of links unblocked.
+   */
+  async clearAnchorAuthBlock(sellerId: string): Promise<number> {
+    const pending = await this.deps.links.listByStatus("offramp_pending");
+    let cleared = 0;
+    for (const link of pending) {
+      if (link.sellerId !== sellerId) continue;
+      if (this.anchorAuthBlockedLinkIds.delete(link.id)) {
+        metrics.offrampJobsAwaitingAnchorAuth.dec();
+        cleared++;
+      }
+      this.nextPollAtByLinkId.delete(link.id);
+      this.consecutivePollErrorsByLinkId.delete(link.id);
+    }
+    return cleared;
   }
 
   /**

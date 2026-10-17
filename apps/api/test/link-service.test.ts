@@ -43,6 +43,7 @@ function makeService(opts: {
   kyc?: KycPort;
   telemetry?: FakeTelemetryRepository;
   interactiveTimeoutMs?: number;
+  hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean;
 }): LinkService {
   return new LinkService({
     links: opts.links,
@@ -65,6 +66,9 @@ function makeService(opts: {
     webhookGuard: async () => ({ ok: true }) as const,
     ...(opts.interactiveTimeoutMs !== undefined
       ? { interactiveTimeoutMs: opts.interactiveTimeoutMs }
+      : {}),
+    ...(opts.hasLiveAnchorSession !== undefined
+      ? { hasLiveAnchorSession: opts.hasLiveAnchorSession }
       : {}),
   });
 }
@@ -242,6 +246,121 @@ describe("LinkService.pollCashOuts", () => {
     const job = await offrampState.getJob("job_auth");
     expect(job?.lastPollReason).toBe("anchor_auth_required");
     expect(job?.lastPollError).toBe("Anchor session expired or required. Please reconnect your anchor session in settings.");
+  });
+
+  it("skips status() for a link whose seller has no live anchor session, and reports anchor_auth_required", async () => {
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_auth",
+      linkId: "lnk_1",
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
+      transferNotifiedAt: null,
+    });
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_auth", offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    let statusCalls = 0;
+    offramp.statusImpl = async () => {
+      statusCalls += 1;
+      throw new AnchorAuthRequiredError("testanchor.stellar.org");
+    };
+
+    const service = makeService({
+      links,
+      offramp,
+      offrampState,
+      hasLiveAnchorSession: () => false,
+    });
+    await service.pollCashOuts();
+    await service.pollCashOuts();
+
+    // status() must not be called at all while the session is dead.
+    expect(statusCalls).toBe(0);
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    const job = await offrampState.getJob("job_auth");
+    expect(job?.lastPollReason).toBe("anchor_auth_required");
+    expect(job?.lastPollError).toBe("Anchor session expired or required. Please reconnect your anchor session in settings.");
+    const status = await service.getOfframpPollStatus(links.get("lnk_1")!);
+    expect(status).toEqual({
+      reason: "anchor_auth_required",
+      message: "Anchor session expired or required. Please reconnect your anchor session in settings.",
+      at: job!.lastPollErrorAt!,
+    });
+  });
+
+  it("resumes polling the job once the seller re-authenticates", async () => {
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "job_auth",
+      linkId: "lnk_1",
+      anchor: "mock",
+      status: "pending",
+      externalStatus: null,
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
+      transferNotifiedAt: null,
+    });
+    const links = new FakeLinkRepository([
+      makeLink({ status: "offramp_pending", offrampJobId: "job_auth", offrampStatus: "pending" }),
+    ]);
+    const offramp = new ScriptedOffRamp();
+    let statusCalls = 0;
+    offramp.statusImpl = async (jobId) => {
+      statusCalls += 1;
+      return {
+        jobId,
+        linkId: "lnk_1",
+        status: "settled",
+        targetCurrency: "NGN",
+        targetAmount: "16500",
+        rate: "1650",
+      };
+    };
+
+    let live = false;
+    const service = makeService({
+      links,
+      offramp,
+      offrampState,
+      hasLiveAnchorSession: () => live,
+    });
+
+    // Blocked: no status() call, link stays pending.
+    await service.pollCashOuts();
+    expect(statusCalls).toBe(0);
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+
+    // Seller re-authenticates; the next tick polls and settles.
+    live = true;
+    await service.pollCashOuts();
+    expect(statusCalls).toBe(1);
+    expect(links.get("lnk_1")?.status).toBe("offramp_settled");
+    const job = await offrampState.getJob("job_auth");
+    expect(job?.lastPollReason).toBeNull();
+    expect(job?.lastPollError).toBeNull();
   });
 
   it("fails a link stuck at offramp_pending with no job id at all (can never resolve)", async () => {
