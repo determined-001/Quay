@@ -727,6 +727,7 @@ export interface AnchorSessionRepository {
   get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null>;
   save(session: AnchorSession): Promise<void>;
   delete(sellerId: string, anchorDomain: string): Promise<void>;
+  deleteAllForSeller(sellerId: string): Promise<number>;
   sweepExpired(now: number, graceMs: number): Promise<number>;
 }
 

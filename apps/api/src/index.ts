@@ -203,6 +203,9 @@ async function main(): Promise<void> {
       revocations: container.auth.revocations,
       secureCookie: container.auth.secureCookie,
       allowedOrigins: container.auth.allowedOrigins,
+      onLogout: async (sellerId: string) => {
+        await container.anchorSessions?.deleteAllForSeller(sellerId);
+      },
     }),
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));

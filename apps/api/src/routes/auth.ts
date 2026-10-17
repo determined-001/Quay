@@ -18,6 +18,8 @@ export function authRoutes(deps: {
   secureCookie?: boolean;
   /** CSRF allowlist for cookie-authenticated state changes (POST /logout). */
   allowedOrigins?: string[];
+  /** Optional callback invoked on seller logout (e.g. to revoke anchor sessions). Best-effort. */
+  onLogout?: (sellerId: string) => Promise<void> | void;
 }): Hono<{ Variables: AuthedVariables }> {
   const app = new Hono<{ Variables: AuthedVariables }>();
   const secure = deps.secureCookie ?? true;
@@ -84,6 +86,18 @@ export function authRoutes(deps: {
   // Logout: revoke the current token's jti (works even if the caller only has
   // the httpOnly cookie, since requireSeller accepts either) and clear the cookie.
   app.post("/logout", requireSeller(deps), async (ctx) => {
+    const seller = ctx.get("seller");
+    if (seller && deps.onLogout) {
+      try {
+        await deps.onLogout(seller.id);
+      } catch (err) {
+        // Best effort: a failure to delete anchor session must not fail the logout
+        ctx.get("logger")?.warn?.(
+          { event: "auth.logout.anchor_session_revoke_failed", sellerId: seller.id, err },
+          "failed to revoke anchor sessions during logout",
+        );
+      }
+    }
     await deps.revocations.revoke(ctx.get("jti"), ctx.get("sessionExp"));
     deleteCookie(ctx, SESSION_COOKIE, { path: "/" });
     return ctx.json({ ok: true });

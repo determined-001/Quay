@@ -95,6 +95,7 @@ export interface Container {
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
+  anchorSessions?: DrizzleAnchorSessionRepository | null;
   deleteAnchorCustomer?: ((customer: AnchorCustomer) => Promise<"deleted" | "not_found">) | null;
   telemetry: OffRampTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string | null; kycStatusCacheMs?: number };
@@ -342,6 +343,7 @@ export async function createContainer(): Promise<Container> {
     anchorDomain,
     kycRepo,
     anchorAuth: anchor?.auth ?? null,
+    anchorSessions: anchorSessionsRepo,
     deleteAnchorCustomer: anchor ? async (customer) => {
       const jwt = await anchor.auth.token(customer);
       const { kycServer } = await anchor.discovery.get();
