@@ -66,15 +66,22 @@ function stubAnchor(
     tokenClaims?: Record<string, unknown>;
     /** Replace the whole token (e.g. one with an unparsable payload). */
     rawToken?: string;
+    /** Domain the stub echoes as `client_domain` when the request asks for one. */
+    clientDomain?: string;
+    /** Source key of the `client_domain` op. Required with `clientDomain`. */
+    clientSigningKey?: Keypair;
   } = {},
 ) {
   const customers = new Map<string, { id: string; fields: Record<string, string> }>();
   const withdrawals: Array<{ account: string; sub: string }> = [];
+  /** Every XDR posted to /auth, so a test can inspect the signatures the anchor received. */
+  const authSubmissions: string[] = [];
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname === "/.well-known/stellar.toml") return new Response(TOML);
     if (url.pathname === "/auth" && init?.method === "POST") {
       const xdr = JSON.parse(init.body as string).transaction as string;
+      authSubmissions.push(xdr);
       const tx = TransactionBuilder.fromXDR(xdr, Networks.TESTNET) as Transaction;
       const account = tx.operations[0]!.source as string;
       return Response.json({
@@ -82,6 +89,10 @@ function stubAnchor(
       });
     }
     if (url.pathname === "/auth") {
+      // A real anchor includes the op only when the client asks; the stub echoes
+      // whatever domain the test configured, so a wrong-domain echo is provable.
+      const asked = url.searchParams.get("client_domain");
+      const clientDomain = asked && opts.clientDomain ? opts.clientDomain : null;
       const tx = WebAuth.buildChallengeTx(
         opts.signingKey ?? anchorKey,
         url.searchParams.get("account")!,
@@ -89,6 +100,9 @@ function stubAnchor(
         300,
         Networks.TESTNET,
         HOME,
+        null,
+        clientDomain,
+        clientDomain ? (opts.clientSigningKey?.publicKey() ?? null) : null,
       );
       return Response.json({ transaction: tx, network_passphrase: Networks.TESTNET });
     }
@@ -132,7 +146,7 @@ function stubAnchor(
     return new Response("unexpected", { status: 500 });
   });
   vi.stubGlobal("fetch", fetchMock);
-  return { customers, withdrawals, fetchMock };
+  return { customers, withdrawals, authSubmissions, fetchMock };
 }
 
 function setup() {
@@ -319,6 +333,107 @@ describe("SellerAnchorAuth", () => {
     await signIn(auth, ALICE, alice);
     const newWallet = { ...ALICE, account: Keypair.random().publicKey() };
     await expect(auth.token(newWallet)).rejects.toBeInstanceOf(AnchorAuthRequiredError);
+  });
+});
+
+describe("SellerAnchorAuth — SEP-10 client_domain (issue 3.12)", () => {
+  const QUAY_DOMAIN = "quay.example";
+  const quayServer = Keypair.random();
+
+  function authWithClientDomain() {
+    const discovery = new AnchorDiscovery({ homeDomain: HOME, fallbackBaseUrl: ORIGIN });
+    const sessions = new FakeAnchorSessionRepository();
+    const signed: string[] = [];
+    const auth = new SellerAnchorAuth({
+      discovery,
+      sessions,
+      networkPassphrase: Networks.TESTNET,
+      clientDomain: QUAY_DOMAIN,
+      signClientDomain: {
+        signingKey: quayServer.publicKey(),
+        coSign: (xdr) => {
+          signed.push(xdr);
+          const tx = TransactionBuilder.fromXDR(xdr, Networks.TESTNET) as Transaction;
+          tx.sign(quayServer);
+          return tx.toXDR();
+        },
+      },
+    });
+    return { auth, signed };
+  }
+
+  /** The URL of the GET /auth challenge request (not the TOML fetch or the POST). */
+  const challengeUrl = (anchor: ReturnType<typeof stubAnchor>) =>
+    new URL(
+      String(
+        anchor.fetchMock.mock.calls.find((c) => {
+          const u = new URL(String(c[0]));
+          return u.pathname === "/auth" && !c[1]?.method;
+        })![0],
+      ),
+    );
+
+  it("asks the anchor for the client_domain and co-signs the challenge Quay gets back", async () => {
+    const anchor = stubAnchor({ clientDomain: QUAY_DOMAIN, clientSigningKey: quayServer });
+    const { auth, signed } = authWithClientDomain();
+
+    const { transaction } = await auth.challenge(ALICE);
+    expect(challengeUrl(anchor).searchParams.get("client_domain")).toBe(QUAY_DOMAIN);
+
+    const walletSigned = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
+    walletSigned.sign(alice);
+    await auth.complete(ALICE, walletSigned.toXDR());
+
+    expect(signed).toHaveLength(1);
+    // The anchor accepted a challenge carrying the seller's wallet signature and
+    // Quay's client_domain signature; verifyChallengeTxSigners throws without both.
+    const found = WebAuth.verifyChallengeTxSigners(
+      anchor.authSubmissions.at(-1)!,
+      anchorKey.publicKey(),
+      Networks.TESTNET,
+      [alice.publicKey()],
+      HOME,
+      HOME,
+    );
+    expect(found).toContain(alice.publicKey());
+  });
+
+  it("relays the challenge unchanged when the anchor ignores the client_domain request", async () => {
+    const anchor = stubAnchor();
+    const { auth, signed } = authWithClientDomain();
+
+    const { transaction } = await auth.challenge(ALICE);
+    const walletSigned = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
+    walletSigned.sign(alice);
+    await auth.complete(ALICE, walletSigned.toXDR());
+
+    expect(signed).toHaveLength(0);
+    expect(anchor.authSubmissions.at(-1)).toBe(walletSigned.toXDR());
+  });
+
+  it("refuses a client_domain op that names another domain", async () => {
+    stubAnchor({ clientDomain: "evil.example", clientSigningKey: quayServer });
+    const { auth } = authWithClientDomain();
+    await expect(auth.challenge(ALICE)).rejects.toThrow(/names a domain that is not ours/);
+  });
+
+  it("refuses a client_domain op sourced by a key that is not Quay's SIGNING_KEY", async () => {
+    stubAnchor({ clientDomain: QUAY_DOMAIN, clientSigningKey: Keypair.random() });
+    const { auth } = authWithClientDomain();
+    await expect(auth.challenge(ALICE)).rejects.toThrow(/not sourced by Quay's signing key/);
+  });
+
+  it("sends no client_domain and does not co-sign when the feature is off", async () => {
+    const anchor = stubAnchor({ clientDomain: QUAY_DOMAIN, clientSigningKey: quayServer });
+    const { auth } = setup();
+
+    const { transaction } = await auth.challenge(ALICE);
+    expect(challengeUrl(anchor).searchParams.get("client_domain")).toBeNull();
+
+    const walletSigned = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
+    walletSigned.sign(alice);
+    await auth.complete(ALICE, walletSigned.toXDR());
+    expect(anchor.authSubmissions.at(-1)).toBe(walletSigned.toXDR());
   });
 });
 

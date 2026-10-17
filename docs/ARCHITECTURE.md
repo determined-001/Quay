@@ -166,13 +166,19 @@ payment operation, and each dedupes independently (issue 4.11).
 For security boundaries, attack paths and the failure branches of this flow, see the [seller-signed anchor threat model](THREAT-MODEL.md).
 
 The anchor's customer is always the **seller**, identified by their own wallet.
-Nothing in this flow is signed by a key the server holds: the seller's wallet
-signs the anchor's SEP-10 challenge (once, ahead of time) and the USDC transfer
-that funds the withdrawal. `SellerAnchorAuth` (`packages/offramp/src/anchor-session.ts`)
-verifies and relays the challenge and keeps the resulting JWT per seller in
-`anchor_sessions`, encrypted at rest. Sensitive seller payout fields (`sellers.payout_fields_encrypted`)
-and SEP-12 KYC records (`seller_kyc.fields_encrypted`) are likewise encrypted at rest using AES-256-GCM
-via `KYC_ENCRYPTION_KEY`.
+Every signature that moves value is the seller's: their wallet signs the
+anchor's SEP-10 challenge (once, ahead of time) and the USDC transfer that funds
+the withdrawal. The server holds no key that can move a seller's funds. With
+`ANCHOR_CLIENT_DOMAIN` on it adds one signature of its own, a SEP-10
+`client_domain` co-signature on the sequence-0 challenge, so anchors can
+attribute the seller to Quay; a sequence-0 transaction cannot be submitted, so
+that key cannot move anything (see `apps/api/src/services/client-domain-signer.ts`
+and `scripts/check-no-server-signing.mjs`). `SellerAnchorAuth`
+(`packages/offramp/src/anchor-session.ts`) verifies and relays the challenge and
+keeps the resulting JWT per seller in `anchor_sessions`, encrypted at rest.
+Sensitive seller payout fields (`sellers.payout_fields_encrypted`) and SEP-12
+KYC records (`seller_kyc.fields_encrypted`) are likewise encrypted at rest using
+AES-256-GCM via `KYC_ENCRYPTION_KEY`.
 
 **KYC status push (SEP-12 callback).** KYC status is otherwise only learned by polling `GET /customer`. After a
 seller submits KYC, `TestAnchorKyc` registers `<public origin>/anchor-callbacks/sep12/<anchor>/<token>` with the anchor
@@ -194,13 +200,14 @@ sequenceDiagram
   Note over Wallet,Testanchor: Once per seller (dashboard → Connect to anchor)
   Wallet->>API: POST /seller/anchor-auth/challenge
   API->>Auth: challenge({ sellerId, account: seller.wallet })
-  Auth->>Testanchor: GET /auth?account=seller.wallet
-  Auth->>Auth: readChallengeTx: anchor SIGNING_KEY, our network, this account
+  Auth->>Testanchor: GET /auth?account=seller.wallet (+ &client_domain=quay when enabled)
+  Auth->>Auth: readChallengeTx: anchor SIGNING_KEY, our network, this account, client_domain op
   API-->>Wallet: challenge XDR
   Wallet->>Wallet: sign (never submitted)
   Wallet->>API: POST /seller/anchor-auth { transaction }
   API->>Auth: complete(customer, signed)
-  Auth->>Testanchor: POST /auth { transaction }
+  Auth->>Auth: sign client_domain (Quay's SIGNING_KEY; seq-0 challenge only)
+  Auth->>Testanchor: POST /auth { transaction + Quay signature }
   Testanchor-->>Auth: { token } (sub = seller.wallet)
   Auth->>Auth: anchor_sessions.save(sellerId, token encrypted)
 

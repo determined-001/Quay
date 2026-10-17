@@ -284,6 +284,11 @@ export const env = {
   // seller). Auto-generates a throwaway testnet keypair if unset. Required on
   // public network — a login server's signing key must be stable across restarts.
   serverSigningSecret: process.env.SERVER_SIGNING_SECRET || undefined,
+  // Ask the anchor for a SEP-10 `client_domain` challenge and co-sign it with
+  // the server signing key, so anchors can attribute sellers to this deployment
+  // (issue 3.12). Off by default; the anchor must support the parameter, and
+  // HOME_DOMAIN must be publicly reachable so it can read Quay's stellar.toml.
+  anchorClientDomain: (process.env.ANCHOR_CLIENT_DOMAIN ?? "false") === "true",
   // Symmetric secret for session JWTs minted after a SEP-10 login. Auto-generates
   // an ephemeral one on testnet if unset (sessions won't survive a restart);
   // required on public network.

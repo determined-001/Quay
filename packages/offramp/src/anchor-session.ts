@@ -1,4 +1,4 @@
-import { WebAuth } from "@stellar/stellar-sdk";
+import { WebAuth, type Transaction } from "@stellar/stellar-sdk";
 import {
   AnchorAuthRequiredError,
   NOOP_LOGGER,
@@ -115,11 +115,41 @@ export class AnchorChallengeError extends Error {
   }
 }
 
+/**
+ * Adds Quay's SEP-10 signature to an anchor challenge so anchors can attribute
+ * a seller to this deployment (issue 3.12). The keypair behind it is Quay's own
+ * login identity: it holds no funds, and its signature is only added to a
+ * sequence-0 challenge that names our `client_domain`, a transaction that
+ * cannot be submitted to the network. It is injected in this narrow shape
+ * rather than as a keypair so {@link SellerAnchorAuth} never holds a secret.
+ */
+export interface ClientDomainSigner {
+  /**
+   * Public key of Quay's SEP-10 identity. Must be the source of the challenge's
+   * `client_domain` operation.
+   */
+  readonly signingKey: string;
+  /**
+   * Return the challenge XDR with Quay's signature appended. The implementation
+   * refuses anything that is not a verified sequence-0 challenge for our domain.
+   */
+  coSign(txXdr: string): string;
+}
+
 export interface SellerAnchorAuthOptions {
   discovery: AnchorDiscovery;
   /** Our network. A challenge built for any other network is refused. */
   networkPassphrase: string;
   sessions: AnchorSessionRepository;
+  /**
+   * Our own home domain. When set, the challenge asks the anchor for a
+   * `client_domain` and {@link SellerAnchorAuth.complete} co-signs it through
+   * `signClientDomain`, so the anchor can attribute the seller to Quay
+   * (SEP-10 "Verifying the Client Domain"). Off when unset.
+   */
+  clientDomain?: string;
+  /** Required with `clientDomain`. See {@link ClientDomainSigner}. */
+  signClientDomain?: ClientDomainSigner;
   logger?: Logger;
 }
 
@@ -133,12 +163,24 @@ export class SellerAnchorAuth {
   private readonly discovery: AnchorDiscovery;
   private readonly sessions: AnchorSessionRepository;
   private readonly networkPassphrase: string;
+  private readonly clientDomain: string | undefined;
+  private readonly signClientDomain: ClientDomainSigner | undefined;
   private readonly logger: Logger;
 
   constructor(opts: SellerAnchorAuthOptions) {
     this.discovery = opts.discovery;
     this.networkPassphrase = opts.networkPassphrase;
     this.sessions = opts.sessions;
+    this.clientDomain = opts.clientDomain;
+    this.signClientDomain = opts.signClientDomain;
+    // Half-configured client_domain is a boot-time mistake, not something to
+    // discover halfway through a seller's login.
+    if (this.clientDomain && !this.signClientDomain) {
+      throw new Error("SellerAnchorAuth: clientDomain is set but signClientDomain is missing");
+    }
+    if (this.signClientDomain && !this.clientDomain) {
+      throw new Error("SellerAnchorAuth: signClientDomain is set but clientDomain is missing");
+    }
     this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "anchor-auth", anchor: opts.discovery.homeDomain });
   }
 
@@ -158,6 +200,10 @@ export class SellerAnchorAuth {
     const url = new URL(d.webAuthEndpoint);
     url.searchParams.set("account", customer.account);
     url.searchParams.set("home_domain", this.anchorDomain);
+    // Ask the anchor to include a `client_domain` op we can co-sign, so it can
+    // attribute this seller to Quay (issue 3.12). Absent by default; an anchor
+    // that ignores it issues an ordinary challenge and we relay it unchanged.
+    if (this.clientDomain) url.searchParams.set("client_domain", this.clientDomain);
 
     const res = await fetch(url);
     if (!res.ok) {
@@ -182,12 +228,12 @@ export class SellerAnchorAuth {
    */
   async complete(customer: AnchorCustomer, signedTransaction: string): Promise<{ expiresAt: number }> {
     const d = await this.verifiableDiscovery();
-    this.verify(signedTransaction, d, customer.account);
+    const tx = this.verify(signedTransaction, d, customer.account);
 
     const res = await fetch(d.webAuthEndpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ transaction: signedTransaction }),
+      body: JSON.stringify({ transaction: this.coSignClientDomain(tx, signedTransaction) }),
     });
     if (!res.ok) {
       // The anchor's body stays out of the error (and so out of any HTTP
@@ -341,10 +387,11 @@ export class SellerAnchorAuth {
     return d;
   }
 
-  private verify(xdr: string, d: Sep1DiscoveryInfo, account: string): void {
+  private verify(xdr: string, d: Sep1DiscoveryInfo, account: string): Transaction {
     let clientAccountID: string;
+    let tx: Transaction;
     try {
-      ({ clientAccountID } = WebAuth.readChallengeTx(
+      ({ clientAccountID, tx } = WebAuth.readChallengeTx(
         xdr,
         d.signingKey as string,
         this.networkPassphrase,
@@ -357,6 +404,46 @@ export class SellerAnchorAuth {
     if (clientAccountID !== account) {
       throw new AnchorChallengeError("challenge is for a different account than the signed-in seller", "wrong_account");
     }
+    this.assertClientDomain(tx);
+    return tx;
+  }
+
+  /**
+   * The SDK tolerates a `client_domain` operation without checking who sourced
+   * it or what domain it names, because it does not know which client asked. We
+   * do: if the anchor echoed our `client_domain`, it must be exactly one op,
+   * sourced by our signing key, naming our domain. A challenge that claims a
+   * client_domain we did not ask for is refused rather than co-signed.
+   */
+  private assertClientDomain(tx: Transaction): void {
+    const clientDomainOps = tx.operations.filter((op) => op.type === "manageData" && op.name === "client_domain");
+    if (clientDomainOps.length === 0) return;
+    if (clientDomainOps.length > 1) {
+      throw new AnchorChallengeError("challenge has more than one client_domain operation");
+    }
+    if (!this.clientDomain || !this.signClientDomain) {
+      throw new AnchorChallengeError("challenge claims a client_domain we did not ask for");
+    }
+    const op = clientDomainOps[0]!;
+    if (op.type !== "manageData") return; // The filter guarantees this; narrows the type.
+    if (op.source !== this.signClientDomain.signingKey) {
+      throw new AnchorChallengeError("client_domain operation is not sourced by Quay's signing key");
+    }
+    if (op.value?.toString("utf8") !== this.clientDomain) {
+      throw new AnchorChallengeError("client_domain operation names a domain that is not ours");
+    }
+  }
+
+  /**
+   * Add Quay's signature so the anchor can attribute the seller to Quay. Only
+   * when we asked for a `client_domain` and the anchor included the op: an extra
+   * signature the anchor is not expecting is rejected as unrecognized.
+   */
+  private coSignClientDomain(tx: Transaction, signedTransaction: string): string {
+    if (!this.clientDomain || !this.signClientDomain) return signedTransaction;
+    const hasOp = tx.operations.some((op) => op.type === "manageData" && op.name === "client_domain");
+    if (!hasOp) return signedTransaction;
+    return this.signClientDomain.coSign(signedTransaction);
   }
 }
 
