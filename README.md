@@ -48,6 +48,8 @@ built on the chain whose anchor network can actually settle to local rails.
 
 ## Quickstart (5-Minute Integration)
 
+Widget API reference: [packages/widget/README.md](./packages/widget/README.md).
+
 ### 1. Install the Widget
 Embed the lightweight modal checkout script tag in your HTML and attach it to any button:
 
