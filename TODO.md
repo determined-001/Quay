@@ -4,7 +4,7 @@ Outstanding work, ordered by what blocks what. `MAINTAINER.md` is the older
 Drips-wave plan and is kept separate — this file tracks the mainnet cutover and
 the maintenance items that came out of it.
 
-Last updated: 2026-08-26.
+Last updated: 2026-10-16.
 
 ---
 
@@ -78,10 +78,11 @@ funds. See `docs/MAINNET.md` Phase 0.
 
 Remaining for this path:
 
-- [ ] Set `OFFRAMP=none` and `NEXT_PUBLIC_OFFRAMP_MODE=none` in the mainnet
-      deployment, and leave `DEFAULT_SELLER_SECRET` unset.
-      *(`render.mainnet.yaml` now declares `OFFRAMP=none` itself; the
-      `NEXT_PUBLIC_*` pair is set on the Vercel web deployment, not there.)*
+- [x] ~~Set `OFFRAMP=none` and `NEXT_PUBLIC_OFFRAMP_MODE=none` in the mainnet
+      deployment, and leave `DEFAULT_SELLER_SECRET` unset.~~ — live on mainnet
+      since 2026-09-06. `render.mainnet.yaml:109-110` declares `OFFRAMP=none`
+      (payments-only) and leaves `DEFAULT_SELLER_SECRET` unset; the web deployment
+      sets `NEXT_PUBLIC_OFFRAMP_MODE=none`.
 - [x] ~~Add an `OFFRAMP=none` variant to `render.mainnet.yaml`~~ — done. The
       blueprint ships payments-only; the anchor variables, `KYC_ENCRYPTION_KEY`
       and `DEFAULT_SELLER_SECRET` are one commented block to uncomment together
@@ -89,7 +90,7 @@ Remaining for this path:
 - [ ] Decide how the dashboard should explain that sellers cash out themselves —
       right now the button simply is not there, with no copy replacing it.
 
-## 3. Next stage — muxed correlation (#197)
+## 3. Next stage — muxed correlation (#197 — closed)
 
 First mainnet payment settled 2026-09-06 (`3e8dfd1…`, memo `pl_7j1wukfijsm1`,
 2 XLM, buyer wallet straight to merchant wallet). The loop is proven on real
@@ -102,9 +103,10 @@ forever, with no reconcile path in the product.
 
 `CORRELATION=muxed` removes the memo from the equation entirely: SEP-23 puts the
 id inside the destination address, and it is already implemented and wired.
-Not a blind flag flip, though — some older wallets and exchanges reject `M...`
-destinations, and a buyer who cannot pay at all is worse off than one whose
-payment lands unattributed.
+Evaluation completed and closed in #197 via PR #319 (see
+`docs/MUXED-CORRELATION-EVALUATION.md`). Not a blind flag flip, though — some
+older wallets and exchanges reject `M...` destinations, and a buyer who cannot
+pay at all is worse off than one whose payment lands unattributed.
 
 - [x] Set `CORRELATION=muxed` on the testnet service and pay a link from
       Freighter, Lobstr, xBull, and one exchange withdrawal. Record what
@@ -226,14 +228,13 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
 
 ## 5. Known gaps — not blockers, each has a real production cost
 
-- [ ] **`TestAnchorOffRamp` requires SEP-38, which the most plausible real
-      anchor does not implement.** `testanchor.ts:165` calls `getSep38Quote`
-      and `:116` calls `getSep38Prices`. Cowrie's stellar.toml declares
-      TRANSFER_SERVER, WEB_AUTH_ENDPOINT, KYC_SERVER and DIRECT_PAYMENT_SERVER
-      but **no ANCHOR_QUOTE_SERVER** — and no SEP-6-only anchor in the scan has
-      one. Integrating a real anchor therefore needs a non-SEP-38 pricing path:
-      fees are available from `/sep6/info` (`feeFixed` / `feePercent`), but the
-      FX rate is not.
+- [x] ~~**`TestAnchorOffRamp` requires SEP-38**~~ — resolved in issue 3.22
+      (#219). SEP-38 is now optional: `TestAnchorOffRamp.quote` calls
+      `getSep38Quote` only when the anchor declares `ANCHOR_QUOTE_SERVER`
+      (`packages/offramp/src/testanchor.ts:307`) and otherwise uses
+      `quoteWithoutSep38` (`:363`, `:386`) with fees from `/sep6/info`
+      (`feeFixed` / `feePercent`) and a configured rate source (`RateSourcePort`).
+      Which production anchor to trust remains an operational choice.
 - [ ] **`REDIS_URL` unset.** Rate-limit counters live in an in-process `Map`, so
       N instances allow N times the configured limit. Set before scaling past
       one instance.
@@ -261,39 +262,38 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
 
 ## 6. Mainnet-readiness audit (2026-08-25) — what stays with you
 
-The audit's twenty findings were triaged on 2026-08-26. Fifteen are ordinary
-engineering and are now filed as contributor issues — **#152–#166**, in
-`ISSUES.md` as 4.11, 4.12, 5.8–5.12, 6.6, 6.7, 7.8 and 8.8–8.12. What is left
-here is the part no contributor can do for you: it needs a secret, a credential,
-a paid account, or your judgement about real money.
+The audit's twenty findings were triaged on 2026-08-26. Fifteen were ordinary
+engineering filed as contributor issues — **#152–#166** (tracked in the
+GitHub issue tracker as 4.11, 4.12, 5.8–5.12, 6.6, 6.7, 7.8 and 8.8–8.12) —
+and all are now closed. What is left here is the part no contributor can do
+for you: it needs a secret, a credential, a paid account, or your judgement
+about real money.
 
 **Gate these two before anyone's fix ships**
 
-- [ ] **#152 — duplicate-payment protection keyed by transaction, not operation.**
-      A two-operation transaction, or one transaction paying two watched sellers,
-      leaves a fully-paid link `underpaid` or `unpaid` forever with no recovery
-      path. Review the fix and its migration yourself; a wrong dedup key is worse
-      than none.
-- [ ] **#159 — an API key can mint itself a broader key.** The escalation ends at
-      `payoutFields` on cash-out, which redirects proceeds. Review the subset
-      check personally, and rotate any API key issued before the fix lands.
+- [x] ~~**#152 — duplicate-payment protection keyed by transaction, not operation.**~~
+      Closed in #177 (issue 4.11). Dedup is keyed by operation paging token so
+      multi-operation transactions and multi-seller batches settle correctly.
+- [x] ~~**#159 — an API key can mint itself a broader key.**~~
+      Closed in #167 (issue 6.6). API key creation now validates that requested
+      scopes are a subset of the calling key's scopes.
 
 **Infrastructure you have to buy or provision**
 
-- [ ] **Redis.** `REDIS_URL` unset means rate-limit counters *and* SEP-10
-      challenge nonces (#160) are per-process — N instances, N× the limit and N
-      redemptions of one signature. Provision before scaling past one instance.
+- [x] ~~**SEP-10 challenge nonces (#160) are per-process**~~ — closed in #175
+      (issue 6.7). Shared Redis-backed challenge store implemented;
+      `apps/api/src/env.ts:232-235` and `container.ts` require `REDIS_URL` or
+      `SINGLE_INSTANCE=true` on public networks. (Setting `REDIS_URL` in production
+      remains tracked in §5).
 - [ ] **A real database.** Tracked in §1; repeated here because it is the single
       item that loses the payment ledger rather than degrading a feature.
-- [ ] **A least-privilege API key for the synthetic uptime check** (#163), stored
-      as a repo secret. The check has been failing since seller auth landed and
-      cannot be fixed without a credential you issue.
-- [ ] **Mainnet monitoring targets** (#162). The schedule is back on and now
-      publishes to a dedicated `status` branch instead of committing to `main`
-      every five minutes — which is why it was disabled in `a0f06d1` — so the
-      README badges are live again. What is left is yours: set
-      `UPTIME_MAINNET_API_URL` (and optionally `UPTIME_MAINNET_WEB_URL`) as repo
-      variables once `quay-api-mainnet` exists.
+- [x] ~~**A least-privilege API key for the synthetic uptime check** (#163)~~ —
+      closed in #181 (issue 8.9). Workflow supports `UPTIME_API_KEY` and
+      `UPTIME_MAINNET_API_KEY` (`.github/workflows/uptime.yml:38-47`); confirming
+      the repo secret is set remains with the maintainer.
+- [x] ~~**Mainnet monitoring targets** (#162)~~ — closed in #179 (issue 8.8).
+      Multi-environment monitoring is implemented and reads `UPTIME_MAINNET_API_URL`;
+      setting the repo variable remains with the maintainer.
 - [ ] **Set `ANCHOR_PROBE_DISABLED=1` and the `PROD_*` backup secrets** once the
       mainnet service exists — see §5. Both are now variable/secret flips, not
       code changes.
@@ -314,13 +314,11 @@ a paid account, or your judgement about real money.
 
 **Backlog hygiene**
 
-- [ ] Six stale contributor PRs were closed on 2026-08-26 (#80, #101, #102, #104,
-      #110, #118) — each had drifted a month behind `main` and no longer merged;
-      one did not compile. Their issues stay open and unclaimed: **#14** (SEP-1
-      discovery), **#22** (durable webhook queue — also the audit's "one slow
-      receiver stalls every seller" finding), **#35** (expiry countdown),
-      **#37** (Playwright e2e), **#41** (per-seller scoping), **#49** (coverage
-      gating). Consider labelling `help-wanted` so they are visibly free.
+- [x] ~~Six stale contributor PRs were closed on 2026-08-26 (#80, #101, #102, #104,
+      #110, #118)~~ — all corresponding issues have since shipped and closed:
+      **#14** (3.2 SEP-1 discovery), **#22** (4.2 durable webhook queue),
+      **#35** (5.5 expiry countdown), **#37** (5.7 Playwright e2e),
+      **#41** (6.4 per-seller scoping), and **#49** (8.1 coverage gating).
 
 ---
 
