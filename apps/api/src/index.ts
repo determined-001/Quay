@@ -122,8 +122,10 @@ async function main(): Promise<void> {
       horizon: container.horizonStatus(),
       // Anchor health probe + circuit breaker (issue #19, 3.7) so an operator
       // can tell "the anchor is down" apart from "the API is down" without
-      // tailing logs.
+      // tailing logs. `anchors` reports every configured anchor's breaker
+      // side by side (issue 3.23); `anchor` stays for the primary anchor.
       anchor: container.service.healthSnapshot(),
+      anchors: container.service.healthSnapshots(),
     });
   });
 
@@ -203,6 +205,9 @@ async function main(): Promise<void> {
       revocations: container.auth.revocations,
       secureCookie: container.auth.secureCookie,
       allowedOrigins: container.auth.allowedOrigins,
+      onLogout: async (sellerId: string) => {
+        await container.anchorSessions?.deleteAllForSeller(sellerId);
+      },
     }),
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
@@ -262,13 +267,19 @@ async function main(): Promise<void> {
     const forceExit = setTimeout(() => {
       logger.warn({ event: "api.shutdown.forced" }, "shutdown grace period elapsed - forcing exit");
       process.exit(1);
-    }, 10_000);
+    }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
     server.close(() => {
-      container.stop();
-      clearTimeout(forceExit);
-      process.exit(0);
+      void (async () => {
+        try {
+          await container.stop();
+        } catch (err) {
+          logger.warn({ event: "api.shutdown.stop_failed", err }, "container stop failed during shutdown");
+        }
+        clearTimeout(forceExit);
+        process.exit(0);
+      })();
     });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));

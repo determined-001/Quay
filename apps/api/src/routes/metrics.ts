@@ -52,7 +52,7 @@ export function metricsRoutes(container: Container): Hono<{ Variables: RequestCo
     metrics.accountsWatched.set(accounts.length);
     metrics.pendingCashOuts.set(pendingCashOuts.length);
     metrics.webhookQueueDepth.set(await container.service.webhookQueueDepth());
-    metrics.circuitBreakerState.set(container.circuitBreakerState());
+    metrics.circuitBreakerState.set({ anchor: container.anchorDomain ?? "none" }, container.circuitBreakerState());
     metrics.watcherLagSeconds.set(container.watcherLagSeconds());
 
     return ctx.text(metrics.registry.render(), 200, {

@@ -27,6 +27,9 @@ interface AccountStream {
   // so far" without racing a message that arrived but hasn't finished
   // normalizing yet (normalizing awaits a memo fetch).
   pending: Promise<void>;
+  // Earliest paging token that failed to ingest; prevents advancing the cursor
+  // or returning subsequent payments until the failure is recovered.
+  failedPagingToken: string | null;
 }
 
 /**
@@ -50,18 +53,30 @@ export class StreamingHorizonWatcher implements WatcherPort {
 
   constructor(
     horizonUrlOrClient: string | HorizonClient,
-    opts?: { log?: (msg: string) => void; initialBackoffMs?: number; maxBackoffMs?: number },
+    opts?: {
+      log?: (msg: string) => void;
+      initialBackoffMs?: number;
+      maxBackoffMs?: number;
+    },
   ) {
     this.client =
-      typeof horizonUrlOrClient === "string" ? realHorizonClient(horizonUrlOrClient) : horizonUrlOrClient;
+      typeof horizonUrlOrClient === "string"
+        ? realHorizonClient(horizonUrlOrClient)
+        : horizonUrlOrClient;
     this.log = opts?.log ?? (() => {});
-    this.initialBackoffMs = opts?.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS;
+    this.initialBackoffMs =
+      opts?.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS;
     this.maxBackoffMs = opts?.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
   }
 
   async latestCursor(account: string): Promise<string | null> {
     try {
-      const page = await this.client.payments().forAccount(account).order("desc").limit(1).call();
+      const page = await this.client
+        .payments()
+        .forAccount(account)
+        .order("desc")
+        .limit(1)
+        .call();
       const rec = page.records[0];
       return rec ? rec.paging_token : null;
     } catch (err) {
@@ -70,11 +85,25 @@ export class StreamingHorizonWatcher implements WatcherPort {
     }
   }
 
-  async fetchSince(account: string, cursor: string, limit = 200): Promise<NormalizedPayment[]> {
+  async fetchSince(
+    account: string,
+    cursor: string,
+    limit = 200,
+  ): Promise<NormalizedPayment[]> {
     const stream = this.ensureStream(account, cursor);
     await stream.pending;
+
     const out = [...stream.buffer.values()]
-      .filter((p) => comparePagingToken(p.pagingToken, cursor) > 0)
+      .filter((p) => {
+        if (comparePagingToken(p.pagingToken, cursor) <= 0) return false;
+        if (
+          stream.failedPagingToken &&
+          comparePagingToken(p.pagingToken, stream.failedPagingToken) >= 0
+        ) {
+          return false;
+        }
+        return true;
+      })
       .sort((a, b) => comparePagingToken(a.pagingToken, b.pagingToken))
       .slice(0, limit);
 
@@ -82,7 +111,8 @@ export class StreamingHorizonWatcher implements WatcherPort {
     // for it again (fetchSince is called with a monotonically advancing
     // cursor) — drop it so the buffer doesn't grow forever.
     for (const [token, payment] of stream.buffer) {
-      if (comparePagingToken(payment.pagingToken, cursor) <= 0) stream.buffer.delete(token);
+      if (comparePagingToken(payment.pagingToken, cursor) <= 0)
+        stream.buffer.delete(token);
     }
 
     return out;
@@ -110,23 +140,30 @@ export class StreamingHorizonWatcher implements WatcherPort {
       reconnectTimer: null,
       stopped: false,
       pending: Promise.resolve(),
+      failedPagingToken: null,
     };
     this.streams.set(account, stream);
     this.connect(account, stream, cursor);
     return stream;
   }
 
-  private connect(account: string, stream: AccountStream, fromCursor: string): void {
+  private connect(
+    account: string,
+    stream: AccountStream,
+    fromCursor: string,
+  ): void {
     stream.close = this.client
       .payments()
       .forAccount(account)
       .cursor(fromCursor)
       .stream({
         onmessage: (record) => {
-          stream.pending = stream.pending.then(
-            () => this.ingest(stream, record),
-            () => this.ingest(stream, record), // a prior ingest failing must not wedge later messages
-          );
+          stream.pending = stream.pending
+            .catch(() => {})
+            .then(() => this.ingest(stream, record))
+            .catch((err) => {
+              this.log(`ingest ${short(account)} error: ${stringifyErr(err)}`);
+            });
         },
         onerror: (err) => {
           this.log(`stream ${short(account)} error: ${stringifyErr(err)}`);
@@ -147,7 +184,10 @@ export class StreamingHorizonWatcher implements WatcherPort {
   }
 
   /** Resume from the last persisted cursor, reconciling the gap via one polled page. */
-  private async reconnect(account: string, stream: AccountStream): Promise<void> {
+  private async reconnect(
+    account: string,
+    stream: AccountStream,
+  ): Promise<void> {
     if (stream.stopped) return;
     try {
       let builder = this.client
@@ -174,13 +214,62 @@ export class StreamingHorizonWatcher implements WatcherPort {
     this.connect(account, stream, stream.highWaterMark);
   }
 
-  private async ingest(stream: AccountStream, record: HorizonPaymentRecord): Promise<void> {
-    const normalized = await normalizePayment(record);
-    if (comparePagingToken(record.paging_token, stream.highWaterMark) > 0) {
-      stream.highWaterMark = record.paging_token;
+  private async ingest(
+    stream: AccountStream,
+    record: HorizonPaymentRecord,
+  ): Promise<void> {
+    const maxAttempts = 3;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (stream.stopped) return;
+      try {
+        const normalized = await normalizePayment(record);
+        if (normalized) {
+          stream.buffer.set(normalized.pagingToken, normalized);
+        }
+        if (
+          stream.failedPagingToken &&
+          comparePagingToken(record.paging_token, stream.failedPagingToken) ===
+            0
+        ) {
+          stream.failedPagingToken = null;
+        }
+        if (
+          !stream.failedPagingToken ||
+          comparePagingToken(record.paging_token, stream.failedPagingToken) < 0
+        ) {
+          if (
+            comparePagingToken(record.paging_token, stream.highWaterMark) > 0
+          ) {
+            stream.highWaterMark = record.paging_token;
+          }
+        }
+        return;
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxAttempts && !stream.stopped) {
+          const delay = Math.min(stream.backoffMs, 50);
+          if (delay > 0) {
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      }
     }
-    if (!normalized) return;
-    stream.buffer.set(normalized.pagingToken, normalized);
+
+    if (
+      !stream.failedPagingToken ||
+      comparePagingToken(record.paging_token, stream.failedPagingToken) < 0
+    ) {
+      stream.failedPagingToken = record.paging_token;
+    }
+    const target =
+      "to" in record && typeof record.to === "string"
+        ? record.to
+        : record.source_account;
+    this.log(
+      `ingest ${short(target ?? "")} token ${record.paging_token} failed after ${maxAttempts} attempts: ${stringifyErr(lastError)}`,
+    );
   }
 }
 

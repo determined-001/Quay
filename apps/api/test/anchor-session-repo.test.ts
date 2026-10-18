@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AnchorSession } from "@checkout/core";
 import { createDb, bootstrap, type DB } from "../src/db/client";
 import { anchorSessions } from "../src/db/schema";
-import { DrizzleAnchorSessionRepository } from "../src/repos/index";
+import { DrizzleAnchorSessionRepository, DrizzleSellerRepository } from "../src/repos/index";
 
 async function makeDb(): Promise<DB> {
   const { db, client } = createDb(":memory:");
@@ -57,6 +57,39 @@ describe("DrizzleAnchorSessionRepository", () => {
     await repo.save(session());
     await repo.delete("sel_1", "anchor.example");
     expect(await repo.get("sel_1", "anchor.example")).toBeNull();
+  });
+
+  it("deletes all anchor sessions for a seller across multiple domains and keeps other sellers' sessions", async () => {
+    const repo = new DrizzleAnchorSessionRepository(await makeDb());
+    await repo.save(session({ sellerId: "sel_1", anchorDomain: "anchor-a.example" }));
+    await repo.save(session({ sellerId: "sel_1", anchorDomain: "anchor-b.example" }));
+    await repo.save(session({ sellerId: "sel_2", anchorDomain: "anchor-a.example" }));
+
+    const deletedCount = await repo.deleteAllForSeller("sel_1");
+    expect(deletedCount).toBe(2);
+
+    expect(await repo.get("sel_1", "anchor-a.example")).toBeNull();
+    expect(await repo.get("sel_1", "anchor-b.example")).toBeNull();
+    expect(await repo.get("sel_2", "anchor-a.example")).not.toBeNull();
+  });
+
+  it("revokes anchor sessions when ensureDefault changes the seller's wallet", async () => {
+    const db = await makeDb();
+    const sellersRepo = new DrizzleSellerRepository(db);
+    const sessionsRepo = new DrizzleAnchorSessionRepository(db);
+
+    // Initial seller setup
+    const seller = await sellersRepo.ensureDefault("GWALLET_OLD", "Store");
+    await sessionsRepo.save(session({ sellerId: seller.id, account: "GWALLET_OLD" }));
+    expect(await sessionsRepo.get(seller.id, "anchor.example")).not.toBeNull();
+
+    // ensureDefault called with identical wallet: sessions must remain
+    await sellersRepo.ensureDefault("GWALLET_OLD", "Store");
+    expect(await sessionsRepo.get(seller.id, "anchor.example")).not.toBeNull();
+
+    // ensureDefault called with updated wallet: old anchor sessions must be deleted
+    await sellersRepo.ensureDefault("GWALLET_NEW", "Store");
+    expect(await sessionsRepo.get(seller.id, "anchor.example")).toBeNull();
   });
 
   describe("sweepExpired", () => {

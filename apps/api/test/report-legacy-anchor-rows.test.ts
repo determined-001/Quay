@@ -114,7 +114,11 @@ beforeEach(async () => {
 
 afterEach(() => {
   close();
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  } catch {
+    // Best effort cleanup on Windows temp directories
+  }
 });
 
 describe("buildReport", () => {

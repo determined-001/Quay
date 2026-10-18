@@ -147,6 +147,11 @@ export const offrampQuotes = sqliteTable("offramp_quotes", {
   sellAmount: text("sell_amount").notNull(),
   buyCurrency: text("buy_currency").notNull(),
   price: text("price").notNull(),
+  // SEP-6 withdraw type resolved at quote time. `initiate()` must reuse it —
+  // quoting for one rail and withdrawing on another is how a seller ends up
+  // paid at a rate that was never quoted for their actual payout method.
+  // NULL on rows saved before this column existed.
+  withdrawType: text("withdraw_type"),
   // The figures shown to the seller at quote time; null on pre-existing rows.
   quotedRate: text("quoted_rate"),
   quotedTargetAmount: text("quoted_target_amount"),

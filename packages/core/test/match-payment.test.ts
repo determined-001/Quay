@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { matchPayment, type NormalizedPayment } from "../src/matching/match-payment";
 import type { PaymentLink } from "../src/domain/payment-link";
+import { createLinkSchema } from "../src/schemas";
 
 // ── Shared constants ──────────────────────────────────────────────────────────
 
@@ -487,5 +488,13 @@ describe("property: memo whitespace is not trimmed", () => {
       ),
       { numRuns: RUNS },
     );
+  });
+});
+
+describe("zero-amount link prevention", () => {
+  it("a zero-amount link cannot be created through createLinkSchema, so it never reaches matchPayment", () => {
+    const parsed = createLinkSchema.safeParse({ title: "Zero payment link", amount: "0" });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) expect(parsed.error.issues[0]?.message).toBe("amount must be a positive number with at most 7 decimals");
   });
 });

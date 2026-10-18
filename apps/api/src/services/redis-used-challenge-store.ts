@@ -1,19 +1,36 @@
 import { createClient, type RedisClientType } from "redis";
 import type { UsedChallengeStore } from "@checkout/core";
 
+export interface RedisUsedChallengeStoreClient {
+  on?(event: "error", listener: (err: unknown) => void): unknown;
+  connect(): Promise<unknown>;
+  set(
+    key: string,
+    value: string,
+    options?: { NX?: boolean; PX?: number },
+  ): Promise<string | null | unknown>;
+}
+
 /**
  * Shared single-use claim for SEP-10 challenges across instances (issue 6.7).
  * `SET NX` is atomic in Redis, so two instances racing the same already-signed
  * challenge cannot both win: only the first `claim()` call gets "OK" back.
  */
 export class RedisUsedChallengeStore implements UsedChallengeStore {
-  private client: RedisClientType;
+  private client: RedisUsedChallengeStoreClient;
   private connecting: Promise<void>;
 
-  constructor(url: string) {
-    this.client = createClient({ url });
-    this.client.on("error", (err) => console.error("[sep10-challenge] redis error", err));
-    this.connecting = this.client.connect().then(() => undefined);
+  constructor(
+    urlOrClient: string | RedisUsedChallengeStoreClient,
+    client?: RedisUsedChallengeStoreClient,
+  ) {
+    if (typeof urlOrClient === "string") {
+      this.client = (client ?? createClient({ url: urlOrClient })) as unknown as RedisUsedChallengeStoreClient;
+    } else {
+      this.client = urlOrClient;
+    }
+    this.client.on?.("error", (err) => console.error("[sep10-challenge] redis error", err));
+    this.connecting = Promise.resolve(this.client.connect()).then(() => undefined);
   }
 
   async claim(hash: string, expiresAt: number): Promise<boolean> {

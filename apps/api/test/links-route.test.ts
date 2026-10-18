@@ -275,6 +275,68 @@ describe("cash-out routes — offramp_rejected", () => {
     expect(res.status).toBe(422);
     expect(await res.json()).toMatchObject({ error: "offramp_rejected", limits: { maxAmount: 10 } });
   });
+
+  it("GET /:id/cash-out/quote normalises lower-case targetCurrency to upper-case before calling quoteCashOut", async () => {
+    const container = fakeContainer();
+    let quotedCurrency: string | undefined;
+    (container.service as unknown as Record<string, unknown>).quoteCashOut = async (
+      _linkId: string,
+      currency: string,
+    ) => {
+      quotedCurrency = currency;
+      return { grossAmount: "100", feeAmount: "2", netAmount: "98", rate: "1650", expiresAt: 1750000000000 };
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=ngn`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(quotedCurrency).toBe("NGN");
+  });
+
+  it("GET /:id/cash-out/quote rejects malformed or missing targetCurrency without calling quoteCashOut", async () => {
+    const container = fakeContainer();
+    let quoteCalled = false;
+    (container.service as unknown as Record<string, unknown>).quoteCashOut = async () => {
+      quoteCalled = true;
+      return {};
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    // Empty targetCurrency
+    const emptyRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(emptyRes.status).toBe(400);
+    expect(await emptyRes.json()).toMatchObject({ error: "invalid_query", message: "targetCurrency is required" });
+    expect(quoteCalled).toBe(false);
+
+    // Too short (2 letters)
+    const shortRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=NG`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(shortRes.status).toBe(400);
+    expect(await shortRes.json()).toMatchObject({ error: "invalid_query", issues: expect.any(Array) });
+    expect(quoteCalled).toBe(false);
+
+    // Too long (4 letters)
+    const longRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=NGNN`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(longRes.status).toBe(400);
+    expect(await longRes.json()).toMatchObject({ error: "invalid_query", issues: expect.any(Array) });
+    expect(quoteCalled).toBe(false);
+
+    // Non-alphabetical
+    const nonAlphaRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=123`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(nonAlphaRes.status).toBe(400);
+    expect(await nonAlphaRes.json()).toMatchObject({ error: "invalid_query", issues: expect.any(Array) });
+    expect(quoteCalled).toBe(false);
+  });
 });
 
 describe("GET /links/:id/cash-out/transfer — non-custodial transfer instructions", () => {

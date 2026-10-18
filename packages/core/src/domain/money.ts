@@ -4,10 +4,21 @@
 
 export const STELLAR_DECIMALS = 7;
 
+/** Maximum Stellar amount: (2^63 - 1) stroops = 922337203685.4775807. */
+export const MAX_AMOUNT = "922337203685.4775807";
+export const MAX_STROOPS = 9_223_372_036_854_775_807n; // 2n ** 63n - 1n
+
 const AMOUNT_RE = /^\d+(\.\d{1,7})?$/;
 
 export function isValidAmount(amount: string): boolean {
   return AMOUNT_RE.test(amount.trim());
+}
+
+/** Check if amount is valid, strictly positive, and does not exceed maximum Stellar stroops. */
+export function isPositiveAmount(amount: string): boolean {
+  if (!isValidAmount(amount)) return false;
+  const stroops = toStroops(amount);
+  return stroops > 0n && stroops <= MAX_STROOPS;
 }
 
 /** Convert a decimal amount string ("12.3456789") to integer stroops (BigInt). */

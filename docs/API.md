@@ -537,9 +537,9 @@ settled.
   "withdrawType": "bank_account"
 }
 ```
-- `targetCurrency` — 3-letter code, defaults to `NGN`.
+- `targetCurrency` — 3-letter ISO 4217 code (case-insensitive, normalised to uppercase), defaults to `NGN`.
 - `payoutFields` — opaque string map handed to the anchor adapter.
-- `quoteId` — *optional*. The firm quote ID returned by `GET /links/:id/cash-out/quote`. When supplied, the withdrawal initiates against that exact quote with no re-quote. If omitted, a fresh quote is fetched and initiated atomically.
+- `quoteId` — *optional*. The firm quote ID returned by `GET /links/:id/cash-out/quote` (which requires `targetCurrency` in the same 3-letter ISO 4217 format). When supplied, the withdrawal initiates against that exact quote with no re-quote. If omitted, a fresh quote is fetched and initiated atomically.
 - `withdrawType` — optional SEP-6 withdrawal type (`bank_account`, `cash`, …)
   when the anchor offers several rails; the seller's choice, discovered from
   `GET /links/:id/offramp-requirements`. Omitted, the adapter falls back to

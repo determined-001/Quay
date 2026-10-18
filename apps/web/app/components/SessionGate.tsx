@@ -76,13 +76,37 @@ export default function SessionGate({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     setBusy(true);
     try {
-      await api.logout().catch(() => {
-        // Revoking server-side is best effort; dropping the local token is what
-        // actually signs this browser out.
-      });
-      await disconnectWallet();
+      try {
+        const linksRes = await api.listLinks().catch(() => null);
+        const hasPendingOfframp = linksRes?.links.some((l) => l.status === "offramp_pending");
+        if (hasPendingOfframp) {
+          const anchorAuth = await api.getAnchorAuth().catch(() => null);
+          const anchorName = anchorAuth?.anchor ?? "the anchor";
+          const confirmed =
+            typeof window !== "undefined" && typeof window.confirm === "function"
+              ? window.confirm(
+                  `You have a cash-out in progress. Signing out also disconnects you from ${anchorName}; we will not see updates until you reconnect.`,
+                )
+              : true;
+          if (!confirmed) {
+            setBusy(false);
+            return;
+          }
+        }
+      } catch {
+        // Warning check is best effort: do not block logout if the check itself throws
+      }
+
+      try {
+        await api.logout().catch(() => {
+          // Revoking server-side is best effort; dropping the local token is what
+          // actually signs this browser out.
+        });
+        await disconnectWallet();
+      } finally {
+        setAddress(null);
+      }
     } finally {
-      setAddress(null);
       setBusy(false);
     }
   }, []);

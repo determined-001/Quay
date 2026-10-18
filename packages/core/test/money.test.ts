@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { toStroops, compareAmount, normalizeAmount, isValidAmount } from "../src/domain/money";
+import {
+  toStroops,
+  compareAmount,
+  normalizeAmount,
+  isValidAmount,
+  isPositiveAmount,
+  MAX_AMOUNT,
+} from "../src/domain/money";
+import { createLinkSchema } from "../src/schemas";
 
 // ── Arbitraries ───────────────────────────────────────────────────────────────
 
@@ -205,5 +213,50 @@ describe("property: stroops addition is associative", () => {
       }),
       { numRuns: RUNS },
     );
+  });
+});
+
+describe("money: isPositiveAmount", () => {
+  it("accepts strictly positive amounts within Stellar bounds", () => {
+    for (const v of ["100", "10.5", "0.0000001", MAX_AMOUNT, "922337203685"]) {
+      expect(isPositiveAmount(v), v).toBe(true);
+    }
+  });
+
+  it("rejects zero amounts", () => {
+    for (const v of ["0", "0.0", "0.0000000"]) expect(isPositiveAmount(v), v).toBe(false);
+  });
+
+  it("rejects amounts exceeding the Stellar int64 stroop limit", () => {
+    for (const v of ["922337203685.4775808", "922337203686", "999999999999999"]) {
+      expect(isPositiveAmount(v), v).toBe(false);
+    }
+  });
+
+  it("rejects negative, empty, non-numeric, or overly precise amounts", () => {
+    for (const v of ["-1", "-0.5", "", "abc", "1.12345678"]) expect(isPositiveAmount(v), v).toBe(false);
+  });
+});
+
+describe("schemas: createLinkSchema amount validation", () => {
+  const MESSAGE = "amount must be a positive number with at most 7 decimals";
+
+  it("rejects zero amounts with the positive number message", () => {
+    for (const zero of ["0", "0.0", "0.0000000"]) {
+      const parsed = createLinkSchema.safeParse({ title: "Item", amount: zero });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) expect(parsed.error.issues[0]?.message).toBe(MESSAGE);
+    }
+  });
+
+  it("rejects amounts above the maximum Stellar amount", () => {
+    const parsed = createLinkSchema.safeParse({ title: "Huge", amount: "922337203685.4775808" });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) expect(parsed.error.issues[0]?.message).toBe(MESSAGE);
+  });
+
+  it("accepts the boundary amounts", () => {
+    expect(createLinkSchema.safeParse({ title: "Min", amount: "0.0000001" }).success).toBe(true);
+    expect(createLinkSchema.safeParse({ title: "Max", amount: "922337203685.4775807" }).success).toBe(true);
   });
 });

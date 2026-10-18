@@ -146,7 +146,7 @@ Copy each value straight into your platform's secret manager, then close the
 terminal.
 
 It generates `JWT_SECRET`, `KYC_ENCRYPTION_KEY`,
-`WEBHOOK_SECRET_ENCRYPTION_KEY`, `METRICS_TOKEN`, the seller keypair, and
+`WEBHOOK_SECRET_ENCRYPTION_KEY`, `METRICS_TOKEN`, and
 `SERVER_SIGNING_SECRET`. It does not generate `ANCHOR_URL`,
 `ANCHOR_HOME_DOMAIN`, `DATABASE_URL`, `DATABASE_AUTH_TOKEN` or `CORS_ORIGINS` —
 supply those by hand.
