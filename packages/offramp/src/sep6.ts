@@ -2,6 +2,7 @@ import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER, OffRampRejectedError } from "@checkout/core";
 import { endpointUrl } from "./sep1";
 import { anchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
 
 export interface Sep6WithdrawResult {
   id: string;
@@ -71,7 +72,7 @@ export async function getSep6Info(baseUrl: string, logger?: Logger): Promise<Sep
   if (cached && Date.now() - cached.at < INFO_TTL_MS) return cached.info;
 
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep6", baseUrl });
-  const res = await fetch(endpointUrl(baseUrl, "info"));
+  const res = await anchorFetch(endpointUrl(baseUrl, "info"));
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.info.fail", statusCode: res.status }, "SEP-6 /info failed");
     throw await anchorHttpError("6", "/info", res);
@@ -277,7 +278,7 @@ export async function startSep6Withdraw(
     },
     "starting SEP-6 withdraw",
   );
-  const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
+  const res = await anchorFetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
     throw await anchorHttpError("6", "withdraw", res);
@@ -303,7 +304,7 @@ export async function getSep6Transaction(
   url.searchParams.set("id", id);
 
   const t0 = Date.now();
-  const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
+  const res = await anchorFetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.status.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 transaction fetch failed");
     throw await anchorHttpError("6", "transaction fetch", res);
