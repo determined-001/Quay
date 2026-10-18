@@ -8,4 +8,5 @@ export * from "./rates";
 export * from "./anchor-session";
 export * from "./sep12";
 export * from "./sep12-callback";
+export * from "./sep38";
 export * from "./anchor-error";

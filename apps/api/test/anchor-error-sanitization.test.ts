@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { Logger } from "@checkout/core";
-import { AnchorChallengeError, AnchorHttpError, type SellerAnchorAuth } from "@checkout/offramp";
+import {
+  AnchorChallengeError,
+  AnchorHttpError,
+  AnchorRejectedError,
+  anchorCallError,
+  type SellerAnchorAuth,
+} from "@checkout/offramp";
 import { linkRoutes } from "../src/routes/links";
 import { kycRoutes } from "../src/routes/kyc";
 import { anchorAuthRoutes } from "../src/routes/anchor-auth";
@@ -115,6 +121,67 @@ describe("link routes: anchor failures", () => {
     container.client.close();
   });
 
+  // Issue 3.29: the same 400 that used to look like an outage is now an
+  // answer — 422 with the anchor's structured reason, and the anchor's own
+  // prose still never on the wire (issue 4.36).
+  it("cash-out quote: an anchor 400 is 422 offramp_rejected with structured detail only", async () => {
+    const { container, app, headers, linkId, lines } = await setup();
+    container.offramp.quote = async () => {
+      // Exactly what SEP-38 throws when the anchor answers 400 — built by the
+      // real classifier, not by hand, so this is the path production runs.
+      throw await anchorCallError(
+        "38",
+        "quote",
+        new Response(
+          JSON.stringify({
+            type: "unsupported_asset_pair",
+            error: `${MARKER} first_name=Ada bank_account_number=1234567890`,
+            fields: ["sell_asset"],
+          }),
+          { status: 400 },
+        ),
+      );
+    };
+    const res = await app.request(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`, { headers });
+    expect(res.status).toBe(422);
+    await expectNoMarker(res.clone());
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.error).toBe("offramp_rejected");
+    expect(json.message).toBe("The anchor rejected this request (SEP-38 quote, HTTP 400).");
+    expect(json.anchorRejection).toEqual({ type: "unsupported_asset_pair", fields: ["sell_asset"] });
+    // The free-text `error` is anchor body text and may echo the seller's own
+    // fields back at us — it belongs in the log, nowhere else.
+    expect(json.anchorRejection).not.toHaveProperty("error");
+    const entry = lines.find((l) => l.event === "anchor.rejected");
+    expect(entry).toMatchObject({ sep: "38", op: "quote", statusCode: 400 });
+    expect(String(entry?.body)).toContain(MARKER);
+    container.client.close();
+  });
+
+  it("cash-out: an anchor 403 is 422 even when the body is not structured at all", async () => {
+    const { container, app, headers, linkId, lines } = await setup();
+    container.offramp.quote = async () => {
+      throw await anchorCallError(
+        "6",
+        "withdraw",
+        new Response(`<html><pre>${MARKER}</pre></html>`, { status: 403 }),
+      );
+    };
+    const res = await app.request(`/links/${linkId}/cash-out`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }),
+    });
+    expect(res.status).toBe(422);
+    await expectNoMarker(res.clone());
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.error).toBe("offramp_rejected");
+    expect(json.message).toBe("The anchor rejected this request (SEP-6 withdraw, HTTP 403).");
+    expect(json).not.toHaveProperty("anchorRejection");
+    expect(lines.some((l) => l.event === "anchor.rejected" && String(l.body).includes(MARKER))).toBe(true);
+    container.client.close();
+  });
+
   it("offramp-preview: 502 anchor_error", async () => {
     const { container, app, headers, linkId, lines } = await setup();
     (container.offramp as unknown as { indicativePrices: () => Promise<never> }).indicativePrices = async () => {
@@ -159,6 +226,28 @@ describe("link routes: anchor failures", () => {
     expect(failure).toBeInstanceOf(HttpError);
     expect(failure.status).toBe(502);
     expect(String(lines[0]?.error).length).toBeLessThan(2100);
+  });
+
+  it("anchorFailure answers a rejection with 422, not the 502 a dead anchor gets", () => {
+    const { logger, lines } = captureLogger();
+    const err = new AnchorRejectedError({
+      sep: "6",
+      op: "withdraw",
+      status: 422,
+      body: `${MARKER} bank 1234567890`,
+      anchorType: "non_interactive_customer_info_needed",
+      anchorError: `${MARKER} complete kyc first`,
+      anchorFields: ["phone_number"],
+    });
+    const failure = anchorFailure(err, logger);
+    expect(failure.status).toBe(422);
+    expect(failure.message).toBe("offramp_rejected");
+    expect(failure.extra).toMatchObject({
+      anchorRejection: { type: "non_interactive_customer_info_needed", fields: ["phone_number"] },
+    });
+    expect(JSON.stringify(failure)).not.toContain(MARKER);
+    expect(lines[0]).toMatchObject({ event: "anchor.rejected", sep: "6", op: "withdraw", statusCode: 422 });
+    expect(String(lines[0]?.body)).toContain(MARKER);
   });
 });
 
