@@ -25,7 +25,9 @@ interface SelectFieldsOptions {
  * Unknown (anchor-specific) fields can only come from overrides, never from the profile.
  * Binary fields are excluded (handled separately in 3.13).
  */
-export function selectFieldsForAnchor(options: SelectFieldsOptions): SelectFieldsResult {
+export function selectFieldsForAnchor(
+  options: SelectFieldsOptions,
+): SelectFieldsResult {
   const { requested, profile, overrides } = options;
   const send: Record<string, string> = {};
   const missing: string[] = [];
@@ -46,8 +48,11 @@ export function selectFieldsForAnchor(options: SelectFieldsOptions): SelectField
     let value: string | undefined;
 
     if (isSep9) {
-      // Try to find the value in the profile using the SEP-9 canonical name or its aliases
-      for (const name of [field.name, ...(sep9.aliases ?? [])]) {
+      // Try to find the value in the profile using the requested name, the SEP-9 canonical name, or its aliases
+      const candidateKeys = Array.from(
+        new Set([field.name, sep9.name, ...(sep9.aliases ?? [])]),
+      );
+      for (const name of candidateKeys) {
         if (profile.fields[name] !== undefined) {
           value = profile.fields[name];
           break;
