@@ -119,6 +119,39 @@ describe("fetchStellarToml", () => {
     expect(good.fallback).toBe(false);
     expect(good.signingKey).toBe("GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR");
   });
+
+  it("falls back to guessed paths when the TOML fetch times out, and does not pin the fallback", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((_url, init) => {
+          return new Promise((_resolve, reject) => {
+            if (init?.signal) {
+              init.signal.addEventListener("abort", () => {
+                reject(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            }
+          });
+        }),
+      );
+
+      const fetchPromise = fetchStellarToml("anchor.example", { timeoutMs: 1000 });
+      vi.advanceTimersByTime(1000);
+      const fallback = await fetchPromise;
+
+      expect(fallback.fallback).toBe(true);
+      expect(fallback.webAuthEndpoint).toBe("https://anchor.example/auth");
+
+      // Verify it was not cached in the discovery cache: a subsequent call re-fetches
+      vi.stubGlobal("fetch", vi.fn(async () => tomlResponse(TOML)));
+      const good = await fetchStellarToml("anchor.example");
+      expect(good.fallback).toBe(false);
+      expect(good.signingKey).toBe("GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("listsCurrency", () => {

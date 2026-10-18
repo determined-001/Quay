@@ -1,5 +1,6 @@
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
+import { anchorFetch } from "./http";
 
 /**
  * SEP-1 (`stellar.toml`) discovery.
@@ -106,6 +107,8 @@ export interface FetchTomlOptions {
   logger?: Logger;
   /** Skip the cache for this call (the result is still cached). */
   force?: boolean;
+  /** Timeout in ms for the stellar.toml fetch. */
+  timeoutMs?: number;
 }
 
 /**
@@ -132,7 +135,7 @@ export async function fetchStellarToml(
   const url = `https://${homeDomain}/.well-known/stellar.toml`;
   let info: Sep1DiscoveryInfo;
   try {
-    const res = await fetch(url);
+    const res = await anchorFetch(url, { timeoutMs: opts.timeoutMs });
     if (!res.ok) throw new Error(`stellar.toml fetch returned ${res.status}`);
     info = parseStellarToml(await res.text(), homeDomain);
   } catch (err) {
