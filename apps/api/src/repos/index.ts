@@ -206,6 +206,28 @@ export class DrizzleLinkRepository implements LinkRepository {
       .where(eq(links.id, link.id));
   }
 
+  async claimForCashOut(id: string, allowedStatuses: Array<PaymentLink["status"]>): Promise<boolean> {
+    const updated = await this.db
+      .update(links)
+      .set({
+        status: "offramp_pending",
+        updatedAt: Date.now(),
+      })
+      .where(and(eq(links.id, id), inArray(links.status, allowedStatuses)))
+      .returning({ id: links.id });
+    return updated.length > 0;
+  }
+
+  async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
+    await this.db
+      .update(links)
+      .set({
+        status: restoreStatus,
+        updatedAt: Date.now(),
+      })
+      .where(and(eq(links.id, id), eq(links.status, "offramp_pending")));
+  }
+
   /**
    * Delete rows flagged as demo data. Called by `pnpm demo:reset` and by
    * `POST /demo/reset`.

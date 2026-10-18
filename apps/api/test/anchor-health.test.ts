@@ -348,6 +348,22 @@ class FakeLinkRepoForAnchor implements LinkRepository {
   async paymentLedger(txHash: string): Promise<number | null> {
     return this.payments.find((p) => p.txHash === txHash)?.ledger ?? null;
   }
+  async claimForCashOut(id: string, allowedStatuses: Array<PaymentLink["status"]>): Promise<boolean> {
+    const link = this.byId.get(id);
+    if (!link) return false;
+    if (!allowedStatuses.includes(link.status)) return false;
+    link.status = "offramp_pending";
+    link.updatedAt = Date.now();
+    return true;
+  }
+  async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
+    const link = this.byId.get(id);
+    if (!link) return;
+    if (link.status === "offramp_pending") {
+      link.status = restoreStatus;
+      link.updatedAt = Date.now();
+    }
+  }
 }
 
 class FakeSellerRepoForAnchor {

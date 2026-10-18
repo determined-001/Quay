@@ -124,8 +124,22 @@ function makeFakeLinkRepo(initial: PaymentLink[]): LinkRepository {
         .reduce((sum, p) => sum + toStroops(p.amount), 0n);
       return fromStroops(total);
     },
-      async paymentLedger(txHash: string): Promise<number | null> {
+    async paymentLedger(txHash: string): Promise<number | null> {
       return payments.find((p) => p.txHash === txHash)?.ledger ?? null;
+    },
+    async claimForCashOut(id: string, allowedStatuses: Array<PaymentLink["status"]>): Promise<boolean> {
+      const link = byId.get(id);
+      if (!link || !allowedStatuses.includes(link.status)) return false;
+      link.status = "offramp_pending";
+      link.updatedAt = Date.now();
+      return true;
+    },
+    async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
+      const link = byId.get(id);
+      if (link && link.status === "offramp_pending") {
+        link.status = restoreStatus;
+        link.updatedAt = Date.now();
+      }
     },
   };
 }
