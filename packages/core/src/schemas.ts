@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isValidAmount } from "./domain/money";
+import { isPositiveAmount } from "./domain/money";
 
 // Asset is restricted to a small allowlist for the MVP: USDC (issued) or native XLM.
 // The issuer for USDC is resolved server-side from config, so the client only
@@ -18,7 +18,7 @@ export const createLinkSchema = z.object({
   amount: z
     .string()
     .trim()
-    .refine(isValidAmount, "amount must be a positive number with at most 7 decimals"),
+    .refine(isPositiveAmount, "amount must be a positive number with at most 7 decimals"),
   assetCode: assetCodeSchema.default("USDC"),
   // optional time-to-live in minutes; omitted => no expiry
   expiresInMinutes: z.number().int().positive().max(60 * 24 * 30).optional(),
