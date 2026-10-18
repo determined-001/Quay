@@ -210,4 +210,29 @@ describe("resolveWithdrawType", () => {
       resolveWithdrawType(`${BASE}/type-min`, "USDC", "10"),
     ).rejects.toThrow(Sep6ValidationError);
   });
+
+  describe("amount validation hardening", () => {
+    it.each([
+      ["empty string", ""],
+      ["whitespace", " "],
+      ["negative number", "-5"],
+      ["zero string", "0"],
+      ["zero float string", "0.0"],
+      ["hex string", "0x10"],
+      ["scientific notation", "1e3"],
+      ["comma decimal separator", "1,5"],
+    ])("rejects invalid or non-positive amount %s (%j) even without anchor min", async (_, invalidAmount) => {
+      stubInfo({ min_amount: undefined });
+      await expect(
+        resolveWithdrawType(`${BASE}/invalid-amount-${encodeURIComponent(invalidAmount || "empty")}`, "USDC", invalidAmount),
+      ).rejects.toThrow(Sep6ValidationError);
+    });
+
+    it("accepts valid positive plain decimal string", async () => {
+      stubInfo({ min_amount: undefined });
+      const result = await resolveWithdrawType(`${BASE}/valid-amount`, "USDC", "10.5");
+      expect(result.type).toBe("bank_account");
+    });
+  });
 });
+

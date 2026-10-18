@@ -190,10 +190,15 @@ export async function resolveWithdrawType(
   // 50 by wire, and the asset-level figure is only the outer envelope.
   const minAmount = typeInfo.minAmount ?? asset.minAmount;
   const maxAmount = typeInfo.maxAmount ?? asset.maxAmount;
+
+  if (!/^\d+(\.\d+)?$/.test(amount)) {
+    throw new Sep6ValidationError(`Amount "${amount}" is not a valid positive decimal`, { minAmount, maxAmount }, typeNames);
+  }
+
   const value = Number(amount);
 
-  if (!Number.isFinite(value)) {
-    throw new Sep6ValidationError(`Amount "${amount}" is not a number`, { minAmount, maxAmount }, typeNames);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Sep6ValidationError(`Amount "${amount}" must be greater than zero`, { minAmount, maxAmount }, typeNames);
   }
   if (minAmount !== undefined && value < minAmount) {
     throw new Sep6ValidationError(
