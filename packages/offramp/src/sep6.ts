@@ -58,6 +58,65 @@ export class Sep6ValidationError extends OffRampRejectedError {
   }
 }
 
+export const RESERVED_WITHDRAW_PARAMS: ReadonlySet<string> = new Set([
+  "asset_code",
+  "amount",
+  "account",
+  "type",
+  "memo",
+  "memo_type",
+  "funding_method",
+  "lang",
+  "on_change_callback",
+  "country_code",
+  "refund_memo",
+  "refund_memo_type",
+  "customer_id",
+  "location_id",
+  "wallet_name",
+  "wallet_url",
+  "quote_id",
+]);
+
+/**
+ * Filter and validate payout fields according to the chosen SEP-6 withdrawal type.
+ *
+ * - Returns exactly the non-reserved fields declared by the anchor that the seller supplied (non-empty after trim).
+ * - A declared field that is not optional and has no non-empty value throws Sep6ValidationError naming the field.
+ * - Reserved names are never taken from payout fields: if the anchor declared one, it is skipped with a warning
+ *   and not counted as missing.
+ * - dest and dest_extra are not reserved; they are sent only when declared.
+ * - Undeclared payout fields are never returned.
+ */
+export function selectWithdrawFields(
+  typeInfo: Sep6WithdrawType,
+  payout: Record<string, string> = {},
+  logger?: Logger,
+): Record<string, string> {
+  const log = (logger ?? NOOP_LOGGER).child({ component: "sep6" });
+  const out: Record<string, string> = {};
+
+  for (const [fieldName, fieldDef] of Object.entries(typeInfo.fields ?? {})) {
+    if (RESERVED_WITHDRAW_PARAMS.has(fieldName)) {
+      log.warn(
+        { event: "anchor.sep6.withdraw.reserved_field_ignored", field: fieldName },
+        `Ignoring reserved withdrawal field "${fieldName}" declared by anchor`,
+      );
+      continue;
+    }
+
+    const raw = payout[fieldName];
+    const val = typeof raw === "string" ? raw.trim() : "";
+    if (val.length > 0) {
+      out[fieldName] = val;
+    } else if (!fieldDef.optional) {
+      throw new Sep6ValidationError(`Missing required payout field: ${fieldName}`);
+    }
+  }
+
+  return out;
+}
+
 const INFO_TTL_MS = 5 * 60_000;
 const infoCache = new Map<string, { at: number; info: Sep6Info }>();
 
@@ -252,8 +311,7 @@ export async function startSep6Withdraw(
     amount: string;
     account: string;
     type: string;
-    dest?: string;
-    destExtra?: string;
+    fields?: Record<string, string>;
   },
   logger?: Logger,
 ): Promise<Sep6WithdrawResult> {
@@ -263,8 +321,22 @@ export async function startSep6Withdraw(
   url.searchParams.set("amount", input.amount);
   url.searchParams.set("account", input.account);
   url.searchParams.set("type", input.type);
-  if (input.dest) url.searchParams.set("dest", input.dest);
-  if (input.destExtra) url.searchParams.set("dest_extra", input.destExtra);
+
+  const coreParams = new Set(["asset_code", "amount", "account", "type"]);
+  if (input.fields) {
+    for (const [key, val] of Object.entries(input.fields)) {
+      if (coreParams.has(key)) {
+        log.warn(
+          { event: "anchor.sep6.withdraw.override_rejected", field: key },
+          `Refusing to override core SEP-6 withdraw parameter "${key}"`,
+        );
+        continue;
+      }
+      if (val !== undefined && val !== "") {
+        url.searchParams.set(key, val);
+      }
+    }
+  }
 
   const t0 = Date.now();
   log.info(

@@ -30,8 +30,10 @@ describe("startSep6Withdraw", () => {
 
     const result = await startSep6Withdraw("https://anchor.example/sep6", "test-jwt-token", {
       ...BASE_INPUT,
-      dest: "account_12345",
-      destExtra: "routing_67890",
+      fields: {
+        dest: "account_12345",
+        dest_extra: "routing_67890",
+      },
     });
 
     expect(result).toEqual({ id: "wd_1", accountId: undefined, memo: undefined, memoType: undefined });
@@ -64,7 +66,7 @@ describe("startSep6Withdraw", () => {
     expect(capturedUrl!.pathname).toBe("/api/v2/sep6/withdraw");
   });
 
-  it("omits empty dest and destExtra optional parameters", async () => {
+  it("omits empty or undefined field parameters", async () => {
     let capturedUrl: URL | undefined;
 
     vi.stubGlobal(
@@ -78,8 +80,7 @@ describe("startSep6Withdraw", () => {
     // Test with undefined
     await startSep6Withdraw("https://anchor.example/sep6", "token", {
       ...BASE_INPUT,
-      dest: undefined,
-      destExtra: undefined,
+      fields: undefined,
     });
 
     expect(capturedUrl!.searchParams.has("dest")).toBe(false);
@@ -88,8 +89,10 @@ describe("startSep6Withdraw", () => {
     // Test with empty string
     await startSep6Withdraw("https://anchor.example/sep6", "token", {
       ...BASE_INPUT,
-      dest: "",
-      destExtra: "",
+      fields: {
+        dest: "",
+        dest_extra: "",
+      },
     });
 
     expect(capturedUrl!.searchParams.has("dest")).toBe(false);

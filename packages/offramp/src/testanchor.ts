@@ -22,7 +22,14 @@ import { NOOP_LOGGER, targetPerSourceRate } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import { listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
-import { getSep6Info, getSep6Transaction, resolveWithdrawType, startSep6Withdraw } from "./sep6";
+import {
+  Sep6ValidationError,
+  getSep6Info,
+  getSep6Transaction,
+  resolveWithdrawType,
+  selectWithdrawFields,
+  startSep6Withdraw,
+} from "./sep6";
 import { randomBytes } from "node:crypto";
 import { computeIndicativeAmounts } from "./quote-math";
 
@@ -501,6 +508,27 @@ export class TestAnchorOffRamp implements OffRampPort {
       (await resolveWithdrawType(dsc.transferServer, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
         .type;
 
+    const info = await getSep6Info(dsc.transferServer, baseLog);
+    const asset = info.withdraw[q.sellAsset.code];
+    if (!asset) {
+      throw new Sep6ValidationError(
+        `Anchor does not list ${q.sellAsset.code} for withdrawal`,
+        {},
+        Object.keys(info.withdraw),
+      );
+    }
+    const typeNames = Object.keys(asset.types);
+    const typeInfo = asset.types[withdrawType];
+    if (!typeInfo) {
+      throw new Sep6ValidationError(
+        `Anchor does not offer withdraw type "${withdrawType}" for ${q.sellAsset.code}`,
+        { minAmount: asset.minAmount, maxAmount: asset.maxAmount },
+        typeNames,
+      );
+    }
+
+    const fields = selectWithdrawFields(typeInfo, input.payout.fields, baseLog);
+
     // Deliberately no quote_id here, on both paths (issue 3.22). SEP-6 has no
     // quote_id parameter, and on the no-SEP-38 path the stored quote id is one
     // WE generated — sending it to the anchor would be handing it an id it
@@ -512,8 +540,7 @@ export class TestAnchorOffRamp implements OffRampPort {
       account: input.customer.account,
       // The type discovered from /sep6/info at quote time — never assumed.
       type: withdrawType,
-      dest: input.payout.fields.dest,
-      destExtra: input.payout.fields.dest_extra,
+      fields,
     }, baseLog);
 
     const now = Date.now();
