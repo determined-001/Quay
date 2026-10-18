@@ -18,7 +18,10 @@ let authToken = "";
 async function req(path: string, init: RequestInit = {}): Promise<Response> {
   return app.request(path, {
     ...init,
-    headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${authToken}` },
+    headers: {
+      ...(init.headers as Record<string, string> | undefined),
+      authorization: `Bearer ${authToken}`,
+    },
   });
 }
 
@@ -26,7 +29,10 @@ beforeAll(async () => {
   container = await createTestContainer();
   app = new Hono();
   app.use("*", rateLimit({ windowMs: 60_000, max: 0 }));
-  app.route("/links", linkRoutes(container, async (_c, next) => next()));
+  app.route(
+    "/links",
+    linkRoutes(container, async (_c, next) => next()),
+  );
   const seller = container.seller;
   authToken = await container.tokenFor(seller.id, seller.wallet);
 });
@@ -44,26 +50,36 @@ describe("POST /links", () => {
     const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Test item", amount: "25.50", assetCode: "USDC" }),
+      body: JSON.stringify({
+        title: "Test item",
+        amount: "25.50",
+        assetCode: "USDC",
+      }),
     });
     expect(res.status).toBe(201);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect(body.link).toBeDefined();
     expect(body.request).toBeDefined();
     expect((body.link as Record<string, unknown>).id).toMatch(/^lnk_/);
     expect((body.link as Record<string, unknown>).status).toBe("active");
     expect((body.link as Record<string, unknown>).amount).toBe("25.5");
-    expect((body.request as Record<string, unknown>).uri).toContain("web+stellar:pay");
+    expect((body.request as Record<string, unknown>).uri).toContain(
+      "web+stellar:pay",
+    );
   });
 
   it("creates a link with XLM asset", async () => {
     const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "XLM item", amount: "100", assetCode: "XLM" }),
+      body: JSON.stringify({
+        title: "XLM item",
+        amount: "100",
+        assetCode: "XLM",
+      }),
     });
     expect(res.status).toBe(201);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     const link = body.link as Record<string, unknown>;
     expect((link.asset as Record<string, unknown>).code).toBe("XLM");
     expect((link.asset as Record<string, unknown>).issuer).toBeNull();
@@ -76,7 +92,7 @@ describe("POST /links", () => {
       body: JSON.stringify({ amount: "10" }),
     });
     expect(res.status).toBe(400);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("invalid_body");
   });
 
@@ -87,6 +103,31 @@ describe("POST /links", () => {
       body: JSON.stringify({ title: "Bad", amount: "-5" }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for zero amount", async () => {
+    const res = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Zero amount", amount: "0" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_body");
+  });
+
+  it("returns 400 for out-of-range amount exceeding max Stellar limit", async () => {
+    const res = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Too big",
+        amount: "922337203685.4775808",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_body");
   });
 
   it("returns 400 for empty title", async () => {
@@ -111,13 +152,17 @@ describe("POST /links", () => {
     const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Timed", amount: "10", expiresInMinutes: 60 }),
+      body: JSON.stringify({
+        title: "Timed",
+        amount: "10",
+        expiresInMinutes: 60,
+      }),
     });
     expect(res.status).toBe(201);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     const link = body.link as Record<string, unknown>;
     expect(link.expiresAt).toBeTypeOf("number");
-    expect((link.expiresAt as number)).toBeGreaterThan(Date.now());
+    expect(link.expiresAt as number).toBeGreaterThan(Date.now());
   });
 
   // A caller must never get to choose a link id. `demo_mug_123` was briefly
@@ -128,10 +173,15 @@ describe("POST /links", () => {
     const res = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Guessable", amount: "10", isDemo: true, id: "guessable_id" }),
+      body: JSON.stringify({
+        title: "Guessable",
+        amount: "10",
+        isDemo: true,
+        id: "guessable_id",
+      }),
     });
     expect(res.status).toBe(201);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     const id = (body.link as Record<string, unknown>).id as string;
     expect(id).not.toBe("guessable_id");
     expect(id).toMatch(/^lnk_/);
@@ -152,7 +202,7 @@ describe("GET /links", () => {
 
     const res = await req("/links");
     expect(res.status).toBe(200);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect(Array.isArray(body.links)).toBe(true);
     expect((body.links as Array<unknown>).length).toBeGreaterThanOrEqual(1);
   });
@@ -160,10 +210,12 @@ describe("GET /links", () => {
   it("returns links sorted newest-first", async () => {
     const res = await req("/links");
     expect(res.status).toBe(200);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     const links = body.links as Array<Record<string, unknown>>;
     if (links.length >= 2) {
-      expect((links[0]!.createdAt as number)).toBeGreaterThanOrEqual(links[1]!.createdAt as number);
+      expect(links[0]!.createdAt as number).toBeGreaterThanOrEqual(
+        links[1]!.createdAt as number,
+      );
     }
   });
 });
@@ -179,12 +231,12 @@ describe("GET /links/:id", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Get me", amount: "30" }),
     });
-    const created = await createRes.json() as Record<string, unknown>;
+    const created = (await createRes.json()) as Record<string, unknown>;
     const linkId = (created.link as Record<string, unknown>).id as string;
 
     const res = await req(`/links/${linkId}`);
     expect(res.status).toBe(200);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect((body.link as Record<string, unknown>).id).toBe(linkId);
     expect(body.request).toBeDefined();
   });
@@ -192,7 +244,7 @@ describe("GET /links/:id", () => {
   it("returns 404 for unknown id", async () => {
     const res = await req("/links/lnk_nonexistent");
     expect(res.status).toBe(404);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("not_found");
   });
 
@@ -206,18 +258,29 @@ describe("GET /links/:id", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Projection", amount: "12.34" }),
     });
-    const created = await createRes.json() as Record<string, unknown>;
+    const created = (await createRes.json()) as Record<string, unknown>;
     const linkId = (created.link as Record<string, unknown>).id as string;
 
     const res = await req(`/links/${linkId}`);
-    const body = await res.json() as { link: Record<string, unknown> };
+    const body = (await res.json()) as { link: Record<string, unknown> };
     const keys = Object.keys(body.link);
 
     expect(keys).not.toContain("sellerId");
     expect(keys.filter((k) => k.startsWith("offramp"))).toEqual([]);
 
     // Still carries everything the checkout page and widget render.
-    for (const needed of ["id", "reference", "destination", "title", "amount", "asset", "status", "txHash", "paidAmount", "expiresAt"]) {
+    for (const needed of [
+      "id",
+      "reference",
+      "destination",
+      "title",
+      "amount",
+      "asset",
+      "status",
+      "txHash",
+      "paidAmount",
+      "expiresAt",
+    ]) {
       expect(keys, `missing ${needed}`).toContain(needed);
     }
   });
@@ -281,7 +344,8 @@ describe("GET /links/:id/detail", () => {
       createdAt: 1000,
       updatedAt: 1000,
       lastError: null,
-      lastPollError: "The anchor service is temporarily unavailable or returned an error.",
+      lastPollError:
+        "The anchor service is temporarily unavailable or returned an error.",
       lastPollErrorAt: 1700000000000,
       lastPollReason: "anchor_unreachable",
       transferNotifiedAt: null,
@@ -294,7 +358,8 @@ describe("GET /links/:id/detail", () => {
     };
     expect(body.offrampPoll).toEqual({
       reason: "anchor_unreachable",
-      message: "The anchor service is temporarily unavailable or returned an error.",
+      message:
+        "The anchor service is temporarily unavailable or returned an error.",
       at: 1700000000000,
     });
   });
@@ -311,7 +376,7 @@ describe("POST /links/:id/cash-out", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Cash-out test", amount: "10" }),
     });
-    const created = await createRes.json() as Record<string, unknown>;
+    const created = (await createRes.json()) as Record<string, unknown>;
     const linkId = (created.link as Record<string, unknown>).id as string;
 
     const link = await container.links.findById(linkId);
@@ -331,7 +396,7 @@ describe("POST /links/:id/cash-out", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Cash-out test", amount: "10" }),
     });
-    const created = await createRes.json() as Record<string, unknown>;
+    const created = (await createRes.json()) as Record<string, unknown>;
     const linkId = (created.link as Record<string, unknown>).id as string;
 
     const res = await req(`/links/${linkId}/cash-out`, {
@@ -340,7 +405,7 @@ describe("POST /links/:id/cash-out", () => {
       body: JSON.stringify({ targetCurrency: "NGN" }),
     });
     expect(res.status).toBe(409);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toContain("must be paid");
   });
 
@@ -364,7 +429,7 @@ describe("POST /links/:id/cash-out", () => {
       body: JSON.stringify({ targetCurrency: 123 }),
     });
     expect(res.status).toBe(400);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("invalid_body");
   });
 
@@ -380,7 +445,7 @@ describe("POST /links/:id/cash-out", () => {
       }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as Record<string, unknown>;
+    const body = (await res.json()) as Record<string, unknown>;
     expect(body.job).toBeDefined();
     expect((body.job as Record<string, unknown>).status).toBe("pending");
 
@@ -393,7 +458,9 @@ describe("POST /links/:id/cash-out", () => {
     const linkId = await createAndPayLink();
 
     // 1. Get firm quote
-    const quoteRes = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`);
+    const quoteRes = await req(
+      `/links/${linkId}/cash-out/quote?targetCurrency=NGN`,
+    );
     expect(quoteRes.status).toBe(200);
     const quoteBody = (await quoteRes.json()) as Record<string, unknown>;
     const quoteId = quoteBody.quoteId as string;
@@ -478,7 +545,9 @@ describe("GET /links/:id/cash-out/quote", () => {
   });
 
   it("returns 404 when link does not exist", async () => {
-    const res = await req("/links/lnk_nonexistent/cash-out/quote?targetCurrency=NGN");
+    const res = await req(
+      "/links/lnk_nonexistent/cash-out/quote?targetCurrency=NGN",
+    );
     expect(res.status).toBe(404);
   });
 
@@ -509,7 +578,9 @@ describe("GET /links/:id/cash-out/quote", () => {
   it("passes ?withdrawType= through to the adapter's quote (issue 5.24)", async () => {
     const linkId = await createAndPayLink();
 
-    const res = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN&withdrawType=cash`);
+    const res = await req(
+      `/links/${linkId}/cash-out/quote?targetCurrency=NGN&withdrawType=cash`,
+    );
     expect(res.status).toBe(200);
     expect(container.offramp.lastQuoteWithdrawType).toBe("cash");
   });
@@ -517,7 +588,9 @@ describe("GET /links/:id/cash-out/quote", () => {
   it("returns 400 with availableTypes for an unknown withdrawType — not a 502 (issue 5.24)", async () => {
     const linkId = await createAndPayLink();
 
-    const res = await req(`/links/${linkId}/cash-out/quote?targetCurrency=NGN&withdrawType=mobile_money`);
+    const res = await req(
+      `/links/${linkId}/cash-out/quote?targetCurrency=NGN&withdrawType=mobile_money`,
+    );
     expect(res.status).toBe(400);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("unknown_withdraw_type");
@@ -560,7 +633,10 @@ describe("POST /links/:id/cash-out withdrawType", () => {
       savedFields: Record<string, string> | null;
     };
     expect(body.types.map((t) => t.name)).toEqual(["bank_account", "cash"]);
-    expect(body.types[0]!.descriptors.map((d) => d.name)).toEqual(["dest", "dest_extra"]);
+    expect(body.types[0]!.descriptors.map((d) => d.name)).toEqual([
+      "dest",
+      "dest_extra",
+    ]);
     expect(body.defaultType).toBe("bank_account");
     // savedFields survives the shape change (issue #32 masking untouched).
     expect("savedFields" in body).toBe(true);
@@ -584,7 +660,10 @@ describe("POST /links/:id/cash-out withdrawType", () => {
     const res = await req(`/links/${linkId}/cash-out`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ targetCurrency: "NGN", withdrawType: "mobile_money" }),
+      body: JSON.stringify({
+        targetCurrency: "NGN",
+        withdrawType: "mobile_money",
+      }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as Record<string, unknown>;
@@ -617,9 +696,14 @@ describe("rate-limit headers", () => {
   it("includes x-ratelimit headers when rate limiter is active", async () => {
     const limitedApp = new Hono();
     limitedApp.use("*", rateLimit({ windowMs: 60_000, max: 5 }));
-    limitedApp.route("/links", linkRoutes(container, async (_c, next) => next()));
+    limitedApp.route(
+      "/links",
+      linkRoutes(container, async (_c, next) => next()),
+    );
 
-    const res = await limitedApp.request("/links", { headers: { authorization: `Bearer ${authToken}` } });
+    const res = await limitedApp.request("/links", {
+      headers: { authorization: `Bearer ${authToken}` },
+    });
     expect(res.status).toBe(200);
     expect(res.headers.get("x-ratelimit-limit")).toBe("5");
     expect(res.headers.get("x-ratelimit-remaining")).toBe("4");
@@ -629,15 +713,22 @@ describe("rate-limit headers", () => {
   it("returns 429 when rate limit exceeded", async () => {
     const limitedApp = new Hono();
     limitedApp.use("*", rateLimit({ windowMs: 60_000, max: 1 }));
-    limitedApp.route("/links", linkRoutes(container, async (_c, next) => next()));
+    limitedApp.route(
+      "/links",
+      linkRoutes(container, async (_c, next) => next()),
+    );
 
-    const res1 = await limitedApp.request("/links", { headers: { authorization: `Bearer ${authToken}` } });
+    const res1 = await limitedApp.request("/links", {
+      headers: { authorization: `Bearer ${authToken}` },
+    });
     expect(res1.status).toBe(200);
     expect(res1.headers.get("x-ratelimit-remaining")).toBe("0");
 
-    const res2 = await limitedApp.request("/links", { headers: { authorization: `Bearer ${authToken}` } });
+    const res2 = await limitedApp.request("/links", {
+      headers: { authorization: `Bearer ${authToken}` },
+    });
     expect(res2.status).toBe(429);
-    const body = await res2.json() as Record<string, unknown>;
+    const body = (await res2.json()) as Record<string, unknown>;
     expect(body.error).toBe("rate_limited");
     expect(res2.headers.get("retry-after")).toBeTruthy();
   });
@@ -663,15 +754,22 @@ describe("404 handling", () => {
 // ---------------------------------------------------------------------------
 
 describe("cross-tenant isolation", () => {
-  const OTHER_WALLET = "GDUY7J7A33TQWOSOQGDO776GGLM3UQERL4J3SPT56F6YS4ID7MLDERI4";
+  const OTHER_WALLET =
+    "GDUY7J7A33TQWOSOQGDO776GGLM3UQERL4J3SPT56F6YS4ID7MLDERI4";
   let intruderToken = "";
   let victimLinkId = "";
 
   /** Same request helper, but authenticated as the *other* seller. */
-  async function asIntruder(path: string, init: RequestInit = {}): Promise<Response> {
+  async function asIntruder(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<Response> {
     return app.request(path, {
       ...init,
-      headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${intruderToken}` },
+      headers: {
+        ...(init.headers as Record<string, string> | undefined),
+        authorization: `Bearer ${intruderToken}`,
+      },
     });
   }
 
@@ -682,7 +780,11 @@ describe("cross-tenant isolation", () => {
     const created = await req("/links", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Victim's item", amount: "42", assetCode: "USDC" }),
+      body: JSON.stringify({
+        title: "Victim's item",
+        amount: "42",
+        assetCode: "USDC",
+      }),
     });
     expect(created.status).toBe(201);
     victimLinkId = ((await created.json()) as { link: { id: string } }).link.id;
@@ -700,13 +802,18 @@ describe("cross-tenant isolation", () => {
     ["off-ramp preview", `/offramp-preview`],
     ["off-ramp requirements", `/offramp-requirements`],
     ["cash-out quote", `/cash-out/quote?targetCurrency=USD`],
-  ])("returns 404 on GET %s for another seller's link", async (_name, suffix) => {
-    const res = await asIntruder(`/links/${victimLinkId}${suffix}`);
-    expect(res.status).toBe(404);
-  });
+  ])(
+    "returns 404 on GET %s for another seller's link",
+    async (_name, suffix) => {
+      const res = await asIntruder(`/links/${victimLinkId}${suffix}`);
+      expect(res.status).toBe(404);
+    },
+  );
 
   it("cannot cancel another seller's link", async () => {
-    const res = await asIntruder(`/links/${victimLinkId}/cancel`, { method: "POST" });
+    const res = await asIntruder(`/links/${victimLinkId}/cancel`, {
+      method: "POST",
+    });
     expect(res.status).toBe(404);
 
     // And the link is untouched.
