@@ -132,6 +132,7 @@ export default function CheckoutClient({
     const id = setInterval(() => forceTick((n) => n + 1), 1_000);
     return () => clearInterval(id);
   }, [expiresAt, isSettled, link.status]);
+  const consecutiveFailsRef = useRef(0);
   const connectionLost = consecutiveFails >= MAX_FAILURES_BEFORE_BACKOFF;
 
   // ── Poll ──────────────────────────────────────────────────────────────────
@@ -142,13 +143,20 @@ export default function CheckoutClient({
     pollingRef.current = true;
     try {
       const next = await api.getLink(link.id);
+      consecutiveFailsRef.current = 0;
       setConsecutiveFails(0);
       setStopped(false);
       intervalMsRef.current = BASE_INTERVAL_MS;
       setLink(next.link);
       return next.link;
     } catch {
-      setConsecutiveFails((c) => c + 1);
+      consecutiveFailsRef.current += 1;
+      const fails = consecutiveFailsRef.current;
+      setConsecutiveFails(fails);
+      if (fails >= MAX_FAILURES_BEFORE_BACKOFF) {
+        intervalMsRef.current = BASE_INTERVAL_MS * BACKOFF_MULTIPLIER;
+        setStopped(true);
+      }
       return null;
     } finally {
       pollingRef.current = false;
@@ -166,6 +174,7 @@ export default function CheckoutClient({
   // ── Retry (manual, from "lost contact" screen) ────────────────────────────
 
   const retry = useCallback(() => {
+    consecutiveFailsRef.current = 0;
     setConsecutiveFails(0);
     setStopped(false);
     intervalMsRef.current = BASE_INTERVAL_MS;
@@ -176,18 +185,34 @@ export default function CheckoutClient({
 
   useEffect(() => {
     if (isTerminal || stopped) return;
+    let cancelled = false;
 
-    // Fire immediately, then schedule the next.
-    poll();
+    // Fire immediately, and if it immediately returns a terminal status, clear timers.
+    poll().then((firstLink) => {
+      if (cancelled) return;
+      if (firstLink && TERMINAL.has(firstLink.status)) {
+        if (timerRef.current) clearTimeout(timerRef.current);
+      }
+    });
 
     const scheduleNext = () => {
+      if (cancelled) return;
+      if (consecutiveFailsRef.current >= MAX_FAILURES_BEFORE_BACKOFF) return;
+
       timerRef.current = setTimeout(() => {
+        if (cancelled) return;
         poll().then((newLink) => {
-          // Use the freshly returned link for the terminal check, not the
-          // stale closure value.
-          if (newLink && !TERMINAL.has(newLink.status)) {
-            scheduleNext();
+          if (cancelled) return;
+          // Stop if the returned link reached a terminal status (settled or expired).
+          if (newLink && TERMINAL.has(newLink.status)) {
+            return;
           }
+          // Stop if consecutive failures reached the backoff/lost contact limit.
+          if (consecutiveFailsRef.current >= MAX_FAILURES_BEFORE_BACKOFF) {
+            return;
+          }
+          // Re-arm for the next poll attempt (on success, transient failure, or skipped poll).
+          scheduleNext();
         });
       }, intervalMsRef.current);
     };
@@ -195,6 +220,7 @@ export default function CheckoutClient({
     scheduleNext();
 
     return () => {
+      cancelled = true;
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [link.id, link.status, isTerminal, stopped, poll]);
