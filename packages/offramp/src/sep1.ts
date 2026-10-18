@@ -134,7 +134,7 @@ export async function fetchStellarToml(
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`stellar.toml fetch returned ${res.status}`);
-    info = parseStellarToml(await res.text(), homeDomain);
+    info = parseStellarToml(await res.text(), homeDomain, log);
   } catch (err) {
     log.warn(
       { event: "anchor.sep1.fallback", reason: err instanceof Error ? err.message : String(err) },
@@ -182,6 +182,30 @@ function fallbackInfo(homeDomain: string): Sep1DiscoveryInfo {
 }
 
 /**
+ * Validates that an endpoint URL parses and uses the https: protocol.
+ * Returns the normalized or original valid URL string, or null if invalid / non-HTTPS.
+ */
+function sanitizeEndpointUrl(key: string, val: string, log?: Logger): string | null {
+  try {
+    const url = new URL(val);
+    if (url.protocol !== "https:") {
+      log?.warn(
+        { event: "anchor.sep1.invalid_endpoint", key, url: val, reason: "protocol must be https:" },
+        `Ignoring ${key} endpoint "${val}": protocol must be https:`,
+      );
+      return null;
+    }
+    return val;
+  } catch (err) {
+    log?.warn(
+      { event: "anchor.sep1.invalid_endpoint", key, url: val, reason: "malformed URL" },
+      `Ignoring ${key} endpoint "${val}": malformed URL`,
+    );
+    return null;
+  }
+}
+
+/**
  * Minimal TOML reader for the handful of keys SEP-1 defines that we use.
  *
  * Deliberately not a general TOML parser: this runs against a file fetched
@@ -189,7 +213,7 @@ function fallbackInfo(homeDomain: string): Sep1DiscoveryInfo {
  * `code` of each `[[CURRENCIES]]` block. A full parser would be more surface
  * area for no more capability.
  */
-export function parseStellarToml(tomlText: string, homeDomain: string): Sep1DiscoveryInfo {
+export function parseStellarToml(tomlText: string, homeDomain: string, logger?: Logger): Sep1DiscoveryInfo {
   const base = fallbackInfo(homeDomain);
   const info: Sep1DiscoveryInfo = { ...base, fallback: false };
   const currencies: string[] = [];
@@ -220,23 +244,35 @@ export function parseStellarToml(tomlText: string, homeDomain: string): Sep1Disc
 
     switch (key) {
       case "WEB_AUTH_ENDPOINT":
-      case "WEB_AUTH_URL":
-        info.webAuthEndpoint = val;
+      case "WEB_AUTH_URL": {
+        const validated = sanitizeEndpointUrl(key, val, logger);
+        if (validated) info.webAuthEndpoint = validated;
         break;
-      case "TRANSFER_SERVER":
-        info.transferServer = val;
+      }
+      case "TRANSFER_SERVER": {
+        const validated = sanitizeEndpointUrl(key, val, logger);
+        if (validated) info.transferServer = validated;
         break;
+      }
       case "TRANSFER_SERVER_SEP0024":
-      case "TRANSFER_SERVER_SEP24":
-        info.transferServerSep24 = val;
+      case "TRANSFER_SERVER_SEP24": {
+        const validated = sanitizeEndpointUrl(key, val, logger);
+        if (validated) info.transferServerSep24 = validated;
         break;
-      case "ANCHOR_QUOTE_SERVER":
-        info.anchorQuoteServer = val;
+      }
+      case "ANCHOR_QUOTE_SERVER": {
+        const validated = sanitizeEndpointUrl(key, val, logger);
+        if (validated) info.anchorQuoteServer = validated;
         break;
-      case "KYC_SERVER":
-        info.kycServer = val;
-        sawKycServer = true;
+      }
+      case "KYC_SERVER": {
+        const validated = sanitizeEndpointUrl(key, val, logger);
+        if (validated) {
+          info.kycServer = validated;
+          sawKycServer = true;
+        }
         break;
+      }
       case "SIGNING_KEY":
         info.signingKey = val;
         break;
