@@ -1,5 +1,5 @@
 import type { Webhook, WebhookQueueEntry, WebhookRepository } from "@checkout/core";
-import type { WebhookSender } from "../services/webhook-sender";
+import type { DeliveryOutcome, WebhookSender } from "../services/webhook-sender";
 
 export interface WebhookWorkerOptions {
   /**
@@ -116,7 +116,17 @@ export class WebhookWorker {
       return;
     }
 
-    const outcome = await this.sender.deliverOnce(hook, entry.event, entry.payload);
+    let outcome: DeliveryOutcome;
+    try {
+      outcome = await this.sender.deliverOnce(hook, entry.event, entry.payload);
+    } catch (err) {
+      outcome = {
+        ok: false,
+        statusCode: null,
+        error: err instanceof Error ? err.message : String(err),
+        permanent: false,
+      };
+    }
 
     if (outcome.ok) {
       await this.finalise(entry, attemptNumber, outcome.statusCode, true, null, "delivered");

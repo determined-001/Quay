@@ -116,4 +116,40 @@ describe("WebhookSender", () => {
       expect.objectContaining({ ok: false, statusCode: 500 }),
     );
   });
+
+  it("returns a permanent failure and makes no HTTP request when secret cannot be decrypted", async () => {
+    const repo = fakeRepo();
+    const sender = new WebhookSender(repo, { guard: PERMISSIVE_GUARD });
+    const hook = baseHook({ secretEncrypted: "bad.bad.bad" });
+
+    const outcome = await sender.deliverOnce(hook, "link.paid", JSON.stringify({}));
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.statusCode).toBeNull();
+    expect(outcome.permanent).toBe(true);
+    expect(outcome.error).toBe(
+      "webhook secret could not be decrypted; check WEBHOOK_SECRET_ENCRYPTION_KEY or rotate the secret",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("drops the second signature with a warning when previous secret cannot be decrypted during rotation overlap", async () => {
+    const repo = fakeRepo();
+    const sender = new WebhookSender(repo, { guard: PERMISSIVE_GUARD });
+    const hook = baseHook({
+      previousSecretEncrypted: "bad.bad.bad",
+      previousSecretLast4: "alue",
+      previousSecretExpiresAt: Date.now() + 60_000,
+    });
+
+    const outcome = await sender.deliverOnce(hook, "link.paid", JSON.stringify({}));
+
+    expect(outcome.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0]!;
+    const headers = init.headers as Record<string, string>;
+    // Sent only the valid signature for the current secret, no second signature
+    expect(headers["x-checkout-signature"]).toBe(`sha256=${sign("current-secret-value", JSON.stringify({}))}`);
+    expect(headers["x-checkout-signature"]).not.toContain(",");
+  });
 });

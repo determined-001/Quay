@@ -1509,7 +1509,7 @@ For seller-level KYC events, `id` is the seller ID and the payload contains **no
   (`attempt` column + `queue_entry_id`), so you can inspect exactly which
   attempts failed and why.
 - **Transient failures** (network errors, `5xx`, `429`) are retried.
-- **Permanent failures** (`4xx` except `429`) are dead-lettered immediately.
+- **Permanent failures** (`4xx` except `429`, or an unreadable secret) are dead-lettered immediately; an unreadable secret can be fixed by rotating the secret and replaying.
 - **Dead letters** are replayable via `POST /webhooks/deliveries/:id/replay`.
 
 Return `2xx` quickly to acknowledge receipt. Long-running processing should be

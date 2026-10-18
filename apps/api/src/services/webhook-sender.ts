@@ -194,7 +194,27 @@ export class WebhookSender {
       };
     }
 
-    const signature = sign(decryptSecret(hook.secretEncrypted), body);
+    let secret: string;
+    try {
+      secret = decryptSecret(hook.secretEncrypted);
+    } catch (err) {
+      this.logger.error(
+        {
+          webhookId: hook.id,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "webhook secret could not be decrypted",
+      );
+      metrics.webhookAttemptsTotal.inc({ result: "error" });
+      return {
+        ok: false,
+        statusCode: null,
+        permanent: true,
+        error: "webhook secret could not be decrypted; check WEBHOOK_SECRET_ENCRYPTION_KEY or rotate the secret",
+      };
+    }
+
+    const signature = sign(secret, body);
 
     // During the post-rotation overlap window, also sign with the previous
     // secret and send both — so a receiver that hasn't redeployed with the
@@ -205,9 +225,21 @@ export class WebhookSender {
       hook.previousSecretEncrypted !== null &&
       hook.previousSecretExpiresAt !== null &&
       hook.previousSecretExpiresAt > Date.now();
-    const signatureHeader = stillInOverlap
-      ? `sha256=${signature},sha256=${sign(decryptSecret(hook.previousSecretEncrypted!), body)}`
-      : `sha256=${signature}`;
+    let signatureHeader = `sha256=${signature}`;
+    if (stillInOverlap) {
+      try {
+        const prevSecret = decryptSecret(hook.previousSecretEncrypted!);
+        signatureHeader = `sha256=${signature},sha256=${sign(prevSecret, body)}`;
+      } catch (err) {
+        this.logger.warn(
+          {
+            webhookId: hook.id,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "previous webhook secret could not be decrypted during rotation overlap; dropping second signature",
+        );
+      }
+    }
 
     try {
       const res = await fetch(hook.url, {
