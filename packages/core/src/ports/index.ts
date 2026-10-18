@@ -39,11 +39,12 @@ export interface RailPort {
   /**
    * Throws `CannotReceiveError` if `account` cannot currently receive `asset` —
    * the account doesn't exist yet, or (for issued assets) has no trustline, an
-   * unauthorized one, or one already at its limit. Resolves silently if it can.
+   * unauthorized one, or one with insufficient limit headroom for `amount`
+   * (or already at its limit if `amount` is omitted). Resolves silently if it can.
    * Implementations should cache a short TTL per (account, asset) so calling
    * this on every link creation stays cheap.
    */
-  assertCanReceive(account: string, asset: AssetRef): Promise<void>;
+  assertCanReceive(account: string, asset: AssetRef, amount?: string): Promise<void>;
 }
 
 export type CannotReceiveReason =

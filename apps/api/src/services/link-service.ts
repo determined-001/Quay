@@ -39,7 +39,7 @@ import {
   type WithdrawTransfer,
 } from "@checkout/core";
 import { AnchorHttpError, Sep6ValidationError, anchorErrorSummary, truncateAnchorBody } from "@checkout/offramp";
-import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
+import { resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
@@ -195,10 +195,9 @@ export class LinkService {
       : null;
 
     // Universal receive-preflight (issue #9): every link, not just muxed ones.
-    // Subsumes the muxed-only `canReceiveAsset` check that used to live in the
-    // branch below — this runs first and carries the richer 422 payload.
+    // Runs first, verifies headroom for the link amount, and carries the richer 422 payload.
     try {
-      await this.deps.rail.assertCanReceive(seller.wallet, asset);
+      await this.deps.rail.assertCanReceive(seller.wallet, asset, body.amount);
     } catch (err) {
       if (err instanceof CannotReceiveError) {
         throw new HttpError(422, "destination_cannot_receive", {

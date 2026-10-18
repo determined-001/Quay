@@ -162,6 +162,21 @@ describe("LinkService.createLink — trustline preflight", () => {
 
     await expect(service.createLink(seller.id, { title: "T-shirt", amount: "10", assetCode: "USDC" })).rejects.toThrow("horizon is down");
   });
+
+  it("hands the link amount to assertCanReceive", async () => {
+    const links = fakeLinks();
+    const assertCanReceive = vi.fn(async () => {});
+    const rail = fakeRail(assertCanReceive);
+    const service = makeService(links, rail);
+
+    await service.createLink(seller.id, { title: "T-shirt", amount: "25.5", assetCode: "USDC" });
+
+    expect(assertCanReceive).toHaveBeenCalledWith(
+      seller.wallet,
+      { code: "USDC", issuer: stellar.usdcIssuer },
+      "25.5",
+    );
+  });
 });
 
 describe("LinkService.checkSellerUsdcTrustline", () => {

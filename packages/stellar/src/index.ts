@@ -5,4 +5,3 @@ export * from "./horizon-retry";
 export * from "./horizon-watcher";
 export * from "./streaming-horizon-watcher";
 export * from "./stellar-rail";
-export * from "./preflight";

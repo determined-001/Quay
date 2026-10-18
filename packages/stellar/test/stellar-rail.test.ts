@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { StrKey } from "@stellar/stellar-sdk";
+import { CannotReceiveError } from "@checkout/core";
 import { muxedFor, StellarRail } from "../src/stellar-rail";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -70,5 +71,36 @@ describe("StellarRail.buildRequest — muxed mode", () => {
     expect(req.uri).not.toContain("memo=");
     expect(req.uri).not.toContain("memo_type=");
     expect(req.uri).toContain(`destination=${req.destination}`);
+  });
+});
+
+describe("StellarRail.assertCanReceive — amount-aware headroom and caching", () => {
+  it("does not reuse a cached pass for a larger link amount", async () => {
+    const rail = new StellarRail(CFG);
+    const loadAccount = vi.fn().mockResolvedValue({
+      balances: [
+        {
+          asset_type: "credit_alphanum4",
+          asset_code: "USDC",
+          asset_issuer: ISSUER,
+          balance: "995",
+          limit: "1000",
+          is_authorized: true,
+        },
+      ],
+    });
+    (rail as any).server = { loadAccount };
+
+    // Link for 5 should pass (headroom is 5)
+    await expect(rail.assertCanReceive(DEST, { code: "USDC", issuer: ISSUER }, "5")).resolves.toBeUndefined();
+    expect(loadAccount).toHaveBeenCalledTimes(1);
+
+    // Re-checking with 5 should hit the cache and not call loadAccount again
+    await expect(rail.assertCanReceive(DEST, { code: "USDC", issuer: ISSUER }, "5")).resolves.toBeUndefined();
+    expect(loadAccount).toHaveBeenCalledTimes(1);
+
+    // Link for 100 exceeds headroom of 5; it must NOT reuse the cached pass for 5
+    await expect(rail.assertCanReceive(DEST, { code: "USDC", issuer: ISSUER }, "100")).rejects.toThrow(CannotReceiveError);
+    expect(loadAccount).toHaveBeenCalledTimes(2);
   });
 });
