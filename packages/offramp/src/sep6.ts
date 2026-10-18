@@ -243,6 +243,14 @@ export class Sep6TransactionError extends Error {
   }
 }
 
+/** Thrown when an anchor's SEP-6 response is missing required fields (e.g. withdraw id or transaction). */
+export class Sep6ResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "Sep6ResponseError";
+  }
+}
+
 /** SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md */
 export async function startSep6Withdraw(
   baseUrl: string,
@@ -282,7 +290,14 @@ export async function startSep6Withdraw(
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
     throw await anchorHttpError("6", "withdraw", res);
   }
-  const body = (await res.json()) as { id: string; account_id?: string; memo?: string; memo_type?: string };
+  const body = (await res.json()) as { id?: string; account_id?: string; memo?: string; memo_type?: string };
+  if (typeof body?.id !== "string" || body.id.trim() === "") {
+    log.warn(
+      { event: "anchor.sep6.withdraw.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /withdraw response has no id",
+    );
+    throw new Sep6ResponseError("SEP-6 /withdraw response has no id, so the withdrawal cannot be tracked");
+  }
   const memoType = body.memo_type === "id" || body.memo_type === "hash" || body.memo_type === "text" ? body.memo_type : undefined;
   const out: Sep6WithdrawResult = { id: body.id, accountId: body.account_id, memo: body.memo, memoType };
   log.info(
@@ -309,9 +324,9 @@ export async function getSep6Transaction(
     throw await anchorHttpError("6", "transaction fetch", res);
   }
   const body = (await res.json()) as {
-    transaction: {
-      id: string;
-      status: string;
+    transaction?: {
+      id?: string;
+      status?: string;
       amount_out?: string;
       message?: string;
       amount_in?: string;
@@ -322,7 +337,28 @@ export async function getSep6Transaction(
       withdraw_memo_type?: string;
     };
   };
+  if (!body || typeof body !== "object" || !body.transaction || typeof body.transaction !== "object") {
+    log.warn(
+      { event: "anchor.sep6.status.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /transaction response missing transaction object",
+    );
+    throw new Sep6ResponseError("SEP-6 /transaction response has no transaction object");
+  }
   const tx = body.transaction;
+  if (typeof tx.id !== "string" || tx.id.trim() === "") {
+    log.warn(
+      { event: "anchor.sep6.status.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /transaction response missing transaction id",
+    );
+    throw new Sep6ResponseError("SEP-6 /transaction response has no transaction id");
+  }
+  if (typeof tx.status !== "string" || tx.status.trim() === "") {
+    log.warn(
+      { event: "anchor.sep6.status.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /transaction response missing transaction status",
+    );
+    throw new Sep6ResponseError("SEP-6 /transaction response has no transaction status");
+  }
   const out: Sep6TransactionResult = {
     id: tx.id,
     status: tx.status,
