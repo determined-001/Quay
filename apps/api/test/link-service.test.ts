@@ -1672,3 +1672,191 @@ describe("LinkService.getCashOutTransfer (resume an unsent transfer)", () => {
   });
 });
 
+describe("LinkService.triggerCashOut concurrency (issue 4.40)", () => {
+  it("parallel triggerCashOut calls call initiate exactly once; the loser gets 409", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offramp = new ScriptedOffRamp();
+    let initiateCalls = 0;
+    offramp.quoteImpl = async () => ({
+      quoteId: "q_1",
+      sourceAsset: { code: "USDC", issuer: "GISSUER" },
+      sourceAmount: "10",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      expiresAt: Date.now() + 60_000,
+      fee: { amount: "0", currency: "NGN", source: "anchor" },
+      netTargetAmount: "16500",
+      quoteKind: "firm",
+    });
+    offramp.initiateImpl = async () => {
+      initiateCalls++;
+      await new Promise((r) => setTimeout(r, 15));
+      return {
+        kind: "transfer",
+        jobId: "job_1",
+        transfer: { destination: "GANCHOR", amount: "10", asset: { code: "USDC", issuer: "GISSUER" }, memo: "123", memoType: "id" },
+      };
+    };
+    const service = makeService({ links, offramp, offrampState: new FakeOffRampStateRepository(), kyc: new AlwaysAcceptedKyc() });
+
+    const results = await Promise.allSettled([
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{ job: { jobId: string } }>[];
+    const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toMatchObject({ status: 409, message: "cashout_already_in_progress" });
+    expect(initiateCalls).toBe(1);
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+    expect(links.get("lnk_1")?.offrampJobId).toBe("job_1");
+  });
+
+  it("releases claim when anchor quote fails and allows seller to retry", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async () => {
+      throw new Error("anchor quote error");
+    };
+    const service = makeService({ links, offramp, offrampState: new FakeOffRampStateRepository(), kyc: new AlwaysAcceptedKyc() });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 502 });
+
+    expect(links.get("lnk_1")?.status).toBe("paid");
+
+    // Retry succeeds once anchor recovers
+    offramp.quoteImpl = async () => ({
+      quoteId: "q_1",
+      sourceAsset: { code: "USDC", issuer: "GISSUER" },
+      sourceAmount: "10",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      expiresAt: Date.now() + 60_000,
+      fee: { amount: "0", currency: "NGN", source: "anchor" },
+      netTargetAmount: "16500",
+      quoteKind: "firm",
+    });
+    offramp.initiateImpl = async () => ({
+      kind: "transfer",
+      jobId: "job_retry",
+      transfer: { destination: "GANCHOR", amount: "10", asset: { code: "USDC", issuer: "GISSUER" }, memo: "123", memoType: "id" },
+    });
+
+    const res = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(res.job.jobId).toBe("job_retry");
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("releases claim when anchor initiate fails and allows seller to retry", async () => {
+    const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async () => ({
+      quoteId: "q_1",
+      sourceAsset: { code: "USDC", issuer: "GISSUER" },
+      sourceAmount: "10",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      expiresAt: Date.now() + 60_000,
+      fee: { amount: "0", currency: "NGN", source: "anchor" },
+      netTargetAmount: "16500",
+      quoteKind: "firm",
+    });
+    offramp.initiateImpl = async () => {
+      throw new Error("anchor initiate timeout");
+    };
+    const service = makeService({ links, offramp, offrampState: new FakeOffRampStateRepository(), kyc: new AlwaysAcceptedKyc() });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 502 });
+
+    expect(links.get("lnk_1")?.status).toBe("paid");
+
+    // Retry succeeds
+    offramp.initiateImpl = async () => ({
+      kind: "transfer",
+      jobId: "job_retry2",
+      transfer: { destination: "GANCHOR", amount: "10", asset: { code: "USDC", issuer: "GISSUER" }, memo: "123", memoType: "id" },
+    });
+
+    const res = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(res.job.jobId).toBe("job_retry2");
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+
+  it("releases claim back to offramp_failed when retry fails, and subsequent retry succeeds", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({
+        status: "offramp_failed",
+        offrampJobId: "old_failed_job",
+      }),
+    ]);
+    const offrampState = new FakeOffRampStateRepository();
+    await offrampState.saveJob({
+      jobId: "old_failed_job",
+      linkId: "lnk_1",
+      anchor: "testanchor",
+      status: "failed",
+      externalStatus: "failed",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      sellerId: "sel_1",
+      account: "GSELLER",
+      createdAt: 1000,
+      updatedAt: 1000,
+      lastError: null,
+      lastPollError: null,
+      lastPollErrorAt: null,
+      lastPollReason: null,
+      transferNotifiedAt: null,
+    });
+
+    const offramp = new ScriptedOffRamp();
+    offramp.quoteImpl = async () => ({
+      quoteId: "q_1",
+      sourceAsset: { code: "USDC", issuer: "GISSUER" },
+      sourceAmount: "10",
+      targetCurrency: "NGN",
+      targetAmount: "16500",
+      rate: "1650",
+      expiresAt: Date.now() + 60_000,
+      fee: { amount: "0", currency: "NGN", source: "anchor" },
+      netTargetAmount: "16500",
+      quoteKind: "firm",
+    });
+    offramp.initiateImpl = async () => {
+      throw new Error("anchor down");
+    };
+
+    const service = makeService({ links, offramp, offrampState, kyc: new AlwaysAcceptedKyc() });
+
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toMatchObject({ status: 502 });
+
+    // Link status is restored to offramp_failed
+    expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+
+    // Next retry succeeds
+    offramp.initiateImpl = async () => ({
+      kind: "transfer",
+      jobId: "new_successful_job",
+      transfer: { destination: "GANCHOR", amount: "10", asset: { code: "USDC", issuer: "GISSUER" }, memo: "123", memoType: "id" },
+    });
+
+    const res = await service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} });
+    expect(res.job.jobId).toBe("new_successful_job");
+    expect(links.get("lnk_1")?.status).toBe("offramp_pending");
+  });
+});
+
+
