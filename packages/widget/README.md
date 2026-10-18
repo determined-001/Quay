@@ -70,11 +70,9 @@ If the host cannot be determined, `Quay.open` throws instead of guessing.
 
 ## `postMessage` contract
 
-The embedded checkout page must post messages to the parent window. The widget
-accepts only messages from the expected checkout origin or the widget's own
-origin.
+The embedded checkout page (`/pay/:id?embed=true`) posts messages to the parent window (`window.parent`). The widget accepts only messages from the expected checkout origin or the widget's own origin.
 
-Message shape:
+### Message shape:
 
 ```ts
 {
@@ -85,10 +83,19 @@ Message shape:
 }
 ```
 
-Origin rule:
+### Event specifications:
 
-- `e.origin` must equal the checkout host origin, or `window.location.origin`.
-- Messages from any other origin are ignored.
+- **`quay:paid`**: Posted when the link settles (`paid`, `offramp_pending`, `offramp_settled`, or `offramp_failed`). Guaranteed to fire exactly once per link. Payload carries `{ type: "quay:paid", linkId, link }`.
+- **`quay:error`**: Posted when the payment link enters a terminal error state. Payload carries `{ type: "quay:error", linkId, error }` where `error` is:
+  - `"expired"`: The link is expired by status or server clock deadline.
+  - `"cancelled"`: The seller cancelled the payment link.
+  - `"connection_lost"`: Polling repeatedly failed and reached maximum backoff limits.
+- **`quay:closed`**: Posted when the buyer clicks the Close action within the embedded checkout frame, prompting the widget modal to close.
+
+### Origin and security rules:
+
+- **Receiving (Widget)**: `e.origin` must equal the checkout host origin, or `window.location.origin`. Messages from any other origin are ignored.
+- **Sending (Checkout iframe)**: Uses `document.referrer` origin as `targetOrigin` when valid, falling back to `"*"` (the posted payloads contain only public payment details, with no credentials or secrets).
 
 ## Build and size budget
 
