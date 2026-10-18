@@ -657,6 +657,9 @@ export const api = {
       body: JSON.stringify({ transaction }),
     }),
 
+  disconnectAnchorAuth: () =>
+    http<void>("/seller/anchor-auth", { method: "DELETE" }),
+
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),
 

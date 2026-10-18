@@ -444,6 +444,7 @@ export class DrizzleSellerRepository implements SellerRepository {
       // keep the wallet in sync if it changed in env
       if (existing[0].wallet !== wallet) {
         await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
+        await new DrizzleAnchorSessionRepository(this.db).deleteAllForSeller(existing[0].id);
       }
       return rowToSeller({ ...existing[0], wallet }, this.piiKey, this.logger);
     }
@@ -928,6 +929,7 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
     sellAmount: row.sellAmount,
     buyCurrency: row.buyCurrency,
     price: row.price,
+    withdrawType: row.withdrawType ?? undefined,
     ...(row.quotedRate !== null &&
     row.quotedTargetAmount !== null &&
     row.quotedFeeAmount !== null &&
@@ -990,6 +992,7 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       sellAmount: quote.sellAmount,
       buyCurrency: quote.buyCurrency,
       price: quote.price,
+      withdrawType: quote.withdrawType ?? null,
       quotedRate: quote.quotedAmounts?.rate ?? null,
       quotedTargetAmount: quote.quotedAmounts?.targetAmount ?? null,
       quotedFeeAmount: quote.quotedAmounts?.feeAmount ?? null,
@@ -1387,6 +1390,13 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
     await this.db
       .delete(anchorSessions)
       .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
+  }
+
+  async deleteAllForSeller(sellerId: string): Promise<number> {
+    const res = await this.db
+      .delete(anchorSessions)
+      .where(eq(anchorSessions.sellerId, sellerId));
+    return res.rowsAffected ?? 0;
   }
 
   /**

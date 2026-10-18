@@ -26,7 +26,7 @@ import {
   type WebhookRepository,
 } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
-import { AnchorHealth, LinkService } from "../src/services/link-service";
+import { AnchorHealth, AnchorHealthRegistry, LinkService } from "../src/services/link-service";
 import { encryptSecret } from "../src/services/secret-crypto";
 import { Hono } from "hono";
 
@@ -595,6 +595,54 @@ function buildSvcWithHealth(health: AnchorHealth, offramp: OffRampPort): Svc {
   return { service, repo, webhooks, health, captureRoute };
 }
 
+/** Like buildSvcWithHealth, but wiring a registry and choosing the anchor to use. */
+function buildSvcWithRegistry(
+  registry: AnchorHealthRegistry,
+  anchorDomain: string,
+  offramp: OffRampPort,
+): { service: LinkService; repo: FakeLinkRepoForAnchor; captureRoute: Hono } {
+  const repo = new FakeLinkRepoForAnchor();
+  const sellers = new FakeSellerRepoForAnchor({ id: "s_1", name: "Demo", wallet: DEST, profileKind: "individual", payoutFields: null, createdAt: 1 });
+  const webhooks = new FakeWebhookRepoForAnchor();
+  void webhooks.create({ sellerId: "s_1", url: "https://example.com/h", secret: "s" });
+  const service = new LinkService({
+    links: repo,
+    sellers,
+    webhooks,
+    rail: new FakeRailForAnchor(),
+    offramp,
+    offrampState: new FakeOffRampStateForAnchor(),
+    kyc: new FakeKycAlwaysAcceptedForAnchor(),
+    stellar: STELLAR,
+    telemetry: noopTelemetry,
+    health: registry,
+    anchorDomain,
+    correlation: "memo",
+    webhookGuard: async () => ({ ok: true }) as const,
+  });
+  const captureRoute = new Hono();
+  captureRoute.post("/:id/cash-out", async (ctx) => {
+    const body = (await ctx.req.json().catch(() => ({}))) as Record<string, unknown>;
+    try {
+      const { job, initiation } = await service.triggerCashOut(ctx.req.param("id"), {
+        targetCurrency: typeof body.targetCurrency === "string" ? body.targetCurrency : "NGN",
+        payoutFields: (body.payoutFields as Record<string, string> | undefined) ?? {},
+      });
+      const interactiveUrl = initiation.kind === "interactive" ? initiation.url : undefined;
+      return ctx.json({ job, interactiveUrl }, 200);
+    } catch (err) {
+      if (err instanceof Error && "status" in err) {
+        return ctx.json(
+          { error: (err as Error).message },
+          (err as { status: number }).status as 403 | 404 | 409 | 502 | 503,
+        );
+      }
+      throw err;
+    }
+  });
+  return { service, repo, captureRoute };
+}
+
 describe("LinkService with AnchorHealth", () => {
   it("triggerCashOut fails fast with 503 anchor_unavailable AND makes no offramp calls while the breaker is open", async () => {
     const offrampCalls: string[] = [];
@@ -643,6 +691,48 @@ describe("LinkService with AnchorHealth", () => {
     // No offramp traffic happened — the link never advanced.
     expect(offrampCalls).toHaveLength(0);
     expect((await built.repo.findById("lnk_1"))!.status).toBe("paid");
+  });
+
+  it("with two anchors, a breaker open on one does not block cash-outs to the other", async () => {
+    const down = new AnchorHealth({
+      enabled: true,
+      url: "https://down.test",
+      homeDomain: "down.test",
+      probeAccount: "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY",
+      failureThreshold: 1,
+      cooldownMs: 1_000_000, // never auto-close during the test
+    });
+    const up = new AnchorHealth({ enabled: false, url: null, homeDomain: "up.test", probeAccount: null });
+    configureFetch(() => ({ ok: false, status: 502 }));
+    await down.probe();
+    expect(down.isAvailable()).toBe(false);
+
+    const registry = new AnchorHealthRegistry([
+      { domain: "down.test", health: down },
+      { domain: "up.test", health: up },
+    ]);
+
+    // This deployment cashes out through up.test, whose breaker is closed:
+    // down.test being dead must not touch it.
+    const healthy = buildSvcWithRegistry(registry, "up.test", new FlakyOffRamp());
+    await healthy.repo.save(link({ status: "paid" }));
+    const okRes = await healthy.captureRoute.request("http://x/lnk_1/cash-out", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetCurrency: "NGN" }),
+    });
+    expect(okRes.status).toBe(200);
+
+    // Point the service at the dead anchor and the same call fails fast.
+    const dead = buildSvcWithRegistry(registry, "down.test", new FlakyOffRamp());
+    await dead.repo.save(link({ status: "paid" }));
+    const blockedRes = await dead.captureRoute.request("http://x/lnk_1/cash-out", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetCurrency: "NGN" }),
+    });
+    expect(blockedRes.status).toBe(503);
+    expect(((await blockedRes.json()) as { error: string }).error).toBe("anchor_unavailable");
   });
 
   it("a 502 still wraps single-call upstream failures (NOT 503) when the breaker is closed", async () => {
@@ -968,17 +1058,43 @@ describe("AnchorHealth probe account", () => {
     }
   });
 
-  it("stays disabled rather than probing with no account configured", async () => {
-    const health = new AnchorHealth({
-      enabled: true,
-      url: "https://anchor.test",
-      homeDomain: "anchor.test",
-      probeAccount: null,
-    });
-    // Short-circuits to healthy without IO, the same as mock mode — better than
-    // probing with a placeholder and reporting a false outage.
-    const snap = await health.probe();
-    expect(snap.state).toBe("closed");
+  it("generates a throwaway account and reports sep10 as skipped when the anchor declines it", async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      seen.push(url);
+      if (url.includes("stellar.toml")) return new Response("ok", { status: 200 });
+      // testanchor-style: an unfunded account is refused. That is not an outage.
+      if (url.includes("/auth")) return new Response(JSON.stringify({ error: "Invalid account." }), { status: 400 });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const health = new AnchorHealth({
+        enabled: true,
+        url: "https://anchor.test",
+        homeDomain: "anchor.test",
+        probeAccount: null,
+      });
+      const snap = await health.probe();
+
+      // Neither faked as a pass nor counted as a failure.
+      expect(snap.probes.sep10).toBe("skipped");
+      expect(snap.probes.toml).toBe(true);
+      expect(snap.probes.info).toBe(true);
+      expect(snap.state).toBe("closed");
+      expect(snap.lastError).toBeNull();
+
+      const authCall = seen.find((u) => u.includes("/auth"));
+      expect(authCall).toBeDefined();
+      const probed = new URL(authCall!).searchParams.get("account");
+      expect(probed).toMatch(/^G/);
+      // The placeholder that caused the false outage must not reappear.
+      expect(probed).not.toBe("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK5KQ");
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });
 
@@ -1052,5 +1168,60 @@ describe("AnchorHealth probe endpoints", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Per-anchor health registry (issue 3.23).
+//
+//  One AnchorHealth guards one anchor. Keyed by home domain, a registry keeps a
+//  dead anchor from pausing cash-outs at the others.
+// ---------------------------------------------------------------------------
+describe("AnchorHealthRegistry", () => {
+  it("keys breakers by home domain so one dead anchor does not pause the others", async () => {
+    const account = "GBMDH3QWSD74ILWD2ZVFOAOCMVRNPNGAHN557WA4KABLI5IFN2XYLMGY";
+    const down = new AnchorHealth({
+      enabled: true,
+      url: "https://down.test",
+      homeDomain: "down.test",
+      probeAccount: account,
+      failureThreshold: 1,
+      cooldownMs: 1_000_000,
+    });
+    const up = new AnchorHealth({ enabled: true, url: "https://up.test", homeDomain: "up.test", probeAccount: account });
+    const registry = new AnchorHealthRegistry([
+      { domain: "down.test", health: down },
+      { domain: "up.test", health: up },
+    ]);
+
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      if (url.includes("down.test")) return new Response("boom", { status: 502 });
+      if (url.includes("stellar.toml")) return new Response("ok", { status: 200 });
+      if (url.includes("/auth")) return new Response(JSON.stringify({ transaction: "AAA" }), { status: 200 });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await down.probe();
+      await up.probe();
+
+      expect(registry.isAvailable("down.test")).toBe(false);
+      expect(registry.isAvailable("up.test")).toBe(true);
+      expect(registry.snapshot("down.test").state).toBe("open");
+      expect(registry.snapshot("up.test").state).toBe("closed");
+      expect(registry.domains().sort()).toEqual(["down.test", "up.test"]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("reports a healthy closed snapshot for a domain it does not know", () => {
+    const registry = new AnchorHealthRegistry();
+    const snap = registry.snapshot("nobody.test");
+    expect(snap.domain).toBe("nobody.test");
+    expect(snap.state).toBe("closed");
+    expect(registry.isAvailable("nobody.test")).toBe(true);
   });
 });
