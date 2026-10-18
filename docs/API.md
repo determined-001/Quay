@@ -19,15 +19,17 @@ cross-origin — so `CORS_ORIGINS` can't be `*` while auth is in use).
 ## Authentication
 
 Every route marked **Requires auth** below needs `Authorization: Bearer <token>`
-(from `POST /auth`) or the httpOnly `session` cookie it also sets.
+(from `POST /auth`), an API key (`Authorization: Bearer ak_...`), or the httpOnly
+`session` cookie set by `POST /auth`.
 
-- **401 `unauthorized`** — you're not authenticated at all: no token, or one
-  that's missing, malformed, tampered, expired, or revoked (`POST /auth/logout`
-  put its `jti` on the revocation list). The response body always has this
-  shape: `{ "error": "unauthorized", "message": "<why>" }`.
+- **401 `unauthorized` / `invalid_api_key`** — you are not authenticated: no token, or one
+  that is missing, malformed, tampered, expired, or revoked (`POST /auth/logout`
+  put its `jti` on the revocation list; an API key was deleted or invalid).
+  The response body has `{ "error": "unauthorized", "message": "<why>" }` or
+  `{ "error": "invalid_api_key" }`.
 - **403 `forbidden` / `missing_scope`** — you *are* authenticated, but the credential is not authorized for this operation:
   - When an API key lacks the required scope, the response is `{ "error": "missing_scope", "required": "<scope>" }` (e.g. `links:write`).
-  - `{ "error": "forbidden", "message": "<why>" }` is returned when a cookie-authenticated state change lacks an allowed `Origin` header (`apps/api/src/middleware/auth.ts`), when an API key attempts a session-only route, or on key-minting scope escalation (`apps/api/src/routes/api-keys.ts`).
+  - `{ "error": "forbidden", "message": "<why>" }` is returned when a cookie-authenticated state change lacks an allowed `Origin` header (`apps/api/src/middleware/auth.ts`), when an API key attempts a session-only route (such as `/seller/kyc/files` or `/seller/profile`), or on key-minting scope escalation (`apps/api/src/routes/api-keys.ts`).
 - **404 `not_found`** — the object does not exist **or does not belong to you**.
   These are deliberately the same answer: a 403 on someone else's link would
   confirm that the id is real, which is a leak in itself. Do not read a 404 as
@@ -36,6 +38,23 @@ Every route marked **Requires auth** below needs `Authorization: Bearer <token>`
 These are deliberately different failure modes: 401 means "prove who you are
 again"; 403 means "you did, and this credential still is not allowed to do
 that"; 404 means "nothing here that is yours."
+
+### Scopes
+
+API keys carry granular permission scopes (`ALL_SCOPES`). Session tokens from `POST /auth`
+represent the logged-in seller and implicitly hold all scopes.
+When minting an API key via `POST /api-keys`, omitting `scopes` assigns `DEFAULT_SCOPES`
+(`links:read`, `links:write`, `webhooks:manage`).
+Sensitive capabilities (`offramp:initiate`, `api-keys:manage`) are opt-in and must be explicitly requested.
+Privilege escalation is prevented: an API key can only mint keys whose scopes are a subset of its own.
+
+| Scope | What it allows | Required by routes | Default? |
+| --- | --- | --- | --- |
+| `links:read` | Read payment links, details, quotes, and export CSVs | `GET /links/export/csv`<br>`GET /links/:id/detail`<br>`GET /links/:id/offramp-preview`<br>`GET /links/:id/offramp-requirements`<br>`GET /links/:id/cash-out/quote` | Yes |
+| `links:write` | Mutate and cancel payment links | `POST /links/:id/cancel` | Yes |
+| `webhooks:manage` | Register, list, delete, and test webhooks | `POST /webhooks`<br>`GET /webhooks`<br>`DELETE /webhooks/:id`<br>`POST /webhooks/:id/test` | Yes |
+| `api-keys:manage` | Create, list, and revoke API keys | `POST /api-keys`<br>`GET /api-keys`<br>`DELETE /api-keys/:id` | No (opt-in) |
+| `offramp:initiate` | Initiate off-ramp cash-out, submit transfers, manage KYC, and anchor sessions | `POST /links/:id/cash-out`<br>`GET /links/:id/cash-out/transfer`<br>`POST /links/:id/cash-out/transfer-sent`<br>`GET /seller/kyc`<br>`POST /seller/kyc`<br>`PUT /seller/kyc`<br>`PUT /seller/kyc/files`<br>`GET /seller/anchor-auth`<br>`POST /seller/anchor-auth`<br>`POST /seller/anchor-auth/complete` | No (opt-in) |
 
 ## Conventions
 
@@ -73,14 +92,41 @@ Idempotency-Key: <unique-string-per-logical-request>
 Use a UUID or any sufficiently random string. Retry safely on network timeouts by
 resending the same key and body.
 
+## Rate limits
+
+The API protects against abuse using fixed-window rate limiting (`apps/api/src/middleware/rate-limit.ts`).
+Rate limit buckets are keyed by client IP (respecting `trustProxyHops`), or by the API key prefix
+(`api-key:<prefix>`) for requests authenticated with an API key.
+
+- **Standard limiter**: `RATE_LIMIT_MAX` requests per window (default 120 req / 60s).
+- **Strict limiter**: `RATE_LIMIT_STRICT_MAX` requests per window (default 10 req / 60s), applied to sensitive routes:
+  `POST /links`, `POST /links/:id/cash-out`, `POST /auth`, and `/api-keys/*`.
+- **Receipt limiter**: `Math.floor(RATE_LIMIT_MAX / 2)` (default 60 req / 60s) for `/r/*`.
+- **Privacy export limiter**: 5 requests per seller per hour for `/seller/profile/export`.
+
+Every rate-limited route attaches standard headers on every response:
+- `x-ratelimit-limit` — maximum number of allowed requests in the current window.
+- `x-ratelimit-remaining` — remaining requests allowed in the current window.
+- `x-ratelimit-reset` — Unix epoch timestamp (in integer seconds) when the window resets.
+
+When rate limits are exceeded, the API responds with **429 Too Many Requests**, attaching a `retry-after` header
+indicating the number of seconds until requests are accepted again.
+
+**429 Response**
+```json
+{
+  "error": "rate_limited"
+}
+```
+
 ---
 
 ## `GET /health`
 
-Liveness + basic config echo, plus the watcher's Horizon health and a re-check of
+Liveness + basic config echo, plus the watcher's Horizon health, a re-check of
 the seller's own USDC trustline (cached up to 60s — see the account/trustline
 preflight note below) so a revoked trustline shows up in ops without anyone
-touching logs.
+touching logs, and the anchor health probe + circuit breaker snapshot.
 
 **200**
 ```json
@@ -89,7 +135,16 @@ touching logs.
   "network": "testnet",
   "sellerWallet": "G...",
   "usdcTrustline": { "ok": true },
-  "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 }
+  "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 },
+  "anchor": {
+    "state": "closed",
+    "consecutiveFailures": 0,
+    "lastCheckedAt": 1750000000000,
+    "lastSuccessAt": 1750000000000,
+    "lastError": null,
+    "url": "https://testanchor.stellar.org",
+    "probes": { "toml": true, "sep10": true, "info": true }
+  }
 }
 ```
 `ok` is pure liveness (the process is up) — check `horizon.degraded` for whether
@@ -105,6 +160,11 @@ to the primary automatically on the next successful call. `400`/`404` responses
 (e.g. an account that doesn't exist yet) are treated as a normal, prompt answer —
 never retried, never counted against `consecutiveFailures`.
 
+The `anchor` field reports the anchor health probe + circuit breaker snapshot (`apps/api/src/services/link-service.ts:AnchorHealth`).
+`state` reflects the circuit breaker status (`closed`, `half_open`, or `open`), allowing operators to distinguish
+an anchor outage from API degradation. `probes` reports the latest health checks across the anchor's `stellar.toml`,
+SEP-10 web auth, and SEP-6/24 `/info` endpoints.
+
 When the seller's own wallet can't currently receive USDC:
 ```json
 {
@@ -116,9 +176,57 @@ When the seller's own wallet can't currently receive USDC:
     "reason": "no_trustline",
     "message": "Account G... has no trustline for USDC (issuer G...) — add one before this link can be paid.",
     "trustlineUri": "web+stellar:tx?xdr=...&network_passphrase=..."
+  },
+  "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 },
+  "anchor": {
+    "state": "closed",
+    "consecutiveFailures": 0,
+    "lastCheckedAt": 1750000000000,
+    "lastSuccessAt": 1750000000000,
+    "lastError": null,
+    "url": "https://testanchor.stellar.org",
+    "probes": { "toml": true, "sep10": true, "info": true }
   }
 }
 ```
+
+---
+
+## `GET /ready`
+
+Readiness probe for orchestrators and container health checks (used as Render's `healthCheckPath`
+and the Dockerfile `HEALTHCHECK`). Distinct from liveness (`GET /health`): `ok` indicates whether
+the instance can actively serve database queries. Watcher circuit breaker status and metrics are
+included for diagnostics, but watcher circuit breaker trips deliberately do not fail readiness so that
+an instance can continue serving checkout pages and link creation during Horizon blips.
+
+**Request**
+```http
+GET /ready HTTP/1.1
+```
+
+**200**
+```json
+{
+  "ok": true,
+  "circuitBreakers": {
+    "horizon": false
+  },
+  "metrics": {
+    "accountsWatched": 1,
+    "tickDurationMs": 45,
+    "circuitBreakersOpen": 0,
+    "perAccountLag": {
+      "G...": 0
+    }
+  }
+}
+```
+
+| Status | Body | When |
+| --- | --- | --- |
+| `200` | `{ "ok": true, "circuitBreakers": ..., "metrics": ... }` | Database connection is healthy and ready to serve traffic |
+| `503` | `{ "ok": false, "circuitBreakers": ..., "metrics": ... }` | Database readiness check failed (`container.ready()` returned false) |
 
 ---
 
@@ -187,6 +295,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `wallet_submissions_total` | `outcome` (`submitted`, `invalid_xdr`, `rejected`) |
 | `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
 | `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` (`ok`, `error`, `rejected`) |
+| `quay_kyc_retention_purged_total` | — (total inactive sellers whose KYC and identity data was purged under retention policy) |
 
 **Histograms**
 | Metric | Labels |
@@ -204,6 +313,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `webhook_deliveries_in_flight` | webhook deliveries currently being attempted, including retries |
 | `offramp_circuit_breaker_state` | `0`=closed, `1`=half_open, `2`=open — see below |
 | `watcher_lag_seconds` | seconds since the watcher's last completed poll tick |
+| `kyc_non_primary_key_rows` | number of seller KYC rows encrypted with legacy or non-primary encryption keys |
 
 A ready-made dashboard for these is at [`docs/grafana-dashboard.json`](grafana-dashboard.json)
 (import directly into Grafana, point it at your Prometheus data source).
@@ -886,6 +996,49 @@ grant consent via `POST /seller/kyc/consent` before retrying.
 
 ---
 
+## `PUT /seller/kyc/files`
+
+Upload identity documents (e.g. passport or ID photos) required by the anchor for SEP-12 KYC verification.
+Files stream directly to the anchor and are immediately discarded; file contents are never stored on disk
+or in the database.
+
+**Requires auth.** Session authentication only (`403` for API keys). Requires `offramp:initiate` scope.
+
+**Request**
+`Content-Type: multipart/form-data`
+Multipart body containing one file per requested binary field (e.g. `photo_id_front`, `photo_id_back`).
+Individual file sizes and overall payload size are capped at `KYC_MAX_UPLOAD_BYTES` (default 5 MB).
+Allowed MIME types: `image/jpeg`, `image/png`, `application/pdf`.
+
+**200**
+```json
+{
+  "status": "PROCESSING",
+  "requiredFields": [],
+  "providedFields": ["photo_id_front", "photo_id_back"],
+  "message": null,
+  "lastSyncedAt": 1750000000000
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `400` | `invalid_body` | Request body could not be parsed as multipart form data |
+| `400` | `no_files` | No files were attached to the request |
+| `400` | `unrequested_field` | An uploaded field is not among the anchor's requested binary fields (`field` included) |
+| `400` | `too_many_files` | Multiple files uploaded for the same field name (`field` included) |
+| `400` | `invalid_file` | Uploaded entry is not a file (`field` included) |
+| `400` | `invalid_mime_type` | File MIME type is not allowed (must be JPEG, PNG, or PDF; `field` and `mimeType` included) |
+| `401` | `unauthorized` | Missing, expired, or invalid session token |
+| `403` | `forbidden` | Request made using an API key (`"file uploads require session authentication"`) |
+| `403` | `anchor_auth_required` | Seller does not have an active SEP-10 anchor session |
+| `403` | `consent_required` | Seller has not granted consent for the uploaded fields to be sent to the anchor (`anchorDomain` and `fields` included) |
+| `413` | `payload_too_large` | Overall body or individual file exceeds maximum permitted upload size |
+| `422` | `kyc_required` | Anchor requires additional fields (`missingFields` included) |
+| `502` | `anchor_error` | Anchor rejected the upload or was unreachable |
+
+---
+
 ## `GET /seller/profile`
 
 The seller's reusable identity profile: the values they own, independent of any
@@ -976,6 +1129,117 @@ SEP-12 `GET /customer` response; its `id` must equal the stored customer id.
 | 400 | `{ "error": "unknown_anchor" }` / `{ "error": "missing_anchor_signing_key" }` | The anchor's `stellar.toml` or signing key could not be resolved |
 | 401 | `{ "error": "missing_signature" }` / `{ "error": "invalid_signature" }` | No signature, a bad or stale one |
 | 404 | `{ "error": "invalid_callback_token" }` | Unknown token, or a token used under a different anchor. No `stellar.toml` is fetched in either case |
+
+---
+
+## `POST /api-keys`
+
+Create an API key for the authenticated seller. Plaintext keys are returned **once** upon creation
+and are never stored or displayed again (the database stores only an scrypt hash and a 16-character
+searchable prefix).
+
+**Requires auth.** Requires the `api-keys:manage` scope. Protected by `strictRateLimit`.
+
+**Request**
+```json
+{
+  "name": "Backend service",
+  "env": "live",
+  "scopes": "links:read,links:write"
+}
+```
+- `name` — required, string (1–120 characters).
+- `env` — optional, `"live"` (default) or `"test"`. Cosmetic prefix tag (`ak_live_...` vs `ak_test_...`).
+- `scopes` — optional, comma-separated list of scopes. Defaults to `links:read,links:write,webhooks:manage`. Sensitive scopes (`offramp:initiate` and `api-keys:manage`) must be requested explicitly. When creating a key using an existing API key, requested scopes must be a subset of the calling key's scopes.
+
+**201**
+```json
+{
+  "id": "key_01J9...",
+  "name": "Backend service",
+  "prefix": "ak_live_a1B2c3D4",
+  "scopes": ["links:read", "links:write"],
+  "createdAt": 1750000000000,
+  "key": "ak_live_a1B2c3D4xxxxxxxxxxxxxxxxxxxxxxxx"
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `400` | `invalid_body` | Validation failed (missing/empty name, name > 120 chars, invalid `env`, or unknown scopes) |
+| `401` | `unauthorized` / `invalid_api_key` | Missing, invalid, expired, or revoked credentials |
+| `403` | `missing_scope` | API key lacks `api-keys:manage` scope |
+| `403` | `forbidden` | Privilege escalation: an API key requested scopes it does not hold |
+| `429` | `rate_limited` | Strict rate limit exceeded |
+
+---
+
+## `GET /api-keys`
+
+List all API keys for the authenticated seller. Hashes and plaintext keys are not returned.
+
+**Requires auth.** Requires the `api-keys:manage` scope. Protected by `strictRateLimit`.
+
+**Request**
+```http
+GET /api-keys HTTP/1.1
+Authorization: Bearer <token>
+```
+
+**200**
+```json
+{
+  "keys": [
+    {
+      "id": "key_01J9...",
+      "name": "Backend service",
+      "prefix": "ak_live_a1B2c3D4",
+      "scopes": ["links:read", "links:write"],
+      "lastUsedAt": 1750001000000,
+      "createdAt": 1750000000000,
+      "revokedAt": null
+    }
+  ],
+  "availableScopes": ["links:read", "links:write", "webhooks:manage", "api-keys:manage", "offramp:initiate"],
+  "defaultScopes": ["links:read", "links:write", "webhooks:manage"]
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `401` | `unauthorized` / `invalid_api_key` | Missing, invalid, expired, or revoked credentials |
+| `403` | `missing_scope` | API key lacks `api-keys:manage` scope |
+| `429` | `rate_limited` | Strict rate limit exceeded |
+
+---
+
+## `DELETE /api-keys/:id`
+
+Revoke an API key. Revocation takes effect immediately; subsequent requests presenting the key return `401 invalid_api_key`.
+
+**Requires auth.** Requires the `api-keys:manage` scope. Protected by `strictRateLimit`.
+
+**Request**
+```http
+DELETE /api-keys/key_01J9... HTTP/1.1
+Authorization: Bearer <token>
+```
+
+**200**
+```json
+{
+  "id": "key_01J9...",
+  "revokedAt": 1750002000000
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `401` | `unauthorized` / `invalid_api_key` | Missing, invalid, expired, or revoked credentials |
+| `403` | `missing_scope` | API key lacks `api-keys:manage` scope |
+| `404` | `not_found` | Key does not exist or does not belong to the authenticated seller |
+| `409` | `already_revoked` | Key has already been revoked |
+| `429` | `rate_limited` | Strict rate limit exceeded |
 
 ---
 
@@ -1370,3 +1634,162 @@ request is scoped to the session's own seller and cannot name another.
 `refused:<status>` or `not_attempted:no_session` (connect to the anchor and
 erase again to remove what it holds). `anchors` is empty when no real anchor
 is configured. The anchor may be legally required to retain KYC records.
+
+---
+
+## `GET /demo/link`
+
+Public helper for the demo checkout page (`/demo`) to resolve the ID of a seeded demo link
+without hardcoding. Only mounted and available when `STELLAR_NETWORK=testnet`.
+
+**Request**
+```http
+GET /demo/link HTTP/1.1
+```
+
+**200**
+```json
+{
+  "linkId": "lnk_demo_123"
+}
+```
+*(or `{ "linkId": null }` if no demo link is seeded)*
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `403` | `demo endpoints are only available on testnet` | Deployment is running on public network (`pubnet`) |
+
+---
+
+## `POST /demo/reset`
+
+Deletes all demo-flagged links (`is_demo = true`) belonging to the authenticated seller
+and clears watcher processed transaction records for them. Only available when `STELLAR_NETWORK=testnet`.
+
+**Requires auth.** Requires seller session or API key.
+
+**Request**
+```http
+POST /demo/reset HTTP/1.1
+Authorization: Bearer <token>
+```
+
+**200**
+```json
+{
+  "ok": true,
+  "deleted": 3
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `401` | `unauthorized` | Missing, invalid, expired, or revoked credentials |
+| `403` | `demo endpoints are only available on testnet` | Deployment is running on public network (`pubnet`) |
+
+---
+
+## `GET /telemetry/summary`
+
+Operator endpoint returning aggregated off-ramp settlement statistics grouped by `(anchorDomain, corridor)`:
+total count, settled count, failed count, p50 and p95 settlement latency, and mean quoted-vs-effective spread.
+Gated by the `TELEMETRY_TOKEN` environment variable.
+
+**Request**
+```http
+GET /telemetry/summary HTTP/1.1
+Authorization: Bearer <TELEMETRY_TOKEN>
+```
+
+**200**
+```json
+{
+  "summary": [
+    {
+      "anchorDomain": "testanchor.stellar.org",
+      "corridor": "USDC:BRL",
+      "count": 42,
+      "settledCount": 40,
+      "failedCount": 2,
+      "latencyP50Ms": 14200,
+      "latencyP95Ms": 35600,
+      "meanSpread": 0.0012
+    }
+  ]
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid `TELEMETRY_TOKEN` in `Authorization: Bearer` |
+| `404` | `telemetry_not_enabled` | `TELEMETRY_TOKEN` is unset in the server environment |
+
+---
+
+## `GET /telemetry/rows`
+
+Operator endpoint returning anonymised recent off-ramp transactions, sorted newest first.
+Link IDs and seller IDs are omitted. Gated by `TELEMETRY_TOKEN`.
+
+**Request**
+```http
+GET /telemetry/rows?corridor=USDC:BRL&limit=20 HTTP/1.1
+Authorization: Bearer <TELEMETRY_TOKEN>
+```
+- `corridor` — optional query filter (e.g. `?corridor=USDC:BRL`).
+- `limit` — optional integer (default 20, clamped between 1 and 100).
+
+**200**
+```json
+{
+  "rows": [
+    {
+      "anchorDomain": "testanchor.stellar.org",
+      "corridor": "USDC:BRL",
+      "sellAsset": "USDC",
+      "sellAmount": "50.00",
+      "quotedRate": "5.45",
+      "effectiveRate": "5.44",
+      "feeAmount": "0.50",
+      "quotedAt": 1750000000000,
+      "initiatedAt": 1750000010000,
+      "settledAt": 1750000025000,
+      "status": "settled",
+      "failureReason": null
+    }
+  ]
+}
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid `TELEMETRY_TOKEN` in `Authorization: Bearer` |
+| `404` | `telemetry_not_enabled` | `TELEMETRY_TOKEN` is unset in the server environment |
+
+---
+
+## `GET /telemetry/export.csv`
+
+Operator endpoint returning a full anonymised CSV dump of off-ramp transactions suitable for
+public dataset export. Link IDs and seller identities are omitted. Gated by `TELEMETRY_TOKEN`.
+
+**Request**
+```http
+GET /telemetry/export.csv HTTP/1.1
+Authorization: Bearer <TELEMETRY_TOKEN>
+```
+
+**200**
+Content-Type: `text/csv; charset=utf-8`
+Content-Disposition: `attachment; filename="offramp_telemetry_2026-10-18.csv"`
+
+```csv
+corridor,sell_asset,sell_amount,quoted_rate,quoted_at,initiated_at,settled_at,effective_rate,fee_amount,status
+USDC:BRL,USDC,50.00,5.45,2026-10-18T08:00:00.000Z,2026-10-18T08:00:10.000Z,2026-10-18T08:00:25.000Z,5.44,0.50,settled
+```
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid `TELEMETRY_TOKEN` in `Authorization: Bearer` |
+| `404` | `telemetry_not_enabled` | `TELEMETRY_TOKEN` is unset in the server environment |
+
