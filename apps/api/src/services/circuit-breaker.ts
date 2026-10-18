@@ -1,6 +1,8 @@
 import {
   AnchorAuthRequiredError,
+  KycRequiredError,
   OffRampRejectedError,
+  QuoteExpiredError,
   type OffRampInitiation,
   type OffRampJob,
   type OffRampMode,
@@ -19,6 +21,8 @@ export interface CircuitBreakerOptions {
   failureThreshold?: number;
   /** How long the circuit stays open before allowing a half-open trial call (default 30s). */
   cooldownMs?: number;
+  /** Anchor home domain, used as the Prometheus `anchor` label. Defaults to "unknown". */
+  anchor?: string;
 }
 
 /**
@@ -40,6 +44,7 @@ export class CircuitBreakerOffRamp implements OffRampPort {
   private openedAt = 0;
   private readonly failureThreshold: number;
   private readonly cooldownMs: number;
+  private readonly anchor: string;
 
   constructor(
     private readonly inner: OffRampPort,
@@ -48,6 +53,7 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     this.mode = inner.mode;
     this.failureThreshold = opts.failureThreshold ?? 3;
     this.cooldownMs = opts.cooldownMs ?? 30_000;
+    this.anchor = opts.anchor ?? "unknown";
 
     if (inner.indicativePrices) {
       const fn = inner.indicativePrices.bind(inner);
@@ -82,7 +88,7 @@ export class CircuitBreakerOffRamp implements OffRampPort {
   private async call<T>(method: string, fn: () => Promise<T>): Promise<T> {
     if (this.state === "open") {
       if (Date.now() - this.openedAt < this.cooldownMs) {
-        metrics.anchorCallsTotal.inc({ method, status: "error" });
+        metrics.anchorCallsTotal.inc({ anchor: this.anchor, method, status: "error" });
         throw new Error(`off-ramp circuit open — anchor calls paused after repeated failures (method: ${method})`);
       }
       this.state = "half_open";
@@ -91,16 +97,20 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     const start = Date.now();
     try {
       const result = await fn();
-      metrics.anchorCallDurationSeconds.observe({ method }, (Date.now() - start) / 1000);
-      metrics.anchorCallsTotal.inc({ method, status: "ok" });
+      metrics.anchorCallDurationSeconds.observe({ anchor: this.anchor, method }, (Date.now() - start) / 1000);
+      metrics.anchorCallsTotal.inc({ anchor: this.anchor, method, status: "ok" });
       this.onSuccess();
       return result;
     } catch (err) {
-      metrics.anchorCallDurationSeconds.observe({ method }, (Date.now() - start) / 1000);
+      metrics.anchorCallDurationSeconds.observe({ anchor: this.anchor, method }, (Date.now() - start) / 1000);
       // A request the anchor refused on its merits (out-of-range amount,
-      // unsupported type) is the caller's problem, not an outage.
-      const rejected = err instanceof OffRampRejectedError;
-      metrics.anchorCallsTotal.inc({ method, status: rejected ? "rejected" : "error" });
+      // unsupported type) or that failed on the seller's side (missing KYC,
+      // expired quote) is not an outage and must not count (issue 3.23).
+      const rejected =
+        err instanceof OffRampRejectedError ||
+        err instanceof KycRequiredError ||
+        err instanceof QuoteExpiredError;
+      metrics.anchorCallsTotal.inc({ anchor: this.anchor, method, status: rejected ? "rejected" : "error" });
       // A seller without a live anchor session says nothing about the
       // anchor's health; counting it would let one signed-out seller open the
       // circuit for everybody.

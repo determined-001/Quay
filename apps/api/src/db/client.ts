@@ -83,6 +83,7 @@ const BOOTSTRAP_SQL = [
      quote_id TEXT PRIMARY KEY, link_id TEXT NOT NULL,
      sell_asset_code TEXT NOT NULL, sell_asset_issuer TEXT, sell_amount TEXT NOT NULL,
      buy_currency TEXT NOT NULL, price TEXT NOT NULL,
+     withdraw_type TEXT,
      expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS offramp_jobs (
@@ -197,6 +198,7 @@ const BOOTSTRAP_SQL = [
 // above won't touch an existing table, so add it out-of-band; ignore the
 // "duplicate column" error on databases that already have it.
 const ADDITIVE_MIGRATIONS = [
+  `ALTER TABLE offramp_quotes ADD COLUMN withdraw_type TEXT`,
   `ALTER TABLE offramp_quotes ADD COLUMN quoted_rate TEXT`,
   `ALTER TABLE offramp_quotes ADD COLUMN quoted_target_amount TEXT`,
   `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_amount TEXT`,

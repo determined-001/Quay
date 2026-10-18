@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AnchorAuthRequiredError,
+  KycRequiredError,
   OffRampRejectedError,
+  QuoteExpiredError,
   type OffRampInitiation,
   type OffRampJob,
   type OffRampPort,
@@ -204,5 +206,28 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
     for (let i = 0; i < 3; i++) await expect(breaker.quote(input)).rejects.toThrow("502");
     expect(breaker.getState()).toBe("open");
+  });
+
+  it("does not open on a missing-KYC rejection (KycRequiredError)", async () => {
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(new KycRequiredError(["email_address"]))),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 2 });
+    for (let i = 0; i < 5; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(KycRequiredError);
+    }
+    // A seller who has not finished KYC is not an anchor outage.
+    expect(breaker.getState()).toBe("closed");
+  });
+
+  it("does not open on an expired quote (QuoteExpiredError)", async () => {
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(new QuoteExpiredError("q1"))),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 2 });
+    for (let i = 0; i < 5; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(QuoteExpiredError);
+    }
+    expect(breaker.getState()).toBe("closed");
   });
 });

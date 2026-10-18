@@ -14,15 +14,15 @@
  * @stellar/stellar-sdk — pnpm's strict node_modules means a script in the repo
  * root cannot resolve it.
  *
- * The two Stellar keys are generated but NOT funded — see docs/MAINNET.md for
- * what each needs before the service will work.
+ * The script generates one Stellar key (the SEP-10 signing identity), which
+ * does not need funding — see docs/MAINNET.md for what each needs before the
+ * service will work.
  */
 import { randomBytes } from "node:crypto";
 import { Keypair } from "@stellar/stellar-sdk";
 
 const hex = () => randomBytes(32).toString("hex");
 
-const seller = Keypair.random();
 const signer = Keypair.random();
 
 const out = [
@@ -38,17 +38,15 @@ const out = [
   `WEBHOOK_SECRET_ENCRYPTION_KEY=${hex()}`,
   `METRICS_TOKEN=${hex()}`,
   "",
-  "# --- Seller wallet: receives customer funds ---",
-  "# Needs a USDC trustline and enough XLM for the base reserve before it can",
-  "# be paid. Fund and add the trustline from a wallet, not from this script.",
-  `DEFAULT_SELLER_WALLET=${seller.publicKey()}`,
-  `DEFAULT_SELLER_SECRET=${seller.secret()}`,
-  "",
   "# --- Platform SEP-10 signing identity ---",
   "# Published as SIGNING_KEY in /.well-known/stellar.toml. Rotating it logs",
   "# every wallet out.",
   `SERVER_SIGNING_SECRET=${signer.secret()}`,
   `#   (public key, for reference: ${signer.publicKey()})`,
+  "",
+  "# --- Seller wallet ---",
+  "# No seller key is needed because every seller signs with their own wallet.",
+  "# DEFAULT_SELLER_WALLET is optional (public address only).",
   "",
   "═".repeat(78),
   "  Still to supply by hand: ANCHOR_URL, ANCHOR_HOME_DOMAIN, DATABASE_URL,",
