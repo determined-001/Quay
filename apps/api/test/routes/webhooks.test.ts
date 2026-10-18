@@ -199,4 +199,37 @@ describe("POST /webhooks/deliveries/:id/replay", () => {
     const res = await req("/webhooks/deliveries/wqe_nope/replay", { method: "POST" });
     expect(res.status).toBe(404);
   });
+
+  it("allows replaying a delivery for a soft-deleted webhook", async () => {
+    const seller = container.seller;
+    const hook = await container.webhooks.create({
+      sellerId: seller.id,
+      url: "https://example.com/replay-deleted",
+      secret: "replay-secret-001",
+    });
+    const entry = await container.webhooks.enqueue({
+      id: "wqe_replay_deleted",
+      webhookId: hook.id,
+      linkId: "lnk_1",
+      event: "link.paid",
+      payload: JSON.stringify({ event: "link.paid" }),
+      nextAttemptAt: Date.now(),
+      createdAt: Date.now(),
+    });
+    await container.webhooks.updateQueueEntry(entry.id, {
+      status: "dead",
+      attempts: 5,
+      nextAttemptAt: entry.nextAttemptAt,
+      lastStatusCode: 500,
+      lastError: "HTTP 500",
+    });
+    await container.webhooks.softDelete(hook.id, seller.id);
+
+    const res = await req(`/webhooks/deliveries/${entry.id}/replay`, { method: "POST" });
+    expect(res.status).toBe(202);
+
+    const after = await container.webhooks.findQueueEntry(entry.id);
+    expect(after?.status).toBe("pending");
+  });
 });
+
