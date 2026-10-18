@@ -62,11 +62,12 @@ describe("createLinkSchema", () => {
     expect(createLinkSchema.safeParse({ amount: "1" }).success).toBe(false);
   });
 
-  it("accepts amounts the money regex accepts and rejects the rest", () => {
-    for (const amount of ["1", "0", "12.3456789", " 7 "]) {
+  it("accepts positive amounts the money regex accepts and rejects the rest", () => {
+    for (const amount of ["1", "12.3456789", " 7 "]) {
       expect(createLinkSchema.safeParse({ title: "t", amount }).success).toBe(true);
     }
-    for (const amount of ["", "abc", "1.12345678", "1.", ".5", "-1", "1e3", "   "]) {
+    // "0" is well-formed but not positive (issue 1.10).
+    for (const amount of ["", "abc", "0", "1.12345678", "1.", ".5", "-1", "1e3", "   "]) {
       expect(createLinkSchema.safeParse({ title: "t", amount }).success).toBe(false);
     }
   });
