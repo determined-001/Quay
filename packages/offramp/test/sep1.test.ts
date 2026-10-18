@@ -102,6 +102,81 @@ describe("fetchStellarToml", () => {
     ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
   });
 
+  it("refuses a cached anchor when subsequent caller specifies a mismatching network passphrase without re-fetching", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Call without passphrase populates the cache
+    const first = await fetchStellarToml("anchor.example");
+    expect(first.networkPassphrase).toBe("Test SDF Network ; September 2015");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Subsequent call with mismatching passphrase throws Sep1NetworkMismatchError without hitting network
+    await expect(
+      fetchStellarToml("anchor.example", {
+        expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015",
+      }),
+    ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves from cache when subsequent caller specifies a matching network passphrase", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const second = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Test SDF Network ; September 2015",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+  });
+
+  it("accepts a document that declares no NETWORK_PASSPHRASE for any expected passphrase", async () => {
+    const tomlWithoutPassphrase = `
+ACCOUNTS = [ "GABC" ]
+VERSION = "2.0.0"
+SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"
+TRANSFER_SERVER = "https://anchor.example/sep6"
+`;
+    const fetchMock = vi.fn(async () => tomlResponse(tomlWithoutPassphrase));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const info = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015",
+    });
+    expect(info.networkPassphrase).toBeNull();
+    expect(info.transferServer).toBe("https://anchor.example/sep6");
+
+    // Also on cache hit
+    const cachedInfo = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Test SDF Network ; September 2015",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cachedInfo).toEqual(info);
+  });
+
+  it("does not cache a document when fresh fetch fails network passphrase check", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchStellarToml("anchor.example", {
+        expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015",
+      }),
+    ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Second call re-fetches because mismatch was not cached
+    const second = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Test SDF Network ; September 2015",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(second.networkPassphrase).toBe("Test SDF Network ; September 2015");
+  });
+
   it("falls back to guessed paths when the TOML cannot be fetched, and does not cache that", async () => {
     const fetchMock = vi
       .fn()

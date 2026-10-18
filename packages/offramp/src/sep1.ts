@@ -118,6 +118,20 @@ export interface FetchTomlOptions {
  * wrong chain, which no fallback can make safe. Fallbacks are not cached, so a
  * transient outage does not pin bad endpoints for five minutes.
  */
+function assertNetworkPassphrase(
+  homeDomain: string,
+  info: Sep1DiscoveryInfo,
+  expectedNetworkPassphrase?: string,
+): void {
+  if (
+    expectedNetworkPassphrase &&
+    info.networkPassphrase &&
+    info.networkPassphrase !== expectedNetworkPassphrase
+  ) {
+    throw new Sep1NetworkMismatchError(homeDomain, info.networkPassphrase, expectedNetworkPassphrase);
+  }
+}
+
 export async function fetchStellarToml(
   homeDomain: string,
   opts: FetchTomlOptions = {},
@@ -126,7 +140,10 @@ export async function fetchStellarToml(
 
   if (!opts.force) {
     const hit = cache.get(homeDomain);
-    if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.info;
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+      assertNetworkPassphrase(homeDomain, hit.info, opts.expectedNetworkPassphrase);
+      return hit.info;
+    }
   }
 
   const url = `https://${homeDomain}/.well-known/stellar.toml`;
@@ -143,13 +160,7 @@ export async function fetchStellarToml(
     return fallbackInfo(homeDomain);
   }
 
-  if (
-    opts.expectedNetworkPassphrase &&
-    info.networkPassphrase &&
-    info.networkPassphrase !== opts.expectedNetworkPassphrase
-  ) {
-    throw new Sep1NetworkMismatchError(homeDomain, info.networkPassphrase, opts.expectedNetworkPassphrase);
-  }
+  assertNetworkPassphrase(homeDomain, info, opts.expectedNetworkPassphrase);
 
   cache.set(homeDomain, { at: Date.now(), info });
   log.info(
