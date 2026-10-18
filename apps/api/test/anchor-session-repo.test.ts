@@ -73,7 +73,7 @@ describe("DrizzleAnchorSessionRepository", () => {
     expect(await repo.get("sel_2", "anchor-a.example")).not.toBeNull();
   });
 
-  it("revokes anchor sessions when ensureDefault changes the seller's wallet", async () => {
+  it("leaves anchor sessions intact when ensureDefault is called with a different wallet", async () => {
     const db = await makeDb();
     const sellersRepo = new DrizzleSellerRepository(db);
     const sessionsRepo = new DrizzleAnchorSessionRepository(db);
@@ -87,9 +87,11 @@ describe("DrizzleAnchorSessionRepository", () => {
     await sellersRepo.ensureDefault("GWALLET_OLD", "Store");
     expect(await sessionsRepo.get(seller.id, "anchor.example")).not.toBeNull();
 
-    // ensureDefault called with updated wallet: old anchor sessions must be deleted
-    await sellersRepo.ensureDefault("GWALLET_NEW", "Store");
-    expect(await sessionsRepo.get(seller.id, "anchor.example")).toBeNull();
+    // Calling ensureDefault with a different wallet creates a second seller,
+    // leaving the existing seller and its anchor sessions untouched.
+    const newSeller = await sellersRepo.ensureDefault("GWALLET_NEW", "Store");
+    expect(newSeller.id).not.toBe(seller.id);
+    expect(await sessionsRepo.get(seller.id, "anchor.example")).not.toBeNull();
   });
 
   describe("sweepExpired", () => {

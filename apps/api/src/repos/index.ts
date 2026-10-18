@@ -437,16 +437,15 @@ export class DrizzleSellerRepository implements SellerRepository {
     private readonly logger?: Logger | null,
   ) {}
 
-  /** Seed (once) and return the single demo seller. */
+  /**
+   * Seed (once) and return the default seller for the given wallet.
+   * If a seller with this wallet already exists, it is returned without modification.
+   * Note that changing DEFAULT_SELLER_WALLET creates a second seller instead of renaming the first.
+   */
   async ensureDefault(wallet: string, name: string): Promise<Seller> {
-    const existing = await this.db.select().from(sellers).limit(1);
-    if (existing[0]) {
-      // keep the wallet in sync if it changed in env
-      if (existing[0].wallet !== wallet) {
-        await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
-        await new DrizzleAnchorSessionRepository(this.db).deleteAllForSeller(existing[0].id);
-      }
-      return rowToSeller({ ...existing[0], wallet }, this.piiKey, this.logger);
+    const existing = await this.findByWallet(wallet);
+    if (existing) {
+      return existing;
     }
     const now = Date.now();
     const seller: typeof sellers.$inferSelect = {
@@ -459,8 +458,12 @@ export class DrizzleSellerRepository implements SellerRepository {
       payoutFieldsEncrypted: null,
       createdAt: now,
     };
-    await this.db.insert(sellers).values(seller);
-    return rowToSeller(seller, this.piiKey, this.logger);
+    await this.db.insert(sellers).values(seller).onConflictDoNothing({ target: sellers.wallet });
+    const created = await this.findByWallet(wallet);
+    if (!created) {
+      throw new Error(`failed to create or find default seller for wallet ${wallet}`);
+    }
+    return created;
   }
 
   async findById(id: string): Promise<Seller | null> {
