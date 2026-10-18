@@ -134,4 +134,143 @@ describe("Quay Widget SDK", () => {
       expect(iframe.src).toContain("lnk_already_open");
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Handler scoping and error isolation (issue 7.23)
+  // ---------------------------------------------------------------------------
+
+  describe("handler scoping and error isolation (issue 7.23)", () => {
+    it("unsubscribes per-open() handlers on close, while Quay.on() handlers stay global", () => {
+      const handlerA = vi.fn();
+      const handlerB = vi.fn();
+      const globalHandler = vi.fn();
+
+      const unsubGlobal = Quay.on("quay:paid", globalHandler);
+
+      // First open with handlerA, then close
+      Quay.open({ linkId: "lnk_prod_1", host: TEST_HOST, onPaid: handlerA });
+      Quay.close();
+
+      // Second open with handlerB
+      Quay.open({ linkId: "lnk_prod_2", host: TEST_HOST, onPaid: handlerB });
+
+      // Dispatch paid message for prod 2
+      const event = new MessageEvent("message", {
+        data: { type: "quay:paid", linkId: "lnk_prod_2", link: { id: "lnk_prod_2" } },
+        origin: window.location.origin,
+      });
+      window.dispatchEvent(event);
+
+      // handlerA should NOT have been called; handlerB should have been called once
+      expect(handlerA).toHaveBeenCalledTimes(0);
+      expect(handlerB).toHaveBeenCalledTimes(1);
+      // globalHandler registered via Quay.on() remains active
+      expect(globalHandler).toHaveBeenCalledTimes(1);
+
+      unsubGlobal();
+    });
+
+    it("unsubscribes onClosed and onError per-open handlers on close", () => {
+      const onClosedA = vi.fn();
+      const onClosedB = vi.fn();
+      const onErrorA = vi.fn();
+      const onErrorB = vi.fn();
+
+      Quay.open({ linkId: "lnk_1", host: TEST_HOST, onClosed: onClosedA, onError: onErrorA });
+      Quay.close();
+
+      expect(onClosedA).toHaveBeenCalledTimes(1);
+
+      Quay.open({ linkId: "lnk_2", host: TEST_HOST, onClosed: onClosedB, onError: onErrorB });
+
+      // Dispatch error message
+      const errorEvent = new MessageEvent("message", {
+        data: { type: "quay:error", linkId: "lnk_2", error: "payment_failed" },
+        origin: window.location.origin,
+      });
+      window.dispatchEvent(errorEvent);
+
+      expect(onErrorA).toHaveBeenCalledTimes(0);
+      expect(onErrorB).toHaveBeenCalledTimes(1);
+
+      Quay.close();
+
+      // onClosedA was called once for modal 1, never for modal 2
+      expect(onClosedA).toHaveBeenCalledTimes(1);
+      expect(onClosedB).toHaveBeenCalledTimes(1);
+    });
+
+    it("removes the modal from DOM and restores focus even when a closed handler throws", () => {
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const button = document.createElement("button");
+      button.id = "focus-trigger";
+      document.body.appendChild(button);
+      button.focus();
+
+      const throwingOnClosed = vi.fn(() => {
+        throw new Error("handler explosion!");
+      });
+
+      Quay.open({ linkId: "lnk_throw_close", host: TEST_HOST, onClosed: throwingOnClosed });
+      expect(document.getElementById("quay-checkout-modal")).not.toBeNull();
+
+      // Quay.close() should not throw
+      expect(() => Quay.close()).not.toThrow();
+
+      // Modal must be removed from the DOM
+      expect(document.getElementById("quay-checkout-modal")).toBeNull();
+      // Focus must be restored
+      expect(document.activeElement).toBe(button);
+
+      expect(throwingOnClosed).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalled();
+    });
+
+    it("closes modal on Escape key even when an onClosed handler throws", () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      Quay.open({
+        linkId: "lnk_escape_throw",
+        host: TEST_HOST,
+        onClosed: () => {
+          throw new Error("boom on escape!");
+        },
+      });
+
+      expect(document.getElementById("quay-checkout-modal")).not.toBeNull();
+
+      const escapeEvent = new KeyboardEvent("keydown", { key: "Escape" });
+      document.dispatchEvent(escapeEvent);
+
+      expect(document.getElementById("quay-checkout-modal")).toBeNull();
+    });
+
+    it("isolates handler errors so sibling handlers still execute", () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const healthyHandler = vi.fn();
+      const faultyHandler = vi.fn(() => {
+        throw new Error("listener error");
+      });
+
+      const unsub1 = Quay.on("quay:paid", faultyHandler);
+      const unsub2 = Quay.on("quay:paid", healthyHandler);
+
+      Quay.open({ linkId: "lnk_sibling_test", host: TEST_HOST });
+
+      const event = new MessageEvent("message", {
+        data: { type: "quay:paid", linkId: "lnk_sibling_test" },
+        origin: window.location.origin,
+      });
+      window.dispatchEvent(event);
+
+      expect(faultyHandler).toHaveBeenCalledTimes(1);
+      expect(healthyHandler).toHaveBeenCalledTimes(1);
+
+      unsub1();
+      unsub2();
+    });
+  });
 });
+

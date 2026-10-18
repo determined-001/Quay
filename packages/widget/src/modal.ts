@@ -1,6 +1,7 @@
 import type { QuayEventData, QuayEventHandler, QuayEventType, QuayOpenOptions } from "./types";
 
 const listeners = new Map<QuayEventType, Set<QuayEventHandler>>();
+const modalUnsubscribers: Array<() => void> = [];
 
 let activeOverlay: HTMLElement | null = null;
 let activeIframe: HTMLIFrameElement | null = null;
@@ -42,7 +43,13 @@ function resolveHost(explicitHost: string | undefined): string {
 function emit(type: QuayEventType, data: QuayEventData): void {
   const handlers = listeners.get(type);
   if (handlers) {
-    handlers.forEach((fn) => fn(data));
+    handlers.forEach((fn) => {
+      try {
+        fn(data);
+      } catch (err) {
+        console.error(`Quay widget: error in ${type} event listener:`, err);
+      }
+    });
   }
 }
 
@@ -59,31 +66,49 @@ export function addEventListener(event: QuayEventType, handler: QuayEventHandler
 export function closeModal(): void {
   if (!activeOverlay) return;
 
-  if (activeLinkId) {
-    emit("quay:closed", { type: "quay:closed", linkId: activeLinkId });
-  }
-
-  if (focusTrapHandler) {
-    document.removeEventListener("keydown", focusTrapHandler);
-    focusTrapHandler = null;
-  }
-
-  if (postMessageHandler) {
-    window.removeEventListener("message", postMessageHandler);
-    postMessageHandler = null;
-  }
-
-  if (activeOverlay.parentNode) {
-    activeOverlay.parentNode.removeChild(activeOverlay);
-  }
+  const overlay = activeOverlay;
+  const linkId = activeLinkId;
 
   activeOverlay = null;
   activeIframe = null;
   activeLinkId = null;
 
-  if (lastFocusedElement && typeof lastFocusedElement.focus === "function") {
-    lastFocusedElement.focus();
-    lastFocusedElement = null;
+  try {
+    if (linkId) {
+      emit("quay:closed", { type: "quay:closed", linkId });
+    }
+  } finally {
+    while (modalUnsubscribers.length > 0) {
+      const unsub = modalUnsubscribers.pop();
+      try {
+        unsub?.();
+      } catch (err) {
+        console.error("Quay widget: error unsubscribing modal listener:", err);
+      }
+    }
+
+    if (focusTrapHandler) {
+      document.removeEventListener("keydown", focusTrapHandler);
+      focusTrapHandler = null;
+    }
+
+    if (postMessageHandler) {
+      window.removeEventListener("message", postMessageHandler);
+      postMessageHandler = null;
+    }
+
+    if (overlay.parentNode) {
+      overlay.parentNode.removeChild(overlay);
+    }
+
+    if (lastFocusedElement && typeof lastFocusedElement.focus === "function") {
+      try {
+        lastFocusedElement.focus();
+      } catch {
+        // Ignore focus restoration errors
+      }
+      lastFocusedElement = null;
+    }
   }
 }
 
@@ -109,9 +134,9 @@ export function openModal(linkIdOrOpts: string | QuayOpenOptions, opts?: Partial
 
   lastFocusedElement = document.activeElement as HTMLElement | null;
 
-  if (options.onPaid) addEventListener("quay:paid", options.onPaid);
-  if (options.onClosed) addEventListener("quay:closed", options.onClosed);
-  if (options.onError) addEventListener("quay:error", options.onError);
+  if (options.onPaid) modalUnsubscribers.push(addEventListener("quay:paid", options.onPaid));
+  if (options.onClosed) modalUnsubscribers.push(addEventListener("quay:closed", options.onClosed));
+  if (options.onError) modalUnsubscribers.push(addEventListener("quay:error", options.onError));
 
   activeHost = resolvedHost;
   activeLinkId = linkId;
