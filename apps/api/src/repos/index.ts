@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -36,7 +36,6 @@ import type {
   OffRampTelemetrySummary,
   AssetRef,
   WithdrawTransfer,
-  PollBlockedReason,
 } from "@checkout/core";
 import type { DB } from "../db/client";
 import {
@@ -101,7 +100,6 @@ function rowToLink(row: LinkRow): PaymentLink {
     offrampFeeCurrency: row.offrampFeeCurrency ?? null,
     offrampFeeSource: row.offrampFeeSource ?? null,
     offrampNetTargetAmount: row.offrampNetTargetAmount ?? null,
-    pollBlockedReason: (row.pollBlockedReason ?? null) as PaymentLink["pollBlockedReason"],
     expiresAt: row.expiresAt ?? null,
     isDemo: row.isDemo ?? false,
     createdAt: row.createdAt,
@@ -139,7 +137,6 @@ export class DrizzleLinkRepository implements LinkRepository {
       offrampFeeCurrency: null,
       offrampFeeSource: null,
       offrampNetTargetAmount: null,
-      pollBlockedReason: null,
       expiresAt: input.expiresAt,
       isDemo: input.isDemo ?? false,
       createdAt: now,
@@ -204,7 +201,6 @@ export class DrizzleLinkRepository implements LinkRepository {
         offrampFeeCurrency: link.offrampFeeCurrency,
         offrampFeeSource: link.offrampFeeSource,
         offrampNetTargetAmount: link.offrampNetTargetAmount,
-        pollBlockedReason: link.pollBlockedReason ?? null,
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
@@ -247,27 +243,6 @@ export class DrizzleLinkRepository implements LinkRepository {
       .orderBy(links.createdAt)
       .limit(1);
     return rows[0] ? rowToLink(rows[0]) : null;
-  }
-
-  /**
-   * Persist the typed reason a cash-out poll is blocked (issue 4.16). Null
-   * clears the block. Kept as a narrow update so the poller never rewrites
-   * unrelated link columns while it is only classifying a poll failure.
-   */
-  async setPollBlockedReason(linkId: string, reason: PollBlockedReason | null): Promise<void> {
-    await this.db
-      .update(links)
-      .set({ pollBlockedReason: reason, updatedAt: Date.now() })
-      .where(eq(links.id, linkId));
-  }
-
-  /** Clear the block for every link of a seller — called on successful anchor re-auth. */
-  async clearPollBlockedReasonForSeller(sellerId: string): Promise<number> {
-    const res = await this.db
-      .update(links)
-      .set({ pollBlockedReason: null, updatedAt: Date.now() })
-      .where(and(eq(links.sellerId, sellerId), isNotNull(links.pollBlockedReason)));
-    return res.rowsAffected ?? 0;
   }
 
   async recordPayment(payment: LinkPaymentRecord): Promise<void> {

@@ -281,7 +281,10 @@ export class LinkService {
    * `AnchorAuthRequiredError`; cleared when the seller completes
    * `POST /seller/anchor-auth`. While set, `pollCashOuts()` skips the link
    * entirely instead of backing off and re-calling `status()` every minute.
-   * In-memory only; the durable copy lives on `offramp_jobs.last_poll_reason`.
+   * The set only dedupes the log line and the gauge; the durable copy of the
+   * state is `offramp_jobs.last_poll_reason = "anchor_auth_required"` (no new
+   * column), and with `hasLiveAnchorSession` wired the skip is re-derived from
+   * the live session on every tick, so a restart loses nothing.
    */
   private readonly anchorAuthBlockedLinkIds = new Set<string>();
 
@@ -320,6 +323,13 @@ export class LinkService {
        * DEFAULT_INTERACTIVE_TIMEOUT_MS (1 hour).
        */
       interactiveTimeoutMs?: number;
+      /**
+       * Whether the seller has a live anchor session (issue 4.16). Lets the
+       * poller skip a job whose `status()` call would only throw
+       * `AnchorAuthRequiredError`. Injected so LinkService stays independent
+       * of the offramp package; omitted when no anchor session store exists.
+       */
+      hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean;
       /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
       logger?: Logger;
     },
@@ -1230,18 +1240,28 @@ export class LinkService {
       // tick. Skip links whose `next_try_at` is still in the future.
       const next = this.nextPollAtByLinkId.get(link.id);
       if (next !== undefined && now < next) continue;
-      // Blocked on the seller's anchor session (issue 4.16): nothing will
-      // change until they re-authenticate, so skip without calling status().
-      // The block is cleared by `clearAnchorAuthBlock()` on successful sign-in.
-      if (this.anchorAuthBlockedLinkIds.has(link.id)) continue;
 
       const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
+      // Read before polling: status() persists any deposit instructions, so
+      // "had none before this poll" is what makes the event fire once, and
+      // it still does after a restart.
+      const before = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
+      // Blocked on the seller's anchor session (issue 4.16): nothing will
+      // change until they re-authenticate, so skip without calling status().
+      // Legacy rows with no seller/account cannot be checked and fall through.
+      if (this.deps.hasLiveAnchorSession && before?.sellerId && before.account) {
+        if (!this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account })) {
+          await this.blockOnAnchorAuth(link, child);
+          continue;
+        }
+        this.liftAnchorAuthBlock(link.id);
+      } else if (this.anchorAuthBlockedLinkIds.has(link.id)) {
+        // No session check available: stay blocked until re-auth clears it.
+        continue;
+      }
+
       let job: OffRampJob;
       try {
-        // Read before polling: status() persists any deposit instructions, so
-        // "had none before this poll" is what makes the event fire once, and
-        // it still does after a restart.
-        const before = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
         job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
         if (job.transfer && !before?.transfer && !this.transferRequiredLogged.has(link.offrampJobId)) {
           this.transferRequiredLogged.add(link.offrampJobId);
@@ -1288,31 +1308,10 @@ export class LinkService {
           }
           continue;
         }
-        // Anchor session expired for this seller (issue 4.16). This is not a
-        // transient anchor fault: retrying will keep returning the same error
-        // until the seller signs in again. Record a typed reason, log once per
-        // blocked episode, and skip the link until re-auth clears the block.
+        // The session expired between the check and the call (or no check is
+        // wired): same handling, retrying would hit the same error.
         if (err instanceof AnchorAuthRequiredError) {
-          const { reason, message: safeMessage } = classifyPollError(err);
-          if (link.offrampJobId) {
-            await this.deps.offrampState.updateJob(link.offrampJobId, {
-              lastPollError: safeMessage,
-              lastPollErrorAt: Date.now(),
-              lastPollReason: reason,
-            });
-          }
-          if (!this.anchorAuthBlockedLinkIds.has(link.id)) {
-            this.anchorAuthBlockedLinkIds.add(link.id);
-            metrics.offrampJobsAwaitingAnchorAuth.inc();
-            child.info(
-              { event: "cashout.poll.anchor_auth_required", linkId: link.id, jobId: link.offrampJobId },
-              "cash-out poll blocked: seller anchor session required",
-            );
-          }
-          // Do not back off — the block is cleared explicitly on re-auth, at
-          // which point the next tick should poll immediately.
-          this.nextPollAtByLinkId.delete(link.id);
-          this.consecutivePollErrorsByLinkId.delete(link.id);
+          await this.blockOnAnchorAuth(link, child);
           continue;
         }
         // Classify the poll error into a sanitized, seller-safe reason and message.
@@ -1475,18 +1474,48 @@ export class LinkService {
   }
 
   /**
-   * Clear the "blocked until re-auth" marker for a seller's links (issue 4.16).
-   * Called from `POST /seller/anchor-auth` on successful sign-in so the next
-   * `pollCashOuts()` tick polls the job immediately and normal settle/fail
-   * handling resumes. Returns the number of links unblocked.
+   * Record that a cash-out poll is blocked on the seller's anchor session
+   * (issue 4.16): persist the typed reason, log and count once per blocked
+   * episode, and drop any backoff so the first tick after re-auth polls
+   * immediately. The link is not failed; the withdrawal is still alive at the
+   * anchor.
+   */
+  private async blockOnAnchorAuth(link: PaymentLink, child: Logger): Promise<void> {
+    if (link.offrampJobId) {
+      await this.deps.offrampState.updateJob(link.offrampJobId, {
+        lastPollError: ANCHOR_AUTH_REQUIRED_POLL.message,
+        lastPollErrorAt: Date.now(),
+        lastPollReason: ANCHOR_AUTH_REQUIRED_POLL.reason,
+      });
+    }
+    if (!this.anchorAuthBlockedLinkIds.has(link.id)) {
+      this.anchorAuthBlockedLinkIds.add(link.id);
+      metrics.offrampJobsAwaitingAnchorAuth.inc();
+      child.info(
+        { event: "cashout.poll.anchor_auth_required", linkId: link.id, jobId: link.offrampJobId },
+        "cash-out poll blocked: seller anchor session required",
+      );
+    }
+    this.nextPollAtByLinkId.delete(link.id);
+    this.consecutivePollErrorsByLinkId.delete(link.id);
+  }
+
+  private liftAnchorAuthBlock(linkId: string): void {
+    if (this.anchorAuthBlockedLinkIds.delete(linkId)) metrics.offrampJobsAwaitingAnchorAuth.dec();
+  }
+
+  /**
+   * Called from `POST /seller/anchor-auth` once the seller has signed in
+   * again: unblock their links so the next `pollCashOuts()` tick polls
+   * immediately. Returns the number of links unblocked.
    */
   async clearAnchorAuthBlock(sellerId: string): Promise<number> {
     const pending = await this.deps.links.listByStatus("offramp_pending");
     let cleared = 0;
     for (const link of pending) {
       if (link.sellerId !== sellerId) continue;
-      if (this.anchorAuthBlockedLinkIds.delete(link.id)) {
-        metrics.offrampJobsAwaitingAnchorAuth.dec();
+      if (this.anchorAuthBlockedLinkIds.has(link.id)) {
+        this.liftAnchorAuthBlock(link.id);
         cleared++;
       }
       this.nextPollAtByLinkId.delete(link.id);
@@ -1680,12 +1709,14 @@ export class HttpError extends Error {
   }
 }
 
+export const ANCHOR_AUTH_REQUIRED_POLL = {
+  reason: "anchor_auth_required",
+  message: "Anchor session expired or required. Please reconnect your anchor session in settings.",
+} as const;
+
 export function classifyPollError(err: unknown): { reason: string; message: string } {
   if (err instanceof AnchorAuthRequiredError || (err instanceof Error && err.message.includes("anchor_auth_required"))) {
-    return {
-      reason: "anchor_auth_required",
-      message: "Anchor session expired or required. Please reconnect your anchor session in settings.",
-    };
+    return { ...ANCHOR_AUTH_REQUIRED_POLL };
   }
   const rawMsg = err instanceof Error ? err.message : String(err);
   if (rawMsg.toLowerCase().includes("circuit open")) {

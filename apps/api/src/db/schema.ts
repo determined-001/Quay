@@ -186,11 +186,6 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
   lastPollError: text("last_poll_error"),
   lastPollErrorAt: integer("last_poll_error_at"),
   lastPollReason: text("last_poll_reason"),
-  // Typed reason the poller is skipping this job (issue 4.16). Distinct from
-  // the free-text lastPollError: e.g. "anchor_auth_required" means the seller's
-  // anchor session expired and polling is paused until they re-authenticate.
-  // Null when the job is polled normally.
-  pollBlockedReason: text("poll_blocked_reason"),
   // When the offramp.transfer_required webhook was first sent for this job.
   // Null means the transfer instructions haven't been surfaced yet; once set,
   // the webhook is not re-fired on subsequent polls or restarts.
