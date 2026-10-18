@@ -67,6 +67,41 @@ describe("selectFieldsForAnchor", () => {
     expect(result.missing).toEqual([]);
   });
 
+  it("maps SEP-9 aliases in reverse: anchor asks for last_name, profile has family_name", () => {
+    const result = selectFieldsForAnchor({
+      requested: [{ name: "last_name", type: "string", optional: false }],
+      profile: { fields: { family_name: "Doe" } },
+      overrides: {},
+    });
+
+    expect(result.send).toEqual({ last_name: "Doe" });
+    expect(result.missing).toEqual([]);
+  });
+
+  it("maps SEP-9 aliases in reverse: anchor asks for first_name, profile has given_name", () => {
+    const result = selectFieldsForAnchor({
+      requested: [{ name: "first_name", type: "string", optional: false }],
+      profile: { fields: { given_name: "John" } },
+      overrides: {},
+    });
+
+    expect(result.send).toEqual({ first_name: "John" });
+    expect(result.missing).toEqual([]);
+  });
+
+  it("prefers exact requested field over canonical/alias when both are in profile", () => {
+    const result = selectFieldsForAnchor({
+      requested: [{ name: "last_name", type: "string", optional: false }],
+      profile: {
+        fields: { last_name: "RequestedName", family_name: "CanonicalName" },
+      },
+      overrides: {},
+    });
+
+    expect(result.send).toEqual({ last_name: "RequestedName" });
+    expect(result.missing).toEqual([]);
+  });
+
   it("overrides take precedence over profile", () => {
     const result = selectFieldsForAnchor({
       requested: [{ name: "first_name", type: "string", optional: false }],
