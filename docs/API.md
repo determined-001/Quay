@@ -7,11 +7,10 @@ The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by defaul
 > challenge; a seller row is created for the wallet on first login. **`/links`
 > and `/webhooks` now require it** — every route under those two prefixes needs
 > `Authorization: Bearer <token>` (or the httpOnly `session` cookie set by
-> `POST /auth`) and returns `401` without one. There is currently no web UI to
-> obtain a token (that needs a wallet-connect button — tracked separately), so
-> the demo dashboard will need one wired up before it can create/list links
-> again post-upgrade. See `apps/web/lib/api.ts`'s `getAuthChallenge` /
-> `submitAuthChallenge` for the client-side pieces already in place.
+> `POST /auth`) and returns `401` without one. The web UI provides wallet login via
+> `SessionGate` (`apps/web/app/components/SessionGate.tsx`), which connects the seller's
+> wallet, fetches the challenge from `GET /auth`, signs it, and submits it to `POST /auth`
+> (via `apps/web/lib/api.ts`'s `getAuthChallenge` / `submitAuthChallenge`) to establish the session.
 
 CORS is restricted to the origins in `CORS_ORIGINS` (comma-separated), with
 `credentials: true` (required for the browser to send/receive the session cookie
@@ -26,9 +25,9 @@ Every route marked **Requires auth** below needs `Authorization: Bearer <token>`
   that's missing, malformed, tampered, expired, or revoked (`POST /auth/logout`
   put its `jti` on the revocation list). The response body always has this
   shape: `{ "error": "unauthorized", "message": "<why>" }`.
-- **403 `forbidden`** — you *are* authenticated, but the credential itself does
-  not carry the required scope (e.g. an API key without `links:write`).
-  `{ "error": "forbidden", "message": "<why>" }`.
+- **403 `forbidden` / `missing_scope`** — you *are* authenticated, but the credential is not authorized for this operation:
+  - When an API key lacks the required scope, the response is `{ "error": "missing_scope", "required": "<scope>" }` (e.g. `links:write`).
+  - `{ "error": "forbidden", "message": "<why>" }` is returned when a cookie-authenticated state change lacks an allowed `Origin` header (`apps/api/src/middleware/auth.ts`), when an API key attempts a session-only route, or on key-minting scope escalation (`apps/api/src/routes/api-keys.ts`).
 - **404 `not_found`** — the object does not exist **or does not belong to you**.
   These are deliberately the same answer: a 403 on someone else's link would
   confirm that the id is real, which is a leak in itself. Do not read a 404 as
@@ -53,7 +52,7 @@ that"; 404 means "nothing here that is yours."
     the seller's KYC or bank fields, so it is written, truncated to about 2 KB, to
     the server log (`event: "anchor.error"`) only. Returned by the cash-out,
     cash-out quote, `offramp-preview`, `offramp-requirements`, `/seller/kyc`,
-    `/seller/anchor-auth` and `/offramp/info` routes.
+    and `/seller/anchor-auth` routes.
   - `internal_error` (**500**) — an unhandled server error. The body is exactly
     `{ "error": "internal_error" }`: no message, no stack. Details are in the log.
 
@@ -248,7 +247,7 @@ On success, a seller row is created for the wallet if one doesn't exist yet
 ```
 
 **200** — also sets an httpOnly `session` cookie (`Secure` unless `COOKIE_SECURE=false`,
-`SameSite=Lax`), for server-side/SSR requests that can't hold the token in JS memory.
+`SameSite=None` when secure, `SameSite=Lax` otherwise), for server-side/SSR requests that can't hold the token in JS memory.
 ```json
 { "token": "<session JWT>", "expiresAt": 1750003600 }
 ```
@@ -312,7 +311,7 @@ one the token's `sellerId` resolves to).
   "link": {
     "id": "lnk_...",
     "reference": "...",
-    "status": "pending",
+    "status": "active",
     "title": "T-shirt",
     "amount": "10.50",
     "asset": { "code": "USDC", "issuer": "G..." },
@@ -594,7 +593,7 @@ settled.
   field is additive and a client that ignores it behaves as it did previously.
   It is always `https`; the dashboard refuses any other scheme.
 
-**409** — link is not in `paid` or `offramp_failed` state: `{ "error": "Link must be paid to cash out (is \"pending\")" }`. `offramp_settled` and every in-flight state are refused.
+**409** — link is not in `paid` or `offramp_failed` state: `{ "error": "Link must be paid to cash out (is \"active\")" }`. `offramp_settled` and every in-flight state are refused.
 **409** — `{ "error": "previous_withdrawal_active" }`. A retry from `offramp_failed` is refused while the previous job's stored status is not `failed`, so a slow anchor cannot end up with two live withdrawals for one payment.
 
 **Retrying a failed cash-out.** A link in `offramp_failed` can be quoted (`GET /links/:id/cash-out/quote`) and cashed out again with this same endpoint; it moves back to `offramp_pending` with a new job id. The rate, fee and net-amount fields of the failed attempt are cleared and replaced by the new attempt's values. A job whose state is no longer stored (the `job_state_lost` repair) has nothing left to be live and may be retried. The webhook payloads are unchanged; the API log carries `event: "cashout.retry"` with `previousJobId`, and `link.transition` carries `retry: true`. The dashboard shows "Retry cash-out" on failed links.
@@ -982,11 +981,9 @@ SEP-12 `GET /customer` response; its `id` must equal the stored customer id.
 
 ## `POST /webhooks`
 
-Register a webhook endpoint. The signing secret is returned **once** — store it.
-It's encrypted at rest (not stored in plaintext); the API can never show it to you
-again after this response, only a display-only `secretLast4`.
 **Requires auth.** Register a webhook endpoint for the authenticated seller.
-The signing secret is returned **once** — store it.
+The signing secret is returned **once** — store it. It is encrypted at rest (not stored
+in plaintext); the API can never show it to you again after this response, only a display-only `secretLast4`.
 
 **Request**
 ```json
@@ -1002,10 +999,8 @@ The signing secret is returned **once** — store it.
 
 ## `GET /webhooks`
 
-List registered webhooks. Secrets are **not** returned — only `secretLast4` for
-display. Deleted webhooks are excluded.
-**Requires auth.** Lists the authenticated seller's registered webhooks.
-Secrets are **not** returned.
+**Requires auth.** List registered webhooks for the authenticated seller. Secrets are
+**not** returned — only `secretLast4` for display. Deleted webhooks are excluded.
 
 **200**
 ```json
@@ -1132,6 +1127,9 @@ registered URL.
 | ----------------------- | --------------------------------------------------- |
 | `link.paid`             | a matching payment settled (exact or over)          |
 | `link.underpaid`        | a payment arrived for less than requested           |
+| `link.cancelled`        | seller voided the link                              |
+| `link.expired`          | TTL elapsed before payment confirmed                |
+| `payment.unmatched`     | a payment arrived matching an expired or cancelled link |
 | `offramp.settled`       | a cash-out job settled                              |
 | `offramp.failed`        | a cash-out job failed                               |
 | `offramp.transfer_required` | anchor has published deposit instructions; the seller's wallet must send USDC to the anchor to fund the withdrawal |
