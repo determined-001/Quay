@@ -19,6 +19,7 @@ export function privacyExportRateLimit(store: RateLimitStore): MiddlewareHandler
     max: PRIVACY_EXPORT_LIMIT.max,
     store,
     keyFor: (ctx) => `privacy-export:${ctx.get("seller").id}`,
+    name: "privacy_export",
   });
 }
 

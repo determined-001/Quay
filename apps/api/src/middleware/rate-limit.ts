@@ -1,5 +1,6 @@
 import type { Context, Next } from "hono";
 import { getConnInfo } from "@hono/node-server/conninfo";
+import { metrics } from "../metrics";
 
 /**
  * Fixed-window rate limiter, keyed by client IP, backed by a pluggable store.
@@ -34,7 +35,23 @@ export class MemoryStore implements RateLimitStore {
   }
 }
 
-export function rateLimit(opts: {
+let lastErrorLogTime = 0;
+const ERROR_LOG_INTERVAL_MS = 60_000;
+
+function logStoreError(limiter: string, reason: string): void {
+  const now = Date.now();
+  if (now - lastErrorLogTime >= ERROR_LOG_INTERVAL_MS) {
+    lastErrorLogTime = now;
+    console.warn(`[rate-limit] store error on limiter "${limiter}", degrading to MemoryStore: ${reason}`);
+  }
+}
+
+/** Test seam — resets the 1-minute warning throttle timer. */
+export function _resetStoreErrorLogThrottle(): void {
+  lastErrorLogTime = 0;
+}
+
+export interface RateLimitOptions {
   windowMs: number;
   max: number;
   /** Defaults to a per-process MemoryStore. Pass a RedisStore to share a budget
@@ -46,22 +63,83 @@ export function rateLimit(opts: {
   /** Override how the limiter key is derived. Defaults to the client IP; API
    *  keys pass `apiKeyRateLimitKey` so each key gets its own bucket (#40 item 4). */
   keyFor?: (ctx: Context, trustProxyHops: number) => Promise<string> | string;
-}) {
+  /** Timeout in ms to wait for the store before degrading to MemoryStore.
+   *  Defaults to 500 ms. */
+  storeTimeoutMs?: number;
+  /** Name of the limiter for telemetry and metrics. Defaults to "default". */
+  name?: string;
+  /** Fallback store when the primary store fails or times out. Defaults to a dedicated MemoryStore. */
+  fallbackStore?: RateLimitStore;
+}
+
+/**
+ * Fixed-window rate limiter, keyed by client IP or custom key, backed by a pluggable store.
+ *
+ * Failure mode:
+ * When the configured store (e.g. RedisStore) throws an error or fails to respond within
+ * `storeTimeoutMs` (default 500ms), the middleware degrades to an in-process `MemoryStore`
+ * instead of failing or blocking the request. This preserves availability during Redis
+ * network partitions or outages while maintaining per-instance rate boundaries. Degraded
+ * requests omit `x-ratelimit-*` headers (since cluster-wide quota is unknown), increment
+ * `rate_limit_store_errors_total{limiter}`, and log a warning throttled to at most once per minute.
+ * Probes (`/health` and `/ready`) are explicitly exempted so orchestrators never restart
+ * instances due to rate limiter latency or failures.
+ */
+export function rateLimit(opts: RateLimitOptions) {
   const store = opts.store ?? new MemoryStore();
+  const fallbackStore = opts.fallbackStore ?? (store instanceof MemoryStore ? store : new MemoryStore());
   const trustProxyHops = opts.trustProxyHops ?? 0;
   const keyFor = opts.keyFor ?? clientIp;
+  const storeTimeoutMs = opts.storeTimeoutMs ?? 500;
+  const name = opts.name ?? "default";
 
   return async (ctx: Context, next: Next) => {
     if (opts.max <= 0) return next(); // disabled
 
+    // Health and readiness probes must never be broken, delayed or failed by rate limiting.
+    if (ctx.req.path === "/health" || ctx.req.path === "/ready") {
+      return next();
+    }
+
     const key = await keyFor(ctx, trustProxyHops);
-    const entry = await store.increment(key, opts.windowMs);
+    let entry: { count: number; resetAt: number };
+    let degraded = false;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`store timed out after ${storeTimeoutMs}ms`));
+      }, storeTimeoutMs);
+    });
+
+    try {
+      entry = await Promise.race([
+        store.increment(key, opts.windowMs),
+        timeoutPromise,
+      ]);
+    } catch (err) {
+      degraded = true;
+      const reason = err instanceof Error ? err.message : String(err);
+      try {
+        metrics.rateLimitStoreErrorsTotal.inc({ limiter: name });
+      } catch {
+        // Ignore metrics failure in tests
+      }
+      logStoreError(name, reason);
+      entry = await fallbackStore.increment(key, opts.windowMs);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
     const now = Date.now();
 
-    const remaining = Math.max(0, opts.max - entry.count);
-    ctx.header("x-ratelimit-limit", String(opts.max));
-    ctx.header("x-ratelimit-remaining", String(remaining));
-    ctx.header("x-ratelimit-reset", String(Math.ceil(entry.resetAt / 1000)));
+    // When degraded, omit x-ratelimit-* headers because the cluster-wide budget could not be computed.
+    if (!degraded) {
+      const remaining = Math.max(0, opts.max - entry.count);
+      ctx.header("x-ratelimit-limit", String(opts.max));
+      ctx.header("x-ratelimit-remaining", String(remaining));
+      ctx.header("x-ratelimit-reset", String(Math.ceil(entry.resetAt / 1000)));
+    }
 
     if (entry.count > opts.max) {
       const retryAfter = Math.ceil((entry.resetAt - now) / 1000);

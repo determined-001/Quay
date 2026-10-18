@@ -72,8 +72,12 @@ failures it prevents — N× every rate limit, and one signed SEP-10 challenge
 redeemable once per instance — are both invisible from outside the process,
 which is why the guard is loud instead of a log line.
 
-- **Rate limiting** — `MemoryStore` unless `REDIS_URL` is set. Already has a
-  `RedisStore`; just configure it.
+- **Rate limiting** — `MemoryStore` unless `REDIS_URL` is set. When Redis is
+  configured but unreachable, throws, or exceeds `storeTimeoutMs` (default 500ms),
+  the rate limiter degrades to an in-process `MemoryStore` so service is not
+  disrupted, `/health` and `/ready` are completely exempt, degraded requests increment
+  `rate_limit_store_errors_total{limiter}`, and warnings are throttled to 1/min.
+  Already has a `RedisStore`; just configure it.
 - **SEP-10 challenge nonces** — `ChallengeService` holds used challenge hashes
   in an in-process `Map`, so a restart or a second instance makes an
   already-redeemed challenge redeemable again inside its 15-minute window.

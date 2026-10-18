@@ -73,6 +73,7 @@ async function main(): Promise<void> {
       max: env.rateLimitMax,
       store: rateLimitStore,
       trustProxyHops: env.trustProxyHops,
+      name: "global",
     }),
   );
   // Strict limiter for money/management routes. `keyFor` gives every API key
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
     store: rateLimitStore,
     trustProxyHops: env.trustProxyHops,
     keyFor: apiKeyRateLimitKey(container.apiKeys),
+    name: "strict",
   });
   // Anchor SEP-10 requests trigger outbound calls to the anchor. Keep their
   // strict budget per authenticated seller so one credential cannot amplify
@@ -93,6 +95,7 @@ async function main(): Promise<void> {
     max: env.rateLimitStrictMax,
     store: rateLimitStore,
     keyFor: (ctx) => `anchor-auth:${ctx.get("seller").id}`,
+    name: "anchor_auth",
   });
 
   // The data-subject export reads every table that holds a seller's personal
@@ -107,6 +110,7 @@ async function main(): Promise<void> {
     max: env.rateLimitStrictMax,
     store: rateLimitStore,
     trustProxyHops: env.trustProxyHops,
+    name: "anchor_callback",
   });
 
   // Liveness: the process is up and answering HTTP at all.

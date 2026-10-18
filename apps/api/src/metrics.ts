@@ -288,6 +288,11 @@ const kycNonPrimaryKeyRows = registry.gauge(
   "kyc_non_primary_key_rows",
   "Number of seller KYC rows encrypted with legacy or non-primary encryption keys.",
 );
+const rateLimitStoreErrorsTotal = registry.counter(
+  "rate_limit_store_errors_total",
+  "Rate-limit store errors resulting in fallback to in-memory store by limiter name.",
+  ["limiter"],
+);
 
 export const metrics = {
   registry,
@@ -308,4 +313,6 @@ export const metrics = {
   watcherLagSeconds,
   kycRetentionPurgedTotal,
   kycNonPrimaryKeyRows,
+  rateLimitStoreErrorsTotal,
 };
+
