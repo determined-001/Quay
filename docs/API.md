@@ -475,6 +475,21 @@ mean a checkout page that could never actually be paid — see
 
 ---
 
+## `GET /links/export/csv`
+
+**Requires auth.** Requires `links:read` scope. Exports reconciliation CSV of the authenticated seller's own links.
+
+**Query parameters:**
+- `from` (*optional*): ISO timestamp or `YYYY-MM-DD` date. Links created at or after this time (`createdAt >= from`) are included. If date-only, defaults to `00:00:00.000Z` of that day.
+- `to` (*optional*): ISO timestamp or `YYYY-MM-DD` date. Links created at or before this time are included. When given as a date-only (`YYYY-MM-DD`), the filter is inclusive of the entire UTC day (through `23:59:59.999Z`). When given as a full ISO timestamp, exact comparison (`createdAt <= to`) is preserved.
+
+If `from` or `to` cannot be parsed, returns **400** `{ "error": "invalid_query", "message": "unparsable <from|to> date" }`.
+
+**200** `text/csv; charset=utf-8`
+Content-Disposition: `attachment; filename="quay-links-export.csv"`
+
+---
+
 ## `GET /links/:id`
 
 **Public — no auth.** Fetch one link plus its payment request (used by the

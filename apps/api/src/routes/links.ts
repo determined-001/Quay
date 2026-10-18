@@ -68,23 +68,42 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     return ctx.json({ links: await c.service.listLinks(ctx.get("seller").id) });
   });
 
+  const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
   // CSV export of links for a date range.
   // NOTE: must be registered BEFORE /:id to avoid being shadowed by the wildcard.
   // Seller reconciliation export — gated, and scoped to the caller's own links.
   app.get("/export/csv", auth, requireScope("links:read"), async (ctx) => {
     const from = ctx.req.query("from");
     const to = ctx.req.query("to");
+
+    let fromMs: number | undefined;
+    if (from !== undefined) {
+      const isoFrom = DATE_ONLY.test(from) ? `${from}T00:00:00.000Z` : from;
+      fromMs = new Date(isoFrom).getTime();
+      if (Number.isNaN(fromMs)) {
+        return ctx.json({ error: "invalid_query", message: "unparsable 'from' date" }, 400);
+      }
+    }
+
+    let toMs: number | undefined;
+    if (to !== undefined) {
+      const isoTo = DATE_ONLY.test(to) ? `${to}T23:59:59.999Z` : to;
+      toMs = new Date(isoTo).getTime();
+      if (Number.isNaN(toMs)) {
+        return ctx.json({ error: "invalid_query", message: "unparsable 'to' date" }, 400);
+      }
+    }
+
     const links = await c.service.listLinks(ctx.get("seller").id);
 
     // Filter by date range if provided.
     let filtered = links;
-    if (from) {
-      const fromMs = new Date(from).getTime();
-      if (!isNaN(fromMs)) filtered = filtered.filter((l) => l.createdAt >= fromMs);
+    if (fromMs !== undefined) {
+      filtered = filtered.filter((l) => l.createdAt >= fromMs);
     }
-    if (to) {
-      const toMs = new Date(to).getTime();
-      if (!isNaN(toMs)) filtered = filtered.filter((l) => l.createdAt <= toMs);
+    if (toMs !== undefined) {
+      filtered = filtered.filter((l) => l.createdAt <= toMs);
     }
 
     const csv = LINKS_CSV_HEADER + filtered.map(linkToCsvRow).join("\n");
