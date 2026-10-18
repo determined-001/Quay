@@ -52,9 +52,13 @@ export async function getSep38Prices(
   }
 
   const body = (await res.json()) as {
-    buy_assets: Array<{
-      asset: string; // e.g. "iso4217:NGN"
-      price: string;
+    buy_assets?: Array<{
+      // Nullable on purpose. An anchor is a third party: an entry missing
+      // `asset` or `price` is malformed, and the right response to malformed
+      // data from someone else's API is to skip the entry, not to throw a
+      // TypeError that fails the whole preview for every other corridor.
+      asset?: string;
+      price?: string | number;
       decimals?: number;
       buy_delivery_methods?: Array<{ name: string; description?: string }>;
     }>;
@@ -62,13 +66,20 @@ export async function getSep38Prices(
 
   return (body.buy_assets ?? []).flatMap((entry) => {
     // Only surface fiat ISO-4217 entries ("iso4217:XXX").
+    if (typeof entry.asset !== "string") return [];
     const match = entry.asset.match(/^iso4217:([A-Z]{3})$/);
     if (!match || !match[1]) return [];
+    // A price we cannot invert is not a price: skip it rather than hand
+    // "Infinity" or "NaN" downstream as an indicative rate. Same rule
+    // `targetPerSourceRate` applies to firm quotes.
+    const price = typeof entry.price === "number" ? String(entry.price) : entry.price;
+    const numeric = Number(price);
+    if (typeof price !== "string" || !Number.isFinite(numeric) || numeric <= 0) return [];
     const buyCurrency: string = match[1];
     return [
       {
         buyCurrency,
-        price: entry.price,
+        price,
         deliveryMethods: (entry.buy_delivery_methods ?? []).map((m) => m.name),
       },
     ];
