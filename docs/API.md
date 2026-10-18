@@ -54,6 +54,11 @@ that"; 404 means "nothing here that is yours."
     the server log (`event: "anchor.error"`) only. Returned by the cash-out,
     cash-out quote, `offramp-preview`, `offramp-requirements`, `/seller/kyc`,
     `/seller/anchor-auth` and `/offramp/info` routes.
+  - `offramp_disabled` (**501**) — the server was started with `OFFRAMP=none`;
+    this deployment has no cash-out leg and payments settle directly to the
+    seller's wallet. Returned by `GET /links/:id/offramp-requirements`,
+    `GET /links/:id/cash-out/quote`, and `POST /links/:id/cash-out`. Clients must
+    not retry.
   - `internal_error` (**500**) — an unhandled server error. The body is exactly
     `{ "error": "internal_error" }`: no message, no stack. Details are in the log.
 
@@ -614,6 +619,7 @@ circuit breaker. The same 422 is returned by `GET /links/:id/cash-out/quote`.
 **403** — `{ "error": "kyc_required" }`. Only possible with a real anchor: the
 seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
 bank/routing info only — it is never used as a source of identity data.
+**501** — `{ "error": "offramp_disabled", "message": "This deployment has no cash-out leg. Payments settle directly to the seller's wallet." }`. Returned when the server is deployed with `OFFRAMP=none`. Also returned by `GET /links/:id/offramp-requirements` and `GET /links/:id/cash-out/quote`. Clients must not retry.
 
 ---
 
