@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { InvalidCursorError } from "@checkout/core";
 
 process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = "1".repeat(64);
 
@@ -150,6 +151,54 @@ describe("DrizzleWebhookRepository", () => {
 
       const { deliveries } = await repo.listDeliveries(hook.id, OTHER_SELLER, { limit: 10 });
       expect(deliveries).toHaveLength(0);
+    });
+
+    it("pages correctly through rows that share the exact same timestamp", async () => {
+      const repo = await freshRepo();
+      const hook = await repo.create({ sellerId: SELLER, url: "https://a.example.com", secret: "secret-a-000000" });
+
+      const sameTime = 1750000000000;
+      for (let i = 0; i < 5; i++) {
+        await repo.recordDelivery({
+          webhookId: hook.id,
+          linkId: `lnk_${i}`,
+          event: "link.paid",
+          attempt: 1,
+          queueEntryId: null,
+          statusCode: 200,
+          ok: true,
+          error: null,
+          createdAt: sameTime,
+        });
+      }
+
+      const page1 = await repo.listDeliveries(hook.id, SELLER, { limit: 2 });
+      expect(page1.deliveries).toHaveLength(2);
+      expect(page1.nextCursor).not.toBeNull();
+
+      const page2 = await repo.listDeliveries(hook.id, SELLER, { limit: 2, cursor: page1.nextCursor });
+      expect(page2.deliveries).toHaveLength(2);
+      expect(page2.nextCursor).not.toBeNull();
+
+      const page3 = await repo.listDeliveries(hook.id, SELLER, { limit: 2, cursor: page2.nextCursor });
+      expect(page3.deliveries).toHaveLength(1);
+      expect(page3.nextCursor).toBeNull();
+
+      const allIds = [
+        ...page1.deliveries.map((d) => d.id),
+        ...page2.deliveries.map((d) => d.id),
+        ...page3.deliveries.map((d) => d.id),
+      ];
+      expect(new Set(allIds).size).toBe(5);
+    });
+
+    it("throws InvalidCursorError when given a malformed cursor", async () => {
+      const repo = await freshRepo();
+      const hook = await repo.create({ sellerId: SELLER, url: "https://a.example.com", secret: "secret-a-000000" });
+
+      await expect(
+        repo.listDeliveries(hook.id, SELLER, { limit: 10, cursor: "not-a-valid-cursor" }),
+      ).rejects.toThrow(InvalidCursorError);
     });
   });
 });

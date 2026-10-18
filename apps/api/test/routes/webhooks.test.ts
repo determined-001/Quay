@@ -200,3 +200,20 @@ describe("POST /webhooks/deliveries/:id/replay", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("GET /webhooks/:id/deliveries", () => {
+  it("returns 400 invalid_query on a malformed cursor", async () => {
+    const seller = container.seller;
+    const hook = await container.webhooks.create({
+      sellerId: seller.id,
+      url: "https://example.com/deliveries-test",
+      secret: "deliveries-secret-000",
+    });
+
+    const res = await req(`/webhooks/${hook.id}/deliveries?cursor=garbage!!`);
+    expect(res.status).toBe(400);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.error).toBe("invalid_query");
+  });
+});
+
