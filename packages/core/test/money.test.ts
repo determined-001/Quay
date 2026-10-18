@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { toStroops, compareAmount, normalizeAmount, isValidAmount } from "../src/domain/money";
+import {
+  toStroops,
+  compareAmount,
+  normalizeAmount,
+  isValidAmount,
+  isPositiveAmount,
+  MAX_AMOUNT,
+} from "../src/domain/money";
+import { createLinkSchema } from "../src/schemas";
 
 // ── Arbitraries ───────────────────────────────────────────────────────────────
 
@@ -79,6 +87,79 @@ describe("money: isValidAmount", () => {
     expect(isValidAmount("-1")).toBe(false);
     expect(isValidAmount("1.12345678")).toBe(false);
     expect(isValidAmount("")).toBe(false);
+  });
+});
+
+describe("money: isPositiveAmount", () => {
+  it("accepts strictly positive amounts within Stellar bounds", () => {
+    expect(isPositiveAmount("100")).toBe(true);
+    expect(isPositiveAmount("10.5")).toBe(true);
+    expect(isPositiveAmount("0.0000001")).toBe(true);
+    expect(isPositiveAmount(MAX_AMOUNT)).toBe(true);
+    expect(isPositiveAmount("922337203685.4775807")).toBe(true);
+    expect(isPositiveAmount("922337203685")).toBe(true);
+  });
+
+  it("rejects zero amounts", () => {
+    expect(isPositiveAmount("0")).toBe(false);
+    expect(isPositiveAmount("0.0")).toBe(false);
+    expect(isPositiveAmount("0.0000000")).toBe(false);
+  });
+
+  it("rejects amounts exceeding the Stellar int64 stroop limit", () => {
+    expect(isPositiveAmount("922337203685.4775808")).toBe(false);
+    expect(isPositiveAmount("922337203686")).toBe(false);
+    expect(isPositiveAmount("999999999999999")).toBe(false);
+  });
+
+  it("rejects negative, empty, non-numeric, or overly precise amounts", () => {
+    expect(isPositiveAmount("-1")).toBe(false);
+    expect(isPositiveAmount("-0.5")).toBe(false);
+    expect(isPositiveAmount("")).toBe(false);
+    expect(isPositiveAmount("abc")).toBe(false);
+    expect(isPositiveAmount("1.12345678")).toBe(false);
+  });
+});
+
+describe("schemas: createLinkSchema amount validation", () => {
+  it("rejects zero amounts with the positive number message", () => {
+    for (const zero of ["0", "0.0", "0.0000000"]) {
+      const parsed = createLinkSchema.safeParse({
+        title: "Item",
+        amount: zero,
+      });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues[0]?.message).toBe(
+          "amount must be a positive number with at most 7 decimals",
+        );
+      }
+    }
+  });
+
+  it("rejects amounts exceeding maximum Stellar amount with the positive number message", () => {
+    const parsed = createLinkSchema.safeParse({
+      title: "Huge",
+      amount: "922337203685.4775808",
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues[0]?.message).toBe(
+        "amount must be a positive number with at most 7 decimals",
+      );
+    }
+  });
+
+  it("accepts valid boundary amounts", () => {
+    expect(
+      createLinkSchema.safeParse({ title: "Min", amount: "0.0000001" }).success,
+    ).toBe(true);
+    expect(
+      createLinkSchema.safeParse({
+        title: "Max",
+        amount: "922337203685.4775807",
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -201,7 +282,7 @@ describe("property: stroops addition is associative", () => {
         const sa = toStroops(a);
         const sb = toStroops(b);
         const sc = toStroops(c);
-        expect((sa + sb) + sc).toBe(sa + (sb + sc));
+        expect(sa + sb + sc).toBe(sa + (sb + sc));
       }),
       { numRuns: RUNS },
     );

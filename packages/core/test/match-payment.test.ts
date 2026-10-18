@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { matchPayment, type NormalizedPayment } from "../src/matching/match-payment";
+import {
+  matchPayment,
+  type NormalizedPayment,
+} from "../src/matching/match-payment";
 import type { PaymentLink } from "../src/domain/payment-link";
+import { createLinkSchema } from "../src/schemas";
 
 // ── Shared constants ──────────────────────────────────────────────────────────
 
@@ -58,8 +62,10 @@ function payment(over: Partial<NormalizedPayment> = {}): NormalizedPayment {
   };
 }
 
-const byRef = (l: PaymentLink) => (ref: string) => (ref === l.reference ? l : undefined);
-const byMuxedId = (l: PaymentLink) => (id: string) => (l.muxedId && id === l.muxedId ? l : undefined);
+const byRef = (l: PaymentLink) => (ref: string) =>
+  ref === l.reference ? l : undefined;
+const byMuxedId = (l: PaymentLink) => (id: string) =>
+  l.muxedId && id === l.muxedId ? l : undefined;
 
 // ── Example-based tests ───────────────────────────────────────────────────────
 
@@ -86,7 +92,10 @@ describe("matchPayment", () => {
 
   it("rejects wrong asset even if memo matches", () => {
     const l = link();
-    const r = matchPayment(payment({ asset: { code: "XLM", issuer: null } }), byRef(l));
+    const r = matchPayment(
+      payment({ asset: { code: "XLM", issuer: null } }),
+      byRef(l),
+    );
     expect(r.kind).toBe("asset_mismatch");
   });
 
@@ -122,14 +131,24 @@ describe("matchPayment", () => {
     it("still enforces destination/asset/amount rules on the muxed path", () => {
       const l = link({ muxedId: "123456789" });
       const underpaid = matchPayment(
-        payment({ memo: null, memoType: "none", toMuxedId: "123456789", amount: "1" }),
+        payment({
+          memo: null,
+          memoType: "none",
+          toMuxedId: "123456789",
+          amount: "1",
+        }),
         byRef(l),
         byMuxedId(l),
       );
       expect(underpaid.kind).toBe("underpaid");
 
       const wrongDest = matchPayment(
-        payment({ memo: null, memoType: "none", toMuxedId: "123456789", to: "GSOMEONEELSE" }),
+        payment({
+          memo: null,
+          memoType: "none",
+          toMuxedId: "123456789",
+          to: "GSOMEONEELSE",
+        }),
         byRef(l),
         byMuxedId(l),
       );
@@ -147,14 +166,22 @@ describe("matchPayment", () => {
     });
 
     it("prefers muxed id over memo when a payment somehow carries both", () => {
-      const muxedLink = link({ id: "lnk_muxed", reference: "ref_other", muxedId: "123456789" });
+      const muxedLink = link({
+        id: "lnk_muxed",
+        reference: "ref_other",
+        muxedId: "123456789",
+      });
       const memoLink = link({ id: "lnk_memo", reference: "ref_1" });
       const finders = (candidates: PaymentLink[]) => ({
         byRef: (ref: string) => candidates.find((c) => c.reference === ref),
         byMuxed: (id: string) => candidates.find((c) => c.muxedId === id),
       });
       const f = finders([muxedLink, memoLink]);
-      const r = matchPayment(payment({ toMuxedId: "123456789" }), f.byRef, f.byMuxed);
+      const r = matchPayment(
+        payment({ toMuxedId: "123456789" }),
+        f.byRef,
+        f.byMuxed,
+      );
       expect(r.kind).toBe("paid");
       if (r.kind === "paid") expect(r.link.id).toBe("lnk_muxed");
     });
@@ -198,13 +225,15 @@ describe("matchPayment", () => {
       const l0 = link({ amount: "30", paidAmount: null });
       const afterFirst = matchPayment(payment({ amount: "10" }), byRef(l0));
       expect(afterFirst.kind).toBe("underpaid");
-      if (afterFirst.kind !== "underpaid") throw new Error("expected underpaid");
+      if (afterFirst.kind !== "underpaid")
+        throw new Error("expected underpaid");
       expect(afterFirst.receivedTotal).toBe("10");
 
       const l1 = link({ amount: "30", paidAmount: afterFirst.receivedTotal });
       const afterSecond = matchPayment(payment({ amount: "10" }), byRef(l1));
       expect(afterSecond.kind).toBe("underpaid");
-      if (afterSecond.kind !== "underpaid") throw new Error("expected underpaid");
+      if (afterSecond.kind !== "underpaid")
+        throw new Error("expected underpaid");
       expect(afterSecond.receivedTotal).toBe("20");
 
       const l2 = link({ amount: "30", paidAmount: afterSecond.receivedTotal });
@@ -407,6 +436,21 @@ describe("property: destination mismatch is never paid", () => {
       ),
       { numRuns: RUNS },
     );
+  });
+
+  describe("zero-amount link prevention", () => {
+    it("ensures zero-amount links cannot be created through createLinkSchema to reach matchPayment", () => {
+      const parsed = createLinkSchema.safeParse({
+        title: "Zero payment link",
+        amount: "0",
+      });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues[0]?.message).toBe(
+          "amount must be a positive number with at most 7 decimals",
+        );
+      }
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isValidAmount } from "./domain/money";
+import { isPositiveAmount } from "./domain/money";
 
 // Asset is restricted to a small allowlist for the MVP: USDC (issued) or native XLM.
 // The issuer for USDC is resolved server-side from config, so the client only
@@ -18,10 +18,18 @@ export const createLinkSchema = z.object({
   amount: z
     .string()
     .trim()
-    .refine(isValidAmount, "amount must be a positive number with at most 7 decimals"),
+    .refine(
+      isPositiveAmount,
+      "amount must be a positive number with at most 7 decimals",
+    ),
   assetCode: assetCodeSchema.default("USDC"),
   // optional time-to-live in minutes; omitted => no expiry
-  expiresInMinutes: z.number().int().positive().max(60 * 24 * 30).optional(),
+  expiresInMinutes: z
+    .number()
+    .int()
+    .positive()
+    .max(60 * 24 * 30)
+    .optional(),
   /** Internal flag set by the demo seed script. */
   isDemo: z.boolean().optional(),
 });
@@ -36,7 +44,9 @@ export const listWebhookDeliveriesQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
   cursor: z.string().trim().min(1).optional(),
 });
-export type ListWebhookDeliveriesQuery = z.infer<typeof listWebhookDeliveriesQuerySchema>;
+export type ListWebhookDeliveriesQuery = z.infer<
+  typeof listWebhookDeliveriesQuerySchema
+>;
 
 export const cashOutSchema = z.object({
   targetCurrency: z.string().trim().length(3).toUpperCase().default("NGN"),
@@ -49,7 +59,6 @@ export const cashOutSchema = z.object({
 });
 export type CashOutBody = z.infer<typeof cashOutSchema>;
 
-
 /** Body of POST /links/:id/cash-out/transfer-sent: the seller's claimed hash of
  *  the on-chain payment to the anchor. A Stellar transaction hash is 32 bytes
  *  of hex; it is stored lowercase. A claim only, never proof (issue 4.32). */
@@ -57,7 +66,10 @@ export const transferSentSchema = z.object({
   hash: z
     .string()
     .trim()
-    .regex(/^[0-9a-fA-F]{64}$/, "hash must be a 64-character hex Stellar transaction hash")
+    .regex(
+      /^[0-9a-fA-F]{64}$/,
+      "hash must be a 64-character hex Stellar transaction hash",
+    )
     .transform((h) => h.toLowerCase()),
 });
 export type TransferSentBody = z.infer<typeof transferSentSchema>;
