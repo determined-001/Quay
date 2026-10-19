@@ -116,6 +116,12 @@ export class WebhookWorker {
       return;
     }
 
+    if (hook.deletedAt !== null) {
+      this.log(`queue ${short(entry.id)}: webhook ${short(entry.webhookId)} deleted, dead-lettering`);
+      await this.finalise(entry, attemptNumber, null, false, "webhook deleted", "dead");
+      return;
+    }
+
     const outcome = await this.sender.deliverOnce(hook, entry.event, entry.payload);
 
     if (outcome.ok) {
