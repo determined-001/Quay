@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { NOOP_LOGGER, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
+import { NOOP_LOGGER, OffRampDisabledError, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
+import { DisabledOffRamp } from "@checkout/offramp";
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
@@ -339,5 +340,78 @@ describe("GET /links/:id/cash-out/transfer — non-custodial transfer instructio
     });
     expect(res.status).toBe(status);
     expect(((await res.json()) as Record<string, unknown>).error).toBe(message);
+  });
+});
+
+describe("Cash-out routes with OFFRAMP=none (DisabledOffRamp)", () => {
+  it("returns 501 offramp_disabled for GET /:id/offramp-requirements", async () => {
+    const container = fakeContainer();
+    (container.service as unknown as Record<string, unknown>).getOfframpRequirements = async () => {
+      const adapter = new DisabledOffRamp();
+      await adapter.offrampRequirements("USDC");
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/offramp-requirements`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({
+      error: "offramp_disabled",
+      message: "This deployment has no cash-out leg. Payments settle directly to the seller's wallet.",
+    });
+  });
+
+  it("returns 501 offramp_disabled for GET /:id/cash-out/quote", async () => {
+    const container = fakeContainer();
+    (container.service as unknown as Record<string, unknown>).quoteCashOut = async () => {
+      const adapter = new DisabledOffRamp();
+      await adapter.quote({
+        linkId: ownedLink.id,
+        sourceAsset: ownedLink.asset,
+        sourceAmount: ownedLink.amount,
+        targetCurrency: "NGN",
+      });
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=NGN`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({
+      error: "offramp_disabled",
+      message: "This deployment has no cash-out leg. Payments settle directly to the seller's wallet.",
+    });
+  });
+
+  it("returns 501 offramp_disabled for POST /:id/cash-out", async () => {
+    const container = fakeContainer();
+    (container.service as unknown as Record<string, unknown>).triggerCashOut = async () => {
+      const adapter = new DisabledOffRamp();
+      await adapter.initiate({
+        linkId: ownedLink.id,
+        quoteId: "quote_1",
+        payout: { currency: "NGN", fields: {} },
+      });
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/cash-out`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }),
+    });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({
+      error: "offramp_disabled",
+      message: "This deployment has no cash-out leg. Payments settle directly to the seller's wallet.",
+    });
   });
 });

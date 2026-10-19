@@ -602,6 +602,9 @@ settled.
 **403** — `{ "error": "anchor_auth_required" }`. Only possible with a real anchor
 (`OFFRAMP=testanchor|anchor`): the seller has no live SEP-10 session with the
 anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
+**501** — `{ "error": "offramp_disabled", "message": "This deployment has no cash-out leg. Payments settle directly to the seller's wallet." }`.
+The deployment runs with `OFFRAMP=none` (no anchor configured). Returned by `POST /links/:id/cash-out`, `GET /links/:id/cash-out/quote`, and `GET /links/:id/offramp-requirements`.
+
 **502** — `{ "error": "anchor_error", "message": "The anchor returned an error (SEP-6 withdraw, HTTP 400)." }`.
 The anchor failed or was unreachable; see Conventions. Nothing from the anchor's
 response body is included.

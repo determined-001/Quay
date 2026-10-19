@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampPort, type RailPort, type WithdrawTransfer } from "@checkout/core";
-import { MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
+import { AnchorAuthRequiredError, OffRampDisabledError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampPort, type RailPort, type WithdrawTransfer } from "@checkout/core";
+import { MockAnchorOffRamp, DisabledOffRamp, Sep6ValidationError } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
@@ -1422,6 +1422,18 @@ describe("LinkService cash-out — anchor rejections", () => {
     await expect(
       service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {}, quoteId: "quote_other_amount" }),
     ).rejects.toMatchObject({ status: 409, message: "quote_mismatch" });
+  });
+
+  it("rethrows OffRampDisabledError on getOfframpRequirements, quoteCashOut, and triggerCashOut without wrapping in anchorFailure", async () => {
+    const links = new FakeLinkRepository([makeLink({ id: "lnk_1", status: "paid", amount: "10" })]);
+    const offrampState = new FakeOffRampStateRepository();
+    const service = makeService({ links, offramp: new DisabledOffRamp(), offrampState });
+
+    await expect(service.getOfframpRequirements("lnk_1")).rejects.toBeInstanceOf(OffRampDisabledError);
+    await expect(service.quoteCashOut("lnk_1", "NGN")).rejects.toBeInstanceOf(OffRampDisabledError);
+    await expect(
+      service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+    ).rejects.toBeInstanceOf(OffRampDisabledError);
   });
 });
 

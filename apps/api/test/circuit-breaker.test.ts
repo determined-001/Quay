@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AnchorAuthRequiredError,
+  OffRampDisabledError,
   OffRampRejectedError,
   type OffRampInitiation,
   type OffRampJob,
@@ -197,6 +198,19 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
     await expect(breaker.quote(input)).rejects.toBeInstanceOf(Sep6ValidationError);
     expect(breaker.getState()).toBe("closed");
+  });
+
+  it("never opens on disabled off-ramp (OffRampDisabledError) and does not count as error", async () => {
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(new OffRampDisabledError("quote"))),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
+
+    for (let i = 0; i < 5; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(OffRampDisabledError);
+    }
+    expect(breaker.getState()).toBe("closed");
+    expect(inner.quote).toHaveBeenCalledTimes(5);
   });
 
   it("still opens on genuine anchor failures", async () => {

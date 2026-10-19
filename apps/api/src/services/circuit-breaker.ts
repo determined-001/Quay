@@ -1,5 +1,6 @@
 import {
   AnchorAuthRequiredError,
+  OffRampDisabledError,
   OffRampRejectedError,
   type OffRampInitiation,
   type OffRampJob,
@@ -97,6 +98,9 @@ export class CircuitBreakerOffRamp implements OffRampPort {
       return result;
     } catch (err) {
       metrics.anchorCallDurationSeconds.observe({ method }, (Date.now() - start) / 1000);
+      if (err instanceof OffRampDisabledError) {
+        throw err;
+      }
       // A request the anchor refused on its merits (out-of-range amount,
       // unsupported type) is the caller's problem, not an outage.
       const rejected = err instanceof OffRampRejectedError;
