@@ -9,7 +9,9 @@ const { decryptSecret } = await import("../src/services/secret-crypto");
 async function freshRepo() {
   const { db, client } = createDb(":memory:");
   await bootstrap(client);
-  return new DrizzleWebhookRepository(db);
+  const repo = new DrizzleWebhookRepository(db);
+  (repo as any).rawDb = db;
+  return repo;
 }
 
 const SELLER = "slr_test1";
@@ -150,6 +152,59 @@ describe("DrizzleWebhookRepository", () => {
 
       const { deliveries } = await repo.listDeliveries(hook.id, OTHER_SELLER, { limit: 10 });
       expect(deliveries).toHaveLength(0);
+    });
+
+    it("does not skip or duplicate deliveries that share the same createdAt timestamp", async () => {
+      const repo = await freshRepo();
+      const hook = await repo.create({ sellerId: SELLER, url: "https://a.example.com", secret: "secret-a-000000" });
+      const db = (repo as any).rawDb;
+
+      const sameTimestamp = 1700000000000;
+      const { webhookDeliveries } = await import("../src/db/schema");
+
+      for (let i = 0; i < 5; i++) {
+        await db.insert(webhookDeliveries).values({
+          id: `whd_test_${i}`,
+          webhookId: hook.id,
+          linkId: `lnk_${i}`,
+          event: "link.paid",
+          attempt: 1,
+          queueEntryId: null,
+          statusCode: 200,
+          ok: true,
+          error: null,
+          createdAt: sameTimestamp,
+        });
+      }
+
+      const page1 = await repo.listDeliveries(hook.id, SELLER, { limit: 2 });
+      expect(page1.deliveries).toHaveLength(2);
+      expect(page1.nextCursor).not.toBeNull();
+
+      const page2 = await repo.listDeliveries(hook.id, SELLER, { limit: 2, cursor: page1.nextCursor });
+      expect(page2.deliveries).toHaveLength(2);
+      expect(page2.nextCursor).not.toBeNull();
+
+      const page3 = await repo.listDeliveries(hook.id, SELLER, { limit: 2, cursor: page2.nextCursor });
+      expect(page3.deliveries).toHaveLength(1);
+      expect(page3.nextCursor).toBeNull();
+
+      const allIds = [
+        ...page1.deliveries.map((d) => d.id),
+        ...page2.deliveries.map((d) => d.id),
+        ...page3.deliveries.map((d) => d.id),
+      ];
+      expect(allIds).toHaveLength(5);
+      expect(new Set(allIds).size).toBe(5);
+    });
+
+    it("throws HttpError 400 invalid_query on malformed cursor", async () => {
+      const repo = await freshRepo();
+      const hook = await repo.create({ sellerId: SELLER, url: "https://a.example.com", secret: "secret-a-000000" });
+
+      await expect(
+        repo.listDeliveries(hook.id, SELLER, { limit: 10, cursor: "not-a-valid-cursor!!!" }),
+      ).rejects.toThrow("invalid_query");
     });
   });
 });

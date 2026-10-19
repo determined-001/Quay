@@ -6,6 +6,7 @@ import type { Container } from "../services/container";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 import { guardWebhookUrl } from "../services/ssrf-guard";
 import { getLogger } from "../request-context";
+import { HttpError } from "../services/link-service";
 
 const HOST_ALLOWLIST = process.env.WEBHOOK_HOST_ALLOWLIST
   ? process.env.WEBHOOK_HOST_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean)
@@ -108,8 +109,15 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthVariables }> 
     const owned = await c.webhooks.getById(ctx.req.param("id"), seller.id, { includeDeleted: true });
     if (!owned) return ctx.json({ error: "not_found" }, 404);
 
-    const { deliveries, nextCursor } = await c.webhooks.listDeliveries(owned.id, seller.id, parsed.data);
-    return ctx.json({ deliveries, nextCursor });
+    try {
+      const { deliveries, nextCursor } = await c.webhooks.listDeliveries(owned.id, seller.id, parsed.data);
+      return ctx.json({ deliveries, nextCursor });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        return ctx.json({ error: err.message, ...err.extra }, err.status as 400 | 404 | 500);
+      }
+      throw err;
+    }
   });
 
   /**
