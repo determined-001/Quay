@@ -38,7 +38,7 @@ import {
   type OffRampTelemetryRow,
   type WithdrawTransfer,
 } from "@checkout/core";
-import { AnchorHttpError, Sep6ValidationError, anchorErrorSummary, truncateAnchorBody } from "@checkout/offramp";
+import { AnchorHttpError, AnchorRejectedError, Sep6ValidationError, anchorErrorSummary, truncateAnchorBody } from "@checkout/offramp";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -1603,11 +1603,16 @@ function assertCanCashOut(link: PaymentLink): void {
 
 /** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */
 function offRampRejected(err: OffRampRejectedError): HttpError {
-  return new HttpError(422, "offramp_rejected", {
+  const extra: Record<string, unknown> = {
     message: err.message,
     limits: err.limits,
     availableTypes: err.availableTypes,
-  });
+  };
+  if (err instanceof AnchorRejectedError) {
+    if (err.rejectionType) extra.rejectionType = err.rejectionType;
+    if (err.fields) extra.fields = err.fields;
+  }
+  return new HttpError(422, "offramp_rejected", extra);
 }
 
 export class HttpError extends Error {

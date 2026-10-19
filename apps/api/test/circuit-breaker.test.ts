@@ -8,7 +8,7 @@ import {
   type OffRampQuote,
   type OfframpRequirementTypes,
 } from "@checkout/core";
-import { Sep6ValidationError } from "@checkout/offramp";
+import { AnchorHttpError, AnchorRejectedError, Sep6ValidationError } from "@checkout/offramp";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 
 const fakeQuote: OffRampQuote = {
@@ -199,10 +199,41 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
     expect(breaker.getState()).toBe("closed");
   });
 
+  it("never opens on repeated 400/403/422 anchor rejections from quote or initiate", async () => {
+    const rejected400 = new AnchorRejectedError({ sep: "38", op: "quote", status: 400, body: '{"error":"unsupported pair"}' });
+    const rejected403 = new AnchorRejectedError({ sep: "6", op: "withdraw", status: 403, body: '{"type":"customer_info_status"}' });
+    const rejected422 = new AnchorRejectedError({ sep: "6", op: "withdraw", status: 422, body: '{"error":"invalid fields"}' });
+    const http400 = new AnchorHttpError({ sep: "38", op: "quote", status: 400, body: "bad request" });
+
+    const inner = fakePort({
+      quote: vi
+        .fn()
+        .mockRejectedValueOnce(rejected400)
+        .mockRejectedValueOnce(rejected403)
+        .mockRejectedValueOnce(rejected422)
+        .mockRejectedValueOnce(http400),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+
+    for (let i = 0; i < 4; i++) {
+      await expect(breaker.quote(input)).rejects.toThrow();
+    }
+    expect(breaker.getState()).toBe("closed");
+    expect(inner.quote).toHaveBeenCalledTimes(4);
+  });
+
   it("still opens on genuine anchor failures", async () => {
     const inner = fakePort({ quote: vi.fn(async () => Promise.reject(new Error("502 from anchor"))) });
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
     for (let i = 0; i < 3; i++) await expect(breaker.quote(input)).rejects.toThrow("502");
+    expect(breaker.getState()).toBe("open");
+  });
+
+  it("opens on AnchorHttpError 502 or 500", async () => {
+    const http502 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 502, body: "bad gateway" });
+    const inner = fakePort({ quote: vi.fn(async () => Promise.reject(http502)) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+    for (let i = 0; i < 3; i++) await expect(breaker.quote(input)).rejects.toThrow();
     expect(breaker.getState()).toBe("open");
   });
 });

@@ -114,7 +114,7 @@ export async function getSep38Quote(
   });
   if (!res.ok) {
     log.warn({ event: "anchor.sep38.quote.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-38 quote failed");
-    throw await anchorHttpError("38", "quote", res);
+    throw await anchorHttpError("38", "quote", res, { allowRejection: true });
   }
   const body = (await res.json()) as {
     id: string;

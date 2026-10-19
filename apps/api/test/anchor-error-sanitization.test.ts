@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { Logger } from "@checkout/core";
-import { AnchorChallengeError, AnchorHttpError, type SellerAnchorAuth } from "@checkout/offramp";
+import { AnchorChallengeError, AnchorHttpError, AnchorRejectedError, type SellerAnchorAuth } from "@checkout/offramp";
 import { linkRoutes } from "../src/routes/links";
 import { kycRoutes } from "../src/routes/kyc";
 import { anchorAuthRoutes } from "../src/routes/anchor-auth";
@@ -150,6 +150,28 @@ describe("link routes: anchor failures", () => {
     expect(res.status).toBe(502);
     await expectNoMarker(res.clone());
     expect(await res.json()).toMatchObject({ error: "anchor_error" });
+    container.client.close();
+  });
+
+  it("cash-out quote: 422 offramp_rejected with rejection details when anchor rejects request", async () => {
+    const { container, app, headers, linkId } = await setup();
+    container.offramp.quote = async () => {
+      throw new AnchorRejectedError({
+        sep: "38",
+        op: "quote",
+        status: 400,
+        body: '{"error":"unsupported pair"}',
+        message: "The anchor rejected the request: unsupported pair",
+        rejectionType: "unsupported_pair",
+      });
+    };
+    const res = await app.request(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`, { headers });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({
+      error: "offramp_rejected",
+      message: "The anchor rejected the request: unsupported pair",
+      rejectionType: "unsupported_pair",
+    });
     container.client.close();
   });
 

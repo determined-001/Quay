@@ -280,7 +280,7 @@ export async function startSep6Withdraw(
   const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   if (!res.ok) {
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
-    throw await anchorHttpError("6", "withdraw", res);
+    throw await anchorHttpError("6", "withdraw", res, { allowRejection: true });
   }
   const body = (await res.json()) as { id: string; account_id?: string; memo?: string; memo_type?: string };
   const memoType = body.memo_type === "id" || body.memo_type === "hash" || body.memo_type === "text" ? body.memo_type : undefined;

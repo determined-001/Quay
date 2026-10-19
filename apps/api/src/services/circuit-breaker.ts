@@ -8,6 +8,7 @@ import {
   type OffRampQuote,
   type OfframpRequirementTypes,
 } from "@checkout/core";
+import { AnchorHttpError, isAnchorRejectionStatus } from "@checkout/offramp";
 import { metrics } from "../metrics";
 
 export type CircuitState = "closed" | "half_open" | "open";
@@ -98,8 +99,10 @@ export class CircuitBreakerOffRamp implements OffRampPort {
     } catch (err) {
       metrics.anchorCallDurationSeconds.observe({ method }, (Date.now() - start) / 1000);
       // A request the anchor refused on its merits (out-of-range amount,
-      // unsupported type) is the caller's problem, not an outage.
-      const rejected = err instanceof OffRampRejectedError;
+      // unsupported type, or 4xx rejection) is the caller's problem, not an outage.
+      const rejected =
+        err instanceof OffRampRejectedError ||
+        (err instanceof AnchorHttpError && isAnchorRejectionStatus(err.status));
       metrics.anchorCallsTotal.inc({ method, status: rejected ? "rejected" : "error" });
       // A seller without a live anchor session says nothing about the
       // anchor's health; counting it would let one signed-out seller open the

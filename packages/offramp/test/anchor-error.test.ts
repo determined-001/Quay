@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ANCHOR_ERROR_BODY_MAX_BYTES,
   AnchorHttpError,
+  AnchorRejectedError,
   anchorErrorSummary,
   anchorHttpError,
   getSep6Info,
@@ -45,6 +46,35 @@ describe("AnchorHttpError", () => {
     const res = new Response("x", { status: 502 });
     res.text = () => Promise.reject(new Error("stream broke"));
     expect((await anchorHttpError("38", "quote", res)).body).toBe("");
+  });
+
+  it("yields AnchorRejectedError for 4xx when allowRejection is true", async () => {
+    const jsonBody = JSON.stringify({
+      type: "non_interactive_customer_info_needed",
+      fields: ["dest", "dest_extra"],
+      error: "KYC details required for recipient bank",
+    });
+    const err = await anchorHttpError("6", "withdraw", new Response(jsonBody, { status: 400 }), {
+      allowRejection: true,
+    });
+    expect(err).toBeInstanceOf(AnchorRejectedError);
+    if (err instanceof AnchorRejectedError) {
+      expect(err.status).toBe(400);
+      expect(err.sep).toBe("6");
+      expect(err.op).toBe("withdraw");
+      expect(err.rejectionType).toBe("non_interactive_customer_info_needed");
+      expect(err.fields).toEqual(["dest", "dest_extra"]);
+      expect(err.message).toBe("The anchor rejected the request: KYC details required for recipient bank");
+    }
+  });
+
+  it("leaves 5xx as AnchorHttpError even with allowRejection is true", async () => {
+    const err = await anchorHttpError("38", "quote", new Response("Server error", { status: 502 }), {
+      allowRejection: true,
+    });
+    expect(err).toBeInstanceOf(AnchorHttpError);
+    expect(err).not.toBeInstanceOf(AnchorRejectedError);
+    expect((err as AnchorHttpError).status).toBe(502);
   });
 });
 
