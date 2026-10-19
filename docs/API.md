@@ -1079,6 +1079,7 @@ webhook has been deleted. `limit` defaults to 20, max 100.
 Pass `nextCursor` back as `?cursor=` to fetch the next page; `null` means there
 are no more results.
 
+**400** — `{ "error": "invalid_query" }` if `cursor` is malformed.
 **404** — `{ "error": "not_found" }` if the id doesn't exist or isn't yours.
 
 ---

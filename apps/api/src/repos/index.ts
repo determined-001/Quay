@@ -59,6 +59,7 @@ import {
 } from "../db/schema";
 import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
+import { HttpError } from "../services/link-service";
 import { computeKeyId, decryptPii, encryptPii, getBlobKeyId, type PiiKeyring } from "../crypto/pii";
 import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
 import type { Logger } from "pino";
@@ -782,21 +783,31 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     const owned = await this.getById(webhookId, sellerId, { includeDeleted: true });
     if (!owned) return { deliveries: [], nextCursor: null };
 
-    const cursorCreatedAt = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
+    const cursor = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
     const conditions = [eq(webhookDeliveries.webhookId, webhookId)];
-    if (cursorCreatedAt !== null) conditions.push(lt(webhookDeliveries.createdAt, cursorCreatedAt));
+    if (cursor !== null) {
+      conditions.push(
+        or(
+          lt(webhookDeliveries.createdAt, cursor.createdAt),
+          and(
+            eq(webhookDeliveries.createdAt, cursor.createdAt),
+            lt(webhookDeliveries.id, cursor.id),
+          ),
+        )!,
+      );
+    }
 
     // Fetch one extra row to know whether there's a next page.
     const rows = await this.db
       .select()
       .from(webhookDeliveries)
       .where(and(...conditions))
-      .orderBy(desc(webhookDeliveries.createdAt))
+      .orderBy(desc(webhookDeliveries.createdAt), desc(webhookDeliveries.id))
       .limit(opts.limit + 1);
 
     const page = rows.slice(0, opts.limit);
     const last = page[page.length - 1];
-    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt) : null;
+    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt, last.id) : null;
 
     return { deliveries: page, nextCursor };
   }
@@ -841,14 +852,32 @@ function rowToQueueEntry(row: QueueRow): WebhookQueueEntry {
   };
 }
 
-function encodeDeliveryCursor(createdAt: number): string {
-  return Buffer.from(String(createdAt), "utf8").toString("base64url");
+function encodeDeliveryCursor(createdAt: number, id: string): string {
+  return Buffer.from(`${createdAt}:${id}`, "utf8").toString("base64url");
 }
 
-function decodeDeliveryCursor(cursor: string): number {
-  const decoded = Number(Buffer.from(cursor, "base64url").toString("utf8"));
-  if (!Number.isFinite(decoded)) throw new Error("Invalid cursor");
-  return decoded;
+function decodeDeliveryCursor(cursor: string): { createdAt: number; id: string } {
+  try {
+    const text = Buffer.from(cursor, "base64url").toString("utf8");
+    const colon = text.indexOf(":");
+    if (colon === -1) {
+      // Legacy backwards-compatibility check: if cursor is purely a number
+      const legacyCreatedAt = Number(text);
+      if (Number.isFinite(legacyCreatedAt)) {
+        return { createdAt: legacyCreatedAt, id: "\uffff" };
+      }
+      throw new HttpError(400, "invalid_query", { message: "Invalid cursor" });
+    }
+    const createdAt = Number(text.slice(0, colon));
+    const id = text.slice(colon + 1);
+    if (!Number.isFinite(createdAt) || !id) {
+      throw new HttpError(400, "invalid_query", { message: "Invalid cursor" });
+    }
+    return { createdAt, id };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    throw new HttpError(400, "invalid_query", { message: "Invalid cursor" });
+  }
 }
 
 export class DrizzleWatcherStateRepository implements WatcherStateRepository {
