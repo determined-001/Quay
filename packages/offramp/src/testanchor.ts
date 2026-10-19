@@ -221,7 +221,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     });
     return entries.map((e) => ({
       targetCurrency: e.buyCurrency,
-      price: e.price,
+      price: targetPerSourceRate(e.price),
       deliveryMethods: e.deliveryMethods,
     }));
   }

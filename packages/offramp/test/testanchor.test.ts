@@ -3,6 +3,8 @@ import { existsSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OffRampJobNotFoundError, type AnchorCustomer, type Logger } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
+import { MockAnchorOffRamp } from "../src/mock-anchor";
+import { getSep38Prices } from "../src/sep38";
 import { SEP6_STATUS_MAP, TESTANCHOR_BASE_URL, TESTANCHOR_HOME_DOMAIN, TestAnchorOffRamp } from "../src/testanchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 
@@ -196,6 +198,115 @@ describe("TestAnchorOffRamp (offline)", () => {
       { event: "anchor.sep6.status.unknown", status: "future_status" },
       "unknown SEP-6 transaction status",
     );
+  });
+
+  describe("indicativePrices (issue 3.27)", () => {
+    it("returns target-per-source rate inverted from SEP-38 sell-per-buy price", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.includes(".well-known/stellar.toml")) {
+            return new Response(
+              'NETWORK_PASSPHRASE="Test SDF Network"\nTRANSFER_SERVER="https://anchor.test/sep6"\nANCHOR_QUOTE_SERVER="https://anchor.test/sep38"\n',
+            );
+          }
+          if (url.includes("/sep38/prices")) {
+            return Response.json({
+              buy_assets: [
+                {
+                  asset: "iso4217:NGN",
+                  price: "0.00065", // sell USDC per buy NGN
+                  buy_delivery_methods: [{ name: "BANK_TRANSFER" }],
+                },
+              ],
+            });
+          }
+          return new Response("unexpected", { status: 404 });
+        }),
+      );
+
+      const offramp = makeOffRamp();
+      const prices = await offramp.indicativePrices({
+        sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sourceAmount: "10",
+      });
+
+      expect(prices).toHaveLength(1);
+      expect(prices[0]?.targetCurrency).toBe("NGN");
+      // 1 / 0.00065 = 1538.46153846
+      expect(prices[0]?.price).toBe("1538.46153846");
+      expect(Number(prices[0]?.price)).toBeGreaterThan(1000);
+      expect(prices[0]?.deliveryMethods).toEqual(["BANK_TRANSFER"]);
+    });
+
+    it("skips bad entries in getSep38Prices: missing asset, non-numeric or non-positive price", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          Response.json({
+            buy_assets: [
+              { asset: null, price: "0.5" },
+              { asset: "crypto:BTC", price: "0.5" },
+              { asset: "iso4217:EUR", price: "-1" },
+              { asset: "iso4217:GBP", price: "0" },
+              { asset: "iso4217:JPY", price: "invalid" },
+              { asset: "iso4217:USD", price: "1.00", buy_delivery_methods: [{ name: "WIRE" }] },
+            ],
+          }),
+        ),
+      );
+
+      const entries = await getSep38Prices("https://anchor.test/sep38", {
+        sellAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sellAmount: "10",
+      });
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toEqual({
+        buyCurrency: "USD",
+        price: "1.00",
+        deliveryMethods: ["WIRE"],
+      });
+    });
+
+    it("ensures mock anchor and testanchor indicative prices agree on direction (target-per-source > 1 for NGN)", async () => {
+      const mock = new MockAnchorOffRamp({ state: new FakeOffRampStateRepository() });
+      const mockPrices = await mock.indicativePrices({
+        sourceAsset: { code: "USDC", issuer: null },
+        sourceAmount: "10",
+      });
+      const mockNgn = mockPrices.find((p) => p.targetCurrency === "NGN");
+      expect(mockNgn).toBeDefined();
+      expect(Number(mockNgn!.price)).toBeGreaterThan(1);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.includes(".well-known/stellar.toml")) {
+            return new Response(
+              'NETWORK_PASSPHRASE="Test SDF Network"\nTRANSFER_SERVER="https://anchor.test/sep6"\nANCHOR_QUOTE_SERVER="https://anchor.test/sep38"\n',
+            );
+          }
+          if (url.includes("/sep38/prices")) {
+            return Response.json({
+              buy_assets: [{ asset: "iso4217:NGN", price: "0.00060606" }],
+            });
+          }
+          return new Response("unexpected", { status: 404 });
+        }),
+      );
+
+      const offramp = makeOffRamp();
+      const realPrices = await offramp.indicativePrices({
+        sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sourceAmount: "10",
+      });
+      const realNgn = realPrices.find((p) => p.targetCurrency === "NGN");
+      expect(realNgn).toBeDefined();
+      expect(Number(realNgn!.price)).toBeGreaterThan(1);
+    });
   });
 });
 

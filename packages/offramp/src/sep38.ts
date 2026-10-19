@@ -61,9 +61,12 @@ export async function getSep38Prices(
   };
 
   return (body.buy_assets ?? []).flatMap((entry) => {
+    if (!entry || typeof entry.asset !== "string") return [];
     // Only surface fiat ISO-4217 entries ("iso4217:XXX").
     const match = entry.asset.match(/^iso4217:([A-Z]{3})$/);
     if (!match || !match[1]) return [];
+    const p = Number(entry.price);
+    if (!Number.isFinite(p) || p <= 0) return [];
     const buyCurrency: string = match[1];
     return [
       {
