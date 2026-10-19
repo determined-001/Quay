@@ -15,11 +15,16 @@ export interface HorizonStatus {
 export interface HorizonWatcherOptions {
   primaryServer: HorizonClient | string;
   /** Optional standby Horizon server. Switched to after `degradedThreshold`
-   *  consecutive failures on the primary; switched back on the next success. */
+   *  consecutive failures on the primary; primary is probed again after `cooldownMs`. */
   fallbackServer?: HorizonClient | string;
   /** Consecutive failures before considered degraded (and before switching to
    *  the fallback, if one is configured). Default 3. */
   degradedThreshold?: number;
+  /** Milliseconds to wait while on fallback before probing the primary server again.
+   *  Default 30,000 (30s). */
+  cooldownMs?: number;
+  /** Clock provider for measuring cooldown. Default Date.now. */
+  now?: () => number;
   /** Passed straight through to `withHorizonRetry` for every call — mainly for
    *  tests to shrink the backoff delays; production can leave this unset. */
   retryOptions?: RetryOptions;
@@ -42,17 +47,20 @@ function toClient(target: HorizonClient | string): HorizonClient {
  * resolves without an operator noticing. Sustained failure — retries exhausted
  * `degradedThreshold` times in a row — marks the watcher `degraded` (see
  * `getStatus()`, surfaced in `GET /health`) and, if `HORIZON_URL_FALLBACK` is
- * set, switches to it until the next successful call.
+ * set, switches to it until the primary recovers after a probe.
  */
 export class HorizonWatcher implements WatcherPort {
   private readonly primaryClient: HorizonClient;
   private readonly fallbackClient: HorizonClient | null;
   private readonly degradedThreshold: number;
+  private readonly cooldownMs: number;
+  private readonly now: () => number;
   private readonly retryOptions?: RetryOptions;
   private readonly log: (msg: string) => void;
 
   private usingFallback = false;
   private consecutiveFailures = 0;
+  private lastProbeAt = 0;
 
   /** Accepts a bare Horizon URL or injected client (the original shape, still
    *  used by tests and the streaming path) or the full resilience options. */
@@ -60,10 +68,12 @@ export class HorizonWatcher implements WatcherPort {
     const opts: HorizonWatcherOptions =
       typeof target === "string" || !("primaryServer" in target)
         ? { primaryServer: target as string | HorizonClient }
-        : target;
+      : target;
     this.primaryClient = toClient(opts.primaryServer);
     this.fallbackClient = opts.fallbackServer ? toClient(opts.fallbackServer) : null;
     this.degradedThreshold = opts.degradedThreshold ?? 3;
+    this.cooldownMs = opts.cooldownMs ?? 30_000;
+    this.now = opts.now ?? (() => Date.now());
     this.retryOptions = opts.retryOptions;
     this.log = opts.log ?? (() => {});
   }
@@ -76,13 +86,7 @@ export class HorizonWatcher implements WatcherPort {
     };
   }
 
-  private get client(): HorizonClient {
-    return this.usingFallback && this.fallbackClient ? this.fallbackClient : this.primaryClient;
-  }
-
-  /** A 404 (missing account) is a legitimate, prompt answer — not a Horizon
-   *  problem — so it counts as a success for degraded-tracking purposes. */
-  private onOk(): void {
+  private onPrimaryOk(): void {
     if (this.consecutiveFailures > 0 || this.usingFallback) {
       this.log(
         `horizon_recovered${this.usingFallback ? " (was on HORIZON_URL_FALLBACK)" : ""} after ${this.consecutiveFailures} consecutive failure(s)`,
@@ -92,12 +96,19 @@ export class HorizonWatcher implements WatcherPort {
     this.usingFallback = false;
   }
 
+  private onFallbackOk(): void {
+    // When fallback succeeds, we do NOT switch back to primary.
+    // We only reset consecutive failures so fallback health is preserved.
+    this.consecutiveFailures = 0;
+  }
+
   private onFail(err: unknown): void {
     this.consecutiveFailures += 1;
     if (this.consecutiveFailures < this.degradedThreshold) return;
 
     if (this.fallbackClient && !this.usingFallback) {
       this.usingFallback = true;
+      this.lastProbeAt = this.now();
       this.log(
         `horizon_degraded — ${this.consecutiveFailures} consecutive failures, switching to HORIZON_URL_FALLBACK: ${stringifyErr(err)}`,
       );
@@ -108,22 +119,68 @@ export class HorizonWatcher implements WatcherPort {
     }
   }
 
+  private async executeWithFailover<T>(run: (client: HorizonClient) => Promise<T>): Promise<T> {
+    // If not using fallback, or no fallback configured, execute against primary directly
+    if (!this.usingFallback || !this.fallbackClient) {
+      try {
+        const result = await withHorizonRetry(() => run(this.primaryClient), this.retryOptions);
+        this.onPrimaryOk();
+        return result;
+      } catch (err) {
+        if (isNotFound(err)) {
+          this.onPrimaryOk();
+          throw err;
+        }
+        this.onFail(err);
+        throw err;
+      }
+    }
+
+    // Currently using fallback. Check if cooldown has elapsed to probe primary.
+    const currentTime = this.now();
+    if (currentTime - this.lastProbeAt >= this.cooldownMs) {
+      this.lastProbeAt = currentTime;
+      try {
+        const result = await withHorizonRetry(() => run(this.primaryClient), this.retryOptions);
+        this.onPrimaryOk();
+        return result;
+      } catch (probeErr) {
+        if (isNotFound(probeErr)) {
+          this.onPrimaryOk();
+          throw probeErr;
+        }
+        // Primary probe failed. Do not count this against the fallback.
+        this.log(`horizon_primary_probe_failed: ${stringifyErr(probeErr)}`);
+      }
+    }
+
+    // Execute via fallback
+    try {
+      const result = await withHorizonRetry(() => run(this.fallbackClient!), this.retryOptions);
+      this.onFallbackOk();
+      return result;
+    } catch (err) {
+      if (isNotFound(err)) {
+        this.onFallbackOk();
+        throw err;
+      }
+      this.onFail(err);
+      throw err;
+    }
+  }
+
   /** Newest payment paging-token for an account, used to seed a fresh watch. */
   async latestCursor(account: string): Promise<string | null> {
     try {
-      const page = await withHorizonRetry(
-        () => this.client.payments().forAccount(account).order("desc").limit(1).call(),
-        this.retryOptions,
+      const page = await this.executeWithFailover((client) =>
+        client.payments().forAccount(account).order("desc").limit(1).call(),
       );
-      this.onOk();
       const rec = page.records[0];
       return rec ? rec.paging_token : null;
     } catch (err) {
       if (isNotFound(err)) {
-        this.onOk();
         return null; // account not yet created on-chain
       }
-      this.onFail(err);
       throw err;
     }
   }
@@ -142,24 +199,22 @@ export class HorizonWatcher implements WatcherPort {
   async fetchSince(account: string, cursor: string, limit = 200): Promise<NormalizedPayment[]> {
     // join=transactions embeds the tx (and its memo) in the same response, so a
     // page of N payments costs one Horizon request instead of 1+N (issue #11).
-    let builder = this.client
-      .payments()
-      .forAccount(account)
-      .order("asc")
-      .limit(limit)
-      .join("transactions");
-    if (cursor) builder = builder.cursor(cursor);
-
     let page;
     try {
-      page = await withHorizonRetry(() => builder.call(), this.retryOptions);
-      this.onOk();
+      page = await this.executeWithFailover((client) => {
+        let builder = client
+          .payments()
+          .forAccount(account)
+          .order("asc")
+          .limit(limit)
+          .join("transactions");
+        if (cursor) builder = builder.cursor(cursor);
+        return builder.call();
+      });
     } catch (err) {
       if (isNotFound(err)) {
-        this.onOk();
         return [];
       }
-      this.onFail(err);
       throw err;
     }
 
