@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OffRampJobNotFoundError, type AnchorCustomer, type Logger } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { SEP6_STATUS_MAP, TESTANCHOR_BASE_URL, TESTANCHOR_HOME_DOMAIN, TestAnchorOffRamp } from "../src/testanchor";
+import { MockAnchorOffRamp } from "../src/mock-anchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 
 // These hit the real https://testanchor.stellar.org sandbox. Off by default —
@@ -196,6 +197,133 @@ describe("TestAnchorOffRamp (offline)", () => {
       { event: "anchor.sep6.status.unknown", status: "future_status" },
       "unknown SEP-6 transaction status",
     );
+  });
+
+  describe("indicativePrices()", () => {
+    it("returns target-per-source rate inverted from SEP-38 sell-per-buy price", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.includes(".well-known/stellar.toml")) {
+            return new Response("ANCHOR_QUOTE_SERVER=\"https://anchor.example.com/sep38\"\n");
+          }
+          if (url.includes("/sep38/prices")) {
+            return Response.json({
+              buy_assets: [
+                {
+                  asset: "iso4217:NGN",
+                  price: "0.00065", // ~1538.46153846 NGN per USDC
+                  buy_delivery_methods: [{ name: "BANK_TRANSFER" }],
+                },
+              ],
+            });
+          }
+          return new Response("Not found", { status: 404 });
+        }),
+      );
+
+      const offramp = makeOffRamp();
+      const prices = await offramp.indicativePrices({
+        sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sourceAmount: "10",
+      });
+
+      expect(prices).toHaveLength(1);
+      expect(prices[0].targetCurrency).toBe("NGN");
+      // 1 / 0.00065 = 1538.46153846
+      expect(prices[0].price).toBe("1538.46153846");
+      expect(Number(prices[0].price)).toBeGreaterThan(1000);
+      expect(prices[0].deliveryMethods).toEqual(["BANK_TRANSFER"]);
+    });
+
+    it("skips bad entries with missing asset, non-numeric price, or non-positive price without throwing", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.includes(".well-known/stellar.toml")) {
+            return new Response("ANCHOR_QUOTE_SERVER=\"https://anchor.example.com/sep38\"\n");
+          }
+          if (url.includes("/sep38/prices")) {
+            return Response.json({
+              buy_assets: [
+                { asset: null, price: "0.00065" },
+                { asset: "iso4217:BAD1", price: "0" },
+                { asset: "iso4217:BAD2", price: "-1.5" },
+                { asset: "iso4217:BAD3", price: "invalid_number" },
+                { asset: "stellar:USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5", price: "1.0" }, // non-fiat
+                {
+                  asset: "iso4217:KES",
+                  price: "0.00775193", // ~129 KES per USDC
+                  buy_delivery_methods: [{ name: "MPESA" }],
+                },
+              ],
+            });
+          }
+          return new Response("Not found", { status: 404 });
+        }),
+      );
+
+      const offramp = makeOffRamp();
+      const prices = await offramp.indicativePrices({
+        sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+        sourceAmount: "10",
+      });
+
+      expect(prices).toHaveLength(1);
+      expect(prices[0].targetCurrency).toBe("KES");
+      expect(Number(prices[0].price)).toBeCloseTo(129, 0);
+      expect(prices[0].deliveryMethods).toEqual(["MPESA"]);
+    });
+
+    it("returns target-per-source rates in the same direction as MockAnchorOffRamp", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.includes(".well-known/stellar.toml")) {
+            return new Response("ANCHOR_QUOTE_SERVER=\"https://anchor.example.com/sep38\"\n");
+          }
+          if (url.includes("/sep38/prices")) {
+            // Anchor returns sell-per-buy (0.00060606 USDC per NGN -> 1650 NGN per USDC)
+            return Response.json({
+              buy_assets: [
+                {
+                  asset: "iso4217:NGN",
+                  price: (1 / 1650).toFixed(8),
+                },
+              ],
+            });
+          }
+          return new Response("Not found", { status: 404 });
+        }),
+      );
+
+      const realOfframp = makeOffRamp();
+      const mockOfframp = new MockAnchorOffRamp({ state: new FakeOffRampStateRepository() });
+
+      const [realPrices, mockPrices] = await Promise.all([
+        realOfframp.indicativePrices({
+          sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+          sourceAmount: "10",
+        }),
+        mockOfframp.indicativePrices({
+          sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+          sourceAmount: "10",
+        }),
+      ]);
+
+      const realNgn = realPrices.find((p) => p.targetCurrency === "NGN");
+      const mockNgn = mockPrices.find((p) => p.targetCurrency === "NGN");
+
+      expect(realNgn).toBeDefined();
+      expect(mockNgn).toBeDefined();
+      // Both mock and real report > 1000 NGN per 1 USDC, not ~0.0006
+      expect(Number(realNgn!.price)).toBeGreaterThan(1000);
+      expect(Number(mockNgn!.price)).toBeGreaterThan(1000);
+      expect(Number(realNgn!.price)).toBeCloseTo(Number(mockNgn!.price), 0);
+    });
   });
 });
 
