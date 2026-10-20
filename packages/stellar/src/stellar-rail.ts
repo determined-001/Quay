@@ -33,8 +33,8 @@ export class StellarRail implements RailPort {
   private readonly server: Horizon.Server;
   private readonly preflightCache = new Map<string, CacheEntry>();
 
-  constructor(private readonly cfg: StellarConfig) {
-    this.server = new Horizon.Server(cfg.horizonUrl);
+  constructor(private readonly cfg: StellarConfig, server?: Horizon.Server) {
+    this.server = server ?? new Horizon.Server(cfg.horizonUrl);
   }
 
   buildRequest(input: {
