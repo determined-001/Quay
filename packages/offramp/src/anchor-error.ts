@@ -59,3 +59,18 @@ export async function anchorHttpError(sep: AnchorSep, op: string, res: Response)
 export function anchorErrorSummary(err: AnchorHttpError): string {
   return `The anchor returned an error (SEP-${err.sep} ${err.op}, HTTP ${err.status}).`;
 }
+
+/**
+ * An anchor 4xx reply (400, 403, 404, 422, etc., excluding 429 rate limit)
+ * represents a rejection of the request on its merits or seller state, not an
+ * anchor infrastructure outage/failure.
+ */
+export function isAnchorRejection(err: unknown): err is AnchorHttpError {
+  return (
+    err instanceof AnchorHttpError &&
+    err.status >= 400 &&
+    err.status < 500 &&
+    err.status !== 429
+  );
+}
+

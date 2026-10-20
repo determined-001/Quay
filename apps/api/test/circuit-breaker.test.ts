@@ -10,7 +10,7 @@ import {
   type OffRampQuote,
   type OfframpRequirementTypes,
 } from "@checkout/core";
-import { Sep6ValidationError } from "@checkout/offramp";
+import { AnchorHttpError, Sep6ValidationError } from "@checkout/offramp";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 
 const fakeQuote: OffRampQuote = {
@@ -229,5 +229,62 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
       await expect(breaker.quote(input)).rejects.toBeInstanceOf(QuoteExpiredError);
     }
     expect(breaker.getState()).toBe("closed");
+  });
+
+  it("does not open on anchor 400 or 403 or 422 rejections from /withdraw or quote (issue 3.29)", async () => {
+    const err400Withdraw = new AnchorHttpError({ sep: "6", op: "withdraw", status: 400, body: "bad request" });
+    const err403Withdraw = new AnchorHttpError({ sep: "6", op: "withdraw", status: 403, body: "kyc needed" });
+    const err400Quote = new AnchorHttpError({ sep: "38", op: "quote", status: 400, body: "unsupported pair" });
+    const err422Withdraw = new AnchorHttpError({ sep: "6", op: "withdraw", status: 422, body: "validation error" });
+
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(err400Quote)),
+      initiate: vi.fn()
+        .mockRejectedValueOnce(err400Withdraw)
+        .mockRejectedValueOnce(err403Withdraw)
+        .mockRejectedValueOnce(err422Withdraw)
+        .mockRejectedValueOnce(err400Withdraw),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+
+    // Repeated 400 from quote
+    for (let i = 0; i < 5; i++) {
+      await expect(breaker.quote(input)).rejects.toBe(err400Quote);
+    }
+    expect(breaker.getState()).toBe("closed");
+
+    // Repeated 400, 403, 422 from initiate (/withdraw)
+    const initInput = {
+      linkId: "lnk_1",
+      quoteId: "q1",
+      payout: { currency: "USD", fields: {} },
+      customer: { sellerId: "sel_1", account: "G" },
+    };
+    for (let i = 0; i < 4; i++) {
+      await expect(breaker.initiate(initInput)).rejects.toBeInstanceOf(AnchorHttpError);
+    }
+    expect(breaker.getState()).toBe("closed");
+  });
+
+  it("still opens on anchor 502 or 429 errors", async () => {
+    const err502 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 502, body: "bad gateway" });
+    const inner502 = fakePort({
+      quote: vi.fn(async () => Promise.reject(err502)),
+    });
+    const breaker502 = new CircuitBreakerOffRamp(inner502, { failureThreshold: 3 });
+    for (let i = 0; i < 3; i++) {
+      await expect(breaker502.quote(input)).rejects.toBe(err502);
+    }
+    expect(breaker502.getState()).toBe("open");
+
+    const err429 = new AnchorHttpError({ sep: "38", op: "quote", status: 429, body: "rate limited" });
+    const inner429 = fakePort({
+      quote: vi.fn(async () => Promise.reject(err429)),
+    });
+    const breaker429 = new CircuitBreakerOffRamp(inner429, { failureThreshold: 2 });
+    for (let i = 0; i < 2; i++) {
+      await expect(breaker429.quote(input)).rejects.toBe(err429);
+    }
+    expect(breaker429.getState()).toBe("open");
   });
 });

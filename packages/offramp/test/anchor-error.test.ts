@@ -5,6 +5,7 @@ import {
   anchorErrorSummary,
   anchorHttpError,
   getSep6Info,
+  isAnchorRejection,
   truncateAnchorBody,
 } from "../src";
 
@@ -45,6 +46,26 @@ describe("AnchorHttpError", () => {
     const res = new Response("x", { status: 502 });
     res.text = () => Promise.reject(new Error("stream broke"));
     expect((await anchorHttpError("38", "quote", res)).body).toBe("");
+  });
+
+  it("classifies 4xx (except 429) as anchor rejections", () => {
+    const err400 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 400, body: "" });
+    const err403 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 403, body: "" });
+    const err404 = new AnchorHttpError({ sep: "38", op: "quote", status: 404, body: "" });
+    const err422 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 422, body: "" });
+    const err429 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 429, body: "" });
+    const err500 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 500, body: "" });
+    const err502 = new AnchorHttpError({ sep: "6", op: "withdraw", status: 502, body: "" });
+
+    expect(isAnchorRejection(err400)).toBe(true);
+    expect(isAnchorRejection(err403)).toBe(true);
+    expect(isAnchorRejection(err404)).toBe(true);
+    expect(isAnchorRejection(err422)).toBe(true);
+
+    expect(isAnchorRejection(err429)).toBe(false);
+    expect(isAnchorRejection(err500)).toBe(false);
+    expect(isAnchorRejection(err502)).toBe(false);
+    expect(isAnchorRejection(new Error("network error"))).toBe(false);
   });
 });
 
