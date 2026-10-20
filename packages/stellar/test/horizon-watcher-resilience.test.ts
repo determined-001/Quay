@@ -62,7 +62,7 @@ describe("HorizonWatcher — degraded tracking + fallback", () => {
     expect(watcher.getStatus()).toMatchObject({ degraded: true, consecutiveFailures: 2 });
   });
 
-  it("switches to the fallback server after the threshold, and back on recovery", async () => {
+  it("switches to the fallback server after the threshold, and does not flap back to a dead primary", async () => {
     let primaryCalls = 0;
     const primary = fakeServer(async () => {
       primaryCalls += 1;
@@ -84,10 +84,65 @@ describe("HorizonWatcher — degraded tracking + fallback", () => {
     await expect(watcher.fetchSince("GACCOUNT", "")).rejects.toBeTruthy();
     expect(watcher.getStatus().usingFallback).toBe(true);
 
-    // Next call should hit the fallback server, succeed, and reset back to primary.
+    // Subsequent calls should hit fallback and succeed without flapping back to dead primary
+    for (let i = 0; i < 3; i++) {
+      const result = await watcher.fetchSince("GACCOUNT", "");
+      expect(result).toEqual([]);
+    }
+    expect(fallbackCalls).toBe(3);
+    expect(watcher.getStatus()).toEqual({ degraded: false, usingFallback: true, consecutiveFailures: 0 });
+  });
+
+  it("probes primary after cooldown and returns to it when recovered", async () => {
+    let currentTime = 1000;
+    let primaryHealthy = false;
+    let primaryCalls = 0;
+    const primary = fakeServer(async () => {
+      primaryCalls += 1;
+      if (!primaryHealthy) throw errWithStatus(503);
+      return { records: [] };
+    });
+    let fallbackCalls = 0;
+    const fallback = fakeServer(async () => {
+      fallbackCalls += 1;
+      return { records: [] };
+    });
+
+    const watcher = new HorizonWatcher({
+      primaryServer: primary,
+      fallbackServer: fallback,
+      degradedThreshold: 1,
+      cooldownMs: 10_000,
+      now: () => currentTime,
+      retryOptions: { ...FAST_RETRY, maxAttempts: 1 },
+    });
+
+    // 1. Initial failure moves to fallback
+    await expect(watcher.fetchSince("GACCOUNT", "")).rejects.toBeTruthy();
+    expect(primaryCalls).toBe(1);
+    expect(watcher.getStatus().usingFallback).toBe(true);
+
+    // 2. Before cooldown expires, calls go straight to fallback
+    currentTime += 5_000;
+    await watcher.fetchSince("GACCOUNT", "");
+    expect(fallbackCalls).toBe(1);
+    expect(primaryCalls).toBe(1); // no extra primary calls
+    expect(watcher.getStatus().usingFallback).toBe(true);
+
+    // 3. Cooldown expires, but primary still fails: probe fails, but call succeeds via fallback
+    currentTime += 6_000; // now 11_000 >= 10_000 cooldown
+    await watcher.fetchSince("GACCOUNT", "");
+    expect(primaryCalls).toBe(2); // probed primary
+    expect(fallbackCalls).toBe(2); // served by fallback
+    expect(watcher.getStatus().usingFallback).toBe(true);
+
+    // 4. Primary recovers; next probe after another cooldown switches back
+    currentTime += 11_000;
+    primaryHealthy = true;
     const result = await watcher.fetchSince("GACCOUNT", "");
     expect(result).toEqual([]);
-    expect(fallbackCalls).toBeGreaterThan(0);
+    expect(primaryCalls).toBe(3); // probed primary
+    expect(fallbackCalls).toBe(2); // not touched fallback this time
     expect(watcher.getStatus()).toEqual({ degraded: false, usingFallback: false, consecutiveFailures: 0 });
   });
 
