@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api, apiBase, classifyError, describeError, CheckoutError, type ApiErrorCode, serverNow, setServerSkewForTest, setSessionToken } from "../lib/api";
+import { api, apiBase, classifyError, describeError, CheckoutError, getSessionToken, type ApiErrorCode, serverNow, setServerSkewForTest, setSessionToken } from "../lib/api";
 
 /**
  * Regression for issue 5.8: `exportCsv` used to call `fetch()` directly, so it
@@ -240,4 +240,219 @@ describe("classifyError", () => {
     }
   });
 });
+
+/**
+ * Issue #390 (5.33): the `http()` wrapper is the single path every screen goes
+ * through, so its token handling, multipart bodies, 204 handling and error
+ * envelope are pinned here one behaviour at a time.
+ */
+describe("http() transport contract", () => {
+  const realFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    setSessionToken(null);
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    setSessionToken(null);
+    vi.restoreAllMocks();
+  });
+
+  it("clears the in-memory session token on a 401 so callers stop retrying with it", async () => {
+    setSessionToken("tok-stale");
+    globalThis.fetch = vi.fn(
+      async () => new Response('{"error":"anchor_auth_required"}', { status: 401 }),
+    ) as unknown as typeof fetch;
+
+    await expect(api.listLinks()).rejects.toMatchObject({ code: "anchor_auth_required", status: 401 });
+
+    expect(getSessionToken()).toBeNull();
+
+    // The very next request must go out without the dead bearer token.
+    const fetchMock = vi.fn(async () => new Response('{"links":[]}', { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await api.listLinks();
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>).authorization).toBeUndefined();
+  });
+
+  it("resolves undefined for a 204 rather than trying to parse a body", async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response(null, { status: 204 }),
+    ) as unknown as typeof fetch;
+
+    await expect(api.deleteWebhook("wh_1")).resolves.toBeUndefined();
+  });
+
+  it("omits content-type for a FormData body so the browser sets the multipart boundary", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ status: "pending", requiredFields: [], providedFields: {}, message: null, lastSyncedAt: null }),
+          { status: 200 },
+        ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const form = new FormData();
+    form.append("id_document", new Blob(["x"], { type: "image/png" }), "id.png");
+
+    await api.submitKycFiles(form);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${apiBase()}/seller/kyc/files`);
+    expect(init.body).toBe(form);
+    expect((init.headers as Record<string, string>)["content-type"]).toBeUndefined();
+  });
+
+  it("still sends a JSON content-type when the body is JSON", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ id: "wh_1" }), { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await api.createWebhook("https://example.test/hook");
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
+  });
+
+  it("maps a non-JSON error body to server_error instead of guessing a code", async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response("<html><body>Bad request</body></html>", { status: 400 }),
+    ) as unknown as typeof fetch;
+
+    await expect(api.listLinks()).rejects.toMatchObject({ code: "server_error", status: 400 });
+  });
+
+  it("maps a thrown fetch to unreachable with status 0", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+
+    await expect(api.listLinks()).rejects.toMatchObject({ code: "unreachable", status: 0 });
+  });
+
+  it("propagates missingFields and the leftover error details", async () => {
+    const body = {
+      error: "kyc_required",
+      message: "KYC incomplete",
+      missingFields: ["id_number", "date_of_birth"],
+      reason: "kyc_incomplete",
+      anchorDomain: "anchor.example",
+    };
+    globalThis.fetch = vi.fn(
+      async () => new Response(JSON.stringify(body), { status: 403 }),
+    ) as unknown as typeof fetch;
+
+    const err = (await api.getKyc().catch((e: unknown) => e)) as CheckoutError;
+
+    expect(err).toBeInstanceOf(CheckoutError);
+    expect(err.code).toBe("kyc_required");
+    expect(err.status).toBe(403);
+    expect(err.message).toBe("kyc_required (403): KYC incomplete");
+    expect(err.missingFields).toEqual(["id_number", "date_of_birth"]);
+    // `error`, `message` and `missingFields` are destructured out; the rest is
+    // kept verbatim so callers can read `details.reason`, `details.limits`, ...
+    expect(err.details).toEqual({ reason: "kyc_incomplete", anchorDomain: "anchor.example" });
+  });
+
+  it("drops a missingFields that is not an array", async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response('{"error":"kyc_required","missingFields":"id_number"}', { status: 403 }),
+    ) as unknown as typeof fetch;
+
+    const err = (await api.getKyc().catch((e: unknown) => e)) as CheckoutError;
+
+    expect(err).toBeInstanceOf(CheckoutError);
+    expect(err.missingFields).toBeUndefined();
+    expect(err.message).toBe("kyc_required (403): kyc_required");
+  });
+});
+
+/**
+ * Issue #390 (5.33): seller-facing copy is asserted for every `ApiErrorCode`.
+ * The record below is `Record<ApiErrorCode, true>`, so adding a code to the
+ * union without listing it here fails `pnpm typecheck` — the copy can't quietly
+ * fall back to "an unexpected error occurred" for a new code.
+ */
+const DEFAULT_ERROR_COPY = "An unexpected error occurred. Please try again.";
+
+const EVERY_ERROR_CODE: Record<ApiErrorCode, true> = {
+  not_found: true,
+  invalid_body: true,
+  conflict: true,
+  kyc_required: true,
+  anchor_auth_required: true,
+  destination_cannot_receive: true,
+  payment_rejected: true,
+  wallet_rejected: true,
+  insufficient_balance: true,
+  missing_trustline: true,
+  wrong_network: true,
+  unreachable: true,
+  server_error: true,
+  consent_required: true,
+  offramp_rejected: true,
+  unauthorized: true,
+  telemetry_not_enabled: true,
+  telemetry_error: true,
+  anchor_unavailable: true,
+  offramp_disabled: true,
+  quote_expired: true,
+  request_in_progress: true,
+  challenge_rejected: true,
+};
+
+const ALL_ERROR_CODES = Object.keys(EVERY_ERROR_CODE) as ApiErrorCode[];
+
+/** Operator telemetry codes are shown on the ops page, never as seller copy. */
+const GENERIC_COPY_CODES: ApiErrorCode[] = ["unauthorized", "telemetry_not_enabled", "telemetry_error"];
+
+describe("describeError copy coverage", () => {
+  it.each(ALL_ERROR_CODES)("returns usable copy for %s", (code) => {
+    const text = describeError(new CheckoutError(code, 400, "x"));
+    expect(text.trim().length).toBeGreaterThan(10);
+  });
+
+  it.each(ALL_ERROR_CODES.filter((code) => !GENERIC_COPY_CODES.includes(code)))(
+    "has a code-specific message for %s",
+    (code) => {
+      expect(describeError(new CheckoutError(code, 400, "x"))).not.toBe(DEFAULT_ERROR_COPY);
+    },
+  );
+
+  it.each(GENERIC_COPY_CODES)("falls back to the generic message for %s", (code) => {
+    expect(describeError(new CheckoutError(code, 400, "x"))).toBe(DEFAULT_ERROR_COPY);
+  });
+});
+
+describe("describeError copy for offramp_rejected limits", () => {
+  function copyFor(limits?: { minAmount?: number; maxAmount?: number }): string {
+    return describeError(
+      new CheckoutError("offramp_rejected", 422, "x", undefined, limits ? { limits } : {}),
+    );
+  }
+
+  it("names both bounds when the anchor quoted a range", () => {
+    expect(copyFor({ minAmount: 5, maxAmount: 500 })).toBe(
+      "The anchor only accepts cash-outs between 5 and 500. Adjust the amount and try again.",
+    );
+  });
+
+  it("names only the minimum when that is all the anchor quoted", () => {
+    expect(copyFor({ minAmount: 5 })).toBe("The anchor requires a cash-out of at least 5.");
+  });
+
+  it("names only the maximum when that is all the anchor quoted", () => {
+    expect(copyFor({ maxAmount: 500 })).toBe("The anchor accepts cash-outs of at most 500.");
+  });
+
+  it("falls back to generic copy when the anchor gave no limits", () => {
+    expect(copyFor({})).toBe("The anchor can't process this cash-out as requested.");
+    expect(copyFor()).toBe("The anchor can't process this cash-out as requested.");
+  });
+});
+
 
