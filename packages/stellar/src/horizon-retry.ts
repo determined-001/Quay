@@ -8,7 +8,7 @@ export interface RetryOptions {
   maxAttempts?: number;
   /** Base for exponential backoff in ms (default 200). */
   baseDelayMs?: number;
-  /** Backoff ceiling in ms, before jitter (default 5000). */
+  /** Ceiling for any single retry sleep in ms, before jitter and capping server-supplied Retry-After (default 5000). */
   maxDelayMs?: number;
   /** Called before each retry sleep — for logging/metrics, never for control flow. */
   onRetry?: (attempt: number, err: unknown, delayMs: number) => void;
@@ -37,7 +37,10 @@ export function retryAfterMs(err: unknown): number | null {
   if (!raw) return null;
 
   const seconds = Number(raw);
-  if (!Number.isNaN(seconds)) return Math.max(0, seconds * 1000);
+  if (!Number.isNaN(seconds)) {
+    if (!Number.isFinite(seconds)) return null;
+    return Math.max(0, seconds * 1000);
+  }
 
   const atMs = Date.parse(raw);
   if (!Number.isNaN(atMs)) return Math.max(0, atMs - Date.now());
@@ -68,7 +71,8 @@ export async function withHorizonRetry<T>(fn: () => Promise<T>, opts: RetryOptio
       return await fn();
     } catch (err) {
       if (attempt >= maxAttempts || !isRetryable(err)) throw err;
-      const delay = retryAfterMs(err) ?? backoffWithFullJitter(attempt, baseDelayMs, maxDelayMs);
+      const uncappedDelay = retryAfterMs(err) ?? backoffWithFullJitter(attempt, baseDelayMs, maxDelayMs);
+      const delay = Math.min(uncappedDelay, maxDelayMs);
       opts.onRetry?.(attempt, err, delay);
       await sleep(delay);
     }

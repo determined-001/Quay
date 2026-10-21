@@ -20,6 +20,11 @@ describe("isRetryable", () => {
     expect(isRetryable(errWithStatus(400))).toBe(false);
   });
 
+  it("pins 408 as non-retryable", () => {
+    // Status 408 is a client timeout, not a 5xx server failure or 429 rate limit.
+    expect(isRetryable(errWithStatus(408))).toBe(false);
+  });
+
   it("treats a bare network error (no response) as retryable", () => {
     expect(isRetryable(new Error("ECONNRESET"))).toBe(true);
   });
@@ -28,6 +33,45 @@ describe("isRetryable", () => {
 describe("retryAfterMs", () => {
   it("reads a numeric-seconds Retry-After header", () => {
     expect(retryAfterMs(errWithStatus(429, { "retry-after": "2" }))).toBe(2000);
+  });
+
+  it("reads capital-case Retry-After key", () => {
+    expect(retryAfterMs(errWithStatus(429, { "Retry-After": "2" }))).toBe(2000);
+  });
+
+  it("reads Headers instance with retry-after", () => {
+    const headers = new Headers({ "retry-after": "5" });
+    expect(retryAfterMs({ response: { status: 429, headers } })).toBe(5000);
+  });
+
+  it("parses HTTP-date form with exact calculation", () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date("2026-10-21T00:00:00Z");
+      vi.setSystemTime(now);
+      const target = new Date("2026-10-21T00:00:10Z").toUTCString();
+      expect(retryAfterMs(errWithStatus(429, { "retry-after": target }))).toBe(10_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 0 for a date in the past", () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date("2026-10-21T00:00:00Z");
+      vi.setSystemTime(now);
+      const past = new Date("2026-10-20T00:00:00Z").toUTCString();
+      expect(retryAfterMs(errWithStatus(429, { "retry-after": past }))).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns null for unparsable string, Infinity, and empty string", () => {
+    expect(retryAfterMs(errWithStatus(429, { "retry-after": "abc" }))).toBeNull();
+    expect(retryAfterMs(errWithStatus(429, { "retry-after": "Infinity" }))).toBeNull();
+    expect(retryAfterMs(errWithStatus(429, { "retry-after": "" }))).toBeNull();
   });
 
   it("returns null when there's no Retry-After header", () => {
@@ -61,6 +105,22 @@ describe("withHorizonRetry", () => {
     const result = await withHorizonRetry(fn, { baseDelayMs: 1, maxDelayMs: 1 });
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps Retry-After at maxDelayMs and passes capped delay to onRetry", async () => {
+    let calls = 0;
+    const fn = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw errWithStatus(429, { "retry-after": "3600" });
+      return "ok";
+    });
+    const onRetry = vi.fn();
+
+    const result = await withHorizonRetry(fn, { maxDelayMs: 50, onRetry });
+    expect(result).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(onRetry).toHaveBeenCalledWith(1, expect.anything(), 50);
   });
 
   it("gives up after maxAttempts and rethrows the last error", async () => {
