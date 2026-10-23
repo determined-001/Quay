@@ -169,6 +169,8 @@ export default function CashOutModal({
   const interactivePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const interactiveOpenedAtRef = useRef<number>(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const onSuccessRef = useRef(onSuccess);
+  onSuccessRef.current = onSuccess;
   // Set when the anchor is waiting for the asset. TransferStep (shared with
   // the resume flow) owns the wallet send; the payout starts once it is sent.
   const [transfer, setTransfer] = useState<WithdrawTransfer | null>(null);
@@ -231,7 +233,7 @@ export default function CashOutModal({
         if (cancelled) return;
         setInteractiveStatus(describeInteractiveStatus(detail.offrampExternalStatus));
         if (isInteractiveTerminalStatus(detail.link.offrampStatus)) {
-          onSuccess();
+          onSuccessRef.current();
           return;
         }
         // A SEP-24 anchor only names its deposit account after the seller finishes its form (issue 3.18).
@@ -256,7 +258,7 @@ export default function CashOutModal({
       cancelled = true;
       if (interactivePollRef.current) clearTimeout(interactivePollRef.current);
     };
-  }, [step, linkId, onSuccess]);
+  }, [step, linkId]);
 
   // ---- form interactions ---------------------------------------------------
   function handleChange(name: string, value: string) {
