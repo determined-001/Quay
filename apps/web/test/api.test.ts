@@ -209,6 +209,9 @@ describe("classifyError", () => {
     ["409 idempotency_key_reuse", 409, { error: "idempotency_key_reuse" }, "request_in_progress"],
     ["400 challenge_rejected", 400, { error: "challenge_rejected" }, "challenge_rejected"],
     ["502 challenge_rejected", 502, { error: "challenge_rejected" }, "challenge_rejected"],
+    ["403 consent_required", 403, { error: "consent_required" }, "consent_required"],
+    ["401 unauthorized", 401, { error: "unauthorized" }, "unauthorized"],
+    ["429 rate_limited", 429, { error: "rate_limited" }, "rate_limited"],
   ];
 
   it.each(rows)("%s", (_name, status, body, expected) => {
@@ -219,14 +222,21 @@ describe("classifyError", () => {
     expect(classifyError(409, { error: 5, reason: {} })).toBe("conflict");
   });
 
-  it.each(["anchor_unavailable", "offramp_disabled", "quote_expired", "request_in_progress", "challenge_rejected"] as const)(
-    "describeError has specific copy for %s",
-    (code) => {
-      const text = describeError(new CheckoutError(code, 400, "x"));
-      expect(text.length).toBeGreaterThan(10);
-      expect(text).not.toMatch(/went wrong on the server/);
-    },
-  );
+  it.each([
+    "anchor_unavailable",
+    "offramp_disabled",
+    "quote_expired",
+    "request_in_progress",
+    "challenge_rejected",
+    "unauthorized",
+    "rate_limited",
+    "consent_required",
+  ] as const)("describeError has specific copy for %s", (code) => {
+    const text = describeError(new CheckoutError(code, 400, "x"));
+    expect(text.length).toBeGreaterThan(10);
+    expect(text).not.toMatch(/went wrong on the server/);
+    expect(text).not.toMatch(/An unexpected error occurred/);
+  });
 
   it("http() surfaces a classified code end to end", async () => {
     const realFetch = globalThis.fetch;
@@ -235,6 +245,33 @@ describe("classifyError", () => {
     ) as unknown as typeof fetch;
     try {
       await expect(api.getLink("lnk_1")).rejects.toMatchObject({ code: "anchor_unavailable", status: 503 });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("preserves details.fields and anchorDomain on consent_required errors thrown by http()", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: "consent_required",
+            anchorDomain: "testanchor.stellar.org",
+            fields: ["first_name", "last_name"],
+          }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        ),
+    ) as unknown as typeof fetch;
+    try {
+      await expect(api.getLink("lnk_1")).rejects.toMatchObject({
+        code: "consent_required",
+        status: 403,
+        details: {
+          anchorDomain: "testanchor.stellar.org",
+          fields: ["first_name", "last_name"],
+        },
+      });
     } finally {
       globalThis.fetch = realFetch;
     }
