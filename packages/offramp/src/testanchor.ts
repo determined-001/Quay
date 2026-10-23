@@ -221,7 +221,14 @@ export class TestAnchorOffRamp implements OffRampPort {
     });
     return entries.map((e) => ({
       targetCurrency: e.buyCurrency,
-      price: e.price,
+      // SEP-38 GET /prices returns SELL units per BUY unit ("0.00065 USDC per
+      // NGN"), while IndicativePrice.price is "1 source = `price` target
+      // units" (core ports). Passing the anchor's number through unchanged —
+      // what this did until issue 3.27 — put an inverted rate on the dashboard,
+      // in the persisted offrampIndicativeRate, and in the spread computed
+      // against the firm quote sitting right next to it. Same conversion
+      // quote() uses, to the same precision, so both directions agree.
+      price: targetPerSourceRate(e.price),
       deliveryMethods: e.deliveryMethods,
     }));
   }
