@@ -1,15 +1,6 @@
 import { api, type PublicReceipt } from "../../../lib/api";
+import { addressUrl, explorerUrl, networkLabel } from "../../../lib/explorer";
 import { ReceiptClient } from "./ReceiptClient";
-
-function explorerUrl(network: string, hash: string): string {
-  const base = network === "public" ? "https://stellar.expert/explorer/public" : "https://stellar.expert/explorer/testnet";
-  return `${base}/tx/${hash}`;
-}
-
-function addressUrl(network: string, addr: string): string {
-  const base = network === "public" ? "https://stellar.expert/explorer/public" : "https://stellar.expert/explorer/testnet";
-  return `${base}/account/${addr}`;
-}
 
 function formatDate(ts: number): string {
   return new Date(ts).toLocaleString(undefined, {
@@ -37,8 +28,6 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
       </main>
     );
   }
-
-  const network = (process.env.STELLAR_NETWORK ?? "testnet") === "public" ? "public" : "testnet";
 
   return (
     <main className="shell shell--receipt">
@@ -78,7 +67,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
           <div className="receipt-row">
             <span className="receipt-label">Transaction</span>
             <a
-              href={explorerUrl(network, receipt.txHash)}
+              href={explorerUrl(receipt.txHash)}
               target="_blank"
               rel="noopener noreferrer"
               className="mono explorer-link"
@@ -92,7 +81,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
           <div className="receipt-row">
             <span className="receipt-label">From</span>
             <a
-              href={addressUrl(network, receipt.payer)}
+              href={addressUrl(receipt.payer)}
               target="_blank"
               rel="noopener noreferrer"
               className="mono explorer-link"
@@ -105,7 +94,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
         <div className="receipt-divider" />
 
         <div className="receipt-footer-meta">
-          <span className="muted">Settled on Stellar {network === "public" ? "Mainnet" : "Testnet"}</span>
+          <span className="muted">Settled on Stellar {networkLabel()}</span>
           <span className="muted">{formatDate(receipt.updatedAt)}</span>
         </div>
       </section>
