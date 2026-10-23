@@ -179,7 +179,7 @@ export class FakeWebhookRepository implements WebhookRepository {
   }
 
   async findWebhookById(id: string): Promise<Webhook | null> {
-    return this.hooks.find((h) => h.id === id) ?? null;
+    return this.hooks.find((h) => h.id === id && h.deletedAt === null) ?? null;
   }
 
   async enqueue(

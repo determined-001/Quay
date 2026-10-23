@@ -152,4 +152,15 @@ describe("DrizzleWebhookRepository", () => {
       expect(deliveries).toHaveLength(0);
     });
   });
+
+  describe("findWebhookById", () => {
+    it("returns null for a soft-deleted webhook", async () => {
+      const repo = await freshRepo();
+      const hook = await repo.create({ sellerId: SELLER, url: "https://a.example.com", secret: "secret-a-000000" });
+      expect(await repo.findWebhookById(hook.id)).not.toBeNull();
+      await repo.softDelete(hook.id, SELLER);
+      expect(await repo.findWebhookById(hook.id)).toBeNull();
+    });
+  });
 });
+

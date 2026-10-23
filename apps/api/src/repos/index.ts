@@ -608,7 +608,11 @@ export class DrizzleWebhookRepository implements WebhookRepository {
    * Routes must keep using `getById`, which enforces ownership.
    */
   async findWebhookById(id: string): Promise<Webhook | null> {
-    const rows = await this.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
+    const rows = await this.db
+      .select()
+      .from(webhooks)
+      .where(and(eq(webhooks.id, id), isNull(webhooks.deletedAt)))
+      .limit(1);
     return rows[0] ? rowToWebhook(rows[0]) : null;
   }
 
