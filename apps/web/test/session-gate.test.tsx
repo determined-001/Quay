@@ -208,3 +208,74 @@ describe("SessionGate - sign out flow and cash-out warning", () => {
     expect(container.textContent).toContain("Connect your wallet");
   });
 });
+
+describe("SessionGate - wallet detection failure and retry (issue #420)", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("enables the button and shows warning with Retry when detectWallet rejects, and recovers on Retry", async () => {
+    let unhandled = false;
+    const onUnhandledRejection = (e: PromiseRejectionEvent) => {
+      unhandled = true;
+      e.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+
+    vi.mocked(wallet.detectWallet)
+      .mockRejectedValueOnce(new Error("Network chunk-load failure"))
+      .mockResolvedValueOnce(true);
+
+    await act(async () => {
+      root.render(
+        <SessionGate>
+          <div data-testid="dashboard-content">Dashboard Protected Area</div>
+        </SessionGate>,
+      );
+    });
+
+    window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    expect(unhandled).toBe(false);
+
+    // Button is enabled and reads "Connect wallet"
+    const connectBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.includes("Connect wallet"),
+    );
+    expect(connectBtn).toBeTruthy();
+    expect(connectBtn?.disabled).toBe(false);
+
+    // Warning message and Retry button are shown
+    expect(container.textContent).toContain("No Stellar wallet detected in this browser");
+    const retryBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.includes("Retry"),
+    );
+    expect(retryBtn).toBeTruthy();
+
+    // Clicking Retry runs detection again
+    await act(async () => {
+      retryBtn?.click();
+    });
+
+    expect(wallet.detectWallet).toHaveBeenCalledTimes(2);
+
+    // Resolves true: shows "Connect wallet" and NO warning
+    expect(connectBtn?.disabled).toBe(false);
+    expect(container.textContent).toContain("Connect wallet");
+    expect(container.textContent).not.toContain("No Stellar wallet detected in this browser");
+  });
+});
+

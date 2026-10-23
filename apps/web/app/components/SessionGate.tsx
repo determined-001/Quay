@@ -36,6 +36,7 @@ export default function SessionGate({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [walletFound, setWalletFound] = useState<boolean | null>(null);
+  const [detectTrigger, setDetectTrigger] = useState(0);
 
   // Warm the kit on mount rather than on click. Two things come free: the
   // dynamic import happens while the user is reading the page instead of after
@@ -43,13 +44,18 @@ export default function SessionGate({ children }: { children: ReactNode }) {
   // before anyone asks whether they exist. `null` means "still looking".
   useEffect(() => {
     let live = true;
-    void detectWallet().then((found) => {
-      if (live) setWalletFound(found);
-    });
+    setWalletFound(null);
+    void detectWallet()
+      .then((found) => {
+        if (live) setWalletFound(found);
+      })
+      .catch(() => {
+        if (live) setWalletFound(false);
+      });
     return () => {
       live = false;
     };
-  }, []);
+  }, [detectTrigger]);
 
   const signIn = useCallback(async () => {
     setError(null);
@@ -136,7 +142,15 @@ export default function SessionGate({ children }: { children: ReactNode }) {
               <a href="https://freighter.app" target="_blank" rel="noopener noreferrer">
                 Freighter
               </a>{" "}
-              is the usual choice. Install it, then reload this page.
+              is the usual choice. Install it, then retry.{" "}
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setDetectTrigger((n) => n + 1)}
+                style={{ marginLeft: 6, padding: "2px 8px", fontSize: 12 }}
+              >
+                Retry
+              </button>
             </p>
           )}
 
