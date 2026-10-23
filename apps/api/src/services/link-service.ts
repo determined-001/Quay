@@ -39,7 +39,13 @@ import {
   type OffRampTelemetryRow,
   type WithdrawTransfer,
 } from "@checkout/core";
-import { AnchorHttpError, Sep6ValidationError, anchorErrorSummary, truncateAnchorBody } from "@checkout/offramp";
+import {
+  AnchorHttpError,
+  AnchorRejectedError,
+  Sep6ValidationError,
+  anchorErrorSummary,
+  truncateAnchorBody,
+} from "@checkout/offramp";
 import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -896,7 +902,7 @@ export class LinkService {
       if (err instanceof OffRampDisabledError) throw err;
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       throwIfUnknownWithdrawType(err, withdrawType);
-      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err, log);
       throw anchorFailure(err, log);
     }
   }
@@ -1048,7 +1054,7 @@ export class LinkService {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
       throwIfUnknownWithdrawType(err, body.withdrawType);
-      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err, child);
       throw anchorFailure(err, child);
     }
 
@@ -1586,6 +1592,9 @@ function anchorAuthRequired(): HttpError {
  * the response or the stored idempotency record (issue 4.36).
  */
 export function anchorFailure(err: unknown, log: Logger): HttpError {
+  // An answer, not a fault: same 422 a rejection gets anywhere else, so this
+  // can never turn into the 502 that makes a healthy anchor look down.
+  if (err instanceof AnchorRejectedError) return offRampRejected(err, log);
   if (err instanceof AnchorHttpError) {
     log.error(
       { event: "anchor.error", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },
@@ -1606,7 +1615,26 @@ function assertCanCashOut(link: PaymentLink): void {
 }
 
 /** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */
-function offRampRejected(err: OffRampRejectedError): HttpError {
+function offRampRejected(err: OffRampRejectedError, log: Logger): HttpError {
+  if (err instanceof AnchorRejectedError) {
+    log.error(
+      { event: "anchor.rejected", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },
+      "anchor rejected the request",
+    );
+    // `type` and `fields` are SEP's structured, bounded vocabulary, so a
+    // seller can re-render the form or finish KYC. The free-text `error`
+    // prose stays in the log: it is anchor body text (issue 4.36) and it can
+    // echo the seller's own KYC and bank fields straight back at us.
+    const anchorRejection: Record<string, unknown> = {};
+    if (err.anchorType !== undefined) anchorRejection.type = err.anchorType;
+    if (err.anchorFields !== undefined) anchorRejection.fields = err.anchorFields;
+    return new HttpError(422, "offramp_rejected", {
+      message: err.message,
+      limits: err.limits,
+      availableTypes: err.availableTypes,
+      ...(Object.keys(anchorRejection).length > 0 ? { anchorRejection } : {}),
+    });
+  }
   return new HttpError(422, "offramp_rejected", {
     message: err.message,
     limits: err.limits,

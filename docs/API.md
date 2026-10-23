@@ -616,6 +616,13 @@ The anchor refused the request on its merits: the amount is outside the limits i
 (SEP-6 `/info`), the asset is not withdrawable, or a withdraw type is needed. This is the
 seller's to fix (change the amount), it is not an anchor outage, and it does not count towards the
 circuit breaker. The same 422 is returned by `GET /links/:id/cash-out/quote`.
+
+When the refusal came back from the anchor itself (SEP-6 `/withdraw` or SEP-38 quote answering
+400/403/404/422), the body also carries `anchorRejection: { "type", "fields" }` — the anchor's
+own structured reason, e.g. `type: "non_interactive_customer_info_needed"` with the fields it
+wants next, so a client can re-render the form instead of guessing. `message` is always text we
+wrote; the anchor's free-text `error` and its raw response body are never returned (issue #4.36),
+only logged.
 **403** — `{ "error": "kyc_required" }`. Only possible with a real anchor: the
 seller's SEP-12 KYC (see below) hasn't reached `ACCEPTED` yet. `payoutFields` is
 bank/routing info only — it is never used as a source of identity data.
