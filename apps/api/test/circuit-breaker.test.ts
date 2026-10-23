@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AnchorAuthRequiredError,
+  OffRampDisabledError,
   OffRampRejectedError,
   type OffRampInitiation,
   type OffRampJob,
@@ -10,6 +11,7 @@ import {
 } from "@checkout/core";
 import { Sep6ValidationError } from "@checkout/offramp";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
+import { metrics } from "../src/metrics";
 
 const fakeQuote: OffRampQuote = {
   quoteId: "q1",
@@ -197,6 +199,21 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
     await expect(breaker.quote(input)).rejects.toBeInstanceOf(Sep6ValidationError);
     expect(breaker.getState()).toBe("closed");
+  });
+
+  it("does not count OffRampDisabledError as failure or error, and keeps breaker closed", async () => {
+    metrics.anchorCallsTotal.reset();
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(new OffRampDisabledError("quote"))),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
+
+    for (let i = 0; i < 5; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(OffRampDisabledError);
+    }
+    expect(breaker.getState()).toBe("closed");
+    expect(inner.quote).toHaveBeenCalledTimes(5);
+    expect(metrics.anchorCallsTotal.render()).not.toContain('status="error"');
   });
 
   it("still opens on genuine anchor failures", async () => {

@@ -10,6 +10,7 @@ import {
   normalizeAmount,
   OffRampJobNotFoundError,
   AnchorAuthRequiredError,
+  OffRampDisabledError,
   OffRampRejectedError,
   NOOP_LOGGER,
   type AnchorCustomer,
@@ -524,6 +525,7 @@ export class LinkService {
     try {
       requirements = await this.deps.offramp.offrampRequirements(link.asset.code, customerOf(seller));
     } catch (err) {
+      if (err instanceof OffRampDisabledError) throw err;
       throw anchorFailure(err, this.deps.logger!);
     }
 
@@ -891,6 +893,7 @@ export class LinkService {
         { logger: log },
       );
     } catch (err) {
+      if (err instanceof OffRampDisabledError) throw err;
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       throwIfUnknownWithdrawType(err, withdrawType);
       if (err instanceof OffRampRejectedError) throw offRampRejected(err);
@@ -1039,6 +1042,7 @@ export class LinkService {
         "cash-out failed",
       );
       if (err instanceof HttpError) throw err;
+      if (err instanceof OffRampDisabledError) throw err;
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       if (err instanceof QuoteExpiredError) {
         throw new HttpError(409, `quote_expired: ${err.message}`);
