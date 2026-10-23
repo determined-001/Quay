@@ -77,6 +77,48 @@ describe("parseStellarToml", () => {
     expect(p.webAuthEndpoint).toBe("https://anchor.example/auth");
     expect(p.transferServerSep24).toBe("https://anchor.example/sep24");
   });
+
+  it("ignores non-https and malformed endpoints with a warning and falls back", () => {
+    const warn = vi.fn();
+    const mockLogger = {
+      child: () => mockLogger,
+      info: vi.fn(),
+      warn,
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const toml = `
+WEB_AUTH_ENDPOINT = "http://a.example/auth"
+TRANSFER_SERVER = "ftp://x"
+KYC_SERVER = "not a url"
+ANCHOR_QUOTE_SERVER = "https://anchor.example/api/v1/sep38"
+`;
+    const p = parseStellarToml(toml, "anchor.example", mockLogger);
+
+    // Fallbacks applied for ignored keys
+    expect(p.webAuthEndpoint).toBe("https://anchor.example/auth");
+    expect(p.transferServer).toBe("https://anchor.example/sep6");
+    expect(p.kycServer).toBe("https://anchor.example/sep6"); // falls back to transferServer
+    // Valid https with path prefix accepted
+    expect(p.anchorQuoteServer).toBe("https://anchor.example/api/v1/sep38");
+    expect(p.fallback).toBe(false);
+
+    // Logger warnings were emitted for the rejected endpoints
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ key: "WEB_AUTH_ENDPOINT", reason: "protocol must be https:" }),
+      expect.stringContaining("protocol must be https:"),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ key: "TRANSFER_SERVER", reason: "protocol must be https:" }),
+      expect.stringContaining("protocol must be https:"),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ key: "KYC_SERVER", reason: "malformed URL" }),
+      expect.stringContaining("malformed URL"),
+    );
+  });
 });
 
 describe("fetchStellarToml", () => {
