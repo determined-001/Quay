@@ -385,7 +385,13 @@ export default function CashOutModal({
       setErrorMsg(msg);
       // An expired or mismatched quote cannot be confirmed; the countdown is
       // forced to zero so the panel offers a fresh quote instead.
-      if (/quote_expired|quote_mismatch/.test(msg)) setCountdown(0);
+      if (e instanceof CheckoutError && (e.code === "quote_expired" || e.code === "quote_mismatch")) {
+        if (countdownRef.current) {
+          clearInterval(countdownRef.current);
+          countdownRef.current = null;
+        }
+        setCountdown(0);
+      }
       setStep("quote");
     }
   }

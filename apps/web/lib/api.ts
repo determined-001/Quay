@@ -217,6 +217,7 @@ export type ApiErrorCode =
   | "anchor_unavailable" // 503: the seller's anchor is down or its circuit breaker is open
   | "offramp_disabled" // 501: this deployment has no off-ramp configured
   | "quote_expired" // 409 `quote_expired: <detail>`: the anchor quote lapsed before use
+  | "quote_mismatch" // 409 `quote_mismatch`: the quote id does not match the link or amount
   | "request_in_progress" // 409: same Idempotency-Key still running, or key reused with a different body
   | "challenge_rejected"; // anchor SEP-10 challenge refused (400/502)
 
@@ -256,6 +257,7 @@ export function classifyError(status: number, body: Record<string, unknown>): Ap
 
   if (Object.hasOwn(EXPLICIT, error)) return EXPLICIT[error]!;
   if (error.startsWith("quote_expired")) return "quote_expired";
+  if (error.startsWith("quote_mismatch")) return "quote_mismatch";
 
   if (status >= 500) return "server_error";
 
@@ -335,7 +337,9 @@ export function describeError(err: CheckoutError): string {
     case "offramp_disabled":
       return "Offramping is currently disabled for this anchor.";
     case "quote_expired":
-      return "The quote expired before the transaction could complete. Try refreshing.";
+      return "The quote expired before the transaction could complete. Get a new quote.";
+    case "quote_mismatch":
+      return "This quote no longer matches the link. Get a new quote.";
     case "request_in_progress":
       return "This request is already being processed. Please wait.";
     case "challenge_rejected":

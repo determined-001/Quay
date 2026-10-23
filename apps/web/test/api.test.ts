@@ -205,6 +205,7 @@ describe("classifyError", () => {
     ["503 anchor_unavailable", 503, { error: "anchor_unavailable" }, "anchor_unavailable"],
     ["501 offramp_disabled", 501, { error: "offramp_disabled" }, "offramp_disabled"],
     ["409 quote_expired with detail", 409, { error: "quote_expired: quote q_1 lapsed" }, "quote_expired"],
+    ["409 quote_mismatch", 409, { error: "quote_mismatch" }, "quote_mismatch"],
     ["409 request_in_progress", 409, { error: "request_in_progress" }, "request_in_progress"],
     ["409 idempotency_key_reuse", 409, { error: "idempotency_key_reuse" }, "request_in_progress"],
     ["400 challenge_rejected", 400, { error: "challenge_rejected" }, "challenge_rejected"],
@@ -219,7 +220,7 @@ describe("classifyError", () => {
     expect(classifyError(409, { error: 5, reason: {} })).toBe("conflict");
   });
 
-  it.each(["anchor_unavailable", "offramp_disabled", "quote_expired", "request_in_progress", "challenge_rejected"] as const)(
+  it.each(["anchor_unavailable", "offramp_disabled", "quote_expired", "quote_mismatch", "request_in_progress", "challenge_rejected"] as const)(
     "describeError has specific copy for %s",
     (code) => {
       const text = describeError(new CheckoutError(code, 400, "x"));
