@@ -11,6 +11,9 @@ interface CacheEntry {
 }
 
 const PREFLIGHT_CACHE_TTL_MS = 60_000;
+/** Failures are cached only briefly: a seller who just added the trustline
+ *  (or funded the account) must not keep getting rejected for a minute. */
+const PREFLIGHT_FAILURE_CACHE_TTL_MS = 5_000;
 
 /** SEP-23: wraps a G-address and a 64-bit id into an M-address. The id is
  *  carried inside the destination itself, so it survives wallets that drop,
@@ -83,7 +86,10 @@ export class StellarRail implements RailPort {
       this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS, error: null });
     } catch (err) {
       if (err instanceof CannotReceiveError) {
-        this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS, error: err });
+        this.preflightCache.set(cacheKey, {
+          expiresAt: Date.now() + PREFLIGHT_FAILURE_CACHE_TTL_MS,
+          error: err,
+        });
       }
       throw err;
     }

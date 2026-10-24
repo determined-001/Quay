@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { StrKey } from "@stellar/stellar-sdk";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Horizon, StrKey } from "@stellar/stellar-sdk";
+import { CannotReceiveError } from "@checkout/core";
 import { muxedFor, StellarRail } from "../src/stellar-rail";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -70,5 +71,51 @@ describe("StellarRail.buildRequest — muxed mode", () => {
     expect(req.uri).not.toContain("memo=");
     expect(req.uri).not.toContain("memo_type=");
     expect(req.uri).toContain(`destination=${req.destination}`);
+  });
+});
+
+describe("StellarRail.assertCanReceive — preflight cache", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const USDC = { code: "USDC", issuer: ISSUER };
+  const accountWith = (balances: unknown[]) =>
+    ({
+      id: DEST,
+      sequence: "100",
+      balances,
+    }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>;
+  const usdcLine = {
+    asset_type: "credit_alphanum4",
+    asset_code: "USDC",
+    asset_issuer: ISSUER,
+    balance: "0.0000000",
+    limit: "1000.0000000",
+  };
+
+  it("does not serve a failed preflight from cache once the trustline is added", async () => {
+    const rail = new StellarRail(CFG);
+    const loadAccount = vi
+      .spyOn(Horizon.Server.prototype, "loadAccount")
+      .mockResolvedValueOnce(accountWith([{ asset_type: "native", balance: "5" }]) as never)
+      .mockResolvedValueOnce(accountWith([{ asset_type: "native", balance: "5" }, usdcLine]) as never);
+
+    await expect(rail.assertCanReceive(DEST, USDC)).rejects.toBeInstanceOf(CannotReceiveError);
+
+    await expect(rail.assertCanReceive(DEST, USDC)).resolves.toBeUndefined();
+    expect(loadAccount).toHaveBeenCalledTimes(2);
+  });
+
+  it("still caches a passing preflight", async () => {
+    const rail = new StellarRail(CFG);
+    const loadAccount = vi
+      .spyOn(Horizon.Server.prototype, "loadAccount")
+      .mockResolvedValue(accountWith([{ asset_type: "native", balance: "5" }, usdcLine]) as never);
+
+    await rail.assertCanReceive(DEST, USDC);
+    await rail.assertCanReceive(DEST, USDC);
+    expect(loadAccount).toHaveBeenCalledTimes(1);
   });
 });
