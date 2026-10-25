@@ -342,7 +342,7 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
 
     // Sandbox settlement timing is not deterministic — only assert the shape,
     // never assert eventual "settled".
-    expect(["pending", "settled", "failed"]).toContain(polled.status);
+    expect(["awaiting_transfer", "pending", "settled", "failed"]).toContain(polled.status);
   });
 
   it("a fresh adapter instance sharing only the persisted state can still resolve status() (restart simulation)", async () => {
@@ -375,7 +375,7 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
     // same wiring stands in for it here.
     const postRestart = makeOffRamp(state, wiring);
     const polled = await postRestart.status(job.jobId);
-    expect(["pending", "settled", "failed"]).toContain(polled.status);
+    expect(["awaiting_transfer", "pending", "settled", "failed"]).toContain(polled.status);
   });
 
   // After all live tests run, emit telemetry for the CI workflow to capture.
