@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AnchorAuthRequiredError, OffRampDisabledError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampPort, type RailPort, type WithdrawTransfer } from "@checkout/core";
+import { AnchorAuthRequiredError, OffRampDisabledError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampJob, type OffRampPort, type RailPort, type WithdrawTransfer } from "@checkout/core";
 import { DisabledOffRamp, MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
@@ -74,6 +74,155 @@ function makeService(opts: {
 }
 
 describe("LinkService.pollCashOuts", () => {
+  describe("overlapping ticks (issue 4.41)", () => {
+    async function setup(statusImpl: ScriptedOffRamp["statusImpl"]) {
+      const webhooks = new FakeWebhookRepository();
+      await webhooks.create({ sellerId: "sel_1", url: "https://hook.example/h", secret: "whsec_test_secret" });
+      const links = new FakeLinkRepository([
+        makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
+      ]);
+      const offramp = new ScriptedOffRamp();
+      offramp.statusImpl = statusImpl;
+      const service = makeService({ links, offramp, offrampState: new FakeOffRampStateRepository(), webhooks });
+      const events = () => webhooks.queue.map((q) => q.event);
+      return { service, links, offramp, events };
+    }
+
+    it("two overlapping ticks enqueue exactly one offramp.settled", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let statusCalls = 0;
+      const { service, links, events } = await setup(async (jobId) => {
+        statusCalls += 1;
+        await gate; // a slow anchor: the second tick starts while the first is still waiting
+        return {
+          jobId,
+          linkId: "lnk_1",
+          status: "settled",
+          targetCurrency: "NGN",
+          targetAmount: "16500",
+          rate: "1650",
+        };
+      });
+
+      const first = service.pollCashOuts();
+      const second = service.pollCashOuts();
+      release();
+      await Promise.all([first, second]);
+
+      expect(links.get("lnk_1")?.status).toBe("offramp_settled");
+      expect(events().filter((e) => e === "offramp.settled")).toHaveLength(1);
+      expect(statusCalls).toBe(1);
+    });
+
+    it("a tick that started from a stale list does not settle a link another tick already finished", async () => {
+      const { service, events } = await setup(async (jobId) => ({
+        jobId,
+        linkId: "lnk_1",
+        status: "settled",
+        targetCurrency: "NGN",
+        targetAmount: "16500",
+        rate: "1650",
+      }));
+
+      await service.pollCashOuts();
+      await service.pollCashOuts();
+
+      expect(events().filter((e) => e === "offramp.settled")).toHaveLength(1);
+    });
+
+    it("two overlapping ticks enqueue exactly one offramp.failed", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const { service, links, events } = await setup(async (jobId) => {
+        await gate;
+        return { jobId, linkId: "lnk_1", status: "failed", targetCurrency: "NGN", targetAmount: "0", rate: "1650", reason: "declined" };
+      });
+
+      const first = service.pollCashOuts();
+      const second = service.pollCashOuts();
+      release();
+      await Promise.all([first, second]);
+
+      expect(links.get("lnk_1")?.status).toBe("offramp_failed");
+      expect(events().filter((e) => e === "offramp.failed")).toHaveLength(1);
+    });
+
+    it("two overlapping ticks enqueue exactly one offramp.transfer_required", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const offrampState = new FakeOffRampStateRepository();
+      await offrampState.saveJob({
+        jobId: "job_1",
+        linkId: "lnk_1",
+        anchor: "anchor.example",
+        status: "pending",
+        externalStatus: null,
+        targetCurrency: "NGN",
+        targetAmount: "16500",
+        rate: "1650",
+        sellerId: "sel_1",
+        account: "GSELLER",
+        createdAt: 1000,
+        updatedAt: 1000,
+        lastError: null,
+        lastPollError: null,
+        lastPollErrorAt: null,
+        lastPollReason: null,
+        transferNotifiedAt: null,
+      });
+      const webhooks = new FakeWebhookRepository();
+      await webhooks.create({ sellerId: "sel_1", url: "https://hook.example/h", secret: "whsec_test_secret" });
+      const links = new FakeLinkRepository([
+        makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),
+      ]);
+      const offramp = new ScriptedOffRamp();
+      offramp.statusImpl = async (jobId) => {
+        await gate;
+        return {
+          jobId,
+          linkId: "lnk_1",
+          status: "pending",
+          targetCurrency: "NGN",
+          targetAmount: "16500",
+          rate: "1650",
+          transfer: {
+            destination: "GANCHOR",
+            amount: "10",
+            asset: { code: "USDC", issuer: "GISSUER" },
+            memo: "memo",
+            memoType: "text",
+          },
+        } as OffRampJob;
+      };
+      const service = makeService({ links, offramp, offrampState, webhooks });
+
+      const first = service.pollCashOuts();
+      const second = service.pollCashOuts();
+      release();
+      await Promise.all([first, second]);
+
+      expect(webhooks.queue.filter((q) => q.event === "offramp.transfer_required")).toHaveLength(1);
+    });
+
+    it("a tick that throws does not wedge the next one", async () => {
+      let calls = 0;
+      const { service, links } = await setup(async (jobId) => {
+        calls += 1;
+        if (calls === 1) throw new Error("ECONNRESET");
+        return { jobId, linkId: "lnk_1", status: "settled", targetCurrency: "NGN", targetAmount: "16500", rate: "1650" };
+      });
+
+      await service.pollCashOuts(); // recorded as a poll error with backoff, not rethrown
+      const realNow = Date.now.bind(Date);
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 60_000);
+      await service.pollCashOuts();
+      nowSpy.mockRestore();
+
+      expect(links.get("lnk_1")?.status).toBe("offramp_settled");
+    });
+  });
+
   it("settles a link when the adapter reports settled", async () => {
     const links = new FakeLinkRepository([
       makeLink({ status: "offramp_pending", offrampJobId: "job_1", offrampStatus: "pending" }),

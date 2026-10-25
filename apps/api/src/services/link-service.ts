@@ -89,6 +89,8 @@ export class LinkService {
   private readonly nextPollAtByLinkId = new Map<string, number>();
   /** Jobs whose `cashout.transfer_required` event was already emitted by this process. */
   private readonly transferRequiredLogged = new Set<string>();
+  /** Links with a cash-out poll in flight; see `pollCashOuts`. */
+  private readonly pollingLinkIds = new Set<string>();
   private static readonly POLL_BACKOFF_BASE_MS = 2_000;
   private static readonly POLL_BACKOFF_CAP_MS = 60_000;
   /**
@@ -1075,57 +1077,99 @@ export class LinkService {
     const log = (opts.logger ?? this.deps.logger!);
     const pending = await this.deps.links.listByStatus("offramp_pending");
     const now = Date.now();
-    for (const link of pending) {
-      if (!link.offrampJobId) {
-        // Should never happen going forward (triggerCashOut always sets it),
-        // but a link like this can't ever resolve — same fate as a lost job.
-        await this.markOffRampFailed(link, "job_state_lost");
+    for (const listed of pending) {
+      // One poll per link at a time. A tick that outlives the interval (slow
+      // anchor, many pending links), or a manual trigger beside the timer,
+      // would otherwise settle the same link twice and fire its webhook twice.
+      if (this.pollingLinkIds.has(listed.id)) {
+        log.debug({ event: "cashout.poll.skipped", linkId: listed.id }, "cash-out poll already in flight");
         continue;
       }
-      // Per-job backoff: while the anchor is sick we don't re-ping it on every
-      // tick. Skip links whose `next_try_at` is still in the future.
-      const next = this.nextPollAtByLinkId.get(link.id);
-      if (next !== undefined && now < next) continue;
-
-      const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
-      // Read before polling: status() persists any deposit instructions, so
-      // "had none before this poll" is what makes the event fire once, and
-      // it still does after a restart.
-      const before = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
-      // Blocked on the seller's anchor session (issue 4.16): nothing will
-      // change until they re-authenticate, so skip without calling status().
-      // Legacy rows with no seller/account cannot be checked and fall through.
-      if (this.deps.hasLiveAnchorSession && before?.sellerId && before.account) {
-        if (!this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account })) {
-          await this.blockOnAnchorAuth(link, child);
-          continue;
-        }
-        this.liftAnchorAuthBlock(link.id);
-      } else if (this.anchorAuthBlockedLinkIds.has(link.id)) {
-        // No session check available: stay blocked until re-auth clears it.
-        continue;
-      }
-
-      let job: OffRampJob;
+      this.pollingLinkIds.add(listed.id);
       try {
-        job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
-        if (job.transfer && !before?.transfer && !this.transferRequiredLogged.has(link.offrampJobId)) {
-          this.transferRequiredLogged.add(link.offrampJobId);
-          // Deliberately no memo/destination here: payment instructions stay
-          // out of plaintext logs. The seller still signs; nothing is sent
-          // from the server.
-          child.info(
-            {
-              event: "cashout.transfer_required",
-              linkId: link.id,
-              jobId: link.offrampJobId,
-              assetCode: job.transfer.asset.code,
-              amount: job.transfer.amount,
-            },
-            "anchor published deposit instructions; seller must send the asset",
-          );
-        }
-        // Successful poll clears any prior in-memory last_error + backoff + persisted poll error.
+        // The list may be stale if another tick finished this link since it was read.
+        const link = (await this.deps.links.findById(listed.id)) ?? listed;
+        if (link.status !== "offramp_pending") continue;
+        await this.pollCashOutLink(link, now, log, opts);
+      } finally {
+        this.pollingLinkIds.delete(listed.id);
+      }
+    }
+  }
+
+  /** One link's share of {@link pollCashOuts}. Returns early rather than `continue`. */
+  private async pollCashOutLink(
+    link: PaymentLink,
+    now: number,
+    log: Logger,
+    opts: ServiceCallOptions,
+  ): Promise<void> {
+    if (!link.offrampJobId) {
+      // Should never happen going forward (triggerCashOut always sets it),
+      // but a link like this can't ever resolve — same fate as a lost job.
+      await this.markOffRampFailed(link, "job_state_lost");
+      return;
+    }
+    // Per-job backoff: while the anchor is sick we don't re-ping it on every
+    // tick. Skip links whose `next_try_at` is still in the future.
+    const next = this.nextPollAtByLinkId.get(link.id);
+    if (next !== undefined && now < next) return;
+
+    const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
+    // Read before polling: status() persists any deposit instructions, so
+    // "had none before this poll" is what makes the event fire once, and
+    // it still does after a restart.
+    const before = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
+    // Blocked on the seller's anchor session (issue 4.16): nothing will
+    // change until they re-authenticate, so skip without calling status().
+    // Legacy rows with no seller/account cannot be checked and fall through.
+    if (this.deps.hasLiveAnchorSession && before?.sellerId && before.account) {
+      if (!this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account })) {
+        await this.blockOnAnchorAuth(link, child);
+        return;
+      }
+      this.liftAnchorAuthBlock(link.id);
+    } else if (this.anchorAuthBlockedLinkIds.has(link.id)) {
+      // No session check available: stay blocked until re-auth clears it.
+      return;
+    }
+
+    let job: OffRampJob;
+    try {
+      job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
+      if (job.transfer && !before?.transfer && !this.transferRequiredLogged.has(link.offrampJobId)) {
+        this.transferRequiredLogged.add(link.offrampJobId);
+        // Deliberately no memo/destination here: payment instructions stay
+        // out of plaintext logs. The seller still signs; nothing is sent
+        // from the server.
+        child.info(
+          {
+            event: "cashout.transfer_required",
+            linkId: link.id,
+            jobId: link.offrampJobId,
+            assetCode: job.transfer.asset.code,
+            amount: job.transfer.amount,
+          },
+          "anchor published deposit instructions; seller must send the asset",
+        );
+      }
+      // Successful poll clears any prior in-memory last_error + backoff + persisted poll error.
+      this.lastPollErrorByLinkId.delete(link.id);
+      this.consecutivePollErrorsByLinkId.delete(link.id);
+      this.nextPollAtByLinkId.delete(link.id);
+      if (link.offrampJobId) {
+        await this.deps.offrampState.updateJob(link.offrampJobId, {
+          lastPollError: null,
+          lastPollErrorAt: null,
+          lastPollReason: null,
+        });
+      }
+    } catch (err) {
+      if (err instanceof OffRampJobNotFoundError) {
+        // The adapter has no state for this job id at all — not a transient
+        // hiccup, it will never resolve on its own. Fail it out so the
+        // seller has a path forward instead of silent purgatory forever.
+        await this.markOffRampFailed(link, "job_state_lost");
         this.lastPollErrorByLinkId.delete(link.id);
         this.consecutivePollErrorsByLinkId.delete(link.id);
         this.nextPollAtByLinkId.delete(link.id);
@@ -1136,144 +1180,127 @@ export class LinkService {
             lastPollReason: null,
           });
         }
-      } catch (err) {
-        if (err instanceof OffRampJobNotFoundError) {
-          // The adapter has no state for this job id at all — not a transient
-          // hiccup, it will never resolve on its own. Fail it out so the
-          // seller has a path forward instead of silent purgatory forever.
-          await this.markOffRampFailed(link, "job_state_lost");
-          this.lastPollErrorByLinkId.delete(link.id);
-          this.consecutivePollErrorsByLinkId.delete(link.id);
-          this.nextPollAtByLinkId.delete(link.id);
-          if (link.offrampJobId) {
-            await this.deps.offrampState.updateJob(link.offrampJobId, {
-              lastPollError: null,
-              lastPollErrorAt: null,
-              lastPollReason: null,
-            });
-          }
-          continue;
-        }
-        // The session expired between the check and the call (or no check is
-        // wired): same handling, retrying would hit the same error.
-        if (err instanceof AnchorAuthRequiredError) {
-          await this.blockOnAnchorAuth(link, child);
-          continue;
-        }
-        // Classify the poll error into a sanitized, seller-safe reason and message.
-        const { reason, message: safeMessage } = classifyPollError(err);
-        if (link.offrampJobId) {
-          await this.deps.offrampState.updateJob(link.offrampJobId, {
-            lastPollError: safeMessage,
-            lastPollErrorAt: Date.now(),
-            lastPollReason: reason,
-          });
-        }
-        const rawMessage = err instanceof Error ? err.message : String(err);
-        this.lastPollErrorByLinkId.set(link.id, rawMessage);
-        console.warn(`[offramp] poll failed for link ${link.id}: ${rawMessage}`);
-        // Exponential backoff per job (in-memory). Capped so a long-lived
-        // pending job doesn't end up wedged for hours.
-        const prev = this.consecutivePollErrorsByLinkId.get(link.id) ?? 0;
-        const next1 = Math.min(LinkService.POLL_BACKOFF_CAP_MS, LinkService.POLL_BACKOFF_BASE_MS * 2 ** prev);
-        this.consecutivePollErrorsByLinkId.set(link.id, prev + 1);
-        this.nextPollAtByLinkId.set(link.id, Date.now() + next1);
-        continue;
+        return;
       }
-// If the anchor returned transfer instructions and we haven't notified yet,
-      // emit the offramp.transfer_required webhook now.
-      // This handles the case where the transfer instructions arrive late (e.g. after review).
-      // Some off-ramp implementations may return transfer instructions in status().
-      const transfer = (job as unknown as Record<string, unknown>).transfer as WithdrawTransfer | undefined;
-      if (transfer && link.offrampJobId) {
-        const storedJob = await this.deps.offrampState.getJob(link.offrampJobId);
-        if (storedJob && !storedJob.transferNotifiedAt) {
-          await this.fireWebhook(link, "offramp.transfer_required", {
-            transfer,
-            jobId: link.offrampJobId,
-          }, opts);
-          await this.deps.offrampState.updateJob(link.offrampJobId, { transferNotifiedAt: Date.now() });
-        }
+      // The session expired between the check and the call (or no check is
+      // wired): same handling, retrying would hit the same error.
+      if (err instanceof AnchorAuthRequiredError) {
+        await this.blockOnAnchorAuth(link, child);
+        return;
       }
-
-      if (job.status === "settled") {
-        const from = link.status;
-        link.status = "offramp_settled";
-        link.offrampStatus = "settled";
-        await this.deps.links.save(link);
-        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_settled" });
-        this.observeSettlementDuration(link.id, "settled");
-        child.info({ event: "link.transition", from, to: link.status }, "off-ramp settled");
-        await this.fireWebhook(link, "offramp.settled", {
-          targetCurrency: job.targetCurrency,
-          targetAmount: job.targetAmount,
-        }, opts);
-
-        // Passive telemetry (issue #20, 3.8): effective_rate derived from the
-        // anchor-reported amount_out at settlement, NOT the quoted rate — the
-        // whole point of this dataset is measuring the spread between them.
-        // Awaited (errors are swallowed inside recordTelemetry) rather than
-        // fire-and-forget, so a slow store can't race past the write.
-        {
-          const existing = await this.deps.telemetry.get(`tel_${link.offrampJobId}`).catch(() => null);
-          const quotedRate = existing?.quotedRate ?? job.rate;
-          const sourceAmount = link.paidAmount ?? link.amount;
-          // Both rates are TARGET per source (issue 5.21): quote.rate is
-          // documented in that direction and every adapter now returns it so,
-          // which is what makes this fee (quoted gross minus actual target,
-          // in target units) and the summary's spread meaningful for real
-          // anchors, not just the mock.
-          const effectiveRate = String(Number(job.targetAmount) / Number(sourceAmount));
-          const feeAmount = (Number(quotedRate) * Number(sourceAmount) - Number(job.targetAmount)).toFixed(6);
-          await this.recordTelemetry(link.offrampJobId!, {
-            quotedRate,
-            settledAt: Date.now(),
-            effectiveRate,
-            feeAmount,
-            status: "settled",
-          });
-        }
-      } else if (job.status === "failed") {
-        const from = link.status;
-        link.status = "offramp_failed";
-        link.offrampStatus = "failed";
-        await this.deps.links.save(link);
-        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
-        this.observeSettlementDuration(link.id, "failed");
-        child.info(
-          { event: "link.transition", from, to: link.status, reason: job.reason },
-          "off-ramp failed",
-        );
-        await this.fireWebhook(link, "offramp.failed", { reason: job.reason }, opts);
-
-        await this.recordTelemetry(link.offrampJobId!, {
-          status: "failed",
-          failureReason: job.reason ?? null,
+      // Classify the poll error into a sanitized, seller-safe reason and message.
+      const { reason, message: safeMessage } = classifyPollError(err);
+      if (link.offrampJobId) {
+        await this.deps.offrampState.updateJob(link.offrampJobId, {
+          lastPollError: safeMessage,
+          lastPollErrorAt: Date.now(),
+          lastPollReason: reason,
         });
-      } else {
-        // Still pending at the anchor. An `incomplete` job means the seller
-        // never finished the anchor's window — without a timeout it would sit
-        // in `offramp_pending` indefinitely. `createdAt` is the durable proxy
-        // for "waiting since": it is written once at initiation, unlike
-        // `updatedAt`, which every status poll refreshes.
-        const stored = link.offrampJobId
-          ? await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null)
-          : null;
-        const timeoutMs = this.deps.interactiveTimeoutMs ?? LinkService.DEFAULT_INTERACTIVE_TIMEOUT_MS;
-        if (stored?.externalStatus === "incomplete" && now - stored.createdAt > timeoutMs) {
-          child.info(
-            { event: "link.transition", from: link.status, reason: "interactive_abandoned" },
-            "interactive anchor flow abandoned",
-          );
-          await this.markOffRampFailed(link, "interactive_abandoned");
-        } else if (link.offrampStatus !== job.status) {
-          link.offrampStatus = job.status;
-          await this.deps.links.save(link);
-          child.info(
-            { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
-            "cash-out offrampStatus updated",
-          );
-        }
+      }
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      this.lastPollErrorByLinkId.set(link.id, rawMessage);
+      console.warn(`[offramp] poll failed for link ${link.id}: ${rawMessage}`);
+      // Exponential backoff per job (in-memory). Capped so a long-lived
+      // pending job doesn't end up wedged for hours.
+      const prev = this.consecutivePollErrorsByLinkId.get(link.id) ?? 0;
+      const next1 = Math.min(LinkService.POLL_BACKOFF_CAP_MS, LinkService.POLL_BACKOFF_BASE_MS * 2 ** prev);
+      this.consecutivePollErrorsByLinkId.set(link.id, prev + 1);
+      this.nextPollAtByLinkId.set(link.id, Date.now() + next1);
+      return;
+    }
+// If the anchor returned transfer instructions and we haven't notified yet,
+    // emit the offramp.transfer_required webhook now.
+    // This handles the case where the transfer instructions arrive late (e.g. after review).
+    // Some off-ramp implementations may return transfer instructions in status().
+    const transfer = (job as unknown as Record<string, unknown>).transfer as WithdrawTransfer | undefined;
+    if (transfer && link.offrampJobId) {
+      const storedJob = await this.deps.offrampState.getJob(link.offrampJobId);
+      if (storedJob && !storedJob.transferNotifiedAt) {
+        await this.fireWebhook(link, "offramp.transfer_required", {
+          transfer,
+          jobId: link.offrampJobId,
+        }, opts);
+        await this.deps.offrampState.updateJob(link.offrampJobId, { transferNotifiedAt: Date.now() });
+      }
+    }
+
+    if (job.status === "settled") {
+      const from = link.status;
+      link.status = "offramp_settled";
+      link.offrampStatus = "settled";
+      await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "offramp_settled" });
+      this.observeSettlementDuration(link.id, "settled");
+      child.info({ event: "link.transition", from, to: link.status }, "off-ramp settled");
+      await this.fireWebhook(link, "offramp.settled", {
+        targetCurrency: job.targetCurrency,
+        targetAmount: job.targetAmount,
+      }, opts);
+
+      // Passive telemetry (issue #20, 3.8): effective_rate derived from the
+      // anchor-reported amount_out at settlement, NOT the quoted rate — the
+      // whole point of this dataset is measuring the spread between them.
+      // Awaited (errors are swallowed inside recordTelemetry) rather than
+      // fire-and-forget, so a slow store can't race past the write.
+      {
+        const existing = await this.deps.telemetry.get(`tel_${link.offrampJobId}`).catch(() => null);
+        const quotedRate = existing?.quotedRate ?? job.rate;
+        const sourceAmount = link.paidAmount ?? link.amount;
+        // Both rates are TARGET per source (issue 5.21): quote.rate is
+        // documented in that direction and every adapter now returns it so,
+        // which is what makes this fee (quoted gross minus actual target,
+        // in target units) and the summary's spread meaningful for real
+        // anchors, not just the mock.
+        const effectiveRate = String(Number(job.targetAmount) / Number(sourceAmount));
+        const feeAmount = (Number(quotedRate) * Number(sourceAmount) - Number(job.targetAmount)).toFixed(6);
+        await this.recordTelemetry(link.offrampJobId!, {
+          quotedRate,
+          settledAt: Date.now(),
+          effectiveRate,
+          feeAmount,
+          status: "settled",
+        });
+      }
+    } else if (job.status === "failed") {
+      const from = link.status;
+      link.status = "offramp_failed";
+      link.offrampStatus = "failed";
+      await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
+      this.observeSettlementDuration(link.id, "failed");
+      child.info(
+        { event: "link.transition", from, to: link.status, reason: job.reason },
+        "off-ramp failed",
+      );
+      await this.fireWebhook(link, "offramp.failed", { reason: job.reason }, opts);
+
+      await this.recordTelemetry(link.offrampJobId!, {
+        status: "failed",
+        failureReason: job.reason ?? null,
+      });
+    } else {
+      // Still pending at the anchor. An `incomplete` job means the seller
+      // never finished the anchor's window — without a timeout it would sit
+      // in `offramp_pending` indefinitely. `createdAt` is the durable proxy
+      // for "waiting since": it is written once at initiation, unlike
+      // `updatedAt`, which every status poll refreshes.
+      const stored = link.offrampJobId
+        ? await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null)
+        : null;
+      const timeoutMs = this.deps.interactiveTimeoutMs ?? LinkService.DEFAULT_INTERACTIVE_TIMEOUT_MS;
+      if (stored?.externalStatus === "incomplete" && now - stored.createdAt > timeoutMs) {
+        child.info(
+          { event: "link.transition", from: link.status, reason: "interactive_abandoned" },
+          "interactive anchor flow abandoned",
+        );
+        await this.markOffRampFailed(link, "interactive_abandoned");
+      } else if (link.offrampStatus !== job.status) {
+        link.offrampStatus = job.status;
+        await this.deps.links.save(link);
+        child.info(
+          { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
+          "cash-out offrampStatus updated",
+        );
       }
     }
   }
