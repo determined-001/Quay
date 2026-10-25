@@ -30,7 +30,7 @@ an issue's area and its `<major>.<minor>` id always agree.
 Optionally add:
 - **`good-first-issue`**: Genuinely self-contained, well-scoped tasks suitable for newcomers.
 - **`help-wanted`**: Issues where community contribution is actively invited.
-- **`Stellar Wave`**: Opts the issue into the Drips Wave Program.
+- **`Stellar Wave`**: Opts the issue into the Drips Wave Program. The label still exists in `.github/labels.yml` but is no longer applied (see `MAINTAINER.md`, "Branches and repository settings").
 
 ---
 
