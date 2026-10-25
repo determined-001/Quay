@@ -45,6 +45,7 @@ account, signed in their wallet.
 | 10 | **Session expiry**: an expired or missing anchor session is `403 anchor_auth_required`, never a 500, and an undecryptable stored session is dropped so the seller is asked to reconnect | `AnchorAuthRequiredError` mapping; `DrizzleAnchorSessionRepository.get` | `kyc-route-auth.test.ts`, `anchor-session-repo.test.ts` |
 | 11 | **Logging**: no PII values and no tokens in logs. Field names may be logged, values and the anchor JWT may not | Structured logger; `anchor_session.undecryptable` carries ids only | `anchor-session-repo.test.ts`, `anchor-error-sanitization.test.ts` |
 | 12 | Consent is session-only and covers exactly the fields the anchor currently requires | `consentApp` guard in `kyc.ts` | `kyc-consent.test.ts` |
+| 13 | **Audit trail**: every successful `GET /seller/kyc` (`kyc.read`), `PUT /seller/kyc` and `PUT /seller/kyc/files` (`kyc.submit`) writes one `pii_audit` row with the actor (session seller or API key id), the request id and field names, never values. The cash-out KYC gate writes a `system` row. A failed audit write is logged as `pii_audit.write_failed`, counted in `pii_audit_write_failures_total`, and never fails the request | `PiiAuditService` (`services/pii-audit.ts`), recorded in `kyc.ts` and `LinkService.assertKycAccepted`; read with `GET /telemetry/pii-audit` | `pii-audit.test.ts` |
 
 ## Decisions recorded here
 
@@ -63,5 +64,11 @@ account, signed in their wallet.
 
 - Field *content* is not validated here (that is the anchor's job, and the web
   form validates SEP-9 types client-side).
-- There is no audit trail of who read identity (tracked separately as the PII
-  access log).
+- The PII access log (`pii_audit`, checklist 13) records reads at the route and
+  system boundary, not every decrypt. `anchor_session.decrypt` exists in the
+  action list but is not emitted: the anchor bearer token never leaves the
+  server and is decrypted on every anchor call, so a row per use would swamp
+  the table. A path that handed that token to a caller would need to emit it.
+- The log is only as complete as the code paths that call it. A new route that
+  returns decrypted identity must record an access, or it is invisible to an
+  incident review.

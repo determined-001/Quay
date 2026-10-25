@@ -249,6 +249,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` (`ok`, `error`, `rejected`) |
 | `anchor_auth_required_total` | `route` (`kyc_get`, `kyc_put`, `quote`, `cash_out`, `poll`) — seller had no live anchor session (403 `anchor_auth_required`); `poll` counts one per poll tick of a blocked job. Not counted by the circuit breaker, so invisible in `anchor_calls_total` |
 | `quay_kyc_retention_purged_total` | — (total inactive sellers whose KYC and identity data was purged under retention policy) |
+| `pii_audit_write_failures_total` | — (PII access audit rows that failed to write while the request still succeeded; any increase means access went unrecorded, alert on it) |
 
 **Histograms**
 | Metric | Labels |
@@ -2057,7 +2058,11 @@ and `Cache-Control: no-store`. Timestamps are ISO 8601 strings.
     "createdAt": "...", "updatedAt": "..."
   }],
   "webhooks": [{ "id": "...", "url": "https://...", "createdAt": "..." }],
-  "apiKeys": [{ "id": "...", "name": "...", "scopes": ["links:read"], "createdAt": "...", "lastUsedAt": null }]
+  "apiKeys": [{ "id": "...", "name": "...", "scopes": ["links:read"], "createdAt": "...", "lastUsedAt": null }],
+  "piiAccess": [{
+    "at": "...", "actorType": "session", "actorId": "sel_...", "action": "kyc.read",
+    "fields": ["first_name"], "requestId": "..."
+  }]
 }
 ```
 
@@ -2066,6 +2071,9 @@ and `Cache-Control: no-store`. Timestamps are ISO 8601 strings.
   `KYC_ENCRYPTION_KEY`, because that is where the encrypted stores live.
   Every other section is always present; an empty array means nothing is held.
 - `payoutFields` is `null` until the seller has saved payout details.
+- `piiAccess` is the seller's own entries from the PII access log (newest
+  first, capped like the other lists): who read their identity data, when, and
+  which field names. Never values. Omitted when the audit log is not configured.
 - `webhooks` lists live webhooks; deleted ones are not included.
 - **Never included:** the anchor SEP-10 token, webhook secrets, API key
   hashes or prefixes, the KYC callback token hash, the anchor's deposit
@@ -2251,6 +2259,58 @@ Authorization: Bearer <TELEMETRY_TOKEN>
 
 | Status | `error` | When |
 | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid `TELEMETRY_TOKEN` in `Authorization: Bearer` |
+| `404` | `telemetry_not_enabled` | `TELEMETRY_TOKEN` is unset in the server environment |
+
+---
+
+## `GET /telemetry/pii-audit`
+
+Operator view of the PII access audit log: every read of a seller's identity
+data through an API route or a system path, with who did it, when and under
+which request. Field **names** only, never values. Behind the same
+`TELEMETRY_TOKEN` as the rest of `/telemetry`. The one telemetry route that names
+a seller, so it is `Cache-Control: no-store`.
+
+```http
+GET /telemetry/pii-audit?sellerId=sel_abc123&limit=50 HTTP/1.1
+Authorization: Bearer <TELEMETRY_TOKEN>
+```
+
+| Query | Meaning |
+| --- | --- |
+| `sellerId` | Only this seller's entries. Omit to see every seller (during an incident, newest first) |
+| `action` | Only this action, e.g. `kyc.read` |
+| `limit` | Page size, 1 to 200 (default 50) |
+| `cursor` | The previous page's `nextCursor` |
+
+```json
+{
+  "entries": [{
+    "id": "pia_k3j9x0q1ab", "at": 1792938665230, "sellerId": "sel_abc123",
+    "actorType": "api_key", "actorId": "key_9f2c...", "action": "kyc.read",
+    "fields": [], "requestId": "7c1e..."
+  }],
+  "nextCursor": "MTc5MjkzODY2NTIzMHxwaWFfazNqOXgwcTFhYg"
+}
+```
+
+`actorType` is `session` (the seller, `actorId` is their seller id), `api_key`
+(`actorId` is the key id) or `system` (`actorId` names the path, e.g.
+`cash-out-gate`). `requestId` matches the `x-request-id` response header and the
+log lines of that request. `fields` lists the identity field names whose values
+the actor received, so an API key reading `GET /seller/kyc` gets `[]` (it only
+sees status), as does the cash-out gate (it only needs the status).
+
+Actions written: `kyc.read`, `kyc.submit`, `profile.read`, `profile.write`,
+`profile.export`, `profile.erase`. `anchor_session.decrypt` is part of the schema
+vocabulary but is **not emitted**: the anchor bearer token never leaves the
+server, it is decrypted on every anchor call, and a row per call would bury the
+entries that matter. Rows older than two years are deleted by a daily sweep.
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `400` | `invalid_cursor`, `invalid_limit` | Malformed `cursor` or non-numeric `limit` |
 | `401` | `unauthorized` | Missing or invalid `TELEMETRY_TOKEN` in `Authorization: Bearer` |
 | `404` | `telemetry_not_enabled` | `TELEMETRY_TOKEN` is unset in the server environment |
 

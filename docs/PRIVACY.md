@@ -99,6 +99,7 @@ Data subjects (sellers) have the following rights:
 | API keys | Indefinite while active | Key revocation |
 | Logs | 30 days (configurable) | Log rotation |
 | Backups | 30 days (configurable) | Backup rotation |
+| PII access log (who read which identity field names, when; never values) | 2 years, then deleted by a daily sweep. Not removed by erasure, so a breach can still be assessed after a seller erases their data | Daily sweep |
 | Consent records | Until erased, or until the same inactivity period; revocation keeps the row with `revoked_at` set | `DELETE /seller/profile`; daily inactivity sweep |
 
 ---
@@ -137,6 +138,7 @@ In the event of a personal data breach:
 - **Pseudonymization**: Seller wallet is pseudonymous identifier; no email/phone stored
 - **Data minimisation**: `selectFieldsForAnchor` (issue 4.25) sends only fields the anchor requests
 - **Purpose limitation**: Each data item collected for a specific, documented purpose
+- **Access audit**: every read of a seller's identity data through an API route or a system path (such as the cash-out KYC gate) is recorded with the actor and request id, field names only. Operators query it with `GET /telemetry/pii-audit?sellerId=...` to answer "whose data was read, by what, and when" during a breach assessment; sellers see their own entries in the data export
 - **Storage limitation**: Retention schedule enforced (daily inactivity sweep for identity data, hourly anchor session sweep); backups rotated
 
 ---
