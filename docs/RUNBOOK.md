@@ -894,14 +894,28 @@ The Nigeria Data Protection Act 2023 (NDPA) requires that personal identity data
 - **Activity tracking**: A seller's `last_active_at` is updated on wallet login (`POST /auth`), link creation (`POST /links`), and KYC submissions (`PUT /seller/kyc`). Database writes are throttled to at most once per hour per seller.
 - **Retention period**: Controlled via `KYC_RETENTION_DAYS` (default `730` days / 2 years). Setting `KYC_RETENTION_DAYS=0` disables the sweep entirely.
 - **In-flight protection**: Sellers with links currently in `offramp_pending` status are excluded from purging to avoid disrupting live cash-outs.
-- **Purged data**:
+- **Purged data** (one atomic transaction per seller, `eraseSellerIdentityLocal`):
   - `seller_kyc` rows (AES-256-GCM encrypted SEP-12 PII fields and customer IDs).
+  - `seller_profile` rows (the stored SEP-9 profile).
+  - `kyc_consents` and `kyc_disclosure_fields` (consent grants and the history of which field names were sent to an anchor).
   - `anchor_sessions` rows (encrypted anchor auth tokens).
-  - `sellers.payout_fields_json` (last-used payout bank/account details are cleared to `NULL`).
+  - `sellers.payout_fields_json` and `sellers.payout_fields_encrypted` (last-used payout bank/account details are cleared to `NULL`).
   - Anchor contact is not attempted (recorded as `anchor_not_contacted`).
+- **Kept**: links, payment history and the `pii_audit` access log. The audit log has its own 2-year sweep (`runPiiAuditSweep`, daily) and holds no values, only who read which field names and when.
 - **Telemetry & Metrics**:
   - Metrics counter: `quay_kyc_retention_purged_total` tracks total purged sellers.
   - Logs structured event: `{"event": "privacy.retention.purged", "count": N}` with strictly zero PII.
+
+### Who read a seller's identity data
+
+Every read or write of a seller's KYC or profile data through the API, and the cash-out gate's status read, leaves a row in `pii_audit` (actor type `session`, `api_key` or `system`, the action, field names only, the request id; never values). Query it with the telemetry token:
+
+```bash
+curl -H "Authorization: Bearer $TELEMETRY_TOKEN" \
+  "$API/telemetry/pii-audit?sellerId=<seller id>&limit=50"
+```
+
+Pages are newest first; pass the returned `nextCursor` as `cursor` for the next page. A failed audit write never fails the request: it logs `pii_audit.write_failed` and increments `pii_audit_write_failures_total`, so alert on that counter. See docs/API.md for the response shape.
 
 ### Operator CLI Usage
 Operators can manually trigger or preview the retention sweep using the retention CLI script:
