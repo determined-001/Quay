@@ -241,7 +241,13 @@ pnpm docs:check-env-docs          # every env var apps/api reads is in .env.exam
 pnpm db:check                     # schema and migrations have not drifted
 ```
 
-All of them must pass. If you change domain logic in `packages/core`, add or update
+All of them must pass. `pnpm typecheck` covers the tests as well as `src` in
+the packages that include them (`packages/offramp` does), so a type error in a
+test fails the check. Every package's `vitest.config.ts` spreads `sharedTest`
+from [`vitest.shared.ts`](vitest.shared.ts) (a 10 s test timeout, because
+`turbo run test` runs all suites at once) and takes its coverage floor through
+`coverage()` in [`vitest.coverage.ts`](vitest.coverage.ts); a new package should
+do the same. If you change domain logic in `packages/core`, add or update
 the corresponding unit tests (`packages/core/test/`). New behaviour in the API,
 worker, or adapters should come with tests where practical. If you change
 `LINK_STATUSES`/`TRANSITIONS` in `packages/core/src/domain/status.ts`, run
