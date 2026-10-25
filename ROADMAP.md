@@ -15,7 +15,8 @@ where effort should go, including the parts that are uncomfortable.
 **A Nigerian merchant does not want USDC. They want naira in their bank
 account.**
 
-Quay currently stops at "USDC arrived in your wallet" and hands the hard part
+On mainnet Quay currently stops at "USDC arrived in your wallet" (`OFFRAMP=none`;
+the cash-out flow runs only against the testnet sandbox) and hands the hard part
 back to the seller. That is the gap between *technically works* and *someone
 would use this*.
 
@@ -96,9 +97,10 @@ than as a reason to choose this.
 3. **The FX quote against one real anchor.** Not SEP-38 in general. One anchor,
    one corridor, end to end. This is the difference between a demo and a
    business.
-4. **Muxed correlation** (#197). Real, and it removes the memo as a failure
-   mode — but it improves a flow that already works, and the off-ramp does not
-   exist yet.
+4. **Muxed correlation** (#197, evaluated and closed; see
+   `docs/MUXED-CORRELATION-EVALUATION.md`). Real, and it removes the memo as a
+   failure mode — but it improves a flow that already works, and the production
+   off-ramp is still not enabled.
 
 ---
 
