@@ -18,7 +18,7 @@
 #   DATABASE_AUTH_TOKEN             from `turso db tokens create <db>`
 #   SERVER_SIGNING_SECRET           S... the platform's stable SEP-10 identity
 #   JWT_SECRET                      64 hex chars — session signing
-#   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED
+#   WEBHOOK_SECRET_ENCRYPTION_KEY   64 hex chars — REQUIRED; also encrypts seller anchor session tokens
 #   METRICS_TOKEN                   64 hex chars — gates GET /metrics
 #
 # This blueprint ships the PAYMENTS-ONLY configuration (OFFRAMP=none), which is

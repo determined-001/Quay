@@ -1382,7 +1382,10 @@ export const ANCHOR_SESSION_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
  * decrypted in-process when a call to the anchor needs it.
  */
 export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
-  constructor(private readonly db: DB) {}
+  constructor(
+    private readonly db: DB,
+    private readonly logger?: Logger,
+  ) {}
 
   async get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null> {
     const rows = await this.db
@@ -1392,11 +1395,27 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
       .limit(1);
     const row = rows[0];
     if (!row) return null;
+    let token: string;
+    try {
+      token = decryptSecret(row.tokenEncrypted);
+    } catch {
+      // The row was written under a different WEBHOOK_SECRET_ENCRYPTION_KEY
+      // (or is corrupt), so the token can never be read again. Drop it and
+      // answer "no session": callers then raise AnchorAuthRequiredError and the
+      // seller is asked to reconnect, instead of every anchor call returning a
+      // 500. No token material is logged.
+      this.logger?.warn(
+        { event: "anchor_session.undecryptable", sellerId, anchorDomain },
+        "stored anchor session could not be decrypted; dropping it",
+      );
+      await this.delete(sellerId, anchorDomain);
+      return null;
+    }
     return {
       sellerId: row.sellerId,
       anchorDomain: row.anchorDomain,
       account: row.account,
-      token: decryptSecret(row.tokenEncrypted),
+      token,
       expiresAt: row.expiresAt,
       createdAt: row.createdAt,
     };

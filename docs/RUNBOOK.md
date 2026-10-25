@@ -32,9 +32,9 @@ default.
 |---|---|---|
 | `DATABASE_URL` · `DATABASE_AUTH_TOKEN` | always (prod) | No persistence; falls back to a local SQLite file inside the container, which is destroyed on every deploy |
 | `KYC_ENCRYPTION_KEY` | `OFFRAMP=testanchor` | **Process will not boot.** `env.ts` resolves it with `req()` at module load and throws `Missing required env var: KYC_ENCRYPTION_KEY` |
-| `WEBHOOK_SECRET_ENCRYPTION_KEY` | `NODE_ENV=production` | **Process will not boot** (`createContainer()` calls `assertKeyConfigured()`). Before that check existed, it fell back to a hardcoded public dev key and 500'd on the first webhook registration |
-| `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveJwtSecret()` in `apps/api/src/services/container.ts:512` throws). On testnet: auto-generated per boot, so every restart and deploy logs every seller out |
-| `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveServerSigningKeypair()` in `apps/api/src/services/container.ts:489` throws). On testnet: auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | `NODE_ENV=production` | Encrypts webhook signing secrets **and** seller anchor session tokens. **Process will not boot** (`createContainer()` calls `assertKeyConfigured()`). Before that check existed, it fell back to a hardcoded public dev key and 500'd on the first webhook registration |
+| `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveJwtSecret()` in `apps/api/src/services/container.ts` throws). On testnet: auto-generated per boot, so every restart and deploy logs every seller out |
+| `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveServerSigningKeypair()` in `apps/api/src/services/container.ts` throws). On testnet: auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
 | `DEFAULT_SELLER_WALLET` | never — optional everywhere | Multi-tenant: sellers supply their own wallet at SEP-10 login and links pay that address. Set it only to give `/health` a wallet to report a USDC trustline for; unset, that field reads `not_configured`. On testnet, unset auto-generates a throwaway seller so `pnpm dev` needs no config |
 | `HOME_DOMAIN` | any real deployment | Falls back to `localhost:8787`. SEP-10 challenges are issued for localhost and `stellar.toml` advertises `WEB_AUTH_ENDPOINT="https://localhost:8787/auth"` — **wallet login cannot work at all** |
 | `CORS_ORIGINS` | always | The browser refuses the dashboard's cross-origin calls |
@@ -403,11 +403,30 @@ corrupted data.
 - **`DEFAULT_SELLER_SECRET`**: not a server secret any more. The API never
   signs with it; each seller signs their own anchor login and withdrawals. If
   a deployment still has it set, unset it. Only the local demo scripts use it.
-- **Anchor sessions** (`anchor_sessions`): each seller's anchor JWT, encrypted
-  with `WEBHOOK_SECRET_ENCRYPTION_KEY`. Rotating that key makes the stored
-  tokens unreadable; sellers simply sign in to the anchor again. A seller who
-  changes wallet also has to sign in again — a session is only honoured for
-  the account it was issued to.
+- **`WEBHOOK_SECRET_ENCRYPTION_KEY`**: encrypts webhook signing secrets
+  (`webhooks.secret_encrypted`) and every seller's anchor bearer token
+  (`anchor_sessions.token_encrypted`). It has no previous-key slot, so
+  replacing it makes both unreadable (AES-GCM authentication fails). There is
+  no re-encryption tool. After redeploying with the new key:
+  - **Anchor sessions** are dropped and re-created. The first read of an
+    unreadable session deletes the row and logs `anchor_session.undecryptable`
+    (no token material); the caller then raises `anchor_auth_required` and the
+    seller signs in to the anchor again. A seller who changes wallet also has
+    to sign in again: a session is only honoured for the account it was issued
+    to.
+  - **Webhook secrets** must be re-issued. Deliveries to a webhook whose secret
+    cannot be decrypted are dead-lettered. Each seller rotates the secret with
+    `POST /webhooks/:id/rotate-secret`. That route never decrypts the old
+    value, so it works, and the unreadable old value is not used to sign during
+    the overlap window. The new secret is shown once.
+- **`KYC_ENCRYPTION_KEY`**: see the zero-downtime procedure above. Dropping the
+  old key before `pnpm kyc:rotate-key` has finished makes the stored identity
+  unreadable and sellers must resubmit it.
+- **`DEFAULT_SELLER_SECRET`** (see above) and **`SERVER_SIGNING_SECRET`**,
+  **`JWT_SECRET`**, **`METRICS_TOKEN`**, **`TELEMETRY_TOKEN`** and
+  **`REDIS_URL`**: rotate by changing the value and redeploying. The full
+  inventory, with what breaks and what survives for each, is in
+  [SECURITY.md](../SECURITY.md#secret-inventory-and-rotation).
 
 ## Anchor outage
 

@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AnchorSession } from "@checkout/core";
 import { createDb, bootstrap, type DB } from "../src/db/client";
 import { anchorSessions } from "../src/db/schema";
 import { DrizzleAnchorSessionRepository, DrizzleSellerRepository } from "../src/repos/index";
+import { __resetKeyCacheForTests } from "../src/services/secret-crypto";
 
 async function makeDb(): Promise<DB> {
   const { db, client } = createDb(":memory:");
@@ -50,6 +51,39 @@ describe("DrizzleAnchorSessionRepository", () => {
     expect(await repo.get("sel_1", "anchor.example")).toMatchObject({ account: "GSELLER2" });
     expect(await repo.get("sel_2", "anchor.example")).toMatchObject({ account: "GSELLER1" });
     expect(await repo.get("sel_1", "other.example")).toBeNull();
+  });
+
+  it("drops a session it can no longer decrypt after the encryption key changes, and answers null", async () => {
+    const db = await makeDb();
+    const original = process.env.WEBHOOK_SECRET_ENCRYPTION_KEY;
+    const warn = vi.fn();
+    const repo = new DrizzleAnchorSessionRepository(db, { warn } as never);
+    try {
+      process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = "1".repeat(64);
+      __resetKeyCacheForTests();
+      await repo.save(session());
+      expect(await repo.get("sel_1", "anchor.example")).toEqual(session());
+
+      process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = "2".repeat(64);
+      __resetKeyCacheForTests();
+      expect(await repo.get("sel_1", "anchor.example")).toBeNull();
+
+      expect(await db.select().from(anchorSessions)).toHaveLength(0);
+      expect(warn).toHaveBeenCalledWith(
+        { event: "anchor_session.undecryptable", sellerId: "sel_1", anchorDomain: "anchor.example" },
+        expect.any(String),
+      );
+      // No token material in what was logged.
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("signature-of-a-seller-session");
+
+      // The seller can connect again under the new key.
+      await repo.save(session());
+      expect(await repo.get("sel_1", "anchor.example")).toEqual(session());
+    } finally {
+      if (original === undefined) delete process.env.WEBHOOK_SECRET_ENCRYPTION_KEY;
+      else process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = original;
+      __resetKeyCacheForTests();
+    }
   });
 
   it("forgets a session on sign-out", async () => {

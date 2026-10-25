@@ -180,7 +180,7 @@ export async function createContainer(): Promise<Container> {
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
-  const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db);
+  const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db, logger);
   const kycConsentsRepo = new DrizzleKycConsentRepository(db);
   const kycKeyring = env.kycEncryptionKey
     ? parsePiiKeyring(env.kycEncryptionKey, env.kycEncryptionKeyPrevious)
