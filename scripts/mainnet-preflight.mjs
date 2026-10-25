@@ -33,6 +33,9 @@ export const CIRCLE_USDC_ISSUER_PUBNET = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3
 
 export const PUBNET_HORIZON = "https://horizon.stellar.org";
 
+/** The network passphrase an anchor's stellar.toml must declare for a pubnet deployment. */
+export const PUBNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
+
 /** Min native balance we insist on: (2 + 1 trustline) * 0.5 base reserve = 1.5 XLM, plus fee headroom. */
 const MIN_XLM_BLOCKING = 2.5;
 const MIN_XLM_COMFORTABLE = 5;
@@ -354,6 +357,17 @@ async function getJson(url, timeoutMs = FETCH_TIMEOUT_MS) {
   }
 }
 
+async function getText(url, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { accept: "text/plain, application/json" } });
+    return { status: res.status, body: await res.text() };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function probeAccount(wallet, { horizon = PUBNET_HORIZON, fetchJson = getJson } = {}) {
   if (!wallet || !STELLAR_PUBLIC_KEY.test(wallet)) {
     return [skip("account", "no valid DEFAULT_SELLER_WALLET to look up")];
@@ -396,6 +410,191 @@ export async function probeDeploy(apiUrl, { fetchJson = getJson } = {}) {
     results.push(fail("live:ready", `Could not reach ${apiUrl}/ready (${err.message}).`));
   }
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// Anchor stellar.toml (SEP-1) — the one part of an anchor setup that is a fact
+// about the outside world. At runtime a failed or incomplete toml degrades
+// silently to guessed endpoints (packages/offramp/src/sep1.ts) and surfaces
+// only when the first seller tries to connect; this surfaces it before launch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal stellar.toml reader: top-level `KEY = "value"` pairs plus the `code`
+ * and `issuer` of every `[[CURRENCIES]]` block.
+ *
+ * Why not import `parseStellarToml` from packages/offramp/src/sep1.ts: this is
+ * a plain .mjs run by `node` with no build step, and that module is TypeScript
+ * (plus a workspace import of @checkout/core) that node cannot load. It also
+ * answers a different question: it substitutes guessed defaults for missing or
+ * non-https endpoints and drops each currency's issuer, which is exactly the
+ * information a preflight has to see raw. Same subset, same quoting rules.
+ */
+export function parseTomlForPreflight(text) {
+  const top = {};
+  const currencies = [];
+  let current = null;
+  // TOML puts top-level keys before the first table header; a key under any
+  // other table ([DOCUMENTATION], [[PRINCIPALS]]...) is not a top-level key.
+  let inTop = true;
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("[")) {
+      inTop = false;
+      current = /^\[\[\s*CURRENCIES\s*\]\]$/i.test(trimmed) ? {} : null;
+      if (current) currencies.push(current);
+      continue;
+    }
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = unquoteToml(trimmed.slice(eq + 1));
+    if (!value) continue;
+    if (current) {
+      if (key === "code" || key === "issuer") current[key] = value;
+    } else if (inTop && !(key in top)) {
+      top[key] = value;
+    }
+  }
+  return { top, currencies };
+}
+
+function unquoteToml(raw) {
+  const val = raw.trim();
+  const quote = val[0];
+  if (quote === '"' || quote === "'") {
+    const close = val.indexOf(quote, 1);
+    return close === -1 ? val.slice(1) : val.slice(1, close);
+  }
+  const hash = val.indexOf(" #");
+  return (hash === -1 ? val : val.slice(0, hash)).trim();
+}
+
+function hostOf(value) {
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** Endpoints the runtime needs from the toml. `aliases` are spellings sep1.ts also accepts. */
+const REQUIRED_TOML_ENDPOINTS = [
+  { key: "WEB_AUTH_ENDPOINT", aliases: ["WEB_AUTH_URL"], why: "SEP-10: sellers cannot connect to the anchor without it" },
+  { key: "KYC_SERVER", aliases: [], why: "SEP-12: seller KYC" },
+  { key: "TRANSFER_SERVER", aliases: [], why: "SEP-6: withdrawals" },
+  { key: "ANCHOR_QUOTE_SERVER", aliases: [], why: "SEP-38: quotes" },
+];
+
+/**
+ * Fetch and audit the configured anchor's stellar.toml. Runs only for
+ * OFFRAMP=anchor. `fetchText(url)` resolves `{ status, body }` (body is the
+ * response text) and is injectable so tests need no network.
+ */
+export async function checkAnchorToml(env, { fetchText = getText } = {}) {
+  if ((env.OFFRAMP ?? "mock") !== "anchor") return [];
+  const domain = env.ANCHOR_HOME_DOMAIN;
+  if (!domain) return [skip("anchor-toml", "ANCHOR_HOME_DOMAIN is unset (reported by the offramp check); nothing to fetch.")];
+  if (!/^[a-z0-9.-]+(:\d+)?$/i.test(domain)) {
+    return [fail("anchor-toml", `ANCHOR_HOME_DOMAIN "${domain}" is not a bare host name (no scheme or path).`)];
+  }
+
+  const url = `https://${domain}/.well-known/stellar.toml`;
+  let body;
+  try {
+    const res = await fetchText(url);
+    if (res.status !== 200) {
+      return [fail("anchor-toml:fetch", `${url} returned ${res.status}. At runtime this silently falls back to guessed endpoints and no seller can connect (SEP-10 refuses a fallback).`)];
+    }
+    body = res.body;
+  } catch (err) {
+    return [fail("anchor-toml:fetch", `Could not fetch ${url} (${err.message}). At runtime this silently falls back to guessed endpoints and no seller can connect.`)];
+  }
+  const { top, currencies } = parseTomlForPreflight(body);
+  const results = [pass("anchor-toml:fetch", `${url} → 200`)];
+
+  const signingKey = top.SIGNING_KEY;
+  if (!signingKey) {
+    results.push(fail("anchor-toml:signing-key", "stellar.toml has no SIGNING_KEY. Without it Quay cannot verify who signed a SEP-10 challenge and refuses to issue one."));
+  } else if (!STELLAR_PUBLIC_KEY.test(signingKey)) {
+    results.push(fail("anchor-toml:signing-key", `SIGNING_KEY "${signingKey}" is not a valid Stellar public key (G…, 56 characters).`));
+  } else {
+    results.push(pass("anchor-toml:signing-key", `SIGNING_KEY=${signingKey.slice(0, 6)}…${signingKey.slice(-4)}`));
+  }
+
+  const passphrase = top.NETWORK_PASSPHRASE;
+  if (!passphrase) {
+    // Quay's runtime only compares a passphrase the toml declares, so omission passes there silently.
+    results.push(fail("anchor-toml:network", `stellar.toml declares no NETWORK_PASSPHRASE, so nothing proves this anchor is on pubnet (the runtime only compares a passphrase that is declared). Expected "${PUBNET_PASSPHRASE}".`));
+  } else if (passphrase !== PUBNET_PASSPHRASE) {
+    results.push(fail("anchor-toml:network", `NETWORK_PASSPHRASE is "${passphrase}", not "${PUBNET_PASSPHRASE}". This anchor is not on the public network.`));
+  } else {
+    results.push(pass("anchor-toml:network", "NETWORK_PASSPHRASE is the public network"));
+  }
+
+  const anchorHost = hostOf(env.ANCHOR_URL ?? "");
+  const endpoints = {};
+  for (const { key, aliases, why } of REQUIRED_TOML_ENDPOINTS) {
+    const usedKey = [key, ...aliases].find((k) => top[k]);
+    const value = usedKey ? top[usedKey] : undefined;
+    const id = `anchor-toml:${key}`;
+    if (!value) {
+      results.push(fail(id, `stellar.toml has no ${key} (${why}).`));
+      continue;
+    }
+    endpoints[key] = value;
+    const host = hostOf(value);
+    if (!host || !value.startsWith("https://")) {
+      results.push(fail(id, `${key} "${value}" is not an https:// URL. Quay ignores non-https endpoints (the seller's SEP-10 token is sent there).`));
+    } else if (anchorHost && host !== anchorHost) {
+      results.push(warn(id, `${key} is on ${host}, but ANCHOR_URL is on ${anchorHost}. Confirm this is the same operator.`));
+    } else {
+      results.push(pass(id, `${key}=${value}`));
+    }
+  }
+
+  const usdc = currencies.filter((c) => c.code === "USDC");
+  if (usdc.some((c) => c.issuer === CIRCLE_USDC_ISSUER_PUBNET)) {
+    results.push(pass("anchor-toml:usdc", "[[CURRENCIES]] lists USDC with Circle's pubnet issuer"));
+  } else if (usdc.length === 0) {
+    results.push(fail("anchor-toml:usdc", "[[CURRENCIES]] has no USDC entry, so the anchor does not advertise the asset sellers cash out."));
+  } else {
+    const issuers = usdc.map((c) => c.issuer ?? "(no issuer)").join(", ");
+    results.push(fail("anchor-toml:usdc", `[[CURRENCIES]] lists USDC from ${issuers}, not Circle's ${CIRCLE_USDC_ISSUER_PUBNET}. A different issuer's USDC is a different asset.`));
+  }
+
+  results.push(await checkAnchorInfo(env, endpoints.TRANSFER_SERVER, fetchText));
+  return results;
+}
+
+/** Warning-level look at SEP-6 `/info`: is USDC withdraw on, and is there a type for Quay to pick? */
+async function checkAnchorInfo(env, transferServer, fetchText) {
+  const id = "anchor-toml:withdraw-info";
+  if (!transferServer || !transferServer.startsWith("https://")) {
+    return skip(id, "no usable TRANSFER_SERVER to ask for /info");
+  }
+  const infoUrl = `${transferServer.replace(/\/+$/, "")}/info`;
+  let info;
+  try {
+    const res = await fetchText(infoUrl);
+    if (res.status !== 200) return warn(id, `${infoUrl} returned ${res.status}; could not confirm USDC withdrawals are enabled.`);
+    info = JSON.parse(res.body);
+  } catch (err) {
+    return warn(id, `Could not read ${infoUrl} (${err.message}); USDC withdrawals unconfirmed.`);
+  }
+  const usdc = info?.withdraw?.USDC;
+  if (!usdc?.enabled) {
+    return warn(id, `${infoUrl} does not list USDC withdraw as enabled; cash-outs would be refused.`);
+  }
+  const types = usdc.types && typeof usdc.types === "object" ? Object.keys(usdc.types) : [];
+  if (env.OFFRAMP_TYPE && types.length > 0 && !types.includes(env.OFFRAMP_TYPE)) {
+    return warn(id, `OFFRAMP_TYPE="${env.OFFRAMP_TYPE}" is not a USDC withdraw type the anchor offers (${types.join(", ")}).`);
+  }
+  if (types.length > 1 && !env.OFFRAMP_TYPE) {
+    return warn(id, `The anchor offers ${types.length} USDC withdraw types (${types.join(", ")}) and OFFRAMP_TYPE is unset; each seller will have to choose.`);
+  }
+  return pass(id, `USDC withdraw enabled${types.length ? ` (types: ${types.join(", ")})` : ""}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +645,7 @@ async function main() {
   if (!apiUrl || localConfigPresent) {
     results.push(...runStaticChecks(processEnv));
     results.push(...(await probeAccount(processEnv.DEFAULT_SELLER_WALLET)));
+    results.push(...(await checkAnchorToml(processEnv)));
   } else {
     results.push(
       skip(

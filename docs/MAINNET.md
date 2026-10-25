@@ -286,6 +286,27 @@ It exits non-zero only on blocking findings; warnings are printed but do not
 fail the run. Read them anyway — `REDIS_URL` is the one that decides whether you
 may run more than one instance.
 
+With `OFFRAMP=anchor` it also fetches the anchor's
+`https://$ANCHOR_HOME_DOMAIN/.well-known/stellar.toml` (SEP-1) and audits it,
+because at runtime a missing or incomplete toml degrades to guessed endpoints
+and only shows up when the first seller taps "Connect to anchor". These block:
+
+| Check | Fails when |
+| --- | --- |
+| `anchor-toml:fetch` | the toml is unreachable or not a 200 |
+| `anchor-toml:signing-key` | `SIGNING_KEY` is missing or not a `G...` public key |
+| `anchor-toml:network` | `NETWORK_PASSPHRASE` is missing (the runtime lets that through silently) or is not `Public Global Stellar Network ; September 2015` |
+| `anchor-toml:WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `TRANSFER_SERVER`, `ANCHOR_QUOTE_SERVER` | the endpoint is missing or not `https://` (it is only a warning if its host differs from `ANCHOR_URL`) |
+| `anchor-toml:usdc` | `[[CURRENCIES]]` has no `code = "USDC"` entry with Circle's pubnet issuer |
+
+`anchor-toml:withdraw-info` is a warning only: it reads `{TRANSFER_SERVER}/info`
+and flags USDC withdraw not enabled, several withdraw types offered with
+`OFFRAMP_TYPE` unset, or an `OFFRAMP_TYPE` the anchor does not offer. As a
+sanity check, pointing it at the sandbox
+(`STELLAR_NETWORK=public OFFRAMP=anchor ANCHOR_URL=https://testanchor.stellar.org
+ANCHOR_HOME_DOMAIN=testanchor.stellar.org pnpm preflight:mainnet`) should fail
+`anchor-toml:network`.
+
 Then work down this list against the deployed mainnet service. Stop at the
 first failure.
 
