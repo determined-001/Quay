@@ -117,6 +117,16 @@ export function toProfileView(res: ProfileResponse): ProfileView {
 }
 
 /** Disclosure metadata only. Field values must never appear in this response. */
+/** What the seller lets the anchor's SEP-24 form open pre-filled with (issue 3.17). Names only. */
+export interface PrefillConsentView {
+  anchorDomain: string;
+  /** Allowlisted SEP-9 names the seller has a value for. */
+  available: string[];
+  /** The names they agreed to share. */
+  fields: string[];
+  grantedAt: number | null;
+}
+
 export interface KycDisclosure {
   anchorDomain: string;
   status: KycStatus;
@@ -652,6 +662,10 @@ export const api = {
    */
   exportMyData: (): Promise<Blob> =>
     http<Blob>("/seller/profile/export", { raw: true, headers: { accept: "application/json" } }),
+  getPrefillConsent: () => http<PrefillConsentView>("/seller/kyc/prefill-consent"),
+  /** Replaces the shared set; `[]` withdraws it. */
+  setPrefillConsent: (fields: string[]) =>
+    http<PrefillConsentView>("/seller/kyc/prefill-consent", { method: "PUT", body: JSON.stringify({ fields }) }),
   getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
   deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
     `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },

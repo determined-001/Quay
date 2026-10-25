@@ -7,6 +7,7 @@ import { useAnchorConnect } from "../../lib/anchor-session";
 import { useSellerWallet } from "./SessionGate";
 import { kycPanelStage, type KycLoadState } from "../../lib/kyc-load";
 import Sep9Input from "./Sep9Input";
+import PrefillConsent from "./PrefillConsent";
 import { checkSep9Value, todayIso } from "../../lib/sep9-input";
 
 function humanize(field: { name: string; description?: string }): string {
@@ -212,6 +213,7 @@ export default function KycPanel({
       <section className="panel">
         <h2>Identity verification</h2>
         <div className="kyc-note kyc-note--ok">Verified — you can cash out to local currency.</div>
+        <PrefillConsent anchorName={anchor?.anchor ?? "the anchor"} />
         {existingConsents.length > 0 && (
           <details style={{ marginTop: 16 }}>
             <summary style={{ cursor: "pointer", color: "var(--blue)" }}>Consent history</summary>
@@ -399,6 +401,7 @@ export default function KycPanel({
           {error}
         </div>
       )}
+      <PrefillConsent anchorName={anchor?.anchor ?? "the anchor"} />
       <p style={{ marginTop: 16, fontSize: 12, color: "var(--text-2, #6b7280)", textAlign: "center" }}>
         By submitting, you consent to share the above fields with the anchor. See our
         <Link href="/privacy" style={{ color: "var(--blue)" }}>Privacy Notice</Link>
