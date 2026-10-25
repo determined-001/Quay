@@ -10,7 +10,7 @@ import { getSep38Quote } from "../src/sep38";
 import { clearSep24InfoCache, getSep24Info } from "../src/sep24";
 import { parseStellarToml, requireTransferServerSep24 } from "../src/sep1";
 import { FakeOffRampStateRepository } from "./fake-state";
-import { LIVE_ENABLED, isHttpsOnAnchor, makeProbeKeypair, mergeProbeTelemetry, signedInAs } from "./live-probe";
+import { LIVE_ENABLED, makeProbeKeypair, mergeProbeTelemetry, signedInAs } from "./live-probe";
 
 const CUSTOMER = { sellerId: "seller-1", account: "GSELLERACCOUNT1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ" };
 const ALICE: AnchorCustomer = { sellerId: "seller-alice", account: Keypair.random().publicKey() };
@@ -644,7 +644,9 @@ describe.skipIf(!LIVE_ENABLED)("AnchorOffRamp SEP-24 (live)", () => {
     expect(initiation.kind).toBe("interactive");
     if (initiation.kind !== "interactive") return;
     expect(initiation.jobId).toBeTruthy();
-    expect(isHttpsOnAnchor(initiation.url, wiring.discovery.homeDomain)).toBe(true);
+    // SEP-24 lets an anchor host its interactive flow on any domain it controls
+    // (testanchor does not serve it from its home domain), so only require https.
+    expect(new URL(initiation.url).protocol).toBe("https:");
 
     const statusStarted = Date.now();
     const polled = await offramp.status(initiation.jobId);
