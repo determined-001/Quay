@@ -7,9 +7,10 @@ import type { AnchorCustomer } from "@checkout/core";
 import { AnchorOffRamp, mapSep24Status } from "../src/anchor";
 import type { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { getSep38Quote } from "../src/sep38";
-import { clearSep24InfoCache } from "../src/sep24";
+import { clearSep24InfoCache, getSep24Info } from "../src/sep24";
 import { parseStellarToml } from "../src/sep1";
 import { FakeOffRampStateRepository } from "./fake-state";
+import { LIVE_ENABLED, isHttpsOnAnchor, makeProbeKeypair, mergeProbeTelemetry, signedInAs } from "./live-probe";
 
 const CUSTOMER = { sellerId: "seller-1", account: "GSELLERACCOUNT1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ" };
 const ALICE: AnchorCustomer = { sellerId: "seller-alice", account: Keypair.random().publicKey() };
@@ -595,4 +596,63 @@ describe("AnchorOffRamp (offline)", () => {
 
     expect(offenders).toEqual([]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Live SEP-24 probe (issue 8.16). Runs only with RUN_LIVE_ANCHOR_TESTS=1, like
+// testanchor.test.ts, and is part of the nightly anchor-probe workflow.
+//
+// The seller's wallet key signs the SEP-10 challenge (SELLER_SECRET_KEY, else a
+// throwaway key); AnchorOffRamp itself holds no key. It deliberately stops at
+// the anchor's hosted interactive page: that form needs a human, so the probe
+// proves the anchor still hands one out, not that a withdrawal completes.
+// ---------------------------------------------------------------------------
+describe.skipIf(!LIVE_ENABLED)("AnchorOffRamp SEP-24 (live)", () => {
+  it("SEP-24: /sep24/info lists USDC withdraw as enabled", async () => {
+    const wiring = (await signedInAs(makeProbeKeypair())).wiring;
+    const discovered = await wiring.discovery.get();
+    clearSep24InfoCache(discovered.transferServerSep24);
+
+    const info = await getSep24Info(discovered.transferServerSep24);
+
+    expect(info.withdraw.USDC?.enabled).toBe(true);
+  }, 60_000);
+
+  it("SEP-24: initiate() returns an interactive https URL on the anchor, and status() is pending/incomplete", async () => {
+    const { wiring, customer } = await signedInAs(makeProbeKeypair());
+    const state = new FakeOffRampStateRepository();
+    const offramp = new AnchorOffRamp({ discovery: wiring.discovery, auth: wiring.auth, state });
+
+    const quote = await offramp.quote({
+      linkId: "probe-sep24",
+      sourceAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+      sourceAmount: "10",
+      targetCurrency: "USD",
+      customer,
+    });
+
+    const initiateStarted = Date.now();
+    const initiation = await offramp.initiate({
+      linkId: "probe-sep24",
+      quoteId: quote.quoteId,
+      payout: { currency: "USD", fields: {} },
+      customer,
+    });
+    const sep24InitiateLatencyMs = Date.now() - initiateStarted;
+    mergeProbeTelemetry({ sep24InitiateLatencyMs });
+
+    expect(initiation.kind).toBe("interactive");
+    if (initiation.kind !== "interactive") return;
+    expect(initiation.jobId).toBeTruthy();
+    expect(isHttpsOnAnchor(initiation.url, wiring.discovery.homeDomain)).toBe(true);
+
+    const statusStarted = Date.now();
+    const polled = await offramp.status(initiation.jobId);
+    const sep24StatusLatencyMs = Date.now() - statusStarted;
+    mergeProbeTelemetry({ sep24StatusLatencyMs });
+
+    // The seller has not opened the hosted form, so the anchor has nothing to wait on yet.
+    expect(polled.status).toBe("pending");
+    expect((await state.getJob(initiation.jobId))?.externalStatus).toBe("incomplete");
+  }, 90_000);
 });

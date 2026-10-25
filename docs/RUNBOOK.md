@@ -273,7 +273,8 @@ marked paid late, not lost. Buying `starter` is what actually removes the
 problem.
 
 **Turning the anchor probe off.** `.github/workflows/anchor-probe.yml` runs a
-nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org`.
+nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow, plus the SEP-24 interactive path
+(`/sep24/info`, then `initiate()` returning an https interactive URL on the anchor), against `testanchor.stellar.org`.
 When it fails it files (or comments on) an issue **and** fails the run, so the
 Actions list and the README badge go red. It covers the testnet cash-out path,
 which exists whatever mainnet does, and it is the only live check of that path:

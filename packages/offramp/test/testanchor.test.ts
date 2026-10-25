@@ -1,11 +1,17 @@
-import { Keypair, Networks, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
-import { existsSync, writeFileSync } from "node:fs";
+import { Keypair } from "@stellar/stellar-sdk";
+import { existsSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OffRampJobNotFoundError, type AnchorCustomer, type Logger } from "@checkout/core";
-import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { AnchorTimeoutError } from "../src/http";
 import { SEP6_STATUS_MAP, TESTANCHOR_BASE_URL, TESTANCHOR_HOME_DOMAIN, TestAnchorOffRamp } from "../src/testanchor";
-import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
+import { FakeOffRampStateRepository } from "./fake-state";
+import {
+  USDC_TESTNET_ISSUER,
+  anchorWiring,
+  makeProbeKeypair as makeKeypair,
+  mergeProbeTelemetry,
+  signedInAs as signedIn,
+} from "./live-probe";
 
 // These hit the real https://testanchor.stellar.org sandbox. Off by default —
 // it's a shared external service, not something CI should depend on. Run with:
@@ -13,25 +19,10 @@ import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-
 //
 // In CI (or locally) you can supply a specific funded testnet keypair via
 //   SELLER_SECRET_KEY=<secret>  — otherwise a random keypair is used.
-const USDC_TESTNET_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 const ANCHOR_BASE_URL = TESTANCHOR_BASE_URL;
 
 /** The withdraw type the live suite cashes out through. */
 export const LIVE_WITHDRAW_TYPE = process.env.OFFRAMP_TYPE ?? "bank_account";
-
-function makeKeypair(): Keypair {
-  if (process.env.SELLER_SECRET_KEY) {
-    return Keypair.fromSecret(process.env.SELLER_SECRET_KEY);
-  }
-  return Keypair.random();
-}
-
-function anchorWiring() {
-  const discovery = new AnchorDiscovery({ homeDomain: TESTANCHOR_HOME_DOMAIN, fallbackBaseUrl: TESTANCHOR_BASE_URL });
-  const sessions = new FakeAnchorSessionRepository();
-  const auth = new SellerAnchorAuth({ discovery, sessions, networkPassphrase: Networks.TESTNET });
-  return { discovery, auth, sessions };
-}
 
 function makeOffRamp(state = new FakeOffRampStateRepository(), wiring = anchorWiring()) {
   // testanchor offers more than one USDC withdraw type; the adapter refuses to
@@ -86,16 +77,6 @@ function stubTransaction(status: string, message?: string) {
       return Response.json({ transaction: { id: "t1", status, message } });
     }),
   );
-}
-
-/** Sign the live anchor's challenge with the seller's key, as their wallet would in the browser. */
-async function signedIn(wallet: Keypair, wiring = anchorWiring()) {
-  const customer: AnchorCustomer = { sellerId: "sel_live", account: wallet.publicKey() };
-  const { transaction } = await wiring.auth.challenge(customer);
-  const tx = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
-  tx.sign(wallet);
-  await wiring.auth.complete(customer, tx.toXDR());
-  return { wiring, customer };
 }
 
 describe("TestAnchorOffRamp (offline)", () => {
@@ -382,7 +363,8 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
   it("emits probe telemetry", () => {
     expect(telemetry.rate).toBeDefined();
     expect(telemetry.quoteLatencyMs).toBeDefined();
-    writeFileSync("probe-telemetry.json", JSON.stringify(telemetry, null, 2), "utf-8");
+    // Merged, not overwritten: the SEP-24 suite and the full cash-out suite record into the same file.
+    mergeProbeTelemetry(telemetry);
     expect(existsSync("probe-telemetry.json")).toBe(true);
   });
 });

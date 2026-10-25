@@ -35,7 +35,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: SEP-1 → SEP-10 → SEP-38 → SEP-6 live probe
+      - name: SEP-1 → SEP-10 → SEP-38 → SEP-6 and SEP-24 live probe
         id: probe
         continue-on-error: true
         env:
@@ -55,6 +55,10 @@ jobs:
           echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
           exit ${EXIT_CODE}
 
+      - name: Name the failing suites
+        if: steps.probe.outputs.exit_code != '0'
+        run: node scripts/anchor-probe-report.mjs failing-suites.md probe-output.txt
+
       - name: Publish telemetry summary
         if: always()
         run: |
@@ -69,9 +73,13 @@ jobs:
               RATE=$(jq -r '.rate // "N/A"' "${TELEMETRY}")
               QUOTE_LATENCY=$(jq -r '.quoteLatencyMs // "N/A"' "${TELEMETRY}")
               WITHDRAW_LATENCY=$(jq -r '.withdrawLatencyMs // "N/A"' "${TELEMETRY}")
+              SEP24_INITIATE=$(jq -r '.sep24InitiateLatencyMs // "N/A"' "${TELEMETRY}")
+              SEP24_STATUS=$(jq -r '.sep24StatusLatencyMs // "N/A"' "${TELEMETRY}")
               echo "| Quoted rate (USDC→USD) | ${RATE} |"
               echo "| SEP-38 quote latency | ${QUOTE_LATENCY}ms |"
               echo "| SEP-6 status poll latency | ${WITHDRAW_LATENCY}ms |"
+              echo "| SEP-24 initiate latency | ${SEP24_INITIATE}ms |"
+              echo "| SEP-24 status poll latency | ${SEP24_STATUS}ms |"
             else
               echo "| Status | No telemetry emitted (probe may have failed before measurement) |"
             fi
@@ -89,6 +97,7 @@ jobs:
           name: probe-results
           path: |
             probe-output.txt
+            failing-suites.md
             packages/offramp/probe-telemetry.json
           retention-days: 7
 
@@ -102,6 +111,9 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
+            const fs = require("fs");
+            let whatBroke = "See the failed run for details.";
+            try { whatBroke = fs.readFileSync("failing-suites.md", "utf8").trim(); } catch {}
             const label = "anchor-probe";
             const issueTitle = "⚠️ Nightly anchor probe failed";
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
@@ -109,7 +121,9 @@ jobs:
             const body = `The nightly [anchor probe](${runUrl}) against \`testanchor.stellar.org\` failed.
 
             ### What broke
-            The SEP-1 → SEP-10 → SEP-38 → SEP-6 live flow is not completing successfully. Check the [failed run](${runUrl}) for details.
+            ${whatBroke}
+
+            The probe covers SEP-1 → SEP-10 → SEP-38 → SEP-6 and the SEP-24 interactive path. Check the [failed run](${runUrl}) for details.
 
             ### Impact
             - The testanchor sandbox off-ramp demo may be broken.
