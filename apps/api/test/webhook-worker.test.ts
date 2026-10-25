@@ -211,6 +211,18 @@ describe("WebhookWorker", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("dead-letters a queued entry for a soft-deleted webhook without making an HTTP request", async () => {
+    const { repo, hook, sender } = await seed();
+    await sender.enqueue([hook], "lnk_1", { event: "link.paid", data: {} });
+    await repo.softDelete(hook.id, hook.sellerId);
+
+    await makeWorker(repo, sender).runOnce();
+
+    expect(repo.queue[0]!.status).toBe("dead");
+    expect(repo.queue[0]!.lastError).toBe("webhook deleted");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("counts undelivered rows for the queue-depth gauge", async () => {
     const { repo, hook, sender } = await seed();
     await sender.enqueue([hook, hook], "lnk_1", { event: "link.paid", data: {} });

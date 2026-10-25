@@ -116,6 +116,15 @@ export class WebhookWorker {
       return;
     }
 
+    if (hook.deletedAt !== null) {
+      // Soft-deleted after enqueue (the merchant removed the endpoint, maybe
+      // because it was compromised): queued events must not still reach it,
+      // and a replay must not revive traffic to it.
+      this.log(`queue ${short(entry.id)}: webhook ${short(entry.webhookId)} was deleted, dead-lettering`);
+      await this.finalise(entry, attemptNumber, null, false, "webhook deleted", "dead");
+      return;
+    }
+
     let outcome: DeliveryOutcome;
     try {
       outcome = await this.sender.deliverOnce(hook, entry.event, entry.payload);
