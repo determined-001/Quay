@@ -43,7 +43,7 @@ function makeService(opts: {
   kyc?: KycPort;
   telemetry?: FakeTelemetryRepository;
   interactiveTimeoutMs?: number;
-  hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean;
+  hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean | Promise<boolean>;
 }): LinkService {
   return new LinkService({
     links: opts.links,
@@ -432,7 +432,7 @@ describe("LinkService.pollCashOuts", () => {
       links,
       offramp,
       offrampState,
-      hasLiveAnchorSession: () => false,
+      hasLiveAnchorSession: async () => false, // async, like the real session lookup
     });
     await service.pollCashOuts();
     await service.pollCashOuts();

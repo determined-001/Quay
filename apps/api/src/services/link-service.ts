@@ -161,7 +161,7 @@ export class LinkService {
        * `AnchorAuthRequiredError`. Injected so LinkService stays independent
        * of the offramp package; omitted when no anchor session store exists.
        */
-      hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean;
+      hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean | Promise<boolean>;
       /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
       logger?: Logger;
     },
@@ -1124,7 +1124,7 @@ export class LinkService {
     // change until they re-authenticate, so skip without calling status().
     // Legacy rows with no seller/account cannot be checked and fall through.
     if (this.deps.hasLiveAnchorSession && before?.sellerId && before.account) {
-      if (!this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account })) {
+      if (!(await this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account }))) {
         await this.blockOnAnchorAuth(link, child);
         return;
       }
