@@ -18,7 +18,7 @@ The operator of this Quay deployment is the data controller. The deployer must f
 | **Data Protection Officer** | `[DPO NAME AND CONTACT]` |
 | **NDPA Registration Number** | `[NDPC REGISTRATION NUMBER, IF APPLICABLE]` |
 
-**NOTICE_VERSION:** `2024.1` — the version of this notice (`NOTICE_VERSION` in `apps/web/app/privacy/page.tsx`); increment it when the notice changes materially. It is not yet what consent records store: `POST /seller/kyc/consent` currently writes a fixed `notice_version` of `1.0` into `kyc_consents` (issue 4.26), which is what `GET /seller/profile/export` and `docs/API.md` show.
+**NOTICE_VERSION:** `2026.1` — the version of this notice (`NOTICE_VERSION` in `apps/web/app/privacy/page.tsx`); increment it when the notice changes materially. It is not yet what consent records store: `POST /seller/kyc/consent` currently writes a fixed `notice_version` of `1.0` into `kyc_consents` (issue 4.26), which is what `GET /seller/profile/export` and `docs/API.md` show.
 
 ---
 
@@ -152,4 +152,4 @@ For questions or to exercise rights:
 
 ---
 
-*Last updated: 2024. Generated from `docs/PRIVACY.md`. NOTICE_VERSION: `2024.1`.*
+*Last updated: 2026. Generated from `docs/PRIVACY.md`. NOTICE_VERSION: `2026.1`.*

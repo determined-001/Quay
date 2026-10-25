@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-export const NOTICE_VERSION = "2024.1";
+export const NOTICE_VERSION = "2026.1";
 
 export default function PrivacyPage() {
   const [loaded, setLoaded] = useState(false);
@@ -29,7 +29,7 @@ export default function PrivacyPage() {
       <header style={{ marginBottom: 32, borderBottom: "1px solid var(--border)", paddingBottom: 16 }}>
         <h1 style={{ margin: 0, fontSize: 28 }}>Privacy Notice</h1>
         <p className="muted" style={{ marginTop: 8, fontSize: 14 }}>
-          Last updated: 2024 | Notice version: {NOTICE_VERSION}
+          Last updated: 2026 | Notice version: {NOTICE_VERSION}
         </p>
         <p className="muted" style={{ marginTop: 8, fontSize: 14, fontStyle: "italic" }}>
           <strong>This document is a template. It is not legal advice.</strong> Deployers must review and adapt it with qualified counsel before use.
@@ -115,8 +115,8 @@ export default function PrivacyPage() {
               <td style={{ padding: 8 }}>Reuse bank details on cash-out</td>
               <td style={{ padding: 8 }}>Contract</td>
               <td style={{ padding: 8 }}>Anchor, Host, DB</td>
-              <td style={{ padding: 8 }}>Indefinite</td>
-              <td style={{ padding: 8 }}>Account deletion</td>
+              <td style={{ padding: 8 }}>Until erased or inactivity sweep</td>
+              <td style={{ padding: 8 }}>Erase my identity data</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Payout fields (encrypted)</td>
@@ -125,8 +125,8 @@ export default function PrivacyPage() {
               <td style={{ padding: 8 }}>Reuse bank details on cash-out</td>
               <td style={{ padding: 8 }}>Contract</td>
               <td style={{ padding: 8 }}>Anchor, Host, DB</td>
-              <td style={{ padding: 8 }}>Indefinite</td>
-              <td style={{ padding: 8 }}>Account deletion</td>
+              <td style={{ padding: 8 }}>Until erased or inactivity sweep</td>
+              <td style={{ padding: 8 }}>Erase my identity data</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>KYC fields</td>
@@ -135,8 +135,8 @@ export default function PrivacyPage() {
               <td style={{ padding: 8 }}>Anchor SEP-12 KYC compliance</td>
               <td style={{ padding: 8 }}>Contract; Legal obligation</td>
               <td style={{ padding: 8 }}>Anchor, Host, DB</td>
-              <td style={{ padding: 8 }}>Indefinite</td>
-              <td style={{ padding: 8 }}>KYC erasure (4.28)</td>
+              <td style={{ padding: 8 }}>Until erased or inactivity sweep</td>
+              <td style={{ padding: 8 }}>Erase my identity data</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Anchor customer ID</td>
@@ -145,8 +145,8 @@ export default function PrivacyPage() {
               <td style={{ padding: 8 }}>Reference to anchor's record</td>
               <td style={{ padding: 8 }}>Contract</td>
               <td style={{ padding: 8 }}>Anchor, Host, DB</td>
-              <td style={{ padding: 8 }}>Indefinite</td>
-              <td style={{ padding: 8 }}>KYC erasure (4.28)</td>
+              <td style={{ padding: 8 }}>Until erased or inactivity sweep</td>
+              <td style={{ padding: 8 }}>Erase my identity data</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Anchor SEP-10 session token</td>
@@ -156,7 +156,7 @@ export default function PrivacyPage() {
               <td style={{ padding: 8 }}>Contract</td>
               <td style={{ padding: 8 }}>Anchor, Host, DB</td>
               <td style={{ padding: 8 }}>Until expiry (~24h)</td>
-              <td style={{ padding: 8 }}>Auto-expiry; revocation</td>
+              <td style={{ padding: 8 }}>Auto-expiry sweep; disconnect; Erase my identity data</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Payer wallet address</td>
@@ -271,13 +271,13 @@ export default function PrivacyPage() {
         <h2>5. Your Rights Under NDPA</h2>
         <p>As a data subject, you have the following rights:</p>
         <ul>
-          <li><strong>Access</strong> — Request a copy of all personal data via support email or the dashboard's "Export Data" (issue 4.27).</li>
+          <li><strong>Access</strong> — Use "Download my data" in the dashboard: a JSON file of your profile, KYC records, consents, disclosure history, anchor connections, saved payout details, links, payments, cash-outs, webhook URLs, API key names and the log of who read your identity data. It needs a signed-in session, is limited to 5 downloads per hour, and never contains tokens, secrets or key hashes.</li>
           <li><strong>Rectification</strong> — Update name/profile kind in dashboard; KYC fields updated via re-submission.</li>
-          <li><strong>Erasure</strong> — Request account deletion via support; KYC erasure (issue 4.28) removes KYC fields; wallet/payment records retained for audit.</li>
+          <li><strong>Erasure</strong> — Use "Erase my identity data" in the dashboard. You type your wallet address to confirm, Quay asks the anchor to erase its copy first, then deletes your profile, KYC records, consents, disclosure history and anchor sessions and clears saved payout fields. Payment history (public on the Stellar ledger), your links and payment records, your seller account, the access log and database backups (until they expire) are kept. Deleting the account itself is a separate request to the operator.</li>
           <li><strong>Restriction</strong> — Contact support to restrict processing of specific fields.</li>
-          <li><strong>Portability</strong> — Use "Export Data" (CSV) for payment records; KYC export (issue 4.27) for identity data.</li>
+          <li><strong>Portability</strong> — Use "Export CSV" for payment records and "Download my data" (JSON) for identity and account data.</li>
           <li><strong>Objection</strong> — Object to processing based on legitimate interest via support.</li>
-          <li><strong>Withdraw Consent</strong> — Revoke KYC consent for specific anchor in dashboard (issue 4.26).</li>
+          <li><strong>Withdraw Consent</strong> — Revoke KYC consent for a specific anchor in the dashboard.</li>
         </ul>
         <p className="muted" style={{ fontSize: 13 }}>
           We respond within 30 days as required by NDPA Section 34.
@@ -297,23 +297,23 @@ export default function PrivacyPage() {
           <tbody>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Seller account data (wallet, name, profile kind)</td>
-              <td style={{ padding: 8 }}>Indefinite while active</td>
-              <td style={{ padding: 8 }}>Seller account deletion request</td>
+              <td style={{ padding: 8 }}>Indefinite</td>
+              <td style={{ padding: 8 }}>Not removed by erasure or the inactivity sweep; account deletion is a separate request to the operator</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
-              <td style={{ padding: 8 }}>KYC fields</td>
-              <td style={{ padding: 8 }}>Indefinite while active</td>
-              <td style={{ padding: 8 }}>KYC erasure request or account deletion</td>
+              <td style={{ padding: 8 }}>KYC fields, anchor customer ID, reusable profile, disclosure history</td>
+              <td style={{ padding: 8 }}>Until erased, or until you have been inactive for 730 days (operator-configurable)</td>
+              <td style={{ padding: 8 }}>"Erase my identity data"; daily inactivity sweep (skips sellers with a cash-out in progress)</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Payout fields</td>
-              <td style={{ padding: 8 }}>Indefinite while active</td>
-              <td style={{ padding: 8 }}>Account deletion request</td>
+              <td style={{ padding: 8 }}>Until erased, or until the same inactivity period</td>
+              <td style={{ padding: 8 }}>"Erase my identity data"; daily inactivity sweep</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Anchor session tokens</td>
-              <td style={{ padding: 8 }}>Until expiry (~24h)</td>
-              <td style={{ padding: 8 }}>Auto-expiry; manual revocation</td>
+              <td style={{ padding: 8 }}>Until expiry (~24h); expired rows are deleted by an hourly sweep</td>
+              <td style={{ padding: 8 }}>Auto-expiry sweep; disconnect; "Erase my identity data"</td>
             </tr>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
               <td style={{ padding: 8 }}>Payment records (payer, amount, link)</td>
@@ -340,6 +340,16 @@ export default function PrivacyPage() {
               <td style={{ padding: 8 }}>30 days</td>
               <td style={{ padding: 8 }}>Backup rotation</td>
             </tr>
+            <tr style={{ borderBottom: "1px solid var(--border)" }}>
+              <td style={{ padding: 8 }}>Consent records</td>
+              <td style={{ padding: 8 }}>Until erased, or until the same inactivity period</td>
+              <td style={{ padding: 8 }}>"Erase my identity data"; daily inactivity sweep</td>
+            </tr>
+            <tr style={{ borderBottom: "1px solid var(--border)" }}>
+              <td style={{ padding: 8 }}>Access log (who read which identity field names, when; never values)</td>
+              <td style={{ padding: 8 }}>2 years</td>
+              <td style={{ padding: 8 }}>Daily sweep; not removed by erasure, so a breach can still be assessed</td>
+            </tr>
           </tbody>
         </table>
       </section>
@@ -365,8 +375,9 @@ export default function PrivacyPage() {
           <li><strong>Encryption in transit:</strong> All API/anchor traffic over HTTPS.</li>
           <li><strong>Pseudonymization:</strong> Seller wallet is a pseudonymous identifier; no email/phone stored.</li>
           <li><strong>Data minimisation:</strong> <code>selectFieldsForAnchor</code> (issue 4.25) sends only fields the anchor requests.</li>
+          <li><strong>Access audit:</strong> every read of your identity data through the API, and the cash-out gate's status check, is recorded with who did it and when (field names only, never values).</li>
           <li><strong>Purpose limitation:</strong> Each data item collected for a specific, documented purpose.</li>
-          <li><strong>Storage limitation:</strong> Retention schedule enforced; backups rotated.</li>
+          <li><strong>Storage limitation:</strong> Daily inactivity sweep for identity data, hourly anchor-session sweep, 2-year limit on the access log; backups rotated.</li>
         </ul>
       </section>
 
@@ -382,7 +393,7 @@ export default function PrivacyPage() {
       <hr style={{ margin: "32 0", borderColor: "var(--border)" }} />
       <footer style={{ fontSize: 13, color: "var(--text-2, #6b7280)" }}>
         <p>
-          <strong>NOTICE_VERSION:</strong> {NOTICE_VERSION} — This version is stored in consent records (issue 4.26).<br />
+          <strong>NOTICE_VERSION:</strong> {NOTICE_VERSION} — Consent records store the fixed value <code>1.0</code>.<br />
           <strong>This document is a template. It is not legal advice.</strong> Deployers must review and adapt it with qualified counsel before use.
         </p>
       </footer>
