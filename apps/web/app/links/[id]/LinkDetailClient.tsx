@@ -11,6 +11,7 @@ import {
 } from "../../../lib/api";
 import { TimelineClient, PendingTransferAction } from "./TimelineClient";
 import SessionGate from "../../components/SessionGate";
+import { addressUrl, explorerUrl } from "../../../lib/explorer";
 
 export interface TimelineEvent {
   id: string;
@@ -132,22 +133,6 @@ export function buildTimeline(
   }
 
   return events.sort((a, b) => a.time - b.time);
-}
-
-function explorerUrl(network: string, hash: string): string {
-  const base =
-    network === "public"
-      ? "https://stellar.expert/explorer/public"
-      : "https://stellar.expert/explorer/testnet";
-  return `${base}/tx/${hash}`;
-}
-
-function addressUrl(network: string, addr: string): string {
-  const base =
-    network === "public"
-      ? "https://stellar.expert/explorer/public"
-      : "https://stellar.expert/explorer/testnet";
-  return `${base}/account/${addr}`;
 }
 
 function formatTime(ts: number): string {
@@ -281,11 +266,6 @@ export function LinkDetailClient({ id }: { id: string }) {
   }
 
   const { link, deliveries, offrampPoll } = state;
-  const network =
-    (process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? process.env.STELLAR_NETWORK ?? "testnet") ===
-    "public"
-      ? "public"
-      : "testnet";
 
   const events = buildTimeline(link, deliveries, offrampPoll);
 
@@ -355,7 +335,7 @@ export function LinkDetailClient({ id }: { id: string }) {
                   <div className="tl-event-detail">
                     {ev.type === "paid" || ev.type === "underpaid" ? (
                       <a
-                        href={explorerUrl(network, ev.detail)}
+                        href={explorerUrl(ev.detail)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="mono explorer-link"
@@ -389,7 +369,7 @@ export function LinkDetailClient({ id }: { id: string }) {
                   <div className="tl-event-detail">
                     <span className="muted">Payer: </span>
                     <a
-                      href={addressUrl(network, ev.meta.payer)}
+                      href={addressUrl(ev.meta.payer)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="mono explorer-link"
@@ -425,7 +405,7 @@ export function LinkDetailClient({ id }: { id: string }) {
             <dt>Destination</dt>
             <dd className="mono">
               <a
-                href={addressUrl(network, link.destination)}
+                href={addressUrl(link.destination)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="explorer-link"
@@ -439,7 +419,7 @@ export function LinkDetailClient({ id }: { id: string }) {
               <dt>Transaction</dt>
               <dd className="mono">
                 <a
-                  href={explorerUrl(network, link.txHash)}
+                  href={explorerUrl(link.txHash)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="explorer-link"
