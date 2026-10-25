@@ -372,8 +372,9 @@ Render deploys `apps/api` as a single Docker web service. The starter plan is
 what keeps it always on; the free tier spins down after 15 min idle, which
 stops the watcher loop and cash-out poller until the next request. Both
 blueprints (`render.yaml`, `render.mainnet.yaml`) currently declare
-`plan: free`, so check the plan in the Render dashboard rather than assuming it. Pushing to `main` triggers Render's
-auto-deploy (configured in the Render dashboard, not in this repo). The web
+`plan: free`, so check the plan in the Render dashboard rather than assuming it.
+Pushing to a service's branch (`dev` for `quay-api`, `main` for `quay-api-mainnet`)
+triggers Render's auto-deploy. The web
 app deploys separately to Vercel.
 
 1. Confirm `pnpm typecheck && pnpm test && pnpm build` is green on `main`
