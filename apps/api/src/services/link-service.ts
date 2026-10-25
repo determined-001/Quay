@@ -40,6 +40,7 @@ import {
   type WithdrawTransfer,
 } from "@checkout/core";
 import {
+  AnchorConfigError,
   AnchorHttpError,
   Sep6ValidationError,
   anchorErrorSummary,
@@ -730,7 +731,7 @@ export class LinkService {
       });
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired(route);
-      if (err instanceof AnchorHttpError) throw anchorFailure(err, this.deps.logger!);
+      if (err instanceof AnchorHttpError || err instanceof AnchorConfigError) throw anchorFailure(err, this.deps.logger!);
       throw err;
     }
     if (status !== "ACCEPTED") throw new HttpError(403, "kyc_required");
@@ -1590,6 +1591,12 @@ export function anchorFailure(err: unknown, log: Logger): HttpError {
       availableTypes: [],
       ...anchorRejectionDetail(err),
     });
+  }
+  // The anchor refused a value the operator configured (SEP-12 type): not an
+  // outage and not the seller's to fix, so say so apart from `anchor_error`.
+  if (err instanceof AnchorConfigError) {
+    log.error({ event: "anchor.config_error", setting: err.setting, value: err.value }, err.message);
+    return new HttpError(502, "anchor_config_error", { message: err.message });
   }
   if (err instanceof AnchorHttpError) {
     log.error(

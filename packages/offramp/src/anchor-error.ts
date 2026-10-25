@@ -33,6 +33,23 @@ export class AnchorHttpError extends Error {
   }
 }
 
+/**
+ * The anchor refused a value the operator configured (today: the SEP-12
+ * `type`). Unlike an outage or a seller-specific rejection this will not go
+ * away on retry; the operator has to fix the configuration. The message only
+ * carries the operator's own configured value, never anything the anchor sent.
+ */
+export class AnchorConfigError extends Error {
+  constructor(
+    readonly setting: "sep12_type",
+    /** The rejected value, as configured. */
+    readonly value: string,
+  ) {
+    super(`anchor rejected SEP-12 type "${value}"`);
+    this.name = "AnchorConfigError";
+  }
+}
+
 /** Cuts `body` to {@link ANCHOR_ERROR_BODY_MAX_BYTES} bytes (UTF-8), marking the cut. */
 export function truncateAnchorBody(body: string, maxBytes: number = ANCHOR_ERROR_BODY_MAX_BYTES): string {
   const bytes = new TextEncoder().encode(body);

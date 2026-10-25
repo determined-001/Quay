@@ -39,6 +39,31 @@ describe("DrizzleKycRepository", () => {
     expect(await repo.get("sel_1", ANCHOR)).toEqual(record());
   });
 
+  it("keeps a separate record per SEP-12 type (issue 3.15)", async () => {
+    const repo = new DrizzleKycRepository(await makeDb(), randomBytes(32));
+    await repo.save(record({ status: "ACCEPTED" }));
+    await repo.save(record({ type: "sep6-business", status: "NEEDS_INFO", customerId: "cust_biz" }));
+
+    expect((await repo.get("sel_1", ANCHOR))?.status).toBe("ACCEPTED");
+    expect(await repo.get("sel_1", ANCHOR, null)).toMatchObject({ status: "ACCEPTED" });
+    expect(await repo.get("sel_1", ANCHOR, "sep6-business")).toMatchObject({
+      type: "sep6-business",
+      status: "NEEDS_INFO",
+      customerId: "cust_biz",
+    });
+    expect(await repo.get("sel_1", ANCHOR, "other")).toBeNull();
+
+    // Saving one type again updates only that type.
+    await repo.save(record({ type: "sep6-business", status: "ACCEPTED", customerId: "cust_biz" }));
+    expect((await repo.get("sel_1", ANCHOR))?.status).toBe("ACCEPTED");
+    expect((await repo.get("sel_1", ANCHOR, "sep6-business"))?.status).toBe("ACCEPTED");
+    expect(await repo.list("sel_1")).toHaveLength(2);
+
+    // Erasing an anchor erases every type held for it.
+    await repo.delete("sel_1", ANCHOR);
+    expect(await repo.list("sel_1")).toHaveLength(0);
+  });
+
   it("looks up a record by callbackTokenHash", async () => {
     const db = await makeDb();
     const repo = new DrizzleKycRepository(db, randomBytes(32));

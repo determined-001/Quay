@@ -703,6 +703,9 @@ function createKyc(
     repo,
     profileRepo,
     callbackBaseUrl,
+    kycType: env.anchorKycType,
+    kycTypeOrganization: env.anchorKycTypeOrganization,
+    profileKindOf: async (sellerId) => (await sellersRepo.findById(sellerId))?.profileKind ?? null,
     logger,
   });
   if (webhooks && sender && anchorDomain) {

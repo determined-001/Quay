@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AnchorHttpError } from "../src/anchor-error";
+import { AnchorConfigError, AnchorHttpError } from "../src/anchor-error";
 import {
   deleteSep12Customer,
   getSep12Customer,
@@ -457,5 +457,114 @@ describe("putSep12CustomerMultipart", () => {
       expect(err.message).not.toContain(anchorBody);
       expect(err.body).toBe(anchorBody);
     });
+  });
+});
+
+describe("SEP-12 customer type (issue 3.15)", () => {
+  const TYPE_ERROR = { error: "unrecognized 'type' value. see valid values in the /info response" };
+
+  it("GET carries ?type= on the id lookup and on the account fallback", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("stale", { status: 404 }))
+      .mockResolvedValueOnce(jsonResponse({ id: "cust_2", status: "NEEDS_INFO" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_1", type: "sep31-receiver" });
+
+    const urls = fetchMock.mock.calls.map((c) => new URL(String(c[0])));
+    expect(urls[0]!.searchParams.get("id")).toBe("cust_1");
+    expect(urls[0]!.searchParams.get("type")).toBe("sep31-receiver");
+    expect(urls[1]!.searchParams.get("account")).toBe(ACCOUNT);
+    expect(urls[1]!.searchParams.get("type")).toBe("sep31-receiver");
+  });
+
+  it("GET leaves the request unchanged when no type is configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1", status: "ACCEPTED" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+
+    const url = new URL(String(fetchMock.mock.calls[0]![0]));
+    expect(url.searchParams.has("type")).toBe(false);
+    expect([...url.searchParams.keys()]).toEqual(["account"]);
+  });
+
+  it("PUT carries type in the body, and a field named type cannot override it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Customer(BASE_URL, JWT, {
+      account: ACCOUNT,
+      fields: { first_name: "Ada", type: "other" },
+      type: "sep31-receiver",
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ account: ACCOUNT, first_name: "Ada", type: "sep31-receiver" });
+  });
+
+  it("PUT body has no type key when none is configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: { first_name: "Ada" } });
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect("type" in JSON.parse(init.body as string)).toBe(false);
+  });
+
+  it("the multipart PUT carries type before the files, and omits it when unset", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ id: "cust_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const files = [{ name: "photo_id_front", blob: new Blob(["x"]), filename: "front.jpg" }];
+
+    await putSep12CustomerMultipart(BASE_URL, JWT, { account: ACCOUNT, files, type: "sep31-receiver" });
+    await putSep12CustomerMultipart(BASE_URL, JWT, { account: ACCOUNT, files });
+
+    const typed = (fetchMock.mock.calls[0]![1] as RequestInit).body as FormData;
+    expect([...typed.keys()]).toEqual(["account", "type", "photo_id_front"]);
+    expect(typed.get("type")).toBe("sep31-receiver");
+    const untyped = (fetchMock.mock.calls[1]![1] as RequestInit).body as FormData;
+    expect(untyped.has("type")).toBe(false);
+  });
+
+  it.each([
+    ["GET", () => getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, type: "bogus" })],
+    ["PUT", () => putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {}, type: "bogus" })],
+    [
+      "PUT (files)",
+      () =>
+        putSep12CustomerMultipart(BASE_URL, JWT, {
+          account: ACCOUNT,
+          files: [{ name: "photo_id_front", blob: new Blob(["x"]), filename: "f.jpg" }],
+          type: "bogus",
+        }),
+    ],
+  ])("a 400 about the type on %s becomes an AnchorConfigError naming the type", async (_op, call) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(TYPE_ERROR, 400)));
+    const err = await call().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AnchorConfigError);
+    expect((err as AnchorConfigError).message).toBe('anchor rejected SEP-12 type "bogus"');
+    expect((err as AnchorConfigError).value).toBe("bogus");
+  });
+
+  it("a 400 that is not about the type stays a plain AnchorHttpError", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "bad first_name" }, 400)));
+    await expect(putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {}, type: "t" })).rejects.toBeInstanceOf(
+      AnchorHttpError,
+    );
+  });
+
+  it("without a configured type, a 400 mentioning type is not blamed on configuration", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(TYPE_ERROR, 400)));
+    await expect(getSep12Customer(BASE_URL, JWT, { account: ACCOUNT })).rejects.toBeInstanceOf(AnchorHttpError);
+  });
+
+  it("a non-400 failure with a type configured is still an AnchorHttpError", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(TYPE_ERROR, 500)));
+    await expect(getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, type: "t" })).rejects.toBeInstanceOf(
+      AnchorHttpError,
+    );
   });
 });

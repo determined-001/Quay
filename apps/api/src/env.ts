@@ -149,6 +149,18 @@ if (anchorUrl && !/^https:\/\//.test(anchorUrl) && network === "public") {
   throw new Error(`ANCHOR_URL must be https:// on public network, got "${anchorUrl}"`);
 }
 
+// SEP-12 customer `type` (issue 3.15). Anchors that key their KYC requirements
+// on a customer type need it on every GET/PUT /customer; unset sends none.
+function kycTypeFromEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  if (!value) return undefined;
+  if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(value)) {
+    throw new Error(`${name} must be 1-64 characters of letters, digits and _ . : - (got "${value}")`);
+  }
+  return value;
+}
+const anchorKycType = kycTypeFromEnv("ANCHOR_KYC_TYPE");
+const anchorKycTypeOrganization = kycTypeFromEnv("ANCHOR_KYC_TYPE_ORGANIZATION");
 
 /**
  * The domain this service identifies as in SEP-10 challenges and in
@@ -248,6 +260,9 @@ export const env = {
   // Preferred SEP-6 withdrawal type (e.g. "bank_account"). Unset means "read
   // /sep6/info and use the only enabled type, or refuse if there are several".
   offrampType: process.env.OFFRAMP_TYPE || undefined,
+  // SEP-12 customer type, a different concept from OFFRAMP_TYPE above.
+  anchorKycType,
+  anchorKycTypeOrganization,
   // FX rate source for anchors with no ANCHOR_QUOTE_SERVER (issue 3.22). Real
   // anchors mostly do not implement SEP-38, so this is what makes them quotable
   // at all. Unset = only SEP-38 is used, and an anchor without one refuses to

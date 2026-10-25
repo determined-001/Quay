@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { Logger } from "@checkout/core";
-import { AnchorChallengeError, AnchorHttpError, type SellerAnchorAuth } from "@checkout/offramp";
+import { AnchorChallengeError, AnchorConfigError, AnchorHttpError, type SellerAnchorAuth } from "@checkout/offramp";
 import { linkRoutes } from "../src/routes/links";
 import { kycRoutes } from "../src/routes/kyc";
 import { anchorAuthRoutes } from "../src/routes/anchor-auth";
@@ -264,6 +264,24 @@ describe("/seller/kyc: anchor failures", () => {
     expect(res.status).toBe(502);
     await expectNoMarker(res.clone());
     expect(await res.json()).toMatchObject({ error: "anchor_error" });
+    container.client.close();
+  });
+
+  it("GET and PUT map a rejected SEP-12 type to 502 anchor_config_error, logged for the operator", async () => {
+    const { container, app, headers, lines } = await setup(() => {
+      throw new AnchorConfigError("sep12_type", "bogus");
+    });
+    const expected = { error: "anchor_config_error", message: 'anchor rejected SEP-12 type "bogus"' };
+
+    const get = await app.request("/", { headers });
+    expect(get.status).toBe(502);
+    expect(await get.json()).toEqual(expected);
+
+    const put = await app.request("/", { method: "PUT", headers, body: JSON.stringify({ first_name: "Ada" }) });
+    expect(put.status).toBe(502);
+    expect(await put.json()).toEqual(expected);
+
+    expect(lines.some((l) => l.event === "anchor.config_error" && l.value === "bogus")).toBe(true);
     container.client.close();
   });
 

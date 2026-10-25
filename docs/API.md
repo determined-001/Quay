@@ -63,7 +63,7 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
 - Errors return `{ "error": "<code>", ... }` with an appropriate HTTP status.
   Validation failures return `400` with `{ "error": "invalid_body", "issues": [...] }`.
 - `error` is a machine-readable code; a human-readable `message` may accompany it.
-  Two codes cover failures we do not control the wording of:
+  A few codes cover failures we do not control the wording of:
   - `anchor_error` (**502**) — the anchor answered a SEP call with an error, was
     unreachable, or sent something unusable. `message` is fixed text such as
     `"The anchor returned an error (SEP-6 withdraw, HTTP 400)."`. The anchor's
@@ -72,6 +72,13 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
     the server log (`event: "anchor.error"`) only. Returned by the cash-out,
     cash-out quote, `offramp-preview`, `offramp-requirements`, `/seller/kyc`,
     and `/seller/anchor-auth` routes.
+  - `anchor_config_error` (**502**) — the anchor rejected the SEP-12 customer
+    `type` the operator configured (`ANCHOR_KYC_TYPE` /
+    `ANCHOR_KYC_TYPE_ORGANIZATION`). It will not clear on retry; the operator has
+    to fix the setting. `message` is `anchor rejected SEP-12 type "<type>"`
+    (the operator's own value, never anchor text); the detail is logged as
+    `event: "anchor.config_error"`. Returned by the `/seller/kyc` routes and any
+    cash-out that checks KYC.
   - `internal_error` (**500**) — an unhandled server error. The body is exactly
     `{ "error": "internal_error" }`: no message, no stack. Details are in the log.
 

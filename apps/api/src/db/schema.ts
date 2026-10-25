@@ -221,6 +221,10 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   sellerId: text("seller_id").notNull(),
   // The anchor home domain this state belongs to; "legacy" for unattributable old rows.
   anchorDomain: text("anchor_domain").notNull(),
+  // The SEP-12 customer `type` this state was read under; "" when no type is
+  // configured. One customer can hold a different status per type, so the type
+  // is part of the key and a status for one type is never read as another.
+  kycType: text("kyc_type").notNull().default(""),
   // The Stellar account `customer_id` belongs to at the anchor. Null on rows
   // written when every seller shared the platform's account.
   account: text("account"),
@@ -237,7 +241,7 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [
-  primaryKey({ columns: [table.sellerId, table.anchorDomain] }),
+  primaryKey({ columns: [table.sellerId, table.anchorDomain, table.kycType] }),
   index("seller_kyc_callback_token_hash_idx").on(table.callbackTokenHash),
 ]);
 

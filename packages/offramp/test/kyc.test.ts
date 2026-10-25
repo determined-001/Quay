@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { TestAnchorKyc, missingRequiredFields } from "../src/kyc";
 import { selectFieldsForAnchor } from "@checkout/core";
 import * as sep12 from "../src/sep12";
+import { AnchorConfigError } from "../src/anchor-error";
 
 // The tests stub only the parts of the repository, discovery and auth the case needs.
 const asDeps = (deps: unknown) => deps as ConstructorParameters<typeof TestAnchorKyc>[0];
@@ -579,5 +580,119 @@ describe("TestAnchorKyc stale customer id (#222)", () => {
 
     expect(record.customerId).toBe("cust_recovered");
     expect(warnSpy).toHaveBeenCalledWith(staleEvent);
+  });
+});
+
+describe("TestAnchorKyc SEP-12 customer type (issue 3.15)", () => {
+  const individual: AnchorCustomer = { sellerId: "sel_1", account: "GSELLER" };
+  const business: AnchorCustomer = { sellerId: "sel_org", account: "GBUSINESS" };
+
+  function memoryRepo() {
+    const rows = new Map<string, KycRecord>();
+    const key = (s: string, a: string, t?: string | null) => `${s}|${a}|${t ?? ""}`;
+    return {
+      rows,
+      get: async (s: string, a: string, t?: string | null) => rows.get(key(s, a, t)) ?? null,
+      save: async (r: KycRecord) => void rows.set(key(r.sellerId, r.anchorDomain, r.type), r),
+      delete: async () => {},
+    };
+  }
+
+  function kycWith(
+    repo: ReturnType<typeof memoryRepo>,
+    types: { kycType?: string; kycTypeOrganization?: string },
+  ) {
+    return new TestAnchorKyc(asDeps({
+      discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://kyc.example" }) } as any,
+      auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "a.example" } as any,
+      repo,
+      profileRepo: { get: vi.fn().mockResolvedValue(null) },
+      profileKindOf: async (sellerId: string) => (sellerId === "sel_org" ? "organization" : "individual"),
+      ...types,
+    }));
+  }
+
+  function remote(status: "ACCEPTED" | "NEEDS_INFO") {
+    return { customerId: "cust_1", status, requiredFields: [], providedFieldStatus: [], message: null };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends the configured type on the GET and stores it with the record", async () => {
+    const get = vi.spyOn(sep12, "getSep12Customer").mockResolvedValue(remote("ACCEPTED"));
+    const repo = memoryRepo();
+
+    const record = await kycWith(repo, { kycType: "sep6-individual" }).status(individual);
+
+    expect(get.mock.calls[0]![2]).toEqual({ account: "GSELLER", customerId: null, type: "sep6-individual" });
+    expect(record.type).toBe("sep6-individual");
+    expect([...repo.rows.keys()]).toEqual(["sel_1|a.example|sep6-individual"]);
+  });
+
+  it("sends no type, and stores none, when nothing is configured", async () => {
+    const get = vi.spyOn(sep12, "getSep12Customer").mockResolvedValue(remote("ACCEPTED"));
+    const repo = memoryRepo();
+
+    const record = await kycWith(repo, {}).status(individual);
+
+    expect(get.mock.calls[0]![2]).toEqual({ account: "GSELLER", customerId: null });
+    expect(record.type).toBeNull();
+    expect([...repo.rows.keys()]).toEqual(["sel_1|a.example|"]);
+  });
+
+  it("uses the organization type for an organization seller, the general type for others", async () => {
+    const get = vi.spyOn(sep12, "getSep12Customer").mockResolvedValue(remote("ACCEPTED"));
+    const kyc = kycWith(memoryRepo(), { kycType: "sep6-individual", kycTypeOrganization: "sep6-business" });
+
+    await kyc.status(business);
+    await kyc.status(individual);
+
+    expect(get.mock.calls[0]![2]).toMatchObject({ type: "sep6-business" });
+    expect(get.mock.calls[1]![2]).toMatchObject({ type: "sep6-individual" });
+    expect(await kyc.resolveType(business)).toBe("sep6-business");
+  });
+
+  it("an organization seller with no organization type falls back to the general type", async () => {
+    const kyc = kycWith(memoryRepo(), { kycType: "sep6-individual" });
+    expect(await kyc.resolveType(business)).toBe("sep6-individual");
+    expect(await kycWith(memoryRepo(), {}).resolveType(business)).toBeNull();
+  });
+
+  it("keeps a separate record per type, so one type's status is never read as another's", async () => {
+    const get = vi.spyOn(sep12, "getSep12Customer");
+    const repo = memoryRepo();
+
+    get.mockResolvedValueOnce(remote("ACCEPTED"));
+    await kycWith(repo, { kycType: "sep6-individual" }).status(individual);
+    get.mockResolvedValueOnce(remote("NEEDS_INFO"));
+    await kycWith(repo, { kycType: "sep6-business" }).status(individual);
+
+    expect(repo.rows.get("sel_1|a.example|sep6-individual")).toMatchObject({ status: "ACCEPTED" });
+    expect(repo.rows.get("sel_1|a.example|sep6-business")).toMatchObject({ status: "NEEDS_INFO" });
+
+    // The cached read for a type only ever returns that type's record.
+    get.mockClear();
+    const cached = await kycWith(repo, { kycType: "sep6-individual" }).status(individual, { maxAgeMs: 60_000 });
+    expect(cached.status).toBe("ACCEPTED");
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("passes the type on the PUT and the follow-up GET of a submission", async () => {
+    const get = vi.spyOn(sep12, "getSep12Customer").mockResolvedValue({ ...remote("NEEDS_INFO") });
+    const put = vi.spyOn(sep12, "putSep12Customer").mockResolvedValue({ customerId: "cust_1" });
+
+    await kycWith(memoryRepo(), { kycType: "sep6-individual" }).submit(individual, { first_name: "Ada" });
+
+    expect(put.mock.calls[0]![2]).toMatchObject({ type: "sep6-individual" });
+    expect(get.mock.calls.every((c) => (c[2] as { type?: string }).type === "sep6-individual")).toBe(true);
+  });
+
+  it("lets an AnchorConfigError from the anchor reach the caller untouched", async () => {
+    vi.spyOn(sep12, "getSep12Customer").mockRejectedValue(new AnchorConfigError("sep12_type", "bogus"));
+    await expect(kycWith(memoryRepo(), { kycType: "bogus" }).status(individual)).rejects.toThrow(
+      'anchor rejected SEP-12 type "bogus"',
+    );
   });
 });

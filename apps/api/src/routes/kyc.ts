@@ -11,7 +11,7 @@ import {
   type KycConsent,
   type KycUploadFile,
 } from "@checkout/core";
-import { AnchorHttpError } from "@checkout/offramp";
+import { AnchorConfigError, AnchorHttpError } from "@checkout/offramp";
 import { env } from "../env";
 import type { Container } from "../services/container";
 import { anchorFailure } from "../services/link-service";
@@ -89,7 +89,7 @@ function consentToResponse(consent: KycConsent) {
  * reaches the client (issue 4.36); unknown errors are left to `app.onError`.
  */
 function anchorFailureResponse(ctx: Context<{ Variables: AuthVariables }>, err: unknown) {
-  if (!(err instanceof AnchorHttpError) && !isNetworkError(err)) return null;
+  if (!(err instanceof AnchorHttpError) && !(err instanceof AnchorConfigError) && !isNetworkError(err)) return null;
   const failure = anchorFailure(err, getLogger(ctx));
   return ctx.json({ error: failure.message, ...failure.extra }, 502);
 }

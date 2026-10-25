@@ -594,6 +594,11 @@ export interface KycRecord {
    *  and `requiredFields` are that anchor's decision; `"legacy"` marks a row
    *  that predates per-anchor keys and could not be attributed. */
   anchorDomain: string;
+  /** The SEP-12 customer `type` this record was read under (`ANCHOR_KYC_TYPE`),
+   *  or null/absent when none is used. One customer can hold a different status
+   *  per type, so it is part of the record's key: a status for one type is
+   *  never read as another's. */
+  type?: string | null;
   /** The Stellar account the anchor's customer record belongs to. A stored
    *  `customerId` is only reused while this still matches the seller's wallet;
    *  null on rows written when every seller shared the platform's account. */
@@ -662,16 +667,20 @@ export interface KycPort {
   /** Submits binary/file fields directly to the anchor via multipart/form-data.
    *  Never persists binary file data. */
   submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord>;
+  /** The SEP-12 type the next call will use for this customer, or null for none.
+   *  Lets a wrapper look up the same stored record the call will read. */
+  resolveType?(customer: AnchorCustomer): Promise<string | null>;
 }
 
-/** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
+/** Persistence for `KycRecord`, keyed by (seller, anchor, type): SEP-12 state belongs
  *  to one anchor, so two anchors never share or overwrite a record.
  *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
-  get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
+  /** `type` is the SEP-12 customer type; omitted/null reads the untyped record. */
+  get(sellerId: string, anchorDomain: string, type?: string | null): Promise<KycRecord | null>;
   getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
-  /** Removes the seller's record for one anchor, or for every anchor when omitted. */
+  /** Removes the seller's records (every type) for one anchor, or for every anchor when omitted. */
   delete(sellerId: string, anchorDomain?: string): Promise<void>;
 }
 

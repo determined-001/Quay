@@ -15,6 +15,13 @@
       "when": 1792938665230,
       "tag": "0001_aspiring_mephistopheles",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792940119205,
+      "tag": "0002_conscious_nightshade",
+      "breakpoints": true
     }
   ]
 }

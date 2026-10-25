@@ -1153,6 +1153,7 @@ export class DrizzleKycRepository implements KycRepository {
     return {
       sellerId: row.sellerId,
       anchorDomain: row.anchorDomain,
+      ...(row.kycType === "" ? {} : { type: row.kycType }),
       account: row.account ?? null,
       customerId: row.customerId ?? null,
       status: row.status as KycStatus,
@@ -1167,11 +1168,17 @@ export class DrizzleKycRepository implements KycRepository {
     };
   }
 
-  async get(sellerId: string, anchorDomain: string): Promise<KycRecord | null> {
+  async get(sellerId: string, anchorDomain: string, type?: string | null): Promise<KycRecord | null> {
     const rows = await this.db
       .select()
       .from(sellerKyc)
-      .where(and(eq(sellerKyc.sellerId, sellerId), eq(sellerKyc.anchorDomain, anchorDomain)))
+      .where(
+        and(
+          eq(sellerKyc.sellerId, sellerId),
+          eq(sellerKyc.anchorDomain, anchorDomain),
+          eq(sellerKyc.kycType, type ?? ""),
+        ),
+      )
       .limit(1);
     return rows[0] ? this.rowToRecord(rows[0]) : null;
   }
@@ -1182,7 +1189,7 @@ export class DrizzleKycRepository implements KycRepository {
       .select()
       .from(sellerKyc)
       .where(eq(sellerKyc.sellerId, sellerId))
-      .orderBy(asc(sellerKyc.anchorDomain));
+      .orderBy(asc(sellerKyc.anchorDomain), asc(sellerKyc.kycType));
     return rows.map((row) => this.rowToRecord(row));
   }
 
@@ -1214,6 +1221,7 @@ export class DrizzleKycRepository implements KycRepository {
     const row = {
       sellerId: record.sellerId,
       anchorDomain: record.anchorDomain,
+      kycType: record.type ?? "",
       account: record.account,
       customerId: record.customerId,
       status: record.status,
@@ -1229,7 +1237,7 @@ export class DrizzleKycRepository implements KycRepository {
     await this.db
       .insert(sellerKyc)
       .values(row)
-      .onConflictDoUpdate({ target: [sellerKyc.sellerId, sellerKyc.anchorDomain], set: row });
+      .onConflictDoUpdate({ target: [sellerKyc.sellerId, sellerKyc.anchorDomain, sellerKyc.kycType], set: row });
   }
 
   async countNonPrimaryRows(): Promise<number> {

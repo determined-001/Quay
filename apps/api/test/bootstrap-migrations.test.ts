@@ -372,3 +372,38 @@ describe("bootstrap() rebuilds seller_kyc keyed by (seller_id, anchor_domain)", 
     expect(tables.map((t) => t.name)).toEqual(["seller_kyc"]);
   });
 });
+
+// Issue 3.15: seller_kyc gained kyc_type and joined the primary key.
+describe("migration 0001 adds kyc_type to the seller_kyc key", () => {
+  // The shape after migration 0000 (and so on every deployed database).
+  const KYC_0000 = `CREATE TABLE seller_kyc (
+    seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT, customer_id TEXT,
+    status TEXT NOT NULL, required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
+    provided_field_status TEXT, sent_fields TEXT, callback_token_hash TEXT, message TEXT,
+    last_synced_at INTEGER, updated_at INTEGER NOT NULL, PRIMARY KEY (seller_id, anchor_domain)
+  )`;
+
+  it("keeps existing rows as the untyped record and then allows one row per type", async () => {
+    const client = createClient({ url: "file::memory:" });
+    await client.execute(KYC_0000);
+    await client.execute(
+      `INSERT INTO seller_kyc (seller_id, anchor_domain, customer_id, status, required_fields, fields_encrypted, updated_at)
+       VALUES ('s1', 'a.example', 'cust_1', 'ACCEPTED', '[]', 'v1:blob', 10)`,
+    );
+    await bootstrap(client);
+
+    const rows = (await client.execute("SELECT seller_id, anchor_domain, kyc_type, customer_id FROM seller_kyc")).rows;
+    expect(rows.map((r) => [r.seller_id, r.anchor_domain, r.kyc_type, r.customer_id])).toEqual([
+      ["s1", "a.example", "", "cust_1"],
+    ]);
+    const insert = (type: string) =>
+      client.execute({
+        sql: `INSERT INTO seller_kyc (seller_id, anchor_domain, kyc_type, status, required_fields, fields_encrypted, updated_at)
+              VALUES ('s1', 'a.example', ?, 'NEEDS_INFO', '[]', 'x', 1)`,
+        args: [type],
+      });
+    await expect(insert("sep6-business")).resolves.toBeDefined();
+    await expect(insert("sep6-business")).rejects.toThrow();
+    await expect(insert("")).rejects.toThrow();
+  });
+});

@@ -118,7 +118,10 @@ What you need from the anchor before proceeding:
 - **Its SEP-6 withdrawal types.** If it publishes more than one, set
   `OFFRAMP_TYPE`; otherwise the adapter refuses rather than guessing a rail.
 - **Its KYC requirements.** SEP-12 fields are collected per seller ahead of
-  time, not per transaction.
+  time, not per transaction. If it keys requirements on a SEP-12 customer
+  `type`, set `ANCHOR_KYC_TYPE` (and `ANCHOR_KYC_TYPE_ORGANIZATION` for
+  organization sellers); Quay then sends it on every `/customer` call and keeps
+  a separate status per type.
 - **That it serves each seller as their own customer.** Every seller signs the
   anchor's SEP-10 challenge with their own wallet (dashboard → identity
   verification → *Connect to anchor*), so the anchor's customer is the seller's
