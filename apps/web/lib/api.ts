@@ -211,7 +211,8 @@ export type ApiErrorCode =
   | "consent_required" // per-anchor consent missing for KYC fields
   | "offramp_rejected" // anchor refused the amount/type; see `details.limits` and `details.availableTypes`
   // Operator telemetry (issue 5.21):
-  | "unauthorized" // telemetry token rejected
+  | "unauthorized" // 401: the session or API key was rejected, sign in again (also: telemetry token rejected)
+  | "rate_limited" // 429: too many requests, slow down
   | "telemetry_not_enabled" // deployment has no TELEMETRY_TOKEN configured
   | "telemetry_error" // any other telemetry-route failure
   | "anchor_unavailable" // 503: the seller's anchor is down or its circuit breaker is open
@@ -244,6 +245,10 @@ const BY_CODE: Record<string, ApiErrorCode> = {
   anchor_auth_required: "anchor_auth_required",
   destination_cannot_receive: "destination_cannot_receive",
   payment_rejected: "payment_rejected",
+  // The KYC panel branches on this to open the consent dialog (issue 5.32).
+  consent_required: "consent_required",
+  unauthorized: "unauthorized",
+  rate_limited: "rate_limited",
 };
 
 /**
@@ -346,6 +351,10 @@ export function describeError(err: CheckoutError): string {
       return "The anchor rejected the sign-in challenge. Please try again.";
     case "consent_required":
       return "You need to approve sharing these identity fields with the anchor before submitting.";
+    case "unauthorized":
+      return "Your session has expired or is not valid. Sign in again to continue.";
+    case "rate_limited":
+      return "Too many requests. Wait a moment and try again.";
     default:
       return "An unexpected error occurred. Please try again.";
   }

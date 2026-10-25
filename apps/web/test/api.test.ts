@@ -210,6 +210,10 @@ describe("classifyError", () => {
     ["409 idempotency_key_reuse", 409, { error: "idempotency_key_reuse" }, "request_in_progress"],
     ["400 challenge_rejected", 400, { error: "challenge_rejected" }, "challenge_rejected"],
     ["502 challenge_rejected", 502, { error: "challenge_rejected" }, "challenge_rejected"],
+    // The KYC consent flow and generic 401/429 (issue 5.32)
+    ["403 consent_required", 403, { error: "consent_required", anchorDomain: "a.example", fields: ["first_name"] }, "consent_required"],
+    ["401 unauthorized", 401, { error: "unauthorized" }, "unauthorized"],
+    ["429 rate_limited", 429, { error: "rate_limited" }, "rate_limited"],
   ];
 
   it.each(rows)("%s", (_name, status, body, expected) => {
@@ -228,6 +232,27 @@ describe("classifyError", () => {
       expect(text).not.toMatch(/went wrong on the server/);
     },
   );
+
+  it("http() keeps anchorDomain and fields on a consent_required error", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "consent_required", anchorDomain: "a.example", fields: ["first_name"] }), {
+          status: 403,
+        }),
+    ) as unknown as typeof fetch;
+    try {
+      const err = await api.getKyc().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CheckoutError);
+      expect(err).toMatchObject({
+        code: "consent_required",
+        status: 403,
+        details: { anchorDomain: "a.example", fields: ["first_name"] },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
 
   it("http() surfaces a classified code end to end", async () => {
     const realFetch = globalThis.fetch;
@@ -398,6 +423,7 @@ const EVERY_ERROR_CODE: Record<ApiErrorCode, true> = {
   offramp_rejected: true,
   quote_mismatch: true,
   unauthorized: true,
+  rate_limited: true,
   telemetry_not_enabled: true,
   telemetry_error: true,
   anchor_unavailable: true,
@@ -410,7 +436,7 @@ const EVERY_ERROR_CODE: Record<ApiErrorCode, true> = {
 const ALL_ERROR_CODES = Object.keys(EVERY_ERROR_CODE) as ApiErrorCode[];
 
 /** Operator telemetry codes are shown on the ops page, never as seller copy. */
-const GENERIC_COPY_CODES: ApiErrorCode[] = ["unauthorized", "telemetry_not_enabled", "telemetry_error"];
+const GENERIC_COPY_CODES: ApiErrorCode[] = ["telemetry_not_enabled", "telemetry_error"];
 
 describe("describeError copy coverage", () => {
   it.each(ALL_ERROR_CODES)("returns usable copy for %s", (code) => {
