@@ -5,7 +5,9 @@ The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by defaul
 
 > **Auth:** `POST /auth` issues a session JWT after a wallet-signed SEP-10
 > challenge; a seller row is created for the wallet on first login. **`/links`
-> and `/webhooks` now require it** — every route under those two prefixes needs
+> and `/webhooks` require it**, except the public checkout reads
+> (`GET /links/:id`, `POST /links/:id/submit`) and `GET /r/:reference`: every
+> other route under those prefixes needs
 > `Authorization: Bearer <token>` (or the httpOnly `session` cookie set by
 > `POST /auth`) and returns `401` without one. The web UI provides wallet login via
 > `SessionGate` (`apps/web/app/components/SessionGate.tsx`), which connects the seller's
