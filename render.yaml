@@ -62,7 +62,9 @@ services:
       # encrypts seller SEP-12 KYC field values at rest.
       - key: KYC_ENCRYPTION_KEY
         sync: false
-      # Encrypts webhook signing secrets at rest. Without it the process falls
+      # Encrypts webhook signing secrets and seller anchor session tokens at
+      # rest. Replacing it makes both unreadable (docs/RUNBOOK.md, Key rotation).
+      # Without it the process falls
       # back to a hardcoded, public dev key — anyone with the repo could then
       # decrypt stored secrets and forge delivery signatures. NODE_ENV is
       # `production` in the image, so a missing value is a hard boot failure.
