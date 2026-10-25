@@ -40,17 +40,20 @@ graph LR
   `OffRampPort`, plus the repository ports (`LinkRepository`,
   `SellerRepository`, `WebhookRepository`, `WatcherStateRepository`).
 - **`packages/stellar`** — implements `RailPort` (`StellarRail`, builds SEP-7 pay URIs)
-  and `WatcherPort` (`HorizonWatcher`, polls Horizon for payments and normalizes them).
+  and `WatcherPort` (`HorizonWatcher`, polls Horizon for payments and normalizes them;
+  `StreamingHorizonWatcher`, the opt-in `WATCH_MODE=stream` variant over Horizon's SSE feed).
 - **[`packages/offramp`](../packages/offramp/README.md)** — implements `OffRampPort` three
   times: `MockAnchorOffRamp` (offline, fake FX rate, no money moves — the default for local
   development), `TestAnchorOffRamp` (real SEP-10 → SEP-38 → SEP-6, against
   `testanchor.stellar.org` or a production anchor via `OFFRAMP=anchor`) and `DisabledOffRamp`
   (`OFFRAMP=none`: no cash-out leg, every method throws `OffRampDisabledError`, which the
-  routes translate to 501). The unwired SEP-24 adapter (`AnchorOffRamp`, `anchor.ts`) also
-  implements the port but is not selected by `createOffRamp()`. Nothing under `src/` here holds a keypair any
-  more (#207): the old SEP-10 client moved to `test/sep10.ts` as a test-only reference, and the
-  unwired SEP-24 adapter (`anchor.ts`) no longer signs a payment or a challenge — it uses the
-  seller's session JWT from `anchor-session.ts` (`SellerAnchorAuth`), which verifies and
+  routes translate to 501). The SEP-24 adapter (`AnchorOffRamp`, `anchor.ts`) also
+  implements the port; for a real anchor `createOffRamp()` wraps both it and `TestAnchorOffRamp` in
+  `SelectingOffRamp` (`select.ts`), which picks SEP-6 or SEP-24 per anchor (`OFFRAMP_PROTOCOL`, default
+  `auto`: SEP-6 when the anchor's stellar.toml declares `TRANSFER_SERVER`, else SEP-24). Nothing under
+  `src/` here holds a keypair any more (#207): the old SEP-10 client moved to `test/sep10.ts` as a
+  test-only reference, and the SEP-24 adapter (`anchor.ts`) no longer signs a payment or a challenge — it
+  uses the seller's session JWT from `anchor-session.ts` (`SellerAnchorAuth`), which verifies and
   relays a challenge for the seller's own wallet to sign.
 - **`apps/api`** — the composition root. `services/container.ts` wires one `RailPort` +
   one `WatcherPort` + one `OffRampPort` + the Drizzle repositories into `LinkService` and
@@ -90,8 +93,8 @@ and `services/seller-wallet.ts` (config validation). It runs in CI
 | Port | Method(s) | Implementation today | What it hides |
 | --- | --- | --- | --- |
 | `RailPort` | `buildRequest()`, `isValidDestination()` | `StellarRail` (`packages/stellar`) | How a payer is asked to pay — SEP-7 URI today, could be an EVM calldata blob or a Lightning invoice for a different chain. |
-| `WatcherPort` | `latestCursor()`, `fetchSince()` | `HorizonWatcher` (`packages/stellar`) | How incoming payments are observed — polling Horizon today; a streaming implementation (Horizon SSE, or a different chain's event log) satisfies the same interface with no change to `WatcherLoop`. |
-| `OffRampPort` | `quote()`, `initiate()`, `status()` | `MockAnchorOffRamp` (offline demo), `TestAnchorOffRamp` (real SEP-10→38→6) or `DisabledOffRamp` (`OFFRAMP=none`, payments only) (`packages/offramp`) | How a seller's stablecoin becomes local currency — the actual anchor protocol conversation. Also wrapped by `CircuitBreakerOffRamp` (`apps/api/src/services/circuit-breaker.ts`) so a down anchor can't be hammered by every cash-out poll. |
+| `WatcherPort` | `latestCursor()`, `fetchSince()` | `HorizonWatcher` (polling, default) or `StreamingHorizonWatcher` (`WATCH_MODE=stream`, Horizon SSE) (`packages/stellar`) | How incoming payments are observed — both Horizon implementations satisfy the same interface with no change to `WatcherLoop`, and so would a different chain's event log. |
+| `OffRampPort` | `quote()`, `initiate()`, `status()` | `MockAnchorOffRamp` (offline demo), `SelectingOffRamp` (real anchors: routes to `TestAnchorOffRamp` SEP-10→38→6 or `AnchorOffRamp` SEP-24 per anchor) or `DisabledOffRamp` (`OFFRAMP=none`, payments only) (`packages/offramp`) | How a seller's stablecoin becomes local currency — the actual anchor protocol conversation. Also wrapped by `CircuitBreakerOffRamp` (`apps/api/src/services/circuit-breaker.ts`) so a down anchor can't be hammered by every cash-out poll. |
 
 All three are consumed only by `apps/api` (`LinkService`, `WatcherLoop`, `startCashOutPoller`)
 — `packages/core`'s domain logic (the matcher, the status machine) takes their *output*
@@ -165,7 +168,7 @@ even if both of the above somehow let it through. The processed-tx ledger keys o
 `(txHash, operationId)`, not `txHash` alone — a transaction can carry more than one
 payment operation, and each dedupes independently (issue 4.11).
 
-### 3. Cash-out — SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, today's real adapter)
+### 3. Cash-out — SEP-10 → SEP-38 → SEP-6 (`TestAnchorOffRamp`, the SEP-6 arm of `SelectingOffRamp`)
 
 For security boundaries, attack paths and the failure branches of this flow, see the [seller-signed anchor threat model](THREAT-MODEL.md).
 
@@ -260,14 +263,14 @@ Every `CircuitBreakerOffRamp` call is instrumented (`anchor_calls_total`,
 consecutive failures, so a down anchor gets a 30s cooldown instead of being hit by every
 poll tick.
 
-### 4. Cash-out — SEP-24 interactive variant (chosen per anchor by `SelectingOffRamp`; quote gaps in [#217](https://github.com/determined-001/Quay/issues/217)/[#219](https://github.com/determined-001/Quay/issues/219))
+### 4. Cash-out — SEP-24 interactive variant (chosen per anchor by `SelectingOffRamp`)
 
 ```mermaid
 sequenceDiagram
   participant Seller
   participant API as apps/api
   participant LS as LinkService
-  participant Anchor as AnchorOffRamp (SEP-24, not wired)
+  participant Anchor as AnchorOffRamp (SEP-24)
   participant Dashboard
   participant AnchorUI as Anchor's interactive KYC/bank-details UI
 
@@ -291,20 +294,22 @@ sequenceDiagram
 and the `AnchorOffRamp` adapter that uses it (`packages/offramp/src/anchor.ts`, running on
 the seller's own anchor session, no server key), the API's `interactiveUrl` field on
 `POST /links/:id/cash-out` (`apps/api/src/routes/links.ts`), and the dashboard's popup
-handling in `CashOutModal`.
+handling in `CashOutModal`. SEP-24 form prefill sends only fields the seller consented to share
+with that anchor (`/seller/kyc/prefill-consent`, see `docs/API.md`), and each read is recorded in the
+PII audit log.
 
-**Pending.** `AnchorOffRamp` is not wired into `createOffRamp()`: the protocol is fixed by
-the `OFFRAMP` deployment setting, and per-anchor selection from the anchor's SEP-1
-capabilities is tracked in [#216](https://github.com/determined-001/Quay/issues/216). It
-matters because a production LINK adapter needs SEP-24's redirect step, which SEP-6
-(today's wired adapter) has no concept of. See
+**Selection.** `SelectingOffRamp` (`packages/offramp/src/select.ts`) is wired by `createOffRamp()` in
+`apps/api/src/services/container.ts` for every real anchor. New work (`quote`, `initiate`) follows the
+anchor's `protocol` setting (`OFFRAMP_PROTOCOL` seeds it; `auto` reads the anchor's SEP-1 declaration and
+prefers SEP-6), while `status()` follows the job (a SEP-24 job id carries a `#sep24` marker on its stored
+`anchor`), so flipping the preference never strands an in-flight withdrawal. See
 [`docs/decisions/0001-sep6-vs-sep24.md`](decisions/0001-sep6-vs-sep24.md).
 
 ---
 
 ## State diagram — `LINK_STATUSES` / `TRANSITIONS`
 
-Generated from `packages/core/src/domain/status.ts:17` by
+Generated from `TRANSITIONS` in `packages/core/src/domain/status.ts` by
 `scripts/gen-status-diagram.mjs` — **do not hand-edit the diagram below.** Run
 `pnpm docs:status-diagram` after changing `TRANSITIONS` and paste the new output here;
 `pnpm docs:check-status-diagram` (wired into CI) fails the build if `status.ts` and
@@ -362,8 +367,8 @@ The seam you need depends on what's actually changing:
    fork it. Its own header comment explains why it picked SEP-6 over SEP-24 (see
    Decisions, below) and what would need to change to support SEP-24 instead.
 2. Swap it in via `createOffRamp()` in `container.ts` (currently returns `DisabledOffRamp`
-   for `OFFRAMP=none`, `MockAnchorOffRamp` when no anchor is wired, and `TestAnchorOffRamp`
-   otherwise — add a case for the new adapter).
+   for `OFFRAMP=none`, `MockAnchorOffRamp` when no anchor is wired, and a `SelectingOffRamp`
+   over `TestAnchorOffRamp` (SEP-6) and `AnchorOffRamp` (SEP-24) otherwise — add a case for the new adapter).
 3. **Validate the anchor will actually onboard and pay out before building further.**
    See the README's "Before you go live" section — this is the step every anchor
    integration actually lives or dies on, not the adapter code.
@@ -382,13 +387,15 @@ send instead of a payment link): usually doesn't need a new port at all — chec
 
 ## Decisions
 
-**Why polling, not streaming, for the watcher.** `HorizonWatcher` polls
+**Why polling is the default watcher.** `HorizonWatcher` polls
 (`WATCH_POLL_MS`, default 6s) instead of subscribing to Horizon's SSE stream. Polling is
 restart-safe by construction — the persisted cursor means a crashed process picks up
 exactly where it left off, with no reconnect/backoff/dedup logic to get subtly wrong.
 `WatcherPort`'s interface (`latestCursor` + `fetchSince(account, cursor)`) doesn't assume
-polling — a streaming implementation satisfies it too, and `WatcherLoop` wouldn't need to
-change. Worth doing once the per-account poll loop stops scaling (see item 4 of the README's "Before you go live").
+polling, and a streaming implementation now exists: `StreamingHorizonWatcher`, selected with
+`WATCH_MODE=stream`, keeps one SSE subscription per watched account and buffers events for
+`fetchSince`. It stays opt-in; reach for it once the per-account poll loop stops scaling
+(see item 4 of the README's "Before you go live").
 
 **Why `seller_initiated` off-ramp mode only, never `inline`.** `OffRampPort.mode` already
 models both, but `inline` (value routed through the anchor mid-flight, seller receives
@@ -398,14 +405,13 @@ custody at the edges: the seller already holds the stablecoin, and cash-out is a
 explicitly authorized action. Flip to `inline` only with a licensed anchor relationship and
 a real compliance story — see the README's boundary note.
 
-**Why SEP-6 in `TestAnchorOffRamp`, not SEP-24.** Both protocols are supported —
-`OffRampInitiation`'s `interactive` arm, the API's `interactiveUrl`, and the dashboard's
-popup handling all exist — and the decision is to choose the protocol per anchor from its
-SEP-1 capabilities, preferring SEP-6 when both are declared. That per-anchor selection is
-not wired yet ([#216](https://github.com/determined-001/Quay/issues/216)); until it lands
-`TestAnchorOffRamp` (SEP-6) is the only adapter `createOffRamp()` returns. The full
-trade-offs and the decision live in [`docs/decisions/0001-sep6-vs-sep24.md`](decisions/0001-sep6-vs-sep24.md).
-The SEP-24 adapter (`AnchorOffRamp`) stays unwired, and since #207 it holds no key: it runs
+**Why SEP-6 is preferred, with SEP-24 as the per-anchor alternative.** Both protocols are
+supported — `OffRampInitiation`'s `interactive` arm, the API's `interactiveUrl`, and the dashboard's
+popup handling all exist — and `SelectingOffRamp` chooses the protocol per anchor from its
+SEP-1 capabilities, preferring SEP-6 when both are declared (`OFFRAMP_PROTOCOL=auto`; `sep6` or
+`sep24` force one). The full trade-offs and the decision live in
+[`docs/decisions/0001-sep6-vs-sep24.md`](decisions/0001-sep6-vs-sep24.md).
+Since #207 the SEP-24 adapter (`AnchorOffRamp`) holds no key: it runs
 every anchor call with the seller's own session JWT and returns the send leg as transfer
 instructions for the seller's wallet to sign.
 

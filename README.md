@@ -398,8 +398,8 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Multiple sellers / scale:** the watcher polls per active destination account; for many
-   sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
+4. **Multiple sellers / scale:** the default watcher polls per active destination account; for many
+   sellers try the streaming `WatcherPort` implementation (`WATCH_MODE=stream`, opt-in until you have measured it).
 
 > This README is engineering guidance, not legal advice. Money transmission is the box you do
 > not want to back into by accident.
