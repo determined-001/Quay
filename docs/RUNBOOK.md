@@ -368,9 +368,11 @@ reason to disable it while testnet still does.
 
 ## Deploy
 
-Render deploys `apps/api` as a single always-on Docker web service (starter
-plan - the free tier spins down after 15 min idle, which would stop the
-watcher loop and cash-out poller). Pushing to `main` triggers Render's
+Render deploys `apps/api` as a single Docker web service. The starter plan is
+what keeps it always on; the free tier spins down after 15 min idle, which
+stops the watcher loop and cash-out poller until the next request. Both
+blueprints (`render.yaml`, `render.mainnet.yaml`) currently declare
+`plan: free`, so check the plan in the Render dashboard rather than assuming it. Pushing to `main` triggers Render's
 auto-deploy (configured in the Render dashboard, not in this repo). The web
 app deploys separately to Vercel.
 
@@ -755,8 +757,8 @@ Symptom: payments are landing on-chain but links aren't transitioning to
    confirmed).
 4. If the whole loop appears dead (no watcher log lines at all across every
    account), the process itself may have crashed or Render may have spun the
-   free-tier instance down (see the `render.yaml` comment - starter plan is
-   mandatory for this reason) - check the Render service's process status
+   free-tier instance down (see the `plan:` comments in `render.yaml` and
+   `render.mainnet.yaml` - starter keeps it awake) - check the Render service's process status
    directly.
 
 ## Telemetry rate-unit repair (one-off, issue 5.21)

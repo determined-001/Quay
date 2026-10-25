@@ -73,16 +73,17 @@ of switching the global account:
 GH_TOKEN=$(gh auth token -u determined-001) gh api user --jq .login   # expect determined-001
 ```
 
-**Pending, as of 2026-09-24:** promote `dev` to `main`. `dev` carries the
-per-seller anchor identity fix (`fbd262f`) and the Next.js 16.3.6 / sharp 0.35.4
-upgrade that closes two critical RCE advisories (`082a846`). Production runs
-`main` and still has Next 16.3.0 until then.
+**Promotion of 2026-09-24 is done.** `dev` was promoted to `main` on 2026-10-05
+(#354), which carried the per-seller anchor identity fix and the Next.js
+16.3.6 / sharp 0.35.4 upgrade; later fixes have been promoted the same way. Keep
+`main` merged back into `dev` after each promotion (`docs/RUNBOOK.md`,
+"Promotion: dev to main").
 
 **Issue backlog.** #203–#287 (85 issues, 2026-09-24) cover follow-ups to the
 anchor identity fix, the reusable KYC profile, SEP-24, anchor readiness, bugs,
 docs and ops. Titles use `<area>.<n> - title`, continuing each area's numbering
 (1 core, 2 stellar, 3 offramp, 4 api, 5 web, 6 auth, 7 distribution, 8 ops).
-The `Stellar Wave` label is no longer applied.
+The `Stellar Wave` label is no longer applied. All of #203–#287 are now closed.
 
 ---
 

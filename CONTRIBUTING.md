@@ -65,7 +65,7 @@ in the domain. Keep that boundary intact — CI enforces it (see
 
 ## Prerequisites
 
-- Node 20+
+- Node 22 (what CI and the API's Docker image run)
 - pnpm 9 (`packageManager` is pinned in `package.json`)
 
 ---
