@@ -216,6 +216,13 @@ export default function CashOutModal({
     };
   }, []);
 
+  // The latest onSuccess, read at call time. Dashboard passes a new function on
+  // every render (it re-renders every 5 s), and listing that in the poll
+  // effect's dependencies restarted the timer each time, so after the 30 s
+  // back-off the poll never fired (issue 5.31).
+  const onSuccessRef = useRef(onSuccess);
+  onSuccessRef.current = onSuccess;
+
   // ---- interactive polling -------------------------------------------------
   // While the interactive step is open, poll the link detail for the
   // anchor-reported status. Steady 5 s cadence, backing off to 30 s after
@@ -231,7 +238,7 @@ export default function CashOutModal({
         if (cancelled) return;
         setInteractiveStatus(describeInteractiveStatus(detail.offrampExternalStatus));
         if (isInteractiveTerminalStatus(detail.link.offrampStatus)) {
-          onSuccess();
+          onSuccessRef.current();
           return;
         }
         // A SEP-24 anchor only names its deposit account after the seller finishes its form (issue 3.18).
@@ -256,7 +263,7 @@ export default function CashOutModal({
       cancelled = true;
       if (interactivePollRef.current) clearTimeout(interactivePollRef.current);
     };
-  }, [step, linkId, onSuccess]);
+  }, [step, linkId]);
 
   // ---- form interactions ---------------------------------------------------
   function handleChange(name: string, value: string) {

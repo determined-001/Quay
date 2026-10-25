@@ -74,8 +74,8 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
     }) as unknown as typeof fetch;
   }
 
-  function renderModal() {
-    root = createRoot(container);
+  function renderModal(success: () => void = onSuccess) {
+    if (!root) root = createRoot(container);
     act(() => {
       root!.render(
         <CashOutModal
@@ -85,10 +85,16 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
           targetCurrency="NGN"
           isMock
           onClose={onClose}
-          onSuccess={onSuccess}
+          onSuccess={success}
         />,
       );
     });
+  }
+
+  function detailPolls(): number {
+    return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) =>
+      String(url).endsWith("/detail"),
+    ).length;
   }
 
   async function submitForm() {
@@ -222,5 +228,45 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
     expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps polling on schedule while the parent re-renders with a new onSuccess every 3 s (issue 5.31)", async () => {
+    renderModal();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await submitForm();
+    const start = detailPolls();
+
+    // Dashboard re-renders far more often than the 30 s back-off delay, and its
+    // onSuccess has a new identity each time. Run past the 2-minute threshold.
+    for (let elapsed = 0; elapsed < 4 * 60_000; elapsed += 3_000) {
+      renderModal(() => onSuccess());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+    }
+
+    // 5 s polls for 2 minutes (~24) then 30 s polls for 2 minutes (~4).
+    expect(detailPolls() - start).toBeGreaterThanOrEqual(24);
+  });
+
+  it("calls the latest onSuccess, not the one from when polling began", async () => {
+    const first = vi.fn();
+    const latest = vi.fn();
+    renderModal(first);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await submitForm();
+    renderModal(latest);
+
+    detailStatus = { offrampStatus: "settled", offrampExternalStatus: "complete" };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(latest).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
   });
 });
