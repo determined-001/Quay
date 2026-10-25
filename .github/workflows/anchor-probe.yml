@@ -54,7 +54,7 @@ jobs:
         # The full cash-out suite has its own step below, so a failure there names
         # its stage and this step stays about the protocol endpoints.
         run: |
-          pnpm --filter @checkout/offramp test --reporter=verbose --exclude '**/testanchor-full-cashout.test.ts' 2>&1 | tee probe-output.txt
+          pnpm --filter @checkout/offramp exec vitest run --reporter=verbose --exclude '**/testanchor-full-cashout.test.ts' 2>&1 | tee probe-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
           echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
           exit ${EXIT_CODE}
