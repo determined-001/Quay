@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "esbuild": "0.28.1",
-    "happy-dom": "^20.11.1",
+    "happy-dom": "^21.0.4",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
     "@vitest/coverage-v8": "4.1.10"
