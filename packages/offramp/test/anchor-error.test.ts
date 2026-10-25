@@ -45,7 +45,7 @@ describe("AnchorHttpError", () => {
     expect(ok.body).toBe("<html>boom</html>");
 
     const res = new Response("x", { status: 502 });
-    res.text = () => Promise.reject(new Error("stream broke"));
+    Object.defineProperty(res, "text", { value: () => Promise.reject(new Error("stream broke")) });
     expect((await anchorHttpError("38", "quote", res)).body).toBe("");
   });
 });

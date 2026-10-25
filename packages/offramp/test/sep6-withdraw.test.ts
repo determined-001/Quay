@@ -17,11 +17,11 @@ describe("startSep6Withdraw", () => {
 
   it("builds the correct URL under a path-prefixed TRANSFER_SERVER and sends query params", async () => {
     let capturedUrl: URL | undefined;
-    let capturedHeaders: HeadersInit | undefined;
+    let capturedHeaders: ConstructorParameters<typeof Headers>[0] | undefined;
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         capturedUrl = new URL(String(input));
         capturedHeaders = init?.headers;
         return Response.json({ id: "wd_1" });
@@ -55,7 +55,7 @@ describe("startSep6Withdraw", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: string | URL | Request) => {
         capturedUrl = new URL(String(input));
         return Response.json({ id: "wd_2" });
       }),
@@ -71,7 +71,7 @@ describe("startSep6Withdraw", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: string | URL | Request) => {
         capturedUrl = new URL(String(input));
         return Response.json({ id: "wd_3" });
       }),

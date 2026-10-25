@@ -16,6 +16,9 @@ import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-
 const USDC_TESTNET_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 const ANCHOR_BASE_URL = TESTANCHOR_BASE_URL;
 
+/** The withdraw type the live suite cashes out through. */
+export const LIVE_WITHDRAW_TYPE = process.env.OFFRAMP_TYPE ?? "bank_account";
+
 function makeKeypair(): Keypair {
   if (process.env.SELLER_SECRET_KEY) {
     return Keypair.fromSecret(process.env.SELLER_SECRET_KEY);
@@ -31,8 +34,9 @@ function anchorWiring() {
 }
 
 function makeOffRamp(state = new FakeOffRampStateRepository(), wiring = anchorWiring()) {
-  // testanchor offers more than one USDC withdraw type; the adapter refuses to guess.
-  return new TestAnchorOffRamp({ ...wiring, state, preferredWithdrawType: "bank_account" });
+  // testanchor offers more than one USDC withdraw type; the adapter refuses to
+  // guess. anchor-probe.yml sets OFFRAMP_TYPE, so honour it here.
+  return new TestAnchorOffRamp({ ...wiring, state, preferredWithdrawType: LIVE_WITHDRAW_TYPE });
 }
 
 const OFFLINE_CUSTOMER: AnchorCustomer = { sellerId: "sel_1", account: Keypair.random().publicKey() };
@@ -63,6 +67,7 @@ async function makeStatusFixture(logger?: Logger) {
     lastError: null,
     createdAt: now,
     updatedAt: now,
+    transferNotifiedAt: null,
   });
   const offramp = new TestAnchorOffRamp({
     ...wiring,
@@ -76,7 +81,7 @@ async function makeStatusFixture(logger?: Logger) {
 function stubTransaction(status: string, message?: string) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: string | URL | Request) => {
       if (String(input).includes(".well-known/stellar.toml")) return new Response("", { status: 500 });
       return Response.json({ transaction: { id: "t1", status, message } });
     }),
@@ -227,7 +232,7 @@ describe("TestAnchorOffRamp (offline)", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const urlStr = String(input);
         if (urlStr.includes(".well-known/stellar.toml")) {
           return new Response("", { status: 500 }); // triggers fallback discovery
@@ -263,7 +268,7 @@ describe("TestAnchorOffRamp (offline)", () => {
       offramp.initiate({
         linkId: "lnk_1",
         quoteId: "q1",
-        payout: { rail: "bank", fields: { dest: "123456789" } },
+        payout: { currency: "NGN", fields: { dest: "123456789" } },
         customer: OFFLINE_CUSTOMER,
       }),
     ).rejects.toThrow(AnchorTimeoutError);

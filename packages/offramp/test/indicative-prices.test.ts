@@ -29,7 +29,7 @@ function makeOffRamp(): TestAnchorOffRamp {
   vi.spyOn(discovery, "get").mockResolvedValue(DISCOVERY);
   const sessions = new FakeAnchorSessionRepository();
   const auth = new SellerAnchorAuth({ discovery, sessions, networkPassphrase: Networks.TESTNET });
-  return new TestAnchorOffRamp({ discovery, auth, sessions, state: new FakeOffRampStateRepository() });
+  return new TestAnchorOffRamp({ discovery, auth, state: new FakeOffRampStateRepository() });
 }
 
 function stubPrices(buyAssets: unknown[]): void {

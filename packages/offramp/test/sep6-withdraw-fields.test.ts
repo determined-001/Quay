@@ -185,7 +185,7 @@ describe("startSep6Withdraw (unit)", () => {
     let capturedUrl: URL | undefined;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: string | URL | Request) => {
         capturedUrl = new URL(String(input));
         return Response.json({ id: "wd_dyn_1" });
       }),
@@ -226,7 +226,7 @@ describe("startSep6Withdraw (unit)", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: string | URL | Request) => {
         capturedUrl = new URL(String(input));
         return Response.json({ id: "wd_dyn_2" });
       }),
@@ -307,7 +307,7 @@ describe("initiate with dynamic withdraw fields (integration)", () => {
     const requested: string[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: string | URL | Request) => {
         const url = String(input);
         requested.push(url);
         if (url.includes("/.well-known/stellar.toml")) {

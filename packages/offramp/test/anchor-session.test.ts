@@ -51,7 +51,7 @@ function jwtFor(sub: string, claims: Record<string, unknown> = {}): string {
   return ["h", Buffer.from(JSON.stringify(payload)).toString("base64url"), "s"].join(".");
 }
 
-function subOf(req: { headers?: HeadersInit }): string {
+function subOf(req: { headers?: ConstructorParameters<typeof Headers>[0] }): string {
   const auth = new Headers(req.headers).get("authorization") ?? "";
   const claims = JSON.parse(Buffer.from(auth.replace("Bearer ", "").split(".")[1]!, "base64url").toString("utf8"));
   return claims.sub as string;
@@ -522,7 +522,7 @@ describe("TestAnchorKyc — per seller", () => {
     const { repo, calls } = countingRepo();
     await repo.save(cachedRecord({ ageMs: 5000 }));
     calls.save = 0;
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     // Alice has NOT signed in, so querying the anchor would throw AnchorAuthRequiredError.
     const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
     expect(record.status).toBe("ACCEPTED");
@@ -538,7 +538,7 @@ describe("TestAnchorKyc — per seller", () => {
     const { repo, calls } = countingRepo();
     await repo.save(cachedRecord({ ageMs: 70_000 }));
     calls.save = 0;
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
 
     const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
@@ -554,7 +554,7 @@ describe("TestAnchorKyc — per seller", () => {
     const repo = new InMemoryKycRepo();
     // older than the 15s cap, but younger than the 60s maxAgeMs
     await repo.save(cachedRecord({ status: "PROCESSING", ageMs: 20_000 }));
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
 
     const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
@@ -567,7 +567,7 @@ describe("TestAnchorKyc — per seller", () => {
     const repo = new InMemoryKycRepo();
     // Fresh, ACCEPTED, but synced for the seller's previous wallet.
     await repo.save(cachedRecord({ account: Keypair.random().publicKey(), ageMs: 1000 }));
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
     anchor.fetchMock.mockClear();
 
@@ -584,7 +584,7 @@ describe("TestAnchorKyc — per seller", () => {
     const { discovery, auth } = setup();
     const repo = new InMemoryKycRepo();
     await repo.save(cachedRecord({ ageMs: 1000 }));
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
     anchor.fetchMock.mockClear();
 
@@ -654,6 +654,7 @@ describe("TestAnchorOffRamp — per seller", () => {
       lastError: null,
       createdAt: 0,
       updatedAt: 0,
+      transferNotifiedAt: null,
     });
     const offramp = new TestAnchorOffRamp({ discovery, auth, state });
     await expect(offramp.status("wd_old")).rejects.toBeInstanceOf(OffRampJobNotFoundError);
@@ -665,8 +666,14 @@ class InMemoryKycRepo {
   async get(sellerId: string, _anchorDomain?: string) {
     return this.rows.get(sellerId) ?? null;
   }
+  async getByCallbackTokenHash(_tokenHash: string) {
+    return null;
+  }
   async save(record: import("@checkout/core").KycRecord) {
     this.rows.set(record.sellerId, record);
+  }
+  async delete(sellerId: string) {
+    this.rows.delete(sellerId);
   }
 }
 

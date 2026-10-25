@@ -87,6 +87,7 @@ describe("AnchorOffRamp (offline)", () => {
       transfer: null,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      transferNotifiedAt: null,
     });
 
     // Also quote indexed by jobId
@@ -167,6 +168,7 @@ describe("AnchorOffRamp (offline)", () => {
       transfer: null,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      transferNotifiedAt: null,
     });
 
     await state.saveQuote({
@@ -231,6 +233,7 @@ describe("AnchorOffRamp (offline)", () => {
       transfer: null,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      transferNotifiedAt: null,
     });
 
     vi.spyOn(offramp["sep24"], "getTransaction").mockResolvedValue({
@@ -275,6 +278,7 @@ describe("AnchorOffRamp (offline)", () => {
       },
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      transferNotifiedAt: null,
     });
 
     vi.spyOn(offramp["sep24"], "getTransaction").mockResolvedValue({
@@ -401,7 +405,8 @@ describe("AnchorOffRamp (offline)", () => {
     expect(token).toHaveBeenCalledWith({ sellerId: CUSTOMER.sellerId, account: CUSTOMER.account });
     expect(getTransaction).toHaveBeenCalledWith("seller-jwt", "job-x");
 
-    await state.updateJob("job-x", { sellerId: null, account: null });
+    // Simulate a legacy row with no owner; updateJob's patch type does not name these.
+    await state.updateJob("job-x", { sellerId: null, account: null } as never);
     await expect(offramp.status("job-x")).rejects.toThrow(/not found|unknown/i);
   });
 

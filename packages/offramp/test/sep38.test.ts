@@ -9,7 +9,7 @@ const USDC: AssetRef = { code: "USDC", issuer: ISSUER };
 const XLM: AssetRef = { code: "XLM", issuer: null };
 
 function stubFetch(body: unknown, status = 200) {
-  const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+  const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => new Response(JSON.stringify(body), { status }));
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }

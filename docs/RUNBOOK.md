@@ -272,11 +272,16 @@ marked paid late, not lost. Buying `starter` is what actually removes the
 problem.
 
 **Turning the anchor probe off.** `.github/workflows/anchor-probe.yml` runs a
-nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org`
-and files an issue when it fails. That is the testnet deploy's sandbox; a
-payments-only mainnet has no anchor, so the probe would file nightly issues
-about a dependency the product no longer has. Set the repository variable
-`ANCHOR_PROBE_DISABLED=1` to skip it.
+nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org`.
+When it fails it files (or comments on) an issue **and** fails the run, so the
+Actions list and the README badge go red. It covers the testnet cash-out path,
+which exists whatever mainnet does, and it is the only live check of that path:
+the regular CI run skips the live suite (`RUN_LIVE_ANCHOR_TESTS` is unset).
+Leave it on for as long as the testnet deploy runs `OFFRAMP=testanchor`. Setting
+the repository variable `ANCHOR_PROBE_DISABLED=1` skips it, and is only right
+when no deployment you operate cashes out through an anchor at all. A
+payments-only mainnet (`OFFRAMP=none`) does not need the probe, but it is not a
+reason to disable it while testnet still does.
 
 ## Deploy
 

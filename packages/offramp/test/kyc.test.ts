@@ -5,6 +5,9 @@ import { TestAnchorKyc, missingRequiredFields } from "../src/kyc";
 import { selectFieldsForAnchor } from "@checkout/core";
 import * as sep12 from "../src/sep12";
 
+// The tests stub only the parts of the repository, discovery and auth the case needs.
+const asDeps = (deps: unknown) => deps as ConstructorParameters<typeof TestAnchorKyc>[0];
+
 describe("TestAnchorKyc.selectFieldsForAnchor", () => {
   const requested: KycFieldSpec[] = [
     { name: "first_name", type: "string", optional: false },
@@ -72,6 +75,7 @@ describe("TestAnchorKyc.submit field mapping", () => {
     customerId: "cus_1",
     status: "NEEDS_INFO" as const,
     message: null,
+    providedFieldStatus: [],
   };
 
   const mockRemote = {
@@ -98,7 +102,7 @@ describe("TestAnchorKyc.submit field mapping", () => {
       get: vi.fn().mockResolvedValue(mockProfile),
     };
 
-    const kyc = new TestAnchorKyc({
+    const kyc = new TestAnchorKyc(asDeps({
       discovery: {
         get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }),
       },
@@ -110,7 +114,7 @@ describe("TestAnchorKyc.submit field mapping", () => {
         save: vi.fn().mockResolvedValue(undefined),
       },
       profileRepo,
-    });
+    }));
 
     const putSep12CustomerSpy = vi.spyOn(sep12, "putSep12Customer");
     const getSep12CustomerSpy = vi.spyOn(sep12, "getSep12Customer");
@@ -142,7 +146,7 @@ describe("TestAnchorKyc.submit field mapping", () => {
   });
 
   it("throws KycRequiredError when required field is missing", async () => {
-    const kyc = new TestAnchorKyc({
+    const kyc = new TestAnchorKyc(asDeps({
       discovery: {
         get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }),
       },
@@ -156,7 +160,7 @@ describe("TestAnchorKyc.submit field mapping", () => {
       profileRepo: {
         get: vi.fn().mockResolvedValue({ fields: {} }),
       },
-    });
+    }));
 
     const getSep12CustomerSpy = vi.spyOn(sep12, "getSep12Customer");
     getSep12CustomerSpy.mockResolvedValue({
@@ -164,6 +168,7 @@ describe("TestAnchorKyc.submit field mapping", () => {
       customerId: null,
       status: "NEEDS_INFO",
       message: null,
+      providedFieldStatus: [],
     });
 
     await expect(kyc.submit(mockAnchorCustomer, {})).rejects.toThrow("Missing required KYC fields");
@@ -184,12 +189,12 @@ describe("TestAnchorKyc customer ids are scoped to the anchor (issue 4.24)", () 
   }
 
   function kycFor(repo: ReturnType<typeof memoryRepo>, anchorDomain: string) {
-    return new TestAnchorKyc({
+    return new TestAnchorKyc(asDeps({
       discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://kyc.example" }) } as any,
       auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain } as any,
       repo,
       profileRepo: { get: vi.fn().mockResolvedValue(null) },
-    });
+    }));
   }
 
   function remote(customerId: string, status: "ACCEPTED" | "NEEDS_INFO") {
@@ -287,14 +292,14 @@ describe("TestAnchorKyc SEP-12 callback registration (#211)", () => {
             lastSyncedAt: 0,
             updatedAt: 0,
           };
-    const kyc = new TestAnchorKyc({
+    const kyc = new TestAnchorKyc(asDeps({
       discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://kyc.example" }) } as any,
       auth: { token: vi.fn().mockResolvedValue("seller-jwt"), anchorDomain: ANCHOR } as any,
       repo: { get: vi.fn().mockResolvedValue(stored), save },
       profileRepo: { get: vi.fn().mockResolvedValue({ fields: { first_name: "Ada" } }) },
       callbackBaseUrl: opts.callbackBaseUrl,
       logger,
-    });
+    }));
     return { kyc, save, logger };
   }
 
@@ -414,7 +419,7 @@ describe("TestAnchorKyc.submitFiles", () => {
 
   it("uploads only the files, never persists binary fields, and records sentFields", async () => {
     const save = vi.fn().mockResolvedValue(undefined);
-    const kyc = new TestAnchorKyc({
+    const kyc = new TestAnchorKyc(asDeps({
       discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }) },
       auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "anchor.example" } as any,
       repo: {
@@ -434,7 +439,7 @@ describe("TestAnchorKyc.submitFiles", () => {
         save,
       },
       profileRepo: { get: vi.fn().mockResolvedValue(null) },
-    });
+    }));
 
     const getSpy = vi.spyOn(sep12, "getSep12Customer");
     getSpy
@@ -468,12 +473,12 @@ describe("TestAnchorKyc.submitFiles", () => {
       vi.spyOn(console, m).mockImplementation(() => {}),
     );
     const save = vi.fn().mockResolvedValue(undefined);
-    const kyc = new TestAnchorKyc({
+    const kyc = new TestAnchorKyc(asDeps({
       discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }) },
       auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "anchor.example" } as any,
       repo: { get: vi.fn().mockResolvedValue(null), save },
       profileRepo: { get: vi.fn().mockResolvedValue(null) },
-    });
+    }));
     vi.spyOn(sep12, "getSep12Customer").mockResolvedValue({
       requiredFields: [NAME, PHOTO_FRONT],
       customerId: "cus_1",
@@ -518,12 +523,12 @@ describe("TestAnchorKyc stale customer id (#222)", () => {
       lastSyncedAt: 0,
       updatedAt: 0,
     };
-    const kyc = new TestAnchorKyc({
+    const kyc = new TestAnchorKyc(asDeps({
       discovery: { get: vi.fn().mockResolvedValue({ kycServer: "https://test.example" }) },
       auth: { token: vi.fn().mockResolvedValue("jwt"), anchorDomain: "anchor.example" } as any,
       repo: { get: vi.fn().mockResolvedValue(stored), save },
       profileRepo: { get: vi.fn().mockResolvedValue({ fields: { first_name: "Ada" } }) },
-    });
+    }));
     return { kyc, save };
   }
 

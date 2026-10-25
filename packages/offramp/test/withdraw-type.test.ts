@@ -81,7 +81,7 @@ function stubAnchorFetch(): string[] {
   const requested: string[] = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       requested.push(url);
       if (url.includes("/.well-known/stellar.toml")) {

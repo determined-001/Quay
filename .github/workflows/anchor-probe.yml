@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # This probe watches testanchor.stellar.org, which is the sandbox the
-    # TESTNET deploy cashes out through. A payments-only mainnet (OFFRAMP=none)
-    # has no anchor at all, so the probe would file nightly issues about a
-    # dependency the product no longer has. Set the repo variable
-    # ANCHOR_PROBE_DISABLED=1 to turn it off — see docs/RUNBOOK.md.
+    # TESTNET deploy cashes out through, and it is the only live check of that
+    # path. Keep it on while the testnet deploy runs OFFRAMP=testanchor. Set the
+    # repo variable ANCHOR_PROBE_DISABLED=1 only if nothing you operate cashes
+    # out through an anchor — see docs/RUNBOOK.md.
     if: vars.ANCHOR_PROBE_DISABLED != '1'
 
     steps:
@@ -151,3 +151,12 @@ jobs:
               });
               core.info("Created new failure issue");
             }
+
+      # The probe step is continue-on-error so the telemetry and issue steps
+      # above still run, which also means the job would otherwise finish green.
+      # Fail the run here so the Actions list and the README badge go red too.
+      - name: Fail the run if the probe failed
+        if: steps.probe.outputs.exit_code != '0'
+        run: |
+          echo "::error::Anchor probe failed (exit code ${{ steps.probe.outputs.exit_code }}). See the filed issue and the probe-results artifact."
+          exit 1
