@@ -233,3 +233,79 @@ describe("anchorAuthRoutes", () => {
     });
   });
 });
+
+/** Issue 3.21: `?anchor=<home_domain>` picks the anchor; one enabled anchor is the default. */
+describe("anchorAuthRoutes with several anchors", () => {
+  const passThrough: MiddlewareHandler = async (_ctx, next) => next();
+
+  function fakeAuth(domain: string, calls: string[]) {
+    return {
+      anchorDomain: domain,
+      sessionExpiry: async () => (domain === "a.example" ? 1_900_000_000_000 : null),
+      challenge: async () => ({ transaction: `tx-${domain}`, networkPassphrase: "net" }),
+      signOut: async (sellerId: string) => void calls.push(`signOut:${domain}:${sellerId}`),
+    } as unknown as SellerAnchorAuth;
+  }
+
+  async function harness(enabledDomains: string[]) {
+    const container = await createTestContainer();
+    const calls: string[] = [];
+    const auths = new Map(["a.example", "b.example", "c.example"].map((d) => [d, fakeAuth(d, calls)]));
+    const rec = (homeDomain: string) => ({ homeDomain });
+    const anchors = {
+      enabled: async () => enabledDomains.map(rec),
+      list: async () => ["a.example", "b.example", "c.example"].map(rec),
+      byDomain: async (d: string) => (auths.has(d) ? { auth: auths.get(d), record: rec(d) } : null),
+    };
+    const app = anchorAuthRoutes({ ...container, anchors } as unknown as Container, passThrough);
+    const { plaintext, prefix } = generateApiKey("test");
+    await container.apiKeys.create({
+      sellerId: container.seller.id, name: "k", prefix, hash: await hashApiKey(plaintext), scopes: ["offramp:initiate"],
+    });
+    return { app, container: container as TestContainer, headers: { authorization: `Bearer ${plaintext}` }, calls, sellerId: container.seller.id };
+  }
+
+  it("defaults to the only enabled anchor", async () => {
+    const { app, container, headers } = await harness(["a.example"]);
+    const res = await app.request("/", { headers });
+    expect(await res.json()).toMatchObject({ required: true, connected: true, anchor: "a.example" });
+    const challenge = await app.request("/challenge", { method: "POST", headers });
+    expect(await challenge.json()).toMatchObject({ transaction: "tx-a.example" });
+    container.client.close();
+  });
+
+  it("with several enabled and none named, is a 400 listing the choices", async () => {
+    const { app, container, headers } = await harness(["a.example", "b.example"]);
+    for (const res of [await app.request("/", { headers }), await app.request("/challenge", { method: "POST", headers })]) {
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "anchor_required", anchors: ["a.example", "b.example"] });
+    }
+    container.client.close();
+  });
+
+  it("?anchor= picks that anchor, case-insensitively, and refuses one that is not enabled", async () => {
+    const { app, container, headers } = await harness(["a.example", "b.example"]);
+    const b = await app.request("/?anchor=B.Example", { headers });
+    expect(await b.json()).toMatchObject({ anchor: "b.example", connected: false });
+    const c = await app.request("/?anchor=c.example", { headers });
+    expect(c.status).toBe(404);
+    expect(await c.json()).toMatchObject({ error: "unknown_anchor", anchors: ["a.example", "b.example"] });
+    container.client.close();
+  });
+
+  it("reports nothing to sign in to when no anchor is enabled", async () => {
+    const { app, container, headers } = await harness([]);
+    expect(await (await app.request("/", { headers })).json()).toEqual({ required: false, connected: false, anchor: null, expiresAt: null });
+    container.client.close();
+  });
+
+  it("DELETE signs out of the named anchor, or of every anchor when none is named", async () => {
+    const { app, container, headers, calls, sellerId } = await harness(["a.example", "b.example"]);
+    expect((await app.request("/?anchor=b.example", { method: "DELETE", headers })).status).toBe(204);
+    expect(calls).toEqual([`signOut:b.example:${sellerId}`]);
+    calls.length = 0;
+    expect((await app.request("/", { method: "DELETE", headers })).status).toBe(204);
+    expect(calls).toEqual([`signOut:a.example:${sellerId}`, `signOut:b.example:${sellerId}`, `signOut:c.example:${sellerId}`]);
+    container.client.close();
+  });
+});

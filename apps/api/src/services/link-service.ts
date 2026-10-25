@@ -74,6 +74,30 @@ export interface ServiceCallOptions {
   requestId?: string;
 }
 
+/**
+ * One anchor as the service sees it: the adapters to call and the domain its
+ * circuit breaker is keyed by (issue 3.21).
+ */
+export interface AnchorRoute {
+  domain: string;
+  offramp: OffRampPort;
+  kyc: KycPort;
+}
+
+/**
+ * Picks the anchor for a piece of work. Present when a deployment can hold
+ * several anchors (`OFFRAMP=testanchor|anchor`); absent, the service uses its
+ * single `offramp` and `kyc` exactly as before.
+ */
+export interface AnchorRouter {
+  /** The enabled anchor serving a payout currency, or null when none does. */
+  forCurrency(targetCurrency: string): Promise<AnchorRoute | null>;
+  /** The anchor that owns a stored job (`offramp_jobs.anchor`), or null when unknown. */
+  forJob(anchorLabel: string): Promise<AnchorRoute | null>;
+  /** The default anchor, for work that names no currency; null when none is enabled. */
+  fallback(): Promise<AnchorRoute | null>;
+}
+
 /** `actor_id` of the audit row written when the cash-out KYC gate reads a seller's identity. */
 export const CASH_OUT_GATE_ACTOR = "cash-out-gate";
 
@@ -151,6 +175,12 @@ export class LinkService {
        * breaker from `health`; omitted means "the only/first anchor".
        */
       anchorDomain?: string;
+      /**
+       * Several-anchor routing (issue 3.21). When set, cash-outs go to the anchor
+       * serving the payout currency and polls to the anchor that owns the job;
+       * `offramp`, `kyc` and `anchorDomain` are then only the fallback.
+       */
+      anchors?: AnchorRouter;
       // "memo" (default) or "muxed" — see packages/stellar/src/stellar-rail.ts.
       correlation: "memo" | "muxed";
       /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
@@ -169,7 +199,7 @@ export class LinkService {
        * `AnchorAuthRequiredError`. Injected so LinkService stays independent
        * of the offramp package; omitted when no anchor session store exists.
        */
-      hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean | Promise<boolean>;
+      hasLiveAnchorSession?: (customer: AnchorCustomer, anchorLabel?: string) => boolean | Promise<boolean>;
       /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
       logger?: Logger;
       /** Audit log for system reads of seller identity (the cash-out KYC gate). Omitted = not audited. */
@@ -339,12 +369,14 @@ export class LinkService {
     if (link.status !== "paid") {
       throw new HttpError(409, `Link must be paid to preview off-ramp (is "${link.status}")`);
     }
-    if (!this.deps.offramp.indicativePrices) return null;
+    const priceCurrency = targetCurrency ?? link.offrampTargetCurrency ?? undefined;
+    const anchor = priceCurrency ? await this.routeForCurrency(priceCurrency) : await this.defaultRoute();
+    if (!anchor.offramp.indicativePrices) return null;
 
     const sourceAmount = link.paidAmount ?? link.amount;
     let prices: IndicativePrice[];
     try {
-      prices = await this.deps.offramp.indicativePrices({
+      prices = await anchor.offramp.indicativePrices({
         sourceAsset: link.asset,
         sourceAmount,
       });
@@ -373,7 +405,7 @@ export class LinkService {
    * server-side so the form can pre-fill / indicate "already on file" without
    * ever leaking the raw bank account number to the browser (issues #32, 5.24).
    */
-  async getOfframpRequirements(linkId: string): Promise<{
+  async getOfframpRequirements(linkId: string, targetCurrency?: string): Promise<{
     types: OfframpRequirementTypes["types"];
     defaultType: string | null;
     savedFields: Record<string, string> | null;
@@ -384,9 +416,13 @@ export class LinkService {
     const seller = await this.deps.sellers.findById(link.sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
 
+    // The anchor that would serve the seller's payout currency, else the default one.
+    const requirementsCurrency = targetCurrency ?? link.offrampTargetCurrency ?? undefined;
+    const anchor = requirementsCurrency ? await this.routeForCurrency(requirementsCurrency) : await this.defaultRoute();
+
     let requirements: OfframpRequirementTypes;
     try {
-      requirements = await this.deps.offramp.offrampRequirements(link.asset.code, customerOf(seller));
+      requirements = await anchor.offramp.offrampRequirements(link.asset.code, customerOf(seller));
     } catch (err) {
       // OFFRAMP=none: the route answers 501 offramp_disabled, which clients do not retry.
       if (err instanceof OffRampDisabledError) throw err;
@@ -708,6 +744,49 @@ export class LinkService {
   }
 
   /**
+   * The anchor a cash-out in `targetCurrency` goes through. Without a router it
+   * is the one anchor this deployment was built with; with one, a currency no
+   * enabled anchor serves is `422 corridor_unavailable`.
+   */
+  private async routeForCurrency(targetCurrency: string): Promise<AnchorRoute> {
+    if (!this.deps.anchors) {
+      return { domain: this.anchorDomain ?? this.deps.offramp.mode, offramp: this.deps.offramp, kyc: this.deps.kyc };
+    }
+    const route = await this.deps.anchors.forCurrency(targetCurrency);
+    if (!route) {
+      throw new HttpError(422, "corridor_unavailable", {
+        message: `No enabled anchor serves payouts in ${targetCurrency}.`,
+        targetCurrency,
+      });
+    }
+    return route;
+  }
+
+  /** The default anchor, for requests that name no currency. */
+  private async defaultRoute(): Promise<AnchorRoute> {
+    if (!this.deps.anchors) {
+      return { domain: this.anchorDomain ?? this.deps.offramp.mode, offramp: this.deps.offramp, kyc: this.deps.kyc };
+    }
+    const route = await this.deps.anchors.fallback();
+    if (!route) {
+      throw new HttpError(422, "corridor_unavailable", { message: "No anchor is enabled for cash-out." });
+    }
+    return route;
+  }
+
+  /**
+   * The off-ramp adapter that owns a stored job. A job keeps polling on the
+   * anchor that created it however the anchor list has changed since; a label
+   * nobody recognises (a legacy row) falls back to the default.
+   */
+  private async offrampForJob(jobId: string): Promise<OffRampPort> {
+    if (!this.deps.anchors) return this.deps.offramp;
+    const stored = await this.deps.offrampState.getJob(jobId).catch(() => null);
+    const route = stored ? await this.deps.anchors.forJob(stored.anchor) : null;
+    return (route ?? (await this.deps.anchors.fallback()))?.offramp ?? this.deps.offramp;
+  }
+
+  /**
    * KYC is keyed by seller, never by link — a live cash-out is impossible
    * until the anchor has actually accepted this seller's identity. `status()`
    * re-syncs rather than trusting a cached value, since paying out against
@@ -717,10 +796,11 @@ export class LinkService {
     customer: AnchorCustomer,
     route: AnchorAuthRoute,
     opts: ServiceCallOptions = {},
+    kyc: KycPort = this.deps.kyc,
   ): Promise<void> {
     let status: string;
     try {
-      status = (await this.deps.kyc.status(customer)).status;
+      status = (await kyc.status(customer)).status;
       // A system read: the gate decrypts the record to learn its status and
       // hands no identity value to anyone, so the row lists no fields (issue 8.15).
       await this.deps.piiAudit?.record({
@@ -755,17 +835,18 @@ export class LinkService {
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
     assertCanCashOut(link);
-    if (!this.health.isAvailable(this.anchorDomain)) {
+    const anchor = await this.routeForCurrency(targetCurrency);
+    if (!this.health.isAvailable(anchor.domain)) {
       throw new HttpError(503, "anchor_unavailable");
     }
     const seller = await this.deps.sellers.findById(link.sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer, "quote", opts);
+    await this.assertKycAccepted(customer, "quote", opts, anchor.kyc);
 
     const sourceAmount = link.paidAmount ?? link.amount;
     try {
-      return await this.deps.offramp.quote(
+      return await anchor.offramp.quote(
         { linkId: link.id, sourceAsset: link.asset, sourceAmount, targetCurrency, customer, withdrawType },
         { logger: log },
       );
@@ -808,21 +889,24 @@ export class LinkService {
       ...body.payoutFields,
     };
 
+    // The anchor serving this payout currency (issue 3.21).
+    const anchor = await this.routeForCurrency(body.targetCurrency);
+
     // Fail fast when the breaker is open: never attempt to call a known-dead
     // anchor. The HTTP layer maps this to 503 anchor_unavailable.
-    if (!this.health.isAvailable(this.anchorDomain)) {
+    if (!this.health.isAvailable(anchor.domain)) {
       throw new HttpError(503, "anchor_unavailable");
     }
 
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer, "cash_out", opts);
+    await this.assertKycAccepted(customer, "cash_out", opts, anchor.kyc);
 
     const sourceAmount = link.paidAmount ?? link.amount;
 
     // Extracted so the expiry guard below can ask for a second, fresh quote
     // without duplicating the request shape.
     const fetchFreshQuote = () =>
-      this.deps.offramp.quote({
+      anchor.offramp.quote({
         linkId: link.id,
         sourceAsset: link.asset,
         sourceAmount,
@@ -892,7 +976,7 @@ export class LinkService {
         child.info(
           {
             event: "cashout.quote",
-            anchor: this.deps.offramp.mode,
+            anchor: anchor.offramp.mode,
             quoteId: quote.quoteId,
             targetCurrency: quote.targetCurrency,
             targetAmount: quote.targetAmount,
@@ -904,7 +988,7 @@ export class LinkService {
       }
 
       const t1 = Date.now();
-      initiation = await this.deps.offramp.initiate({
+      initiation = await anchor.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
         payout: { currency: body.targetCurrency, fields: mergedFields },
@@ -913,7 +997,7 @@ export class LinkService {
       child.info(
         {
           event: "cashout.initiate",
-          anchor: this.deps.offramp.mode,
+          anchor: anchor.offramp.mode,
           jobId: initiation.jobId,
           durationMs: Date.now() - t1,
         },
@@ -924,7 +1008,7 @@ export class LinkService {
       link.status = from;
       const message = err instanceof Error ? err.message : String(err);
       child.error(
-        { event: "cashout.error", anchor: this.deps.offramp.mode, error: message },
+        { event: "cashout.error", anchor: anchor.offramp.mode, error: message },
         "cash-out failed",
       );
       if (err instanceof HttpError) throw err;
@@ -999,7 +1083,7 @@ export class LinkService {
     // Passive telemetry (issue #20, 3.8) — never blocks the cash-out response.
     const storedJob = await this.deps.offrampState.getJob(jobId).catch(() => null);
     void this.recordTelemetry(jobId, {
-      anchorDomain: storedJob?.anchor ?? this.deps.offramp.mode,
+      anchorDomain: storedJob?.anchor ?? anchor.offramp.mode,
       corridor: `${link.asset.code}/${quote.targetCurrency}`,
       sellAsset: link.asset.code,
       sellAmount: sourceAmount,
@@ -1057,8 +1141,10 @@ export class LinkService {
     if (!link.offrampJobId) return null;
     try {
       // Circuit breaker open: do not add load to a struggling anchor; the stored copy below answers.
-      if (!this.health.isAvailable(this.anchorDomain)) throw new Error("anchor_unavailable");
-      const job = await this.deps.offramp.status(link.offrampJobId, opts);
+      const stored = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
+      const owner = this.deps.anchors && stored ? await this.deps.anchors.forJob(stored.anchor) : null;
+      if (!this.health.isAvailable(owner?.domain ?? this.anchorDomain)) throw new Error("anchor_unavailable");
+      const job = await (await this.offrampForJob(link.offrampJobId)).status(link.offrampJobId, opts);
       return job.transfer ?? null;
     } catch (err) {
       // No live anchor session for this seller: the seller has to reconnect, same
@@ -1147,7 +1233,7 @@ export class LinkService {
     // change until they re-authenticate, so skip without calling status().
     // Legacy rows with no seller/account cannot be checked and fall through.
     if (this.deps.hasLiveAnchorSession && before?.sellerId && before.account) {
-      if (!(await this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account }))) {
+      if (!(await this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account }, before.anchor))) {
         await this.blockOnAnchorAuth(link, child);
         return;
       }
@@ -1159,7 +1245,7 @@ export class LinkService {
 
     let job: OffRampJob;
     try {
-      job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
+      job = await (await this.offrampForJob(link.offrampJobId)).status(link.offrampJobId, { logger: child });
       if (job.transfer && !before?.transfer && !this.transferRequiredLogged.has(link.offrampJobId)) {
         this.transferRequiredLogged.add(link.offrampJobId);
         // Deliberately no memo/destination here: payment instructions stay

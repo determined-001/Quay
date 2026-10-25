@@ -183,7 +183,8 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
         // the id and leaks the link's existence (issue #41).
         return ctx.json({ error: "not_found" }, 404);
       }
-      const result = await c.service.getOfframpRequirements(ctx.req.param("id"));
+      // Optional ?currency=NGN picks the anchor that serves it when several are configured.
+      const result = await c.service.getOfframpRequirements(ctx.req.param("id"), ctx.req.query("currency") ?? undefined);
       return ctx.json(result);
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);

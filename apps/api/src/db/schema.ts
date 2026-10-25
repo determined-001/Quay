@@ -385,6 +385,29 @@ export const kycConsents = sqliteTable("kyc_consents", {
 ]);
 
 /**
+ * Anchors this deployment can cash out through (issue 3.21). No secrets: an
+ * anchor is a public domain plus how to talk to it; authority comes from each
+ * seller's own SEP-10 session (`anchor_sessions`).
+ */
+export const anchors = sqliteTable("anchors", {
+  id: text("id").primaryKey(),
+  homeDomain: text("home_domain").notNull(),
+  // Origin the guessed endpoint layout hangs off when SEP-1 discovery fails (was ANCHOR_URL).
+  baseUrl: text("base_url").notNull(),
+  displayName: text("display_name").notNull(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  protocol: text("protocol", { enum: ["auto", "sep6", "sep24"] }).notNull().default("auto"),
+  withdrawType: text("withdraw_type"),
+  // JSON string[] of target currencies; [] means "any".
+  corridors: text("corridors").notNull().default("[]"),
+  rateSource: text("rate_source"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("anchors_home_domain_unique").on(table.homeDomain),
+]);
+
+/**
  * Which SEP-9 fields a seller agreed to share with an anchor to pre-fill its
  * SEP-24 form (issue 3.17). Field names only, never values.
  */

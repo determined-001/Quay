@@ -26,6 +26,7 @@
     "check:no-server-signing": "node scripts/check-no-server-signing.mjs",
     "sweep": "node scripts/uptime-check.mjs && pnpm e2e:live",
     "preflight:mainnet": "node scripts/mainnet-preflight.mjs",
+    "anchors": "node scripts/anchors.mjs",
     "secrets:mainnet": "pnpm --filter @checkout/api exec node scripts/gen-mainnet-secrets.mjs",
     "demo:seed": "pnpm --filter @checkout/api exec tsx scripts/demo-seed.ts",
     "demo:reset": "pnpm --filter @checkout/api exec tsx scripts/demo-reset.ts",

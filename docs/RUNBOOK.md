@@ -211,10 +211,42 @@ mainnet-only notes:
 - **`ANCHOR_URL` / `ANCHOR_HOME_DOMAIN`** only exist on mainnet
   (`OFFRAMP=anchor`). Changing anchors is not a rotation — treat it as picking
   a new anchor (`docs/MAINNET.md` Phase 1) and re-verify its SEP-10/SEP-38/
-  SEP-6 support before pointing production traffic at it.
+  SEP-6 support before pointing production traffic at it. They only **seed**
+  the `anchors` table on the first boot; after that editing them changes
+  nothing (the API logs `anchors.env_ignored`). See "Switching anchors" below.
 - **`METRICS_TOKEN`** is `sync: false` on mainnet the same as testnet — rotate
   it the same way, but remember any external scraper reading the mainnet
   `/metrics` endpoint needs the new token too.
+
+## Switching anchors
+
+Anchors live in the `anchors` table, not in the environment. The first boot
+after upgrading inserts one row from `ANCHOR_URL` / `ANCHOR_HOME_DOMAIN` /
+`OFFRAMP_PROTOCOL` / `OFFRAMP_TYPE` / `OFFRAMP_RATE_SOURCE`, so an existing
+deployment carries on unchanged. Change it with the CLI, which uses the same
+`DATABASE_URL` / `DATABASE_AUTH_TOKEN` as the API (no redeploy; the running API
+re-reads the table every few seconds):
+
+```bash
+node scripts/anchors.mjs list
+node scripts/anchors.mjs add anchor2.example --url https://anchor2.example --corridors KES --protocol auto
+node scripts/anchors.mjs disable anchor1.example     # and `enable` to undo
+```
+
+- **Moving to a new anchor with no downtime:** `add` the new one, check it with
+  `pnpm preflight:mainnet`, then `disable` the old one. A disabled anchor takes
+  no new cash-outs but its withdrawals in flight keep polling on it, so nothing
+  is stranded; sellers sign in to the new anchor with their own wallet (it is a
+  new SEP-10 session per anchor).
+- **Corridors:** `--corridors NGN,KES` limits an anchor to those payout
+  currencies; none listed means any. A cash-out in a currency no enabled anchor
+  serves is `422 corridor_unavailable`.
+- **A bad row** (for example a rate source that cannot be configured) is logged
+  as `anchor.build_failed` and that anchor is skipped; at boot it stops the
+  process, as before.
+- **Not yet per anchor:** the dashboard's identity panel and `/seller/kyc` act on
+  the default anchor only. The cash-out KYC gate does use the anchor that serves
+  the currency.
 
 ## Uptime monitoring
 

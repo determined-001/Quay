@@ -344,14 +344,15 @@ export function kycRoutes(
       return ctx.json({ error: "forbidden", message: "deletion requires session authentication" }, 403);
     }
     const anchorDomain = ctx.req.param("anchorDomain");
-    if (!c.anchorDomain || anchorDomain !== c.anchorDomain || !c.deleteAnchorCustomer) {
+    const known = c.anchorDomains ? await c.anchorDomains() : c.anchorDomain ? [c.anchorDomain] : [];
+    if (!known.includes(anchorDomain) || !c.deleteAnchorCustomer) {
       return ctx.json({ error: "anchor_unavailable" }, 404);
     }
     const seller = ctx.get("seller");
     const customer = customerOf(seller);
     try {
       await c.kycConsents.revoke(seller.id, anchorDomain);
-      const anchorResult = await c.deleteAnchorCustomer(customer);
+      const anchorResult = await c.deleteAnchorCustomer(customer, anchorDomain);
       await c.db.delete(sellerKyc).where(and(eq(sellerKyc.sellerId, seller.id), eq(sellerKyc.anchorDomain, anchorDomain)));
       await c.db.delete(kycDisclosureFields).where(and(eq(kycDisclosureFields.sellerId, seller.id), eq(kycDisclosureFields.anchorDomain, anchorDomain)));
       return ctx.json({ anchorDomain, anchorResult, localDataErased: true });

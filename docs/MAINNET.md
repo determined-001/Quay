@@ -146,6 +146,12 @@ What you need from the anchor before proceeding:
   account, not Quay's. Each seller also signs the USDC transfer that funds their
   withdrawal. Nothing is sent from an account Quay controls.
 
+`ANCHOR_URL` and `ANCHOR_HOME_DOMAIN` name the first anchor and seed the
+`anchors` table on the first boot. More anchors (another corridor, or a move to
+a different production anchor) are added afterwards with
+`node scripts/anchors.mjs add|disable|list`, without a redeploy; see
+[Switching anchors](RUNBOOK.md#switching-anchors).
+
 Verify before writing any config:
 
 ```bash

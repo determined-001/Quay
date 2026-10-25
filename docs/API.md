@@ -723,7 +723,9 @@ The calls that start money-adjacent work (`POST /links/:id/cash-out`) honour
 offers for this link's asset, the payout fields each one needs, and the payout
 fields the seller already saved (masked). Use it to build the cash-out form
 instead of hard-coding bank fields. It works on a link in any state and does
-not need the seller's anchor session (the anchor's `/info` is public).
+not need the seller's anchor session (the anchor's `/info` is public). With
+several anchors, `?currency=NGN` picks the anchor serving that payout currency
+(default: the link's cash-out currency if it has one, else the default anchor).
 
 **200** (the `mock` adapter; a real anchor lists its own types and fields)
 ```json
@@ -875,6 +877,7 @@ GET /links/lnk_y70hu7frwy/cash-out/quote?targetCurrency=NGN
 | `404` | `not_found` | Unknown link, or another seller's link | Check the id |
 | `409` | `Link must be paid to cash out (is "<status>")` | The link is not `paid` or `offramp_failed` | Wait until it is paid |
 | `422` | `offramp_rejected` | The anchor refused on its merits: amount outside its limits, unsupported pair, or a withdraw type is needed. Body has `message`, `limits` (`minAmount`, `maxAmount`) and `availableTypes`, and may carry `anchorType` and `fields` | The seller's to fix; do not retry unchanged. Does not count towards the circuit breaker |
+| `422` | `corridor_unavailable` | No enabled anchor serves `targetCurrency` (several-anchor deployments; body has `targetCurrency`) | Pick a currency the deployment serves |
 | `501` | `offramp_disabled` | `OFFRAMP=none` | Do not retry; hide cash-out |
 | `502` | `anchor_error` | The anchor failed or was unreachable | Retry later |
 | `503` | `anchor_unavailable` | The anchor is marked unhealthy (circuit breaker open) and no call was made | Retry after a short delay |
@@ -1138,6 +1141,16 @@ The flow is `GET /seller/anchor-auth` (is there a session?), then
 `POST /seller/anchor-auth`. Every method below also returns `401 unauthorized`
 without a credential and `403 missing_scope` for a key without
 `offramp:initiate`.
+
+A deployment can hold several anchors (the `anchors` table, managed with
+`node scripts/anchors.mjs`). Every method here then takes an optional
+`?anchor=<home_domain>`. Left out, it means the only enabled anchor; with
+several enabled it is `400 { "error": "anchor_required", "anchors": [...] }`
+listing the choices, and an anchor that is not enabled is
+`404 { "error": "unknown_anchor", "anchors": [...] }`. `DELETE` without
+`?anchor=` signs the seller out of every anchor. The dashboard and
+`/seller/kyc` still act on the default anchor only (the one named by
+`ANCHOR_HOME_DOMAIN` when it is enabled, else the oldest enabled).
 
 ### `GET /seller/anchor-auth`
 

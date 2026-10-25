@@ -260,7 +260,7 @@ Every `CircuitBreakerOffRamp` call is instrumented (`anchor_calls_total`,
 consecutive failures, so a down anchor gets a 30s cooldown instead of being hit by every
 poll tick.
 
-### 4. Cash-out — SEP-24 interactive variant (per-anchor selection tracked in [#216](https://github.com/determined-001/Quay/issues/216); quote gaps in [#217](https://github.com/determined-001/Quay/issues/217)/[#219](https://github.com/determined-001/Quay/issues/219))
+### 4. Cash-out — SEP-24 interactive variant (chosen per anchor by `SelectingOffRamp`; quote gaps in [#217](https://github.com/determined-001/Quay/issues/217)/[#219](https://github.com/determined-001/Quay/issues/219))
 
 ```mermaid
 sequenceDiagram
@@ -367,6 +367,12 @@ The seam you need depends on what's actually changing:
 3. **Validate the anchor will actually onboard and pay out before building further.**
    See the README's "Before you go live" section — this is the step every anchor
    integration actually lives or dies on, not the adapter code.
+
+**A second anchor that speaks the same SEPs** needs no code: add a row to the `anchors`
+table (`node scripts/anchors.mjs add`). `AnchorRegistry` (`apps/api/src/services/anchor-registry.ts`)
+builds that anchor's discovery, per-seller auth, KYC and circuit-broken off-ramp once, picks
+the anchor for a cash-out by payout currency and the anchor for a poll by the job's stored
+`anchor`, and keeps polling a disabled anchor's jobs.
 
 **A new rail variant on the same chain** (e.g. a different memo scheme, or SEP-31 direct
 send instead of a payment link): usually doesn't need a new port at all — check whether

@@ -133,18 +133,21 @@ export function profileRoutes(c: Container): Hono<{ Variables: AuthVariables }> 
     }
 
     const anchors: AnchorEraseResult[] = [];
-    if (c.anchorDomain && c.deleteAnchorCustomer) {
-      const anchorDomain = c.anchorDomain;
-      try {
-        const outcome = await c.deleteAnchorCustomer(customerOf(seller));
-        anchors.push({ anchorDomain, result: outcome === "deleted" ? "erased" : "not_held" });
-      } catch (err) {
-        if (err instanceof AnchorAuthRequiredError) {
-          anchors.push({ anchorDomain, result: "not_attempted:no_session" });
-        } else {
-          // Message carries only the HTTP status; never return anchor bodies.
-          const status = err instanceof Error ? err.message.match(/\b(\d{3})\b/)?.[1] : undefined;
-          anchors.push({ anchorDomain, result: `refused:${status ?? "error"}` });
+    // Every registered anchor, enabled or not: a disabled anchor still holds what the seller gave it.
+    const domains = c.anchorDomains ? await c.anchorDomains() : c.anchorDomain ? [c.anchorDomain] : [];
+    if (c.deleteAnchorCustomer) {
+      for (const anchorDomain of domains) {
+        try {
+          const outcome = await c.deleteAnchorCustomer(customerOf(seller), anchorDomain);
+          anchors.push({ anchorDomain, result: outcome === "deleted" ? "erased" : "not_held" });
+        } catch (err) {
+          if (err instanceof AnchorAuthRequiredError) {
+            anchors.push({ anchorDomain, result: "not_attempted:no_session" });
+          } else {
+            // Message carries only the HTTP status; never return anchor bodies.
+            const status = err instanceof Error ? err.message.match(/\b(\d{3})\b/)?.[1] : undefined;
+            anchors.push({ anchorDomain, result: `refused:${status ?? "error"}` });
+          }
         }
       }
     }

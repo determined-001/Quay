@@ -58,11 +58,13 @@ import {
   offrampTelemetry,
   apiKeys,
   kycConsents,
+  anchors,
   prefillConsents,
   sellerProfile,
 } from "../db/schema";
 import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
+import type { AnchorRecord, AnchorRepository } from "../services/anchor-registry";
 import { computeKeyId, decryptPii, encryptPii, getBlobKeyId, type PiiKeyring } from "../crypto/pii";
 import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
 import type { Logger } from "pino";
@@ -526,6 +528,64 @@ export class DrizzlePrefillConsentRepository implements PrefillConsentRepository
       .where(eq(prefillConsents.sellerId, sellerId))
       .orderBy(asc(prefillConsents.anchorDomain));
     return rows.map((r) => this.rowToConsent(r));
+  }
+}
+
+/** The `anchors` table (issue 3.21). */
+export class DrizzleAnchorRepository implements AnchorRepository {
+  constructor(private readonly db: DB) {}
+
+  private rowToRecord(row: typeof anchors.$inferSelect): AnchorRecord {
+    let corridors: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.corridors);
+      if (Array.isArray(parsed)) corridors = parsed.filter((c): c is string => typeof c === "string");
+    } catch {
+      corridors = [];
+    }
+    return {
+      id: row.id,
+      homeDomain: row.homeDomain,
+      baseUrl: row.baseUrl,
+      displayName: row.displayName,
+      enabled: row.enabled,
+      protocol: row.protocol,
+      withdrawType: row.withdrawType ?? null,
+      corridors,
+      rateSource: row.rateSource ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async list(): Promise<AnchorRecord[]> {
+    const rows = await this.db.select().from(anchors).orderBy(asc(anchors.createdAt), asc(anchors.homeDomain));
+    return rows.map((r) => this.rowToRecord(r));
+  }
+
+  async insert(record: AnchorRecord): Promise<void> {
+    await this.db.insert(anchors).values({
+      id: record.id,
+      homeDomain: record.homeDomain,
+      baseUrl: record.baseUrl,
+      displayName: record.displayName,
+      enabled: record.enabled,
+      protocol: record.protocol,
+      withdrawType: record.withdrawType,
+      corridors: JSON.stringify(record.corridors),
+      rateSource: record.rateSource,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    });
+  }
+
+  async setEnabled(homeDomain: string, enabled: boolean, now: number = Date.now()): Promise<boolean> {
+    const updated = await this.db
+      .update(anchors)
+      .set({ enabled, updatedAt: now })
+      .where(eq(anchors.homeDomain, homeDomain))
+      .returning({ id: anchors.id });
+    return updated.length > 0;
   }
 }
 

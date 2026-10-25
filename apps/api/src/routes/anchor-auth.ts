@@ -1,6 +1,11 @@
-import { Hono, type MiddlewareHandler } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { z } from "zod";
-import { AnchorChallengeError, AnchorHttpError, type AnchorChallengeErrorKind } from "@checkout/offramp";
+import {
+  AnchorChallengeError,
+  AnchorHttpError,
+  type AnchorChallengeErrorKind,
+  type SellerAnchorAuth,
+} from "@checkout/offramp";
 import { anchorFailure } from "../services/link-service";
 import { getLogger } from "../request-context";
 import type { Container } from "../services/container";
@@ -18,6 +23,40 @@ const CHALLENGE_MESSAGES: Record<AnchorChallengeErrorKind, string> = {
   unverifiable: "This anchor could not be verified, so no challenge was issued.",
   invalid: "The anchor's challenge could not be verified.",
 };
+
+/**
+ * The anchor a request is about (issue 3.21): `?anchor=<home_domain>`, else the
+ * only enabled anchor. With several enabled and none named it is a 400 that
+ * lists the choices. `null` means this deployment has no real anchor.
+ */
+type Resolved =
+  | { ok: true; auth: SellerAnchorAuth | null; domain: string | null }
+  | { ok: false; response: Response };
+
+async function resolveAnchor(c: Container, ctx: Context): Promise<Resolved> {
+  // Deployments built without a registry (and test containers) carry one auth.
+  if (!c.anchors) return { ok: true, auth: c.anchorAuth, domain: c.anchorAuth?.anchorDomain ?? null };
+  const enabled = await c.anchors.enabled();
+  if (enabled.length === 0) return { ok: true, auth: null, domain: null };
+  const choices = enabled.map((r) => r.homeDomain);
+  const wanted = ctx.req.query("anchor");
+  const record = wanted
+    ? enabled.find((r) => r.homeDomain.toLowerCase() === wanted.toLowerCase())
+    : enabled.length === 1
+      ? enabled[0]
+      : undefined;
+  if (!record) {
+    return {
+      ok: false,
+      response: wanted
+        ? ctx.json({ error: "unknown_anchor", anchors: choices }, 404)
+        : ctx.json({ error: "anchor_required", message: "More than one anchor is enabled; pass ?anchor=<home_domain>.", anchors: choices }, 400),
+    };
+  }
+  const entry = await c.anchors.byDomain(record.homeDomain);
+  if (!entry) return { ok: false, response: ctx.json({ error: "anchor_unavailable" }, 503) };
+  return { ok: true, auth: entry.auth, domain: entry.record.homeDomain };
+}
 
 const completeSchema = z.object({ transaction: z.string().min(1) });
 
@@ -56,7 +95,9 @@ export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandle
   // Whether the seller has a live session. `required: false` means this
   // deployment has no real anchor (mock / none), so there is nothing to do.
   app.get("/", async (ctx) => {
-    const auth = c.anchorAuth;
+    const resolved = await resolveAnchor(c, ctx);
+    if (!resolved.ok) return resolved.response;
+    const auth = resolved.auth;
     if (!auth) return ctx.json({ required: false, connected: false, anchor: null, expiresAt: null });
     const expiresAt = await auth.sessionExpiry(customerOf(ctx.get("seller")));
     return ctx.json({ required: true, connected: expiresAt !== null, anchor: auth.anchorDomain, expiresAt });
@@ -66,7 +107,9 @@ export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandle
   // above has populated the seller used by its per-seller key.
   // A verified challenge for the seller's wallet to sign.
   app.post("/challenge", anchorAuthLimit, async (ctx) => {
-    const auth = c.anchorAuth;
+    const resolved = await resolveAnchor(c, ctx);
+    if (!resolved.ok) return resolved.response;
+    const auth = resolved.auth;
     if (!auth) return ctx.json({ error: "no_anchor" }, 404);
     try {
       return ctx.json(await auth.challenge(customerOf(ctx.get("seller"))));
@@ -85,7 +128,9 @@ export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandle
 
   // Relay the signed challenge; the anchor's JWT is kept, never returned.
   app.post("/", anchorAuthLimit, async (ctx) => {
-    const auth = c.anchorAuth;
+    const resolved = await resolveAnchor(c, ctx);
+    if (!resolved.ok) return resolved.response;
+    const auth = resolved.auth;
     if (!auth) return ctx.json({ error: "no_anchor" }, 404);
     const parsed = completeSchema.safeParse(await ctx.req.json().catch(() => ({})));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
@@ -109,8 +154,18 @@ export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandle
     }
   });
 
+  // Signs the seller out of the named anchor, or of every anchor when none is named.
   app.delete("/", async (ctx) => {
-    await c.anchorAuth?.signOut(ctx.get("seller").id);
+    const sellerId = ctx.get("seller").id;
+    if (c.anchors && !ctx.req.query("anchor")) {
+      for (const record of await c.anchors.list()) {
+        await (await c.anchors.byDomain(record.homeDomain))?.auth.signOut(sellerId);
+      }
+      return ctx.body(null, 204);
+    }
+    const resolved = await resolveAnchor(c, ctx);
+    if (!resolved.ok) return resolved.response;
+    await resolved.auth?.signOut(sellerId);
     return ctx.body(null, 204);
   });
 
