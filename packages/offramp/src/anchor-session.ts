@@ -9,6 +9,7 @@ import {
 } from "@checkout/core";
 import { clearStellarTomlCache, fetchStellarToml, type Sep1DiscoveryInfo } from "./sep1";
 import { anchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
 
 // ===========================================================================
 //  Per-seller anchor identity.
@@ -225,7 +226,7 @@ export class SellerAnchorAuth {
     // that ignores it issues an ordinary challenge and we relay it unchanged.
     if (this.clientDomain) url.searchParams.set("client_domain", this.clientDomain);
 
-    const res = await fetch(url);
+    const res = await anchorFetch(url);
     if (!res.ok) {
       throw await anchorHttpError("10", "challenge fetch", res);
     }
@@ -250,7 +251,7 @@ export class SellerAnchorAuth {
     const d = await this.verifiableDiscovery();
     const tx = this.verify(signedTransaction, d, customer.account);
 
-    const res = await fetch(d.webAuthEndpoint, {
+    const res = await anchorFetch(d.webAuthEndpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ transaction: this.coSignClientDomain(tx, signedTransaction) }),

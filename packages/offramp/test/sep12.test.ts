@@ -80,7 +80,7 @@ describe("deleteSep12Customer", () => {
     expect(await deleteSep12Customer(`${BASE_URL}/sep12`, JWT, ACCOUNT)).toBe("not_found");
     const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect(url.toString()).toBe(`${BASE_URL}/sep12/customer/${ACCOUNT}`);
-    expect(init).toEqual({ method: "DELETE", headers: { authorization: `Bearer ${JWT}` } });
+    expect(init).toMatchObject({ method: "DELETE", headers: { authorization: `Bearer ${JWT}` } });
   });
 
   it("does not report deletion when the anchor rejects the request", async () => {

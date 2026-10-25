@@ -1,6 +1,7 @@
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { anchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
 import type { AnchorDiscovery } from "./anchor-session";
 import { endpointUrl, type Sep1DiscoveryInfo } from "./sep1";
 import { Sep6ValidationError } from "./sep6";
@@ -44,7 +45,7 @@ export async function getSep24Info(baseUrl: string, logger?: Logger): Promise<Se
   if (cached && Date.now() - cached.at < INFO_TTL_MS) return cached.info;
 
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep24", baseUrl });
-  const res = await fetch(endpointUrl(baseUrl, "info"));
+  const res = await anchorFetch(endpointUrl(baseUrl, "info"));
   if (!res.ok) {
     log.warn({ event: "anchor.sep24.info.fail", statusCode: res.status }, "SEP-24 /info failed");
     throw await anchorHttpError("24", "/info", res);
@@ -190,7 +191,7 @@ export class Sep24Client {
       Object.assign(bodyData, input.payoutFields);
     }
 
-    const res = await fetch(endpoint.toString(), {
+    const res = await anchorFetch(endpoint.toString(), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -217,7 +218,7 @@ export class Sep24Client {
     const url = endpointUrl(discovery.transferServerSep24, "transaction");
     url.searchParams.set("id", id);
 
-    const res = await fetch(url.toString(), {
+    const res = await anchorFetch(url.toString(), {
       headers: { authorization: `Bearer ${token}` },
     });
 

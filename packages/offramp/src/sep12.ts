@@ -1,6 +1,9 @@
 import type { KycFieldSpec, KycStatus, ProvidedFieldStatus } from "@checkout/core";
 import { endpointUrl } from "./sep1";
 import { anchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
+
+const FILE_UPLOAD_TIMEOUT_MS = 60_000;
 
 // SEP-12: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
 //
@@ -79,7 +82,7 @@ export async function getSep12Customer(
   const fetchCustomer = (searchKey: "id" | "account", searchValue: string) => {
     const url = endpointUrl(kycServer, "customer");
     url.searchParams.set(searchKey, searchValue);
-    return fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
+    return anchorFetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   };
 
   let res: Response;
@@ -126,7 +129,7 @@ export async function putSep12Customer(
   jwt: string,
   params: { account: string; customerId?: string | null; fields: Record<string, string> },
 ): Promise<{ customerId: string }> {
-  const res = await fetch(endpointUrl(kycServer, "customer"), {
+  const res = await anchorFetch(endpointUrl(kycServer, "customer"), {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({
@@ -150,7 +153,7 @@ export async function putSep12Callback(
   jwt: string,
   params: { customerId?: string | null; url: string },
 ): Promise<void> {
-  const res = await fetch(endpointUrl(kycServer, "customer/callback"), {
+  const res = await anchorFetch(endpointUrl(kycServer, "customer/callback"), {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({
@@ -165,7 +168,7 @@ export async function putSep12Callback(
 
 /** Ask one anchor to erase the authenticated seller's SEP-12 customer data. */
 export async function deleteSep12Customer(kycServer: string, jwt: string, account: string): Promise<"deleted" | "not_found"> {
-  const res = await fetch(endpointUrl(kycServer, `customer/${encodeURIComponent(account)}`), {
+  const res = await anchorFetch(endpointUrl(kycServer, `customer/${encodeURIComponent(account)}`), {
     method: "DELETE",
     headers: { authorization: `Bearer ${jwt}` },
   });
@@ -209,10 +212,12 @@ export async function putSep12CustomerMultipart(
     formData.append(file.name, file.blob, file.filename);
   }
 
-  const res = await fetch(endpointUrl(kycServer, "customer"), {
+  const res = await anchorFetch(endpointUrl(kycServer, "customer"), {
     method: "PUT",
     headers: { authorization: `Bearer ${jwt}` },
     body: formData,
+    // Document uploads are larger than the JSON calls, so they get a longer budget.
+    timeoutMs: FILE_UPLOAD_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw await anchorHttpError("12", "customer PUT (files)", res);
