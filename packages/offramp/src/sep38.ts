@@ -2,6 +2,7 @@ import type { AssetRef, Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { endpointUrl } from "./sep1";
 import { anchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
 
 export interface Sep38QuoteResult {
   id: string;
@@ -46,7 +47,7 @@ export async function getSep38Prices(
   // consistent about which corridors it surfaces.
   url.searchParams.set("context", "sep6");
 
-  const res = await fetch(url);
+  const res = await anchorFetch(url);
   if (!res.ok) {
     throw await anchorHttpError("38", "/prices", res);
   }
@@ -105,7 +106,7 @@ export async function getSep38Quote(
     },
     "fetching SEP-38 quote",
   );
-  const res = await fetch(endpointUrl(baseUrl, "quote"), {
+  const res = await anchorFetch(endpointUrl(baseUrl, "quote"), {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({

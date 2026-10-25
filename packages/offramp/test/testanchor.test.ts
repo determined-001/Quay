@@ -3,6 +3,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OffRampJobNotFoundError, type AnchorCustomer, type Logger } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
+import { AnchorTimeoutError } from "../src/http";
 import { SEP6_STATUS_MAP, TESTANCHOR_BASE_URL, TESTANCHOR_HOME_DOMAIN, TestAnchorOffRamp } from "../src/testanchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 
@@ -196,6 +197,76 @@ describe("TestAnchorOffRamp (offline)", () => {
       { event: "anchor.sep6.status.unknown", status: "future_status" },
       "unknown SEP-6 transaction status",
     );
+  });
+
+  it("initiate() aborts and throws AnchorTimeoutError when anchor withdraw stalls", async () => {
+    const state = new FakeOffRampStateRepository();
+    const wiring = anchorWiring();
+    const now = Date.now();
+
+    await wiring.sessions.save({
+      sellerId: OFFLINE_CUSTOMER.sellerId,
+      anchorDomain: TESTANCHOR_HOME_DOMAIN,
+      account: OFFLINE_CUSTOMER.account,
+      token: "offline-jwt",
+      expiresAt: now + 60 * 60_000,
+      createdAt: now,
+    });
+
+    await state.saveQuote({
+      quoteId: "q1",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+      sellAmount: "10",
+      buyCurrency: "USD",
+      price: "1",
+      withdrawType: "bank_account",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const urlStr = String(input);
+        if (urlStr.includes(".well-known/stellar.toml")) {
+          return new Response("", { status: 500 }); // triggers fallback discovery
+        }
+        if (urlStr.includes("/info")) {
+          return new Response(
+            JSON.stringify({
+              withdraw: {
+                USDC: {
+                  enabled: true,
+                  types: { bank_account: { fields: {} } },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (urlStr.includes("/withdraw")) {
+          // Trigger the timeout error that anchorFetch produces
+          return Promise.reject(new AnchorTimeoutError(urlStr, 10_000));
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+
+    const offramp = new TestAnchorOffRamp({
+      ...wiring,
+      state,
+      preferredWithdrawType: "bank_account",
+    });
+
+    await expect(
+      offramp.initiate({
+        linkId: "lnk_1",
+        quoteId: "q1",
+        payout: { rail: "bank", fields: { dest: "123456789" } },
+        customer: OFFLINE_CUSTOMER,
+      }),
+    ).rejects.toThrow(AnchorTimeoutError);
   });
 });
 
