@@ -4,7 +4,7 @@ Describe what this PR changes.
 
 ## Why
 
-The motivation / problem being solved. Link any related issue (e.g. `Closes #8.7`).
+The motivation / problem being solved. Link any related issue (e.g. `Closes #123`; backlog ids such as `8.7` are not GitHub references).
 
 ## How
 
