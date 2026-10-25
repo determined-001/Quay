@@ -19,9 +19,11 @@ describe("DrizzleLinkRepository claimForCashOut / releaseCashOutClaim", () => {
       reference: "ref_test_1",
       sellerId: seller.id,
       destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      muxedId: null,
       title: "Test item",
       amount: "10.00",
       asset: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+      expiresAt: null,
     });
 
     // Mark paid
@@ -47,9 +49,11 @@ describe("DrizzleLinkRepository claimForCashOut / releaseCashOutClaim", () => {
       reference: "ref_test_2",
       sellerId: seller.id,
       destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      muxedId: null,
       title: "Test item",
       amount: "10.00",
       asset: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+      expiresAt: null,
     });
 
     link.status = "offramp_failed";
@@ -71,9 +75,11 @@ describe("DrizzleLinkRepository claimForCashOut / releaseCashOutClaim", () => {
       reference: "ref_test_3",
       sellerId: seller.id,
       destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      muxedId: null,
       title: "Active item",
       amount: "10.00",
       asset: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+      expiresAt: null,
     });
     // Link is 'active', not in allowedStatuses
     expect(await links.claimForCashOut(link.id, ["paid", "offramp_failed"])).toBe(false);
@@ -86,9 +92,11 @@ describe("DrizzleLinkRepository claimForCashOut / releaseCashOutClaim", () => {
       reference: "ref_test_4",
       sellerId: seller.id,
       destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      muxedId: null,
       title: "Test item",
       amount: "10.00",
       asset: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+      expiresAt: null,
     });
 
     link.status = "paid";
