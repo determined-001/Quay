@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { AnchorAuthRequiredError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampPort, type RailPort, type WithdrawTransfer } from "@checkout/core";
-import { MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
+import { AnchorAuthRequiredError, OffRampDisabledError, OffRampJobNotFoundError, type AnchorCustomer, type KycPort, type OffRampInitiation, type OffRampPort, type RailPort, type WithdrawTransfer } from "@checkout/core";
+import { DisabledOffRamp, MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
@@ -1106,6 +1106,30 @@ describe("LinkService cash-out — the seller is the anchor's customer", () => {
     await expect(
       service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
     ).rejects.toMatchObject({ status: 403, message: "anchor_auth_required" });
+  });
+
+  describe("OFFRAMP=none (issue 4.44)", () => {
+    // The routes map OffRampDisabledError to 501 offramp_disabled; the service
+    // must let it through instead of wrapping it as a 502 anchor_error.
+    function disabledService() {
+      const links = new FakeLinkRepository([makeLink({ status: "paid" })]);
+      const wrapped = new CircuitBreakerOffRamp(new DisabledOffRamp());
+      return makeService({ links, offramp: wrapped, offrampState: new FakeOffRampStateRepository() });
+    }
+
+    it("getOfframpRequirements rethrows OffRampDisabledError", async () => {
+      await expect(disabledService().getOfframpRequirements("lnk_1")).rejects.toBeInstanceOf(OffRampDisabledError);
+    });
+
+    it("quoteCashOut rethrows OffRampDisabledError", async () => {
+      await expect(disabledService().quoteCashOut("lnk_1", "NGN")).rejects.toBeInstanceOf(OffRampDisabledError);
+    });
+
+    it("triggerCashOut rethrows OffRampDisabledError", async () => {
+      await expect(
+        disabledService().triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
+      ).rejects.toBeInstanceOf(OffRampDisabledError);
+    });
   });
 
   describe("getOfframpPreview with CircuitBreakerOffRamp", () => {

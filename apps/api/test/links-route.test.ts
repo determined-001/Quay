@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NOOP_LOGGER, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
+import { NOOP_LOGGER, OffRampDisabledError, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
@@ -231,6 +231,36 @@ describe("POST /links/:id/submit — public wallet relay", () => {
     });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe("cash-out routes — offramp_disabled (OFFRAMP=none)", () => {
+  function appThatIsDisabled() {
+    const container = fakeContainer();
+    const service = container.service as unknown as Record<string, unknown>;
+    const disabled = async () => {
+      throw new OffRampDisabledError("disabled");
+    };
+    service.getOfframpRequirements = disabled;
+    service.quoteCashOut = disabled;
+    service.triggerCashOut = disabled;
+    return { container, app: linkRoutes(container, async (_c, next) => next()) };
+  }
+
+  it.each([
+    ["GET", "/offramp-requirements"],
+    ["GET", "/cash-out/quote?targetCurrency=NGN"],
+    ["POST", "/cash-out"],
+  ])("%s %s answers 501 offramp_disabled, not a 502 anchor_error", async (method, path) => {
+    const { container, app } = appThatIsDisabled();
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(`/${ownedLink.id}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      ...(method === "POST" ? { body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }) } : {}),
+    });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toMatchObject({ error: "offramp_disabled" });
   });
 });
 

@@ -1,6 +1,7 @@
 import {
   AnchorAuthRequiredError,
   KycRequiredError,
+  OffRampDisabledError,
   OffRampRejectedError,
   QuoteExpiredError,
   type OffRampInitiation,
@@ -112,6 +113,8 @@ export class CircuitBreakerOffRamp implements OffRampPort {
         err instanceof OffRampRejectedError ||
         err instanceof KycRequiredError ||
         err instanceof QuoteExpiredError ||
+        // OFFRAMP=none has no anchor, so there is no outage to count (issue 4.44).
+        err instanceof OffRampDisabledError ||
         isAnchorRejection(err);
       metrics.anchorCallsTotal.inc({ anchor: this.anchor, method, status: rejected ? "rejected" : "error" });
       // A seller without a live anchor session says nothing about the

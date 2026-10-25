@@ -10,6 +10,7 @@ import {
   normalizeAmount,
   OffRampJobNotFoundError,
   AnchorAuthRequiredError,
+  OffRampDisabledError,
   OffRampRejectedError,
   NOOP_LOGGER,
   type AnchorCustomer,
@@ -375,6 +376,8 @@ export class LinkService {
     try {
       requirements = await this.deps.offramp.offrampRequirements(link.asset.code, customerOf(seller));
     } catch (err) {
+      // OFFRAMP=none: the route answers 501 offramp_disabled, which clients do not retry.
+      if (err instanceof OffRampDisabledError) throw err;
       throw anchorFailure(err, this.deps.logger!);
     }
 
@@ -744,6 +747,7 @@ export class LinkService {
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
       throwIfUnknownWithdrawType(err, withdrawType);
+      if (err instanceof OffRampDisabledError) throw err;
       if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw anchorFailure(err, log);
     }
@@ -904,6 +908,7 @@ export class LinkService {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
       throwIfUnknownWithdrawType(err, body.withdrawType);
+      if (err instanceof OffRampDisabledError) throw err;
       if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw anchorFailure(err, child);
     }

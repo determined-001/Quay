@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AnchorAuthRequiredError,
   KycRequiredError,
+  OffRampDisabledError,
   OffRampRejectedError,
   QuoteExpiredError,
   type OffRampInitiation,
@@ -211,6 +212,17 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
       ).rejects.toBe(err);
     }
     expect(breaker.getState()).toBe("closed");
+  });
+
+  it("never opens on OffRampDisabledError: OFFRAMP=none is not an anchor outage", async () => {
+    const inner = fakePort({ quote: vi.fn(async () => Promise.reject(new OffRampDisabledError("quote"))) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 2 });
+
+    for (let i = 0; i < 6; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(OffRampDisabledError);
+    }
+    expect(breaker.getState()).toBe("closed");
+    expect(inner.quote).toHaveBeenCalledTimes(6);
   });
 
   it("still opens on a 5xx from /withdraw", async () => {
