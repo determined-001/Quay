@@ -31,6 +31,54 @@ function tomlResponse(body: string, status = 200) {
   return new Response(body, { status, headers: { "content-type": "text/plain" } });
 }
 
+describe("parseStellarToml — endpoint URLs (issue 3.30)", () => {
+  const withEndpoints = (lines: string) =>
+    `SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"\n${lines}\n`;
+
+  function warnLogger() {
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn(), child: () => logger };
+    return { logger: logger as unknown as import("@checkout/core").Logger, warn };
+  }
+
+  it.each([
+    ["http://", 'WEB_AUTH_ENDPOINT = "http://a.example/auth"', "webAuthEndpoint", "https://a.example/auth"],
+    ["ftp://", 'TRANSFER_SERVER = "ftp://x"', "transferServer", "https://a.example/sep6"],
+    ["a non-URL string", 'TRANSFER_SERVER_SEP24 = "not a url"', "transferServerSep24", "https://a.example/sep24"],
+  ])("ignores %s and keeps the guessed default with a warning", (_name, line, field, fallback) => {
+    const { logger, warn } = warnLogger();
+    const info = parseStellarToml(withEndpoints(line), "a.example", logger);
+    expect(info[field as "webAuthEndpoint"]).toBe(fallback);
+    expect(info.fallback).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "anchor.sep1.endpoint_rejected", key: line.split(" ")[0] }),
+      expect.any(String),
+    );
+  });
+
+  it("leaves the quote server absent when ANCHOR_QUOTE_SERVER is not https", () => {
+    const info = parseStellarToml(withEndpoints('ANCHOR_QUOTE_SERVER = "http://a.example/sep38"'), "a.example");
+    expect(info.anchorQuoteServer).toBeNull();
+  });
+
+  it("serves SEP-12 from the transfer server when KYC_SERVER is rejected", () => {
+    const info = parseStellarToml(
+      withEndpoints('TRANSFER_SERVER = "https://a.example/sep6"\nKYC_SERVER = "http://a.example/sep12"'),
+      "a.example",
+    );
+    expect(info.kycServer).toBe("https://a.example/sep6");
+  });
+
+  it("still accepts an https endpoint with a path prefix", () => {
+    const info = parseStellarToml(
+      withEndpoints('TRANSFER_SERVER = "https://api.a.example/v2/anchor/sep6"\nWEB_AUTH_ENDPOINT = "https://a.example/v2/auth"'),
+      "a.example",
+    );
+    expect(info.transferServer).toBe("https://api.a.example/v2/anchor/sep6");
+    expect(info.webAuthEndpoint).toBe("https://a.example/v2/auth");
+  });
+});
+
 describe("parseStellarToml", () => {
   it("reads every endpoint, the signing key, the passphrase and the currencies", () => {
     const p = parseStellarToml(TOML, "anchor.example");

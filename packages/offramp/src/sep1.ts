@@ -154,7 +154,7 @@ export async function fetchStellarToml(
   try {
     const res = await anchorFetch(url, { timeoutMs: opts.timeoutMs });
     if (!res.ok) throw new Error(`stellar.toml fetch returned ${res.status}`);
-    info = parseStellarToml(await res.text(), homeDomain);
+    info = parseStellarToml(await res.text(), homeDomain, log);
   } catch (err) {
     log.warn(
       { event: "anchor.sep1.fallback", reason: err instanceof Error ? err.message : String(err) },
@@ -202,8 +202,19 @@ function fallbackInfo(homeDomain: string): Sep1DiscoveryInfo {
  * from a third party, and the subset we need is flat key/value pairs plus the
  * `code` of each `[[CURRENCIES]]` block. A full parser would be more surface
  * area for no more capability.
+ *
+ * An endpoint is accepted only if it parses as a URL and is `https:`. The
+ * seller's SEP-10 bearer JWT is sent to these, so an `http://` value would put
+ * it on the wire in the clear, and an unparsable one would fail deep inside the
+ * endpoint builder instead of at discovery. A rejected key is ignored (with a
+ * warning on `logger`) and keeps its default: the guessed path, or null for the
+ * quote server.
  */
-export function parseStellarToml(tomlText: string, homeDomain: string): Sep1DiscoveryInfo {
+export function parseStellarToml(
+  tomlText: string,
+  homeDomain: string,
+  logger: Logger = NOOP_LOGGER,
+): Sep1DiscoveryInfo {
   const base = fallbackInfo(homeDomain);
   const info: Sep1DiscoveryInfo = { ...base, fallback: false };
   const currencies: string[] = [];
@@ -229,6 +240,22 @@ export function parseStellarToml(tomlText: string, homeDomain: string): Sep1Disc
 
     if (inCurrency) {
       if (key === "code") currencies.push(val);
+      continue;
+    }
+
+    const isEndpoint =
+      key === "WEB_AUTH_ENDPOINT" ||
+      key === "WEB_AUTH_URL" ||
+      key === "TRANSFER_SERVER" ||
+      key === "TRANSFER_SERVER_SEP0024" ||
+      key === "TRANSFER_SERVER_SEP24" ||
+      key === "ANCHOR_QUOTE_SERVER" ||
+      key === "KYC_SERVER";
+    if (isEndpoint && !isHttpsUrl(val)) {
+      logger.warn(
+        { event: "anchor.sep1.endpoint_rejected", homeDomain, key, reason: "not an https URL" },
+        "ignoring stellar.toml endpoint that is not an https URL",
+      );
       continue;
     }
 
@@ -278,6 +305,14 @@ export function listsCurrency(info: Sep1DiscoveryInfo, code: string): boolean {
   // absent, so this cannot be treated as a rejection.
   if (info.currencies.length === 0) return true;
   return info.currencies.some((c) => c.toUpperCase() === code.toUpperCase());
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function unquote(raw: string): string {
