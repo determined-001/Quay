@@ -189,6 +189,8 @@ export function clearSep6InfoCache(baseUrl?: string): void {
   else infoCache.clear();
 }
 
+const PLAIN_DECIMAL = /^\d+(\.\d+)?$/;
+
 /**
  * Decide which withdrawal type to use and confirm the anchor will take this
  * amount, from the anchor's own published capabilities.
@@ -250,10 +252,16 @@ export async function resolveWithdrawType(
   // 50 by wire, and the asset-level figure is only the outer envelope.
   const minAmount = typeInfo.minAmount ?? asset.minAmount;
   const maxAmount = typeInfo.maxAmount ?? asset.maxAmount;
-  const value = Number(amount);
+  // A positive plain decimal only. `Number()` also accepts "", " ", "0x10" and
+  // "1e3", and the raw string is what gets sent to the anchor.
+  const value = PLAIN_DECIMAL.test(amount) ? Number(amount) : Number.NaN;
 
-  if (!Number.isFinite(value)) {
-    throw new Sep6ValidationError(`Amount "${amount}" is not a number`, { minAmount, maxAmount }, typeNames);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Sep6ValidationError(
+      `Amount "${amount}" is not a positive decimal number`,
+      { minAmount, maxAmount },
+      typeNames,
+    );
   }
   if (minAmount !== undefined && value < minAmount) {
     throw new Sep6ValidationError(

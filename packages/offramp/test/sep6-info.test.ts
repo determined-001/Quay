@@ -167,6 +167,23 @@ describe("resolveWithdrawType", () => {
     ).rejects.toThrow(Sep6ValidationError);
   });
 
+  it.each(["", " ", "-5", "0", "0.0", "0x10", "1e3", "1,5", "abc", "5.", ".5"])(
+    "rejects the amount %j even when the anchor publishes no minimum",
+    async (amount) => {
+      stubInfo();
+      await expect(
+        resolveWithdrawType(`${BASE}/bad-amount-${encodeURIComponent(amount)}`, "USDC", amount),
+      ).rejects.toThrow(Sep6ValidationError);
+    },
+  );
+
+  it("accepts a plain positive decimal", async () => {
+    stubInfo();
+    await expect(resolveWithdrawType(`${BASE}/good-amount`, "USDC", "10.5")).resolves.toMatchObject({
+      type: "bank_account",
+    });
+  });
+
   it("includes anchor limits in the thrown error", async () => {
     stubInfo({ min_amount: 10, max_amount: 500 });
     try {
