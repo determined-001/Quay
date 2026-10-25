@@ -226,9 +226,11 @@ export class TestAnchorOffRamp implements OffRampPort {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
     });
+    // SEP-38 prices are sell-per-buy; IndicativePrice.price is target per
+    // source (issue 3.27), the same direction quote() reports as its rate.
     return entries.map((e) => ({
       targetCurrency: e.buyCurrency,
-      price: e.price,
+      price: targetPerSourceRate(e.price),
       deliveryMethods: e.deliveryMethods,
     }));
   }

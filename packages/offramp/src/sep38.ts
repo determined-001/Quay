@@ -16,7 +16,9 @@ export interface Sep38QuoteResult {
 export interface Sep38PriceEntry {
   /** ISO-4217 currency code, e.g. "NGN". */
   buyCurrency: string;
-  /** Indicative sell_amount / buy_amount exchange rate. */
+  /** Indicative sell_amount / buy_amount exchange rate: SELL asset per 1 BUY
+   *  unit (e.g. ~0.00065 USDC per NGN). Not the target-per-source direction
+   *  that core's `IndicativePrice.price` uses; convert with `targetPerSourceRate`. */
   price: string;
   /** Available delivery methods (e.g. "WIRE", "BANK_TRANSFER"). May be empty. */
   deliveryMethods: string[];
@@ -62,6 +64,10 @@ export async function getSep38Prices(
   };
 
   return (body.buy_assets ?? []).flatMap((entry) => {
+    // A malformed entry is skipped rather than failing the whole preview.
+    if (typeof entry?.asset !== "string") return [];
+    const unit = Number(entry.price);
+    if (!Number.isFinite(unit) || unit <= 0) return [];
     // Only surface fiat ISO-4217 entries ("iso4217:XXX").
     const match = entry.asset.match(/^iso4217:([A-Z]{3})$/);
     if (!match || !match[1]) return [];
