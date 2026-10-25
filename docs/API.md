@@ -719,6 +719,7 @@ settled.
   It is always `https`; the dashboard refuses any other scheme.
 
 **409** — link is not in `paid` or `offramp_failed` state: `{ "error": "Link must be paid to cash out (is \"active\")" }`. `offramp_settled` and every in-flight state are refused.
+**409** — `{ "error": "cashout_already_in_progress" }`. Another cash-out request is currently in flight or being initiated for this link; concurrent requests are atomically rejected to prevent duplicate withdrawals at the anchor.
 **409** — `{ "error": "previous_withdrawal_active" }`. A retry from `offramp_failed` is refused while the previous job's stored status is not `failed`, so a slow anchor cannot end up with two live withdrawals for one payment.
 
 **Retrying a failed cash-out.** A link in `offramp_failed` can be quoted (`GET /links/:id/cash-out/quote`) and cashed out again with this same endpoint; it moves back to `offramp_pending` with a new job id. The rate, fee and net-amount fields of the failed attempt are cleared and replaced by the new attempt's values. A job whose state is no longer stored (the `job_state_lost` repair) has nothing left to be live and may be retried. The webhook payloads are unchanged; the API log carries `event: "cashout.retry"` with `previousJobId`, and `link.transition` carries `retry: true`. The dashboard shows "Retry cash-out" on failed links.

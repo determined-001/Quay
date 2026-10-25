@@ -800,6 +800,18 @@ export interface LinkRepository {
   /** Ledger a recorded payment settled in; null if the tx isn't on the ledger
    *  table, or predates the column. */
   paymentLedger(txHash: string): Promise<number | null>;
+  /**
+   * Atomically claims a link for cash-out by transitioning its status from one of
+   * `allowedStatuses` to `offramp_pending`. Returns `true` if the transition
+   * succeeded, or `false` if the link does not exist or its current status was not
+   * in `allowedStatuses`.
+   */
+  claimForCashOut(id: string, allowedStatuses: Array<PaymentLink["status"]>): Promise<boolean>;
+  /**
+   * Releases a cash-out claim by transitioning status from `offramp_pending` back to
+   * `restoreStatus`, only if the status is still `offramp_pending`.
+   */
+  releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void>;
 }
 
 /**

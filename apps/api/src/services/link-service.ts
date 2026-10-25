@@ -795,6 +795,13 @@ export class LinkService {
         withdrawType: body.withdrawType,
       }, { logger: child });
 
+    const from = link.status;
+    const claimed = await this.deps.links.claimForCashOut(link.id, ["paid", "offramp_failed"]);
+    if (!claimed) {
+      throw new HttpError(409, "cashout_already_in_progress");
+    }
+    link.status = "offramp_pending";
+
     let quote: OffRampQuote;
     let initiation: OffRampInitiation;
     const t0 = Date.now();
@@ -877,6 +884,8 @@ export class LinkService {
         "cash-out initiated",
       );
     } catch (err) {
+      await this.deps.links.releaseCashOutClaim(link.id, from);
+      link.status = from;
       const message = err instanceof Error ? err.message : String(err);
       child.error(
         { event: "cashout.error", anchor: this.deps.offramp.mode, error: message },
@@ -897,7 +906,6 @@ export class LinkService {
       await this.deps.sellers.savePayoutFields(seller.id, mergedFields);
     }
 
-    const from = link.status;
     const jobId = initiation.jobId;
     // A retry starts from a clean slate: nothing from the failed attempt may
     // survive into the new attempt's rate, fee or net-amount fields.
