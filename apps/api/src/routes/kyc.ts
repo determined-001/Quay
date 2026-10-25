@@ -16,6 +16,7 @@ import { env } from "../env";
 import type { Container } from "../services/container";
 import { anchorFailure } from "../services/link-service";
 import { getLogger } from "../request-context";
+import { recordAnchorAuthRequired } from "../metrics";
 import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 import { kycDisclosureFields, sellerKyc } from "../db/schema";
@@ -289,7 +290,10 @@ export function kycRoutes(
       const record = await c.kyc.status(customerOf(ctx.get("seller")), { maxAgeMs });
       return ctx.json(toResponse(record, ctx.get("authKind")));
     } catch (err) {
-      if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      if (err instanceof AnchorAuthRequiredError) {
+        recordAnchorAuthRequired("kyc_get");
+        return ctx.json({ error: "anchor_auth_required" }, 403);
+      }
       const failed = anchorFailureResponse(ctx, err);
       if (failed) return failed;
       throw err;
@@ -372,7 +376,10 @@ export function kycRoutes(
       await c.sellers.touchLastActive?.(seller.id);
       return ctx.json(toResponse(updatedRecord, ctx.get("authKind")));
     } catch (err) {
-      if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      if (err instanceof AnchorAuthRequiredError) {
+        recordAnchorAuthRequired("kyc_put");
+        return ctx.json({ error: "anchor_auth_required" }, 403);
+      }
       if (err instanceof KycRequiredError) {
         return ctx.json({ error: "kyc_required", missingFields: err.missingFields }, 422);
       }
@@ -406,7 +413,10 @@ export function kycRoutes(
       try {
         record = await c.kyc.status(customer);
       } catch (err) {
-        if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+        if (err instanceof AnchorAuthRequiredError) {
+          recordAnchorAuthRequired("kyc_put");
+          return ctx.json({ error: "anchor_auth_required" }, 403);
+        }
         const failed = anchorFailureResponse(ctx, err);
         if (failed) return failed;
         throw err;
@@ -482,7 +492,10 @@ export function kycRoutes(
         await c.sellers.touchLastActive?.(seller.id);
         return ctx.json(toResponse(updated, "session"));
       } catch (err) {
-        if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+        if (err instanceof AnchorAuthRequiredError) {
+          recordAnchorAuthRequired("kyc_put");
+          return ctx.json({ error: "anchor_auth_required" }, 403);
+        }
         if (err instanceof KycRequiredError) {
           return ctx.json({ error: "kyc_required", missingFields: err.missingFields }, 422);
         }

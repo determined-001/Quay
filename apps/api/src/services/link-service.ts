@@ -52,7 +52,7 @@ import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
 import { AnchorHealthRegistry, type AnchorHealth, type AnchorHealthSnapshot } from "./anchor-health";
-import { metrics } from "../metrics";
+import { metrics, recordAnchorAuthRequired, type AnchorAuthRoute } from "../metrics";
 
 // Re-exported for callers that historically imported them from LinkService
 // (issue 3.23 moved the implementation into ./anchor-health).
@@ -703,12 +703,12 @@ export class LinkService {
    * re-syncs rather than trusting a cached value, since paying out against
    * stale/rejected KYC is exactly the failure this gate exists to prevent.
    */
-  private async assertKycAccepted(customer: AnchorCustomer): Promise<void> {
+  private async assertKycAccepted(customer: AnchorCustomer, route: AnchorAuthRoute): Promise<void> {
     let status: string;
     try {
       status = (await this.deps.kyc.status(customer)).status;
     } catch (err) {
-      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired(route);
       if (err instanceof AnchorHttpError) throw anchorFailure(err, this.deps.logger!);
       throw err;
     }
@@ -738,7 +738,7 @@ export class LinkService {
     const seller = await this.deps.sellers.findById(link.sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer);
+    await this.assertKycAccepted(customer, "quote");
 
     const sourceAmount = link.paidAmount ?? link.amount;
     try {
@@ -747,7 +747,7 @@ export class LinkService {
         { logger: log },
       );
     } catch (err) {
-      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired("quote");
       throwIfUnknownWithdrawType(err, withdrawType);
       if (err instanceof OffRampDisabledError) throw err;
       if (err instanceof OffRampRejectedError) throw offRampRejected(err);
@@ -792,7 +792,7 @@ export class LinkService {
     }
 
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer);
+    await this.assertKycAccepted(customer, "cash_out");
 
     const sourceAmount = link.paidAmount ?? link.amount;
 
@@ -905,7 +905,7 @@ export class LinkService {
         "cash-out failed",
       );
       if (err instanceof HttpError) throw err;
-      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired("cash_out");
       if (err instanceof QuoteExpiredError) {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
@@ -1354,6 +1354,8 @@ export class LinkService {
    * anchor.
    */
   private async blockOnAnchorAuth(link: PaymentLink, child: Logger): Promise<void> {
+    // Every poll tick that finds the block counts, so the rate tracks how long sellers stay signed out.
+    recordAnchorAuthRequired("poll");
     if (link.offrampJobId) {
       await this.deps.offrampState.updateJob(link.offrampJobId, {
         lastPollError: ANCHOR_AUTH_REQUIRED_POLL.message,
@@ -1540,7 +1542,8 @@ export function customerOf(seller: Seller): AnchorCustomer {
 }
 
 /** Only the seller's wallet can open an anchor session, so this is theirs to fix. */
-function anchorAuthRequired(): HttpError {
+function anchorAuthRequired(route?: AnchorAuthRoute): HttpError {
+  if (route) recordAnchorAuthRequired(route);
   return new HttpError(403, "anchor_auth_required");
 }
 

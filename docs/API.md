@@ -247,6 +247,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `wallet_submissions_total` | `outcome` (`submitted`, `invalid_xdr`, `rejected`) |
 | `webhook_attempts_total` | `result` (`ok`, `error`) — every retry counts separately |
 | `anchor_calls_total` | `method` (`quote`~SEP-38, `initiate`/`status`~SEP-6), `status` (`ok`, `error`, `rejected`) |
+| `anchor_auth_required_total` | `route` (`kyc_get`, `kyc_put`, `quote`, `cash_out`, `poll`) — seller had no live anchor session (403 `anchor_auth_required`); `poll` counts one per poll tick of a blocked job. Not counted by the circuit breaker, so invisible in `anchor_calls_total` |
 | `quay_kyc_retention_purged_total` | — (total inactive sellers whose KYC and identity data was purged under retention policy) |
 
 **Histograms**
@@ -262,6 +263,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | --- | --- |
 | `accounts_watched` | distinct destinations the watcher is currently polling |
 | `pending_cash_outs` | links in `offramp_pending` |
+| `offramp_jobs_by_external_status` | `external_status` — `offramp_pending` links by the anchor's raw transaction status, set at scrape time. Known SEP-6/SEP-24 statuses (e.g. `pending_user_transfer_start` = waiting on the seller's transfer, `pending_anchor`, `incomplete`) are always present (0 when empty); any other value, or a job not yet polled, is counted under `other`. Sums to `pending_cash_outs` |
 | `webhook_deliveries_in_flight` | webhook deliveries currently being attempted, including retries |
 | `offramp_circuit_breaker_state` | `0`=closed, `1`=half_open, `2`=open — see below |
 | `watcher_lag_seconds` | seconds since the watcher's last completed poll tick |

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { timingSafeEqual } from "node:crypto";
 import type { Container } from "../services/container";
-import { metrics } from "../metrics";
+import { metrics, setOfframpJobsByExternalStatus } from "../metrics";
 import { getLogger, type RequestContextVariables } from "../request-context";
 
 /** Length-independent constant-time comparison. `timingSafeEqual` throws on a
@@ -51,6 +51,7 @@ export function metricsRoutes(container: Container): Hono<{ Variables: RequestCo
     ]);
     metrics.accountsWatched.set(accounts.length);
     metrics.pendingCashOuts.set(pendingCashOuts.length);
+    setOfframpJobsByExternalStatus(await container.links.countPendingByExternalStatus());
     metrics.webhookQueueDepth.set(await container.service.webhookQueueDepth());
     metrics.circuitBreakerState.set({ anchor: container.anchorDomain ?? "none" }, container.circuitBreakerState());
     metrics.watcherLagSeconds.set(container.watcherLagSeconds());

@@ -3,6 +3,7 @@ import { AnchorAuthRequiredError, OffRampDisabledError, OffRampJobNotFoundError,
 import { DisabledOffRamp, MockAnchorOffRamp, Sep6ValidationError } from "@checkout/offramp";
 import type { StellarConfig } from "@checkout/stellar";
 import { LinkService } from "../src/services/link-service";
+import { authRequiredCount } from "./auth-required-count";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 import {
   AlwaysAcceptedKyc,
@@ -390,11 +391,13 @@ describe("LinkService.pollCashOuts", () => {
     };
 
     const service = makeService({ links, offramp, offrampState });
+    const pollBefore = authRequiredCount("poll");
     await service.pollCashOuts();
 
     const job = await offrampState.getJob("job_auth");
     expect(job?.lastPollReason).toBe("anchor_auth_required");
     expect(job?.lastPollError).toBe("Anchor session expired or required. Please reconnect your anchor session in settings.");
+    expect(authRequiredCount("poll")).toBe(pollBefore + 1);
   });
 
   it("skips status() for a link whose seller has no live anchor session, and reports anchor_auth_required", async () => {
@@ -1234,6 +1237,8 @@ describe("LinkService cash-out — the seller is the anchor's customer", () => {
     };
     const service = makeService({ links, offramp: new ScriptedOffRamp(), offrampState: new FakeOffRampStateRepository(), kyc });
 
+    const cashOutBefore = authRequiredCount("cash_out");
+    const quoteBefore = authRequiredCount("quote");
     await expect(
       service.triggerCashOut("lnk_1", { targetCurrency: "NGN", payoutFields: {} }),
     ).rejects.toMatchObject({ status: 403, message: "anchor_auth_required" });
@@ -1242,6 +1247,8 @@ describe("LinkService cash-out — the seller is the anchor's customer", () => {
       message: "anchor_auth_required",
     });
     expect(links.get("lnk_1")?.status).toBe("paid");
+    expect(authRequiredCount("cash_out")).toBe(cashOutBefore + 1);
+    expect(authRequiredCount("quote")).toBe(quoteBefore + 1);
   });
 
   it("maps an expired anchor session during the quote to 403, not a 502 anchor error", async () => {

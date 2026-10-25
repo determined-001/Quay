@@ -772,6 +772,34 @@ typical settlement time.
    /links/:id/cash-out`), provided the previous job is terminal (see
    `previous_withdrawal_active` in `docs/API.md`).
 
+### Alerting on stuck cash-outs by cause
+
+A growing `pending_cash_outs` has three different causes. The metrics tell them apart
+(`GET /metrics`, see `docs/API.md`; panels 13 and 14 in `docs/grafana-dashboard.json`):
+
+| Signal | Meaning | Who acts |
+| --- | --- | --- |
+| `offramp_jobs_by_external_status{external_status="pending_user_transfer_start"}` stays high | The anchor is holding the job until the seller sends the asset. Sellers are abandoning the transfer step. | Product / support: remind the seller, check the `offramp.transfer_required` webhook was delivered |
+| `offramp_jobs_by_external_status{external_status=~"pending_anchor\|pending_external\|pending_stellar"}` stays high | The anchor is processing slowly. | Anchor outage runbook above |
+| `rate(anchor_auth_required_total[15m]) > 0` | Sellers have no live anchor session. A step change right after a deploy usually means a JWT secret, `SIGNING_KEY` or anchor domain change invalidated sessions. | See "SEP-1 `SIGNING_KEY` rotated" |
+
+Suggested Prometheus alert rules:
+
+```yaml
+- alert: CashOutsAbandonedAtTransferStep
+  # Any job parked at pending_user_transfer_start for 24h straight.
+  expr: min_over_time(offramp_jobs_by_external_status{external_status="pending_user_transfer_start"}[24h]) > 0
+  labels: { severity: ticket }
+- alert: AnchorSignInRequiredSpike
+  expr: sum(increase(anchor_auth_required_total{route!="poll"}[15m])) > 20
+  labels: { severity: page }
+```
+
+`route="poll"` increments once per poll tick for each blocked job, so alert on the
+other routes for user-driven spikes and graph `poll` to see how many jobs are stuck.
+The 24h rule is a coarse "something has been waiting the whole day" signal: the
+gauge counts jobs, not their age, so use the job's `updated_at` for per-job detail.
+
 ## Reconciliation report (issue 4.32)
 
 A cash-out has three records that should agree: Quay's withdrawal

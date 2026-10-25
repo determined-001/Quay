@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -165,6 +165,21 @@ export class DrizzleLinkRepository implements LinkRepository {
   async listByStatus(status: PaymentLink["status"]): Promise<PaymentLink[]> {
     const rows = await this.db.select().from(links).where(eq(links.status, status));
     return rows.map(rowToLink);
+  }
+
+  /**
+   * Cash-outs in `offramp_pending` grouped by the anchor's raw status
+   * (`offramp_jobs.external_status`, NULL until the first poll). One grouped
+   * query rather than loading every job; the caller buckets unknown values.
+   */
+  async countPendingByExternalStatus(): Promise<Array<{ externalStatus: string | null; count: number }>> {
+    const rows = await this.db
+      .select({ externalStatus: offrampJobs.externalStatus, count: sql<number>`count(*)` })
+      .from(links)
+      .innerJoin(offrampJobs, eq(offrampJobs.jobId, links.offrampJobId))
+      .where(eq(links.status, "offramp_pending"))
+      .groupBy(offrampJobs.externalStatus);
+    return rows.map((r) => ({ externalStatus: r.externalStatus ?? null, count: Number(r.count) }));
   }
 
   async activeDestinations(): Promise<string[]> {
