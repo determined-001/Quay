@@ -9,7 +9,7 @@ Operational procedures for the Quay API (deploy target: Render, see
   nightly schedule (`.github/workflows/db-backup.yml`, 03:17 UTC). This is
   **not** continuous protection - a failure right before the next scheduled
   backup loses up to a full day of payment records, off-ramp job state, and
-  (once issue 3.4 ships) KYC data. If that window is unacceptable for a given
+  encrypted KYC data. If that window is unacceptable for a given
   deployment, increase the backup frequency (the cron schedule and
   `pnpm db:backup` support running more often) rather than assume this
   document promises something it doesn't.
@@ -60,8 +60,9 @@ mistake is possible in `apps/api/src/services/container.ts`, where
 
 ### Scaling past one instance
 
-Three structures are per-process today, and each silently loses its guarantee
-if a second instance is started. The Render blueprint runs exactly one
+Three structures are per-process unless `REDIS_URL` is set (two of them) or
+at all (the third), and each silently loses its guarantee if a second instance
+is started. The Render blueprint runs exactly one
 instance, which is what makes the current setup correct — treat this as a hard
 prerequisite, not a preference.
 
@@ -79,9 +80,12 @@ which is why the guard is loud instead of a log line.
   disrupted, `/health` and `/ready` are completely exempt, degraded requests increment
   `rate_limit_store_errors_total{limiter}`, and warnings are throttled to 1/min.
   Already has a `RedisStore`; just configure it.
-- **SEP-10 challenge nonces** — `ChallengeService` holds used challenge hashes
-  in an in-process `Map`, so a restart or a second instance makes an
-  already-redeemed challenge redeemable again inside its 15-minute window.
+- **SEP-10 challenge nonces** — without `REDIS_URL`, `ChallengeService` holds
+  used challenge hashes in an in-process `Map`, so a restart or a second
+  instance makes an already-redeemed challenge redeemable again inside its
+  15-minute window. With `REDIS_URL` set, the single-use claim moves to Redis
+  (`RedisUsedChallengeStore`, an atomic `SET NX`) and is shared across
+  instances.
 - **Idempotency in-flight guard** — `idempotency()` tracks concurrent requests
   in a per-process `Map`. The persisted replay table still works; only the
   concurrent-duplicate guard is lost, and it guards a money endpoint.
@@ -268,7 +272,7 @@ variables → Actions → Variables — they're plain hostnames, not secrets):
 |---|---|---|
 | `UPTIME_MAINNET_API_URL` | **set this once `quay-api-mainnet` exists** | e.g. `https://quay-api-mainnet.onrender.com` (`render.mainnet.yaml`'s `quay-api-mainnet`). Unset means mainnet is skipped entirely, not silently checked against the testnet URL. |
 | `UPTIME_MAINNET_WEB_URL` | optional | Only set this if a dedicated mainnet web deployment exists. `render.mainnet.yaml` declares no web service today, so leave unset until one does. |
-| `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run, and unlike testnet, `POST /links` there has no scoped-credential story yet — see issue #163 (least-privilege API key for this check) before turning it on. |
+| `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run. It authenticates with the repository secret `UPTIME_MAINNET_API_KEY` (a least-privilege API key, issue 8.9 / #163, same as `UPTIME_API_KEY` on testnet), so create that key and set the secret before turning this on. |
 
 Both environments are watched at once, on the same schedule, with separate
 history series — a green testnet can never stand in for an unmonitored mainnet.
@@ -387,12 +391,15 @@ app deploys separately to Vercel.
 1. In the Render dashboard, redeploy the previous successful deploy (Render
    keeps prior build artifacts - this is faster and safer than reverting the
    commit and waiting for a fresh build).
-2. If the bad deploy included a schema change (`pnpm db:push`), assess
-   whether the previous code version is compatible with the *new* schema
-   before rolling back the code alone - `db:push` is additive-by-default
-   (`CREATE TABLE IF NOT EXISTS`; see `apps/api/src/db/client.ts`), so an old
-   binary talking to a newer schema is the common case and usually safe, but
-   a column removal or rename would not be.
+2. If the bad deploy included a schema change, assess whether the previous
+   code version is compatible with the *new* schema before rolling back the
+   code alone. Schema changes ship as Drizzle migration files in
+   `apps/api/drizzle/` and are applied automatically at API boot
+   (`bootstrap()` → `runMigrations()` in `apps/api/src/db/`, serialised by a
+   `_migration_lock` row); nothing is rolled back for you. An old binary
+   talking to a newer schema is the common case and usually safe when the
+   migration only added tables or columns, but a column removal or rename
+   would not be.
 3. If rollback doesn't resolve the incident, fall back to the restore
    procedure below against the most recent backup.
 
@@ -466,8 +473,16 @@ corrupted data.
   3. Redeploy the API. The service will immediately encrypt all new submissions under the new key while continuing to read older records seamlessly.
   4. Run dry-run scan to verify: `pnpm kyc:rotate-key --dry-run`
   5. Run the background re-encryption: `pnpm kyc:rotate-key`
-  6. Verify the Prometheus metric `kyc_non_primary_key_rows` drops to `0`.
-  7. Remove `KYC_ENCRYPTION_KEY_PREVIOUS` from the deployment environment.
+  6. Verify the Prometheus metric `kyc_non_primary_key_rows` drops to `0`
+     (it counts `seller_kyc` rows only and is read at API boot, so restart or
+     redeploy to refresh it).
+  7. Caveat: `pnpm kyc:rotate-key` re-encrypts `seller_kyc` only. The same key
+     also protects `seller_profile.value_encrypted` and
+     `sellers.payout_fields_encrypted`, which are re-encrypted under the new
+     key only when a seller next writes them. Keep
+     `KYC_ENCRYPTION_KEY_PREVIOUS` in place until those rows have been
+     rewritten, then remove it; removing it earlier makes the remaining rows
+     unreadable.
 - **`BACKUP_ENCRYPTION_KEY`**: generate a new key, but **keep the old key
   available** (e.g. as `BACKUP_ENCRYPTION_KEY_PREVIOUS` in your secret store)
   until every backup encrypted under it has passed its retention window -
@@ -518,13 +533,14 @@ external anchor. When the anchor is down or erroring:
   requests can still delay the response.
 - `pollCashOuts` (used by `startCashOutPoller` in
   `apps/api/src/worker/watcher-loop.ts`) catches each per-job status error,
-  stores the message against that link id in the in-memory
-  `lastPollErrorByLinkId` map, and logs
-  `[offramp] poll failed for link <id>: <message>`. Each failing link backs
-  off independently from 2 seconds to a 60-second cap, so one sick anchor
-  does not crash the loop or block healthy jobs. A successful poll clears
-  that link's stored error and backoff. The map is process-local, is not
-  persisted or exposed over HTTP, and is cleared by an API restart.
+  logs `[offramp] poll failed for link <id>: <message>` (the raw message stays
+  in a process-local `lastPollErrorByLinkId` map, never persisted or exposed),
+  and stores a sanitized reason and message on the job
+  (`offramp_jobs.last_poll_reason` / `last_poll_error` / `last_poll_error_at`),
+  which `GET /links/:id/detail` returns as `offrampPoll`. Each failing link
+  backs off independently from 2 seconds to a 60-second cap (the backoff is
+  in-memory and resets on restart), so one sick anchor does not crash the loop
+  or block healthy jobs. A successful poll clears the stored error and backoff.
 - Links stuck in `offramp_pending` during an outage resume polling
   automatically after their per-link backoff expires and the anchor recovers
   - no manual intervention is needed unless the outage is prolonged (see
@@ -595,29 +611,31 @@ transition and webhook.
 `offramp_jobs.last_error` (or a generated withdrawal-failed message), and
 moves the link to `offramp_failed`. Quay never takes custody. If the cash-out
 returned transfer instructions and the seller confirms submission, the asset
-payment went directly from the seller's wallet to the anchor. Quay does not
-persist the seller's anchor-transfer hash, and it neither refunds nor
-reverses the payment. Any refund is the anchor's process.
+payment went directly from the seller's wallet to the anchor. Quay stores only the
+hash the seller's browser reported after sending (`offramp_jobs.seller_tx_hash`,
+via `POST /links/:id/cash-out/transfer-sent`), as an unverified claim, and it
+neither refunds nor reverses the payment. Any refund is the anchor's process.
 
 **What the operator does:**
 
 1. Find the job and preserve the anchor's evidence:
    ```sql
    SELECT job_id, link_id, seller_id, account, external_status,
-          last_error, created_at, updated_at
+          last_error, seller_tx_hash, created_at, updated_at
    FROM offramp_jobs
    WHERE job_id = '<anchor job id>' OR link_id = '<link id>';
    ```
    If there is no job row, stop. Preserve `cashout.error` and
    `cashout.request.error`, determine whether quote/initiate was refused or
    job state was lost, and contact anchor support. Do not create a job row.
-2. Ask the seller for the Stellar transaction hash of their payment to the
-   anchor. If they do not have it, search `offramp_jobs.account` on the
+2. Read `seller_tx_hash` from the job row: it is the hash the seller's
+   browser reported, a claim to verify, and the reconciliation report (below)
+   checks it on Horizon. If it is empty, ask the seller for the Stellar
+   transaction hash of their payment to the anchor. If they do not have it, search `offramp_jobs.account` on the
    configured `HORIZON_URL` or a block explorer around `created_at`, and
    verify the destination, asset, amount, memo, and successful status against
-   the cash-out instructions or the anchor's transaction record. Quay does not
-   store this hash; `links.tx_hash` is the buyer's payment, not the seller's
-   transfer to the anchor. If no transfer instructions were returned or the
+   the cash-out instructions or the anchor's transaction record. `links.tx_hash` is the buyer's
+   payment, not the seller's transfer to the anchor. If no transfer instructions were returned or the
    seller cannot confirm submission, do not assume funds moved; reconcile the
    account and ask the anchor.
 3. Give the seller, transaction hash, `job_id`, `external_status`,
@@ -650,9 +668,10 @@ in `apps/api/src/routes/anchor-auth.ts`.
 **What Quay does automatically:** Quay refuses to show or relay an
 unverified challenge, so the seller is never asked to sign a transaction that
 does not match the published key. Existing anchor sessions remain usable
-until their JWTs expire. `AnchorDiscovery` currently caches the successful
-SEP-1 response for the life of the process, so it does not learn a new key
-without an API restart.
+until their JWTs expire. `AnchorDiscovery` re-reads the SEP-1 file at most every
+5 minutes and drops its cache when the health probe sees a different
+`SIGNING_KEY` (issue 3.23), so a genuine rotation normally clears by itself
+without a restart.
 
 **What the operator does:**
 
@@ -666,14 +685,14 @@ without an API restart.
    anchor using previously verified contact details.** A changed key is also
    what a compromised domain or TOML looks like; the fetched file alone is not
    proof. Do not use contact details that appear only in the new TOML.
-3. Only after the anchor confirms the change, restart every API instance so
-   `AnchorDiscovery` reloads the SEP-1 file. Confirm the service is healthy
-   and have affected sellers reconnect. Issue 3.23 will remove this restart
-   requirement when live discovery refresh lands; until then, restart is part
-   of the verified procedure.
+3. Only after the anchor confirms the change, wait for discovery to refresh
+   (a few minutes) and have affected sellers reconnect. If challenges are still
+   rejected after the refresh window, restart the API instances so
+   `AnchorDiscovery` reloads the SEP-1 file, and confirm the service is
+   healthy.
 
 **What the operator must not do:** Do not restart merely because the TOML
-changed, disable challenge verification, accept an unverified SEP-10
+changed (discovery refreshes itself), disable challenge verification, accept an unverified SEP-10
 transaction, or manually copy a new key into application state. Do not delete
 valid seller sessions as a substitute for discovery reload.
 
@@ -982,7 +1001,7 @@ Copy this into a new incident doc/issue when something goes wrong:
 <what fixed it>
 
 ### Data impact
-- Was any payment record, off-ramp job, or (post-3.4) KYC data lost or
+- Was any payment record, off-ramp job, or KYC data lost or
   corrupted? If a restore was performed, link to the restore-drill log entry
   above with the real incident's row counts.
 
@@ -996,11 +1015,11 @@ If personal data (KYC fields, payout fields, session tokens, seller identity) is
 
 ### 1. Detect & Contain (immediate)
 
-- **Rotate `KYC_ENCRYPTION_KEY`** (see issue 4.31):
+- **Rotate `KYC_ENCRYPTION_KEY`** (issue 4.31; the full procedure is under "Key rotation" above):
   1. Generate new key: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-  2. Add to `render.yaml` / Render dashboard as new `KYC_ENCRYPTION_KEY`
-  3. Re-encrypt all `seller_kyc.fields_encrypted` and `sellers.payout_fields_encrypted` with new key (one-off script)
-  4. Deploy with new key; old key invalidates all existing encrypted rows
+  2. Set it as `KYC_ENCRYPTION_KEY` in the Render dashboard and move the old value to `KYC_ENCRYPTION_KEY_PREVIOUS`
+  3. Deploy, then run `pnpm kyc:rotate-key` to re-encrypt `seller_kyc.fields_encrypted` (see the caveat above for `seller_profile` and `sellers.payout_fields_encrypted`)
+  4. Once nothing is left under the old key, remove `KYC_ENCRYPTION_KEY_PREVIOUS`; the compromised key then stops decrypting anything
 
 - **Revoke all anchor sessions** (issue 4.26):
   - `DELETE FROM anchor_sessions;` (or call revocation endpoint per seller)
@@ -1048,7 +1067,7 @@ Per NDPA Section 38, notify:
 - `WEBHOOK_SECRET_ENCRYPTION_KEY` (if webhook payloads exposed)
 - `JWT_SECRET` (if session tokens exposed)
 - `SERVER_SIGNING_SECRET` (if signing key exposed)
-- `WEBHOOK_SECRET_ENCRYPTION_KEY` rotation (issue 4.31) — 24h overlap window
+- `WEBHOOK_SECRET_ENCRYPTION_KEY` rotation: it has no previous-key slot, so follow the "Key rotation" section above (sellers re-issue webhook secrets and reconnect to the anchor)
 
 ### 6. Follow-up
 
