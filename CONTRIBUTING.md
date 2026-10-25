@@ -14,16 +14,16 @@ By participating you agree to uphold our [Code of Conduct](./CODE_OF_CONDUCT.md)
 
 Welcome! If you are looking for your first contribution:
 
-1. **Find a starter issue**: browse the [`good-first-issue`](https://github.com/determined-001/Quay/issues?q=is%3Aissue+is%3Aopen+label%3Agood-first-issue) label. The newcomer-gated set is backlog items 1.6, 5.5, 7.4, 7.6, 8.5 and 8.7 — property-based money tests, SEP-7 builder tests, the FIXLOG regression index, README repositioning, dependency/secret scanning in CI, and uptime monitoring.
+1. **Find a starter issue**: browse the open issues labelled [`good-first-issue` or `good first issue`](https://github.com/determined-001/Quay/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22%2Cgood-first-issue) (both spellings exist; see [`.github/labels.yml`](.github/labels.yml)). The label query is the source of truth: the list changes as issues are closed, so this guide does not name individual issues.
 2. **Comment on the Issue**: Express interest so maintainers can assign it to you.
 3. **Fork & Branch**: Fork the repo and create a descriptive branch from `dev`, the default branch:
    ```bash
    git checkout dev && git pull
    git checkout -b feature/issue-8.7-qr-copy-toast
    ```
-4. **Make Granular Commits**: Write clean code and make regular, logical commits using conventional prefixes (`feat:`, `fix:`, `docs:`, `test:`). **Do not squash your commits** into a single blob — commit history and velocity are legible and valuable to reviewers (`MAINTAINER.md:120`).
+4. **Make Granular Commits**: Write clean code and make regular, logical commits using conventional prefixes (`feat:`, `fix:`, `docs:`, `test:`). **Do not squash your commits** into a single blob — commit history and velocity are legible and valuable to reviewers (see "Stop squashing" under "5. Distribution + SCF packaging" in [`MAINTAINER.md`](./MAINTAINER.md)).
 5. **Verify Locally**: Run the local check suite (see below).
-6. **Submit PR**: Open your Pull Request referencing the issue ID (e.g. `Closes #8.7`). Assigned maintainers will review within our **48-hour Review SLA**.
+6. **Submit PR**: Open your Pull Request referencing the GitHub issue number (e.g. `Closes #123`; backlog ids such as `8.7` are not GitHub references and will not link or close anything). Assigned maintainers will review within our **48-hour Review SLA**.
 
 ---
 
@@ -41,7 +41,7 @@ new area, type or complexity.
 ### SLAs & Codeowners
 - **Triage Cadence**: Every new issue is triaged and labeled within **48 hours** (see [TRIAGE.md](docs/TRIAGE.md)).
 - **Review SLA**: Assigned [.github/CODEOWNERS](.github/CODEOWNERS) provide initial PR feedback within **48 hours** (business days).
-- **Stale Policy**: Issues inactive for 14 days receive a warning; closed after 30 days of inactivity.
+- **Stale Policy**: Maintainers comment on issues inactive for 14 days and close them after 30 days of inactivity. This is a manual practice; no bot enforces it (see [TRIAGE.md](docs/TRIAGE.md#stale-issue-policy)).
 
 ---
 
@@ -222,7 +222,8 @@ Run these from the repo root. They are the checks in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) that you can run without
 a browser or Docker; CI runs a few more (the Playwright `pnpm e2e` job, a
 dependency audit, a client-bundle check and a Docker build), so treat this as
-"at least these" and read the workflow if a PR fails there:
+"at least these" and read the workflow if a PR fails there. The required checks
+on `dev` and `main` are `build`, `docker` and `secret-scan`:
 
 ```bash
 pnpm typecheck                    # all packages
@@ -252,7 +253,7 @@ worker, or adapters should come with tests where practical. If you change
   `main` is what mainnet deploys from and only moves when a maintainer promotes `dev`
   (see `docs/RUNBOOK.md` "Promotion: dev to main").
 - Write a clear description of **what** changed and **why**. Link any related issue.
-- **Do not squash commits**: Maintainers and contributors preserve granular commit history on merge. Commit velocity and history demonstrate development progression.
+- **Do not squash commits**: `dev` and `main` require linear history, so a PR is merged by **rebase**, which keeps your granular commits. Maintainers do not squash-merge, and merge commits are blocked by the linear-history rule. Commit velocity and history demonstrate development progression.
 - Match the surrounding code style — comments explain intent, money is compared in integer stroops (never floats), and illegal status transitions must stay rejected.
 - Do not flip the off-ramp from `seller_initiated` to `inline`. That mode has legal (money-transmission / custody) implications and is out of scope for a PR.
 

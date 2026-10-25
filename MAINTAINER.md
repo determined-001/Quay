@@ -50,8 +50,10 @@ No other long-lived branches. Merged feature branches are deleted.
 - Required checks `build`, `docker`, `secret-scan`, and the branch must be up to
   date with its base before merging (`strict`).
 - Linear history, so PRs merge by **rebase** (keeps a contributor's granular
-  commits, which is what `CONTRIBUTING.md` asks for) or squash. Merge
-  commits are enabled repo-wide but the linear-history rule blocks them here.
+  commits, which is what `CONTRIBUTING.md` asks for). We do not squash (see
+  "Stop squashing" under "5. Distribution + SCF packaging"); squash and merge
+  commits are enabled repo-wide, but merge commits are blocked here by the
+  linear-history rule.
 - All review conversations resolved before merge.
 - No force-push, no deletion.
 - Admins are exempt. A maintainer can push to `dev` directly and can sync `main`

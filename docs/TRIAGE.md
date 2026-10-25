@@ -10,8 +10,8 @@ This document defines the issue triage process, labeling rules, response SLAs, a
 | --- | --- | --- |
 | **New Issue Triage & Labeling** | Within **48 hours** | Maintainers |
 | **First PR Review Feedback** | Within **48 hours** (business days) | Assigned CODEOWNER |
-| **Stale Warning Trigger** | **14 days** of inactivity | Automated bot / Maintainers |
-| **Stale Issue Closure** | **30 days** of total inactivity | Automated bot / Maintainers |
+| **Stale Warning Trigger** | **14 days** of inactivity | Maintainers (manual) |
+| **Stale Issue Closure** | **30 days** of total inactivity | Maintainers (manual) |
 
 ---
 
@@ -36,10 +36,13 @@ Optionally add:
 
 ## Stale Issue Policy
 
-To maintain a clean and actionable issue backlog:
+To maintain a clean and actionable issue backlog, maintainers apply this by hand
+during triage sweeps. There is no stale bot or `actions/stale` workflow in
+`.github/workflows/`, and no `stale` label in [`.github/labels.yml`](../.github/labels.yml),
+so nothing is warned or closed automatically.
 
-1. **14-Day Warning**: Issues without activity for 14 consecutive days receive the `stale` label along with a comment asking if the issue remains relevant or needs assistance.
-2. **30-Day Closure**: If no further response or commit activity occurs within **30 days** of initial inactivity, the issue is closed as stale. Reopening is always welcome if the context becomes relevant again.
+1. **14-Day Warning**: For an issue without activity for 14 consecutive days, a maintainer comments asking if the issue remains relevant or needs assistance.
+2. **30-Day Closure**: If no further response or commit activity occurs within **30 days** of initial inactivity, a maintainer closes the issue as stale. Reopening is always welcome if the context becomes relevant again.
 
 ---
 
@@ -47,8 +50,8 @@ To maintain a clean and actionable issue backlog:
 
 1. **No Squashing Policy**:
    - Maintainers must **never squash** PR commits into a single blob commit upon merging.
-   - Commit velocity and granular history provide legibility for auditability and code review (`MAINTAINER.md:120`).
-   - Use standard merge commits or rebase-merge to preserve granular commit histories.
+   - Commit velocity and granular history provide legibility for auditability and code review (see "Stop squashing" under "5. Distribution + SCF packaging" in `MAINTAINER.md`).
+   - Merge by **rebase**. `dev` and `main` require linear history, so merge commits are blocked, and squash-merge is not used even though the repository setting allows it (see "Branches and repository settings" in `MAINTAINER.md`).
 2. **Verification Gate**:
-   - Every PR must pass `pnpm typecheck`, `pnpm test`, and `pnpm build` in CI before merge.
+   - Every PR must pass the required checks `build`, `docker` and `secret-scan` before merge. `build` runs typecheck, tests, coverage, the docs and signing guards, the schema check and the web build; the commands are listed in `CONTRIBUTING.md` ("Before You Open a PR") and the source of truth is `.github/workflows/ci.yml`.
    - Off-ramp mode must remain `seller_initiated` (no switching to `inline`).
