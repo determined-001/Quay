@@ -1,4 +1,4 @@
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -20,7 +20,19 @@ import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 import { kycDisclosureFields, sellerKyc } from "../db/schema";
 
-const submitKycSchema = z.record(z.string(), z.string());
+/**
+ * Bounds on what a seller can submit, because the whole map is forwarded to the
+ * anchor: at most 50 fields, SEP-9 style snake_case names, values up to 1,000
+ * characters (issue 8.17). Real SEP-9 fields are short; a legitimate KYC form
+ * is nowhere near these limits.
+ */
+export const KYC_MAX_FIELDS = 50;
+export const KYC_MAX_VALUE_LENGTH = 1000;
+const submitKycSchema = z
+  .record(z.string().regex(/^[a-z0-9_.]{1,64}$/), z.string().max(KYC_MAX_VALUE_LENGTH))
+  .refine((fields) => Object.keys(fields).length <= KYC_MAX_FIELDS, {
+    message: `at most ${KYC_MAX_FIELDS} fields`,
+  });
 
 const grantConsentSchema = z.object({
   anchorDomain: z.string().min(1),
@@ -29,11 +41,17 @@ const grantConsentSchema = z.object({
 
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "application/pdf"]);
 
-function toResponse(record: KycRecord) {
+/**
+ * `providedFields` holds the seller's decrypted identity. A programmatic API key
+ * has no need to read it back (consent, disclosures and file upload already
+ * refuse keys), so only a signed-in seller session gets the values; a key gets
+ * the status and what is still required (issue 8.17).
+ */
+function toResponse(record: KycRecord, authKind: "session" | "api_key" | undefined) {
   return {
     status: record.status,
     requiredFields: record.requiredFields,
-    providedFields: record.providedFields,
+    providedFields: authKind === "api_key" ? {} : record.providedFields,
     message: record.message,
     lastSyncedAt: record.lastSyncedAt,
   };
@@ -80,8 +98,17 @@ function isNetworkError(err: unknown): boolean {
   return err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
 }
 
-export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
+export function kycRoutes(
+  c: Container,
+  kycWriteLimit: MiddlewareHandler = async (_ctx, next) => next(),
+): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
+
+  // Identity data must never sit in a shared cache or the browser's history.
+  app.use("*", async (ctx, next) => {
+    await next();
+    ctx.header("Cache-Control", "no-store");
+  });
 
   app.use(
     "*",
@@ -260,7 +287,7 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       const refresh = ctx.req.query("refresh") === "1" || ctx.req.query("refresh") === "true";
       const maxAgeMs = refresh ? 0 : (c.config.kycStatusCacheMs ?? 60_000);
       const record = await c.kyc.status(customerOf(ctx.get("seller")), { maxAgeMs });
-      return ctx.json(toResponse(record));
+      return ctx.json(toResponse(record, ctx.get("authKind")));
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
       const failed = anchorFailureResponse(ctx, err);
@@ -270,7 +297,7 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
   });
 
   // Submit or update identity fields. Enforces per-anchor consent.
-  app.put("/", async (ctx) => {
+  app.put("/", kycWriteLimit, async (ctx) => {
     const parsed = submitKycSchema.safeParse(await safeJson(ctx));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
 
@@ -343,7 +370,7 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
         });
       }
       await c.sellers.touchLastActive?.(seller.id);
-      return ctx.json(toResponse(updatedRecord));
+      return ctx.json(toResponse(updatedRecord, ctx.get("authKind")));
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
       if (err instanceof KycRequiredError) {
@@ -453,7 +480,7 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       try {
         const updated = await c.kyc.submitFiles(customer, uploadFiles);
         await c.sellers.touchLastActive?.(seller.id);
-        return ctx.json(toResponse(updated));
+        return ctx.json(toResponse(updated, "session"));
       } catch (err) {
         if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
         if (err instanceof KycRequiredError) {

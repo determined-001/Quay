@@ -347,9 +347,11 @@ describe("kycRoutes — consent endpoints (issue 4.26)", () => {
         requiredFields: [],
         providedFields: {},
       };
-      const { app, container, key, submitted, consents, seller } = await harness(
+      // A session, because only a session is shown the identity it submitted;
+      // an API key gets providedFields: {} (issue 8.17, see the test below).
+      const { app, container, sessionToken, submitted, consents, seller } = await harness(
         ["offramp:initiate"],
-        "api_key",
+        "session",
         firstSubRecord,
       );
       consents.push({
@@ -365,7 +367,7 @@ describe("kycRoutes — consent endpoints (issue 4.26)", () => {
 
       const res = await app.request("/", {
         method: "PUT",
-        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${sessionToken}`, "content-type": "application/json" },
         body: JSON.stringify({ first_name: "Ada", id_number: "1" }),
       });
 

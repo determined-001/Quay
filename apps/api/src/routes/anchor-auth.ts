@@ -35,6 +35,12 @@ const completeSchema = z.object({ transaction: z.string().min(1) });
 export function anchorAuthRoutes(c: Container, anchorAuthLimit: MiddlewareHandler): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
 
+  // Session state for one seller: not for a shared cache or the history.
+  app.use("*", async (ctx, next) => {
+    await next();
+    ctx.header("Cache-Control", "no-store");
+  });
+
   app.use(
     "*",
     buildAuthMiddleware({

@@ -98,6 +98,16 @@ async function main(): Promise<void> {
     name: "anchor_auth",
   });
 
+  // PUT /seller/kyc forwards a seller's identity to the anchor, so it gets the
+  // strict budget per authenticated seller (issue 8.17), like the anchor auth routes.
+  const kycWriteLimit = rateLimit({
+    windowMs: env.rateLimitStrictWindowMs,
+    max: env.rateLimitStrictMax,
+    store: rateLimitStore,
+    keyFor: (ctx) => `kyc-write:${ctx.get("seller").id}`,
+    name: "kyc_write",
+  });
+
   // The data-subject export reads every table that holds a seller's personal
   // data, so it gets its own small budget per seller (issue 4.27), not the shared
   // strict one: 5 per hour, regardless of IP.
@@ -215,7 +225,7 @@ async function main(): Promise<void> {
     }),
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
-  app.route("/seller/kyc", kycRoutes(container));
+  app.route("/seller/kyc", kycRoutes(container, kycWriteLimit));
   // Before profileRoutes: both live under /seller/profile, and the first router
   // to match answers, so /export is handled here and never reaches the profile
   // router's auth + store guards.
