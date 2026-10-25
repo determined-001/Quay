@@ -29,17 +29,40 @@ Please include:
 
 ## Scope notes
 
-This project is currently **pre-production**. Several things are intentionally not
-production-ready and are documented as such in the [README](./README.md):
+Stellar Checkout is live on Stellar mainnet (payments only; cash-out is
+`OFFRAMP=none` there - see the [README](./README.md)). Anything that can affect
+real funds or seller data is in scope. In particular:
 
-- **No authentication** — a single hard-coded demo seller, no API keys or login.
-- **The off-ramp is a mock** — `MockAnchorOffRamp` moves no money.
-- **USDC issuers in `.env.example` are placeholders** that must be verified per network.
+- **Wallet authentication and sessions** - the SEP-10 login (`GET`/`POST /auth`),
+  session JWTs and their revocation, and per-seller scoping of `/links`,
+  `/webhooks`, `/seller/*` and the other authenticated routes. Reading or
+  changing another seller's data is a valid finding.
+- **API keys and scopes** - key minting, scope enforcement and the
+  no-privilege-escalation rule ([docs/API.md](./docs/API.md#authentication)).
+- **Payment matching and money math** - bypassing the payment-matching or
+  idempotency guards, double-crediting, or incorrect amounts.
+- **Webhooks** - forging a webhook signature, and the SSRF guard on
+  seller-registered webhook URLs (`apps/api/src/services/ssrf-guard.ts`).
+- **KYC and payout data** - handling of SEP-12 identity fields, saved payout
+  fields and the anchor bearer tokens stored in `anchor_sessions`
+  ([encryption inventory](#at-rest-encryption-inventory),
+  [docs/PRIVACY.md](./docs/PRIVACY.md)).
+- **The non-custodial signing boundary** - Quay must never hold or use a
+  seller's spending key; the seller's own wallet signs the anchor login and the
+  withdrawal transfer. Anything that makes the server sign for a seller is a
+  finding ([docs/THREAT-MODEL.md](./docs/THREAT-MODEL.md),
+  [docs/ANCHOR-DUE-DILIGENCE.md](./docs/ANCHOR-DUE-DILIGENCE.md)).
 
-Reports about these *known, documented* limitations are appreciated but may be
-closed as "by design (pre-production)". Reports about unexpected behaviour — for
-example a way to bypass the payment-matching or idempotency guards, forge a webhook
-signature, or cause incorrect money math — are exactly what we want to hear about.
+Known, documented limitations are listed in the "Remaining exposure" column of
+[docs/THREAT-MODEL.md](./docs/THREAT-MODEL.md). Reports about those are
+appreciated but may be closed as already tracked. Two environments are not
+production and are out of scope for findings that need them:
+
+- **`OFFRAMP=mock`** moves no money and is refused at boot on the public network.
+  **`OFFRAMP=testanchor`** talks to the SDF testnet sandbox and is likewise
+  refused on the public network.
+- **The USDC issuers in `.env.example`** are the issuers we use, but verify them
+  per network before relying on them.
 
 ## Dependency and secret scanning (issue 8.5)
 
@@ -47,8 +70,10 @@ signature, or cause incorrect money math — are exactly what we want to hear ab
   against an explicit allowlist (`.github/audit-allowlist.txt`) - only
   advisories listed there (each with a reasoning comment) are permitted to
   pass; anything else fails the build.
-- **Dependabot** (`.github/dependabot.yml`) watches both the npm workspace
-  and GitHub Actions, grouped into one weekly PR per ecosystem.
+- **Dependabot** (`.github/dependabot.yml`) runs monthly. For the npm
+  workspace it is security-only: version-bump PRs are suppressed and it opens
+  a PR only when an advisory is involved. The GitHub Actions ecosystem is not
+  security-only; its updates are grouped into one monthly PR.
 - **gitleaks** runs in CI (`.gitleaks.toml`, extending gitleaks' default
   rule set with a rule specifically matching a Stellar secret seed -
   `S` followed by 55 base32 characters) and is available as a local
