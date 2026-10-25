@@ -394,3 +394,24 @@ export const sellerProfile = sqliteTable("seller_profile", {
 }, (table) => [
   primaryKey({ columns: [table.sellerId, table.field] }),
 ]);
+
+/**
+ * Append-only record of who read a seller's identity data (issue 8.15). One row
+ * per access, written where plaintext leaves the repository toward a caller.
+ * `fields` is a JSON array of field NAMES; a value never goes in this table.
+ * Rows are only ever inserted, then deleted by the 2-year retention sweep.
+ */
+export const piiAudit = sqliteTable("pii_audit", {
+  id: text("id").primaryKey(),
+  at: integer("at").notNull(),
+  sellerId: text("seller_id").notNull(),
+  actorType: text("actor_type", { enum: ["session", "api_key", "system"] }).notNull(),
+  /** Seller id for a session, the API key id for a key, a fixed label (e.g. "cash-out-gate") for the system. */
+  actorId: text("actor_id").notNull(),
+  action: text("action").notNull(),
+  fields: text("fields"), // JSON string[] of field names, never values
+  requestId: text("request_id"),
+}, (table) => [
+  index("pii_audit_seller_at_idx").on(table.sellerId, table.at),
+  index("pii_audit_at_idx").on(table.at),
+]);

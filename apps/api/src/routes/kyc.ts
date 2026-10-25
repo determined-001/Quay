@@ -20,6 +20,7 @@ import { recordAnchorAuthRequired } from "../metrics";
 import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 import { kycDisclosureFields, sellerKyc } from "../db/schema";
+import { auditActor } from "../services/pii-audit";
 
 /**
  * Bounds on what a seller can submit, because the whole map is forwarded to the
@@ -288,7 +289,15 @@ export function kycRoutes(
       const refresh = ctx.req.query("refresh") === "1" || ctx.req.query("refresh") === "true";
       const maxAgeMs = refresh ? 0 : (c.config.kycStatusCacheMs ?? 60_000);
       const record = await c.kyc.status(customerOf(ctx.get("seller")), { maxAgeMs });
-      return ctx.json(toResponse(record, ctx.get("authKind")));
+      const body = toResponse(record, ctx.get("authKind"));
+      // Names of the identity fields whose values this response carries. An API
+      // key gets none (see toResponse), so its row says it only saw the status.
+      await c.piiAudit?.record({
+        ...auditActor(ctx),
+        action: "kyc.read",
+        fields: Object.keys(body.providedFields),
+      });
+      return ctx.json(body);
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) {
         recordAnchorAuthRequired("kyc_get");
@@ -374,6 +383,7 @@ export function kycRoutes(
         });
       }
       await c.sellers.touchLastActive?.(seller.id);
+      await c.piiAudit?.record({ ...auditActor(ctx), action: "kyc.submit", fields: Object.keys(fields) });
       return ctx.json(toResponse(updatedRecord, ctx.get("authKind")));
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) {
@@ -490,6 +500,7 @@ export function kycRoutes(
       try {
         const updated = await c.kyc.submitFiles(customer, uploadFiles);
         await c.sellers.touchLastActive?.(seller.id);
+        await c.piiAudit?.record({ ...auditActor(ctx), action: "kyc.submit", fields: uploadedFields });
         return ctx.json(toResponse(updated, "session"));
       } catch (err) {
         if (err instanceof AnchorAuthRequiredError) {

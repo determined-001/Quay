@@ -115,6 +115,8 @@ export interface AuthVariables extends RequestContextVariables {
    *  session (a logged-in seller is the root user of their own account). */
   scopes: ApiKeyScope[];
   authKind: "api_key" | "session";
+  /** API-key path only: the id of the key that authenticated the request (audit actor). */
+  apiKeyId?: string;
   /** Session-only (set by requireSeller); undefined on the API-key path. */
   jti?: string;
   sessionExp?: number;
@@ -183,6 +185,7 @@ export function buildAuthMiddleware(deps: AuthDeps): MiddlewareHandler<{ Variabl
       ctx.set("seller", seller);
       ctx.set("scopes", matched.scopes);
       ctx.set("authKind", "api_key");
+      ctx.set("apiKeyId", matched.id);
 
       // Fire-and-forget last_used_at update (issue spec: "asynchronously").
       // Swallow failures — a DB blip must never take the process down via an

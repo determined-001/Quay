@@ -53,6 +53,7 @@ import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
 import { AnchorHealthRegistry, type AnchorHealth, type AnchorHealthSnapshot } from "./anchor-health";
 import { metrics, recordAnchorAuthRequired, type AnchorAuthRoute } from "../metrics";
+import type { PiiAuditRecorder } from "./pii-audit";
 
 // Re-exported for callers that historically imported them from LinkService
 // (issue 3.23 moved the implementation into ./anchor-health).
@@ -67,7 +68,12 @@ export interface LinkWithRequest {
 /** Per-call logger override — omit to fall back to the service's own ambient logger. */
 export interface ServiceCallOptions {
   logger?: Logger;
+  /** The inbound request's id, carried into PII audit rows written on its behalf. */
+  requestId?: string;
 }
+
+/** `actor_id` of the audit row written when the cash-out KYC gate reads a seller's identity. */
+export const CASH_OUT_GATE_ACTOR = "cash-out-gate";
 
 export class LinkService {
   private readonly sender: WebhookSender;
@@ -164,6 +170,8 @@ export class LinkService {
       hasLiveAnchorSession?: (customer: AnchorCustomer) => boolean | Promise<boolean>;
       /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
       logger?: Logger;
+      /** Audit log for system reads of seller identity (the cash-out KYC gate). Omitted = not audited. */
+      piiAudit?: PiiAuditRecorder;
     },
   ) {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
@@ -703,10 +711,23 @@ export class LinkService {
    * re-syncs rather than trusting a cached value, since paying out against
    * stale/rejected KYC is exactly the failure this gate exists to prevent.
    */
-  private async assertKycAccepted(customer: AnchorCustomer, route: AnchorAuthRoute): Promise<void> {
+  private async assertKycAccepted(
+    customer: AnchorCustomer,
+    route: AnchorAuthRoute,
+    opts: ServiceCallOptions = {},
+  ): Promise<void> {
     let status: string;
     try {
       status = (await this.deps.kyc.status(customer)).status;
+      // A system read: the gate decrypts the record to learn its status and
+      // hands no identity value to anyone, so the row lists no fields (issue 8.15).
+      await this.deps.piiAudit?.record({
+        sellerId: customer.sellerId,
+        actorType: "system",
+        actorId: CASH_OUT_GATE_ACTOR,
+        action: "kyc.read",
+        requestId: opts.requestId ?? null,
+      });
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired(route);
       if (err instanceof AnchorHttpError) throw anchorFailure(err, this.deps.logger!);
@@ -738,7 +759,7 @@ export class LinkService {
     const seller = await this.deps.sellers.findById(link.sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer, "quote");
+    await this.assertKycAccepted(customer, "quote", opts);
 
     const sourceAmount = link.paidAmount ?? link.amount;
     try {
@@ -792,7 +813,7 @@ export class LinkService {
     }
 
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer, "cash_out");
+    await this.assertKycAccepted(customer, "cash_out", opts);
 
     const sourceAmount = link.paidAmount ?? link.amount;
 

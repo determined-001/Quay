@@ -3,6 +3,7 @@ import type { Container } from "../services/container";
 import { buildSellerExport } from "../services/privacy-export";
 import { getLogger } from "../request-context";
 import { buildAuthMiddleware, type AuthVariables } from "../middleware/auth";
+import { auditActor } from "../services/pii-audit";
 import { rateLimit, type RateLimitStore } from "../middleware/rate-limit";
 
 /** At most this many exports per seller per window (issue 4.27). */
@@ -64,6 +65,12 @@ export function privacyRoutes(
     const seller = ctx.get("seller");
     const now = Date.now();
     const body = await buildSellerExport(c, seller, now);
+    // After the export is built, so the export lists past accesses and this row is the next one's.
+    await c.piiAudit?.record({
+      ...auditActor(ctx),
+      action: "profile.export",
+      fields: [...new Set([...(body.profile ?? []).map((f) => f.field), ...(body.kyc ?? []).flatMap((k) => Object.keys(k.providedFields))])],
+    });
 
     // The sellerId only: the export's contents are personal data and never go in a log.
     getLogger(ctx).info({ event: "privacy.export", sellerId: seller.id }, "seller data export generated");

@@ -76,6 +76,7 @@ import { assertKeyConfigured } from "./secret-crypto";
 import { createRateSource } from "./rate-source";
 import { guardWebhookUrl } from "./ssrf-guard";
 import { runKycRetentionSweep } from "./kyc-retention";
+import { PiiAuditService, runPiiAuditSweep } from "./pii-audit";
 
 export interface Container {
   service: LinkService;
@@ -94,6 +95,8 @@ export interface Container {
   /** The anchor's home domain (e.g. "testanchor.stellar.org") for consent tracking. Null when no real anchor. */
   anchorDomain: string | null;
   kycRepo?: DrizzleKycRepository | null;
+  /** Audit log of access to seller identity data (issue 8.15). Optional so partial test containers stay valid. */
+  piiAudit?: PiiAuditService;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
@@ -185,6 +188,7 @@ export async function createContainer(): Promise<Container> {
   const kycKeyring = env.kycEncryptionKey
     ? parsePiiKeyring(env.kycEncryptionKey, env.kycEncryptionKeyPrevious)
     : null;
+  const piiAuditService = new PiiAuditService(db, logger);
   const kycRepo = kycKeyring ? new DrizzleKycRepository(db, kycKeyring) : null;
 
   // Optional. Quay is multi-tenant: a seller signs in with their own wallet
@@ -289,6 +293,7 @@ export async function createContainer(): Promise<Container> {
     // sessionExpiry is async: comparing the bare Promise to null was always true,
     // so the poller's pre-check never blocked on an expired session.
     hasLiveAnchorSession: anchor ? async (customer) => (await anchor.auth.sessionExpiry(customer)) !== null : undefined,
+    piiAudit: piiAuditService,
   });
 
   // A link stuck in `offramp_pending` whose job has no row in offramp_jobs was
@@ -341,6 +346,7 @@ export async function createContainer(): Promise<Container> {
   let stopPoller: (() => void) | null = null;
   let stopRevocationSweep: (() => void) | null = null;
   let stopRetentionSweep: (() => void) | null = null;
+  let stopAuditSweep: (() => void) | null = null;
   let stopProbe: (() => void) | null = null;
 
   return {
@@ -356,6 +362,7 @@ export async function createContainer(): Promise<Container> {
     sellerProfile: sellerProfileRepo,
     anchorDomain,
     kycRepo,
+    piiAudit: piiAuditService,
     anchorAuth: anchor?.auth ?? null,
     anchorSessions: anchorSessionsRepo,
     deleteAnchorCustomer: anchor ? async (customer) => {
@@ -416,6 +423,15 @@ export async function createContainer(): Promise<Container> {
       }, 60 * 60 * 1000); // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
       stopRevocationSweep = () => clearInterval(sweepTimer);
 
+      // Audit rows are kept for two years, then deleted. Runs daily and is not
+      // configurable: shortening it would defeat the point of the log.
+      const auditTimer = setInterval(() => {
+        void runPiiAuditSweep({ db, logger }).catch((err) => {
+          logger.error({ err }, "pii audit retention sweep error");
+        });
+      }, 24 * 60 * 60 * 1000);
+      stopAuditSweep = () => clearInterval(auditTimer);
+
       if (env.kycRetentionDays > 0) {
         const sweepKyc = () => {
           void runKycRetentionSweep({
@@ -437,6 +453,7 @@ export async function createContainer(): Promise<Container> {
       stopPoller?.();
       stopRevocationSweep?.();
       stopRetentionSweep?.();
+      stopAuditSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();
       stopProbe?.();
       stopPoller = null;

@@ -294,6 +294,10 @@ const kycRetentionPurgedTotal = registry.counter(
   "quay_kyc_retention_purged_total",
   "Total number of inactive sellers whose KYC and identity data was purged under the retention policy.",
 );
+const piiAuditWriteFailuresTotal = registry.counter(
+  "pii_audit_write_failures_total",
+  "PII access audit rows that failed to write (the request still succeeded). Any increase means access went unrecorded.",
+);
 const kycNonPrimaryKeyRows = registry.gauge(
   "kyc_non_primary_key_rows",
   "Number of seller KYC rows encrypted with legacy or non-primary encryption keys.",
@@ -324,6 +328,7 @@ export const metrics = {
   circuitBreakerState,
   watcherLagSeconds,
   kycRetentionPurgedTotal,
+  piiAuditWriteFailuresTotal,
   kycNonPrimaryKeyRows,
   rateLimitStoreErrorsTotal,
 };

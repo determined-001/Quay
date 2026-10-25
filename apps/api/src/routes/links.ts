@@ -217,6 +217,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       const quote = await c.service.quoteCashOut(linkId, targetCurrency, withdrawType, {
         logger: getLogger(ctx),
+        requestId: ctx.get("requestId"),
       });
       return ctx.json(quote);
     } catch (err) {
@@ -274,7 +275,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
         // the id and leaks the link's existence (issue #41).
         return ctx.json({ error: "not_found" }, 404);
       }
-      const { job, initiation } = await c.service.triggerCashOut(linkId, parsed.data, { logger: log });
+      const { job, initiation } = await c.service.triggerCashOut(linkId, parsed.data, { logger: log, requestId: ctx.get("requestId") });
       log.info({ event: "cashout.request.ok", linkId, jobId: job.jobId }, "cash-out request succeeded");
       const interactiveUrl = initiation.kind === "interactive" ? initiation.url : undefined;
       // The anchor's deposit instructions for the seller's own wallet to sign

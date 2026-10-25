@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Container } from "../services/container";
+import { InvalidAuditCursorError } from "../services/pii-audit";
 
 /**
  * GET /telemetry/summary
@@ -14,7 +15,14 @@ import type { Container } from "../services/container";
  *            initiated_at, settled_at, effective_rate, fee_amount, status
  *   Seller identity and link IDs are intentionally excluded.
  *
- * Auth note: both endpoints are guarded by a simple bearer-token check against
+ * GET /telemetry/pii-audit?sellerId=...&action=...&limit=...&cursor=...
+ *   Operator view of the PII access audit log (issue 8.15): who read a seller's
+ *   identity, by what, when and under which request id. Field names only, never
+ *   values. Newest first, paginated: pass `nextCursor` back as `cursor`.
+ *   This is the one telemetry route that names a seller, which is why it is
+ *   behind the same token and is never cached.
+ *
+ * Auth note: all endpoints are guarded by a simple bearer-token check against
  * TELEMETRY_TOKEN env var.  When the var is unset the routes are disabled
  * (return 404) so local dev without auth is safe.
  */
@@ -70,6 +78,29 @@ export function telemetryRoutes(c: Container): Hono {
       }));
 
     return ctx.json({ rows });
+  });
+
+  app.get("/pii-audit", async (ctx) => {
+    const denied = guard(ctx);
+    if (denied) return denied;
+    if (!c.piiAudit) return ctx.json({ error: "pii_audit_unavailable" }, 503);
+
+    const rawLimit = ctx.req.query("limit");
+    const limit = rawLimit === undefined ? undefined : Number(rawLimit);
+    if (limit !== undefined && !Number.isFinite(limit)) return ctx.json({ error: "invalid_limit" }, 400);
+    try {
+      const page = await c.piiAudit.list({
+        sellerId: ctx.req.query("sellerId") || undefined,
+        action: ctx.req.query("action") || undefined,
+        limit,
+        cursor: ctx.req.query("cursor") || undefined,
+      });
+      ctx.header("Cache-Control", "no-store");
+      return ctx.json(page);
+    } catch (err) {
+      if (err instanceof InvalidAuditCursorError) return ctx.json({ error: "invalid_cursor" }, 400);
+      throw err;
+    }
   });
 
   app.get("/export.csv", async (ctx) => {
