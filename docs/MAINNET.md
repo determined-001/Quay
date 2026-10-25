@@ -10,12 +10,14 @@ skip the verification at the end of each phase.
 
 **Read this first:** the public-network guardrails throw at boot rather than
 warn. A service that refuses to start is loud; one that quietly settles into a
-sandbox anchor is not. The guards are split across two files: the OFFRAMP and
-anchor-URL checks fire in `apps/api/src/env.ts` at module load (lines
-114–142), as does the USDC issuer check (line 189); the
-`SERVER_SIGNING_SECRET` (line 489), and `JWT_SECRET` (line 512) checks fire in
-`apps/api/src/services/container.ts` inside `createContainer()`. If a guard
-fires, fix the configuration — never relax the guard to get a green deploy.
+sandbox anchor is not. The guards are split across three places: the OFFRAMP,
+seller-secret, anchor-URL and e2e checks and the USDC issuer check fire in
+`apps/api/src/env.ts` at module load; the `SERVER_SIGNING_SECRET` and
+`JWT_SECRET` checks (`resolveServerSigningKeypair`, `resolveJwtSecret`) and the
+`REDIS_URL` / `SINGLE_INSTANCE` check (`assertSharedStateOrSingleInstance`) fire
+in `apps/api/src/services/container.ts` inside `createContainer()`, which also
+calls `assertKeyConfigured()` from `apps/api/src/services/secret-crypto.ts` for
+the webhook-secret key. If a guard fires, fix the configuration — never relax the guard to get a green deploy.
 
 ---
 
@@ -25,19 +27,28 @@ fires, fix the configuration — never relax the guard to get a green deploy.
 |---|---|
 | `OFFRAMP=mock` | The mock anchor fakes settlement 8s after cash-out and pays out nothing. Sellers would see completed cash-outs against real funds that never left. Use `none`, not `mock`, to ship without a cash-out leg. |
 | `OFFRAMP=testanchor` | `testanchor.stellar.org` is the SDF testnet sandbox. It does not settle real money. |
+| `DEFAULT_SELLER_SECRET` set (`STELLAR_NETWORK=public`) | Quay never signs for a seller; each seller's wallet signs its own anchor login and withdrawals. A server-side seller secret is only for the testnet demo scripts. |
 | `OFFRAMP=anchor` without `ANCHOR_URL` / `ANCHOR_HOME_DOMAIN` | There is deliberately no default. A default would mean "the sandbox". |
 | `ANCHOR_URL` over plain HTTP | SEP-10 auth tokens and SEP-12 KYC fields cross this connection. |
 | Missing `USDC_ISSUER_PUBLIC` | Without an issuer the watcher cannot tell real USDC from an impostor asset. |
-| Missing `KYC_ENCRYPTION_KEY` (`OFFRAMP=anchor`) | Seller SEP-12 PII would be stored unencrypted. Not required under `OFFRAMP=none`, which collects none. |
+| Missing `KYC_ENCRYPTION_KEY` (`OFFRAMP=testanchor` or `anchor`; on pubnet that means `anchor`) | Seller SEP-12 PII would be stored unencrypted. Not required under `OFFRAMP=none`, which collects none. |
 | Missing `SERVER_SIGNING_SECRET` | A per-boot SEP-10 identity changes the advertised `SIGNING_KEY` on every restart, breaking every wallet that cached it. |
 | Missing `JWT_SECRET` | Every seller is logged out on each deploy. |
+| Missing `REDIS_URL` without `SINGLE_INSTANCE=true` (`STELLAR_NETWORK=public`) | Rate-limit counters and SEP-10 single-use challenge claims are per-process without Redis, so N instances allow N times every limit and N redemptions of one signed challenge. Set `REDIS_URL`, or set `SINGLE_INSTANCE=true` to state that this deployment runs exactly one instance. |
+| Missing `WEBHOOK_SECRET_ENCRYPTION_KEY` (`NODE_ENV=production`, any network) | It encrypts webhook signing secrets and seller anchor session tokens at rest. The trigger is `NODE_ENV=production`, not `STELLAR_NETWORK=public`. A value that does not decode to exactly 32 bytes (64 hex chars, or base64 of 32 bytes) is also refused. |
+| `E2E_TEST_MODE=1` with `NODE_ENV=production` or `STELLAR_NETWORK=public` | The e2e harness mounts routes that mint sessions and mark links paid without authentication or a ledger. |
+| Unrecognised `STELLAR_NETWORK`, `OFFRAMP`, `WATCH_MODE` or `CORRELATION` value | Each is validated against its allowed set at module load. |
 | A blank or non-numeric numeric var | A blank value used to yield `0` — `TRUST_PROXY_HOPS=` silently collapsed every client into one rate-limit bucket. A typo yields `NaN`, and `setInterval(NaN)` is a tight loop against Horizon, not a slow poll. |
 
-The OFFRAMP, USDC issuer, anchor-URL, and KYC key guards are covered by
-`apps/api/test/env-mainnet-guards.test.ts`. The
-`SERVER_SIGNING_SECRET`, and `JWT_SECRET` guards live in
-`apps/api/src/services/container.ts` and are not yet covered by a dedicated
-test file.
+The `env.ts` guards (OFFRAMP, `DEFAULT_SELLER_SECRET`, anchor URL, USDC
+issuer, KYC key, unknown OFFRAMP value) are covered by
+`apps/api/test/env-mainnet-guards.test.ts`. The `REDIS_URL` / `SINGLE_INSTANCE`
+guard is covered by `apps/api/test/single-instance-guard.test.ts` and the
+webhook-key guard by `apps/api/test/secret-crypto.test.ts`. The
+`SERVER_SIGNING_SECRET` and `JWT_SECRET` guards
+(`resolveServerSigningKeypair`, `resolveJwtSecret` in
+`apps/api/src/services/container.ts`) and the `E2E_TEST_MODE` guard have no
+dedicated test.
 
 ---
 

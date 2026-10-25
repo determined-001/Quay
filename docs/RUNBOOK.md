@@ -31,7 +31,8 @@ default.
 | Variable | Required when | What breaks without it |
 |---|---|---|
 | `DATABASE_URL` · `DATABASE_AUTH_TOKEN` | always (prod) | No persistence; falls back to a local SQLite file inside the container, which is destroyed on every deploy |
-| `KYC_ENCRYPTION_KEY` | `OFFRAMP=testanchor` | **Process will not boot.** `env.ts` resolves it with `req()` at module load and throws `Missing required env var: KYC_ENCRYPTION_KEY` |
+| `KYC_ENCRYPTION_KEY` | `OFFRAMP=testanchor` or `OFFRAMP=anchor` | **Process will not boot.** `env.ts` resolves it with `req()` at module load and throws `Missing required env var: KYC_ENCRYPTION_KEY` |
+| `ANCHOR_URL` · `ANCHOR_HOME_DOMAIN` | `OFFRAMP=anchor` | **Process will not boot.** `env.ts` resolves each with `req()` and throws `Missing required env var: ANCHOR_URL` (or `ANCHOR_HOME_DOMAIN`). There is deliberately no default. On the public network `ANCHOR_URL` must also be `https://` |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | `NODE_ENV=production` | Encrypts webhook signing secrets **and** seller anchor session tokens. **Process will not boot** (`createContainer()` calls `assertKeyConfigured()`). Before that check existed, it fell back to a hardcoded public dev key and 500'd on the first webhook registration |
 | `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveJwtSecret()` in `apps/api/src/services/container.ts` throws). On testnet: auto-generated per boot, so every restart and deploy logs every seller out |
 | `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveServerSigningKeypair()` in `apps/api/src/services/container.ts` throws). On testnet: auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
@@ -54,8 +55,8 @@ from the Render dashboard on first deploy. Adding a new `req()` call to
 `apps/api/src/env.ts` without adding the matching `render.yaml` entry is what
 caused the 2026-07-31 outage — see `docs/FIXLOG.md` `BUG-4.11`. The same
 mistake is possible in `apps/api/src/services/container.ts`, where
-`SERVER_SIGNING_SECRET` (line 489) and
-`JWT_SECRET` (line 512) are also enforced at boot on public network.
+`resolveServerSigningKeypair()` (`SERVER_SIGNING_SECRET`) and
+`resolveJwtSecret()` (`JWT_SECRET`) are also enforced at boot on public network.
 
 ### Scaling past one instance
 
@@ -896,7 +897,7 @@ If personal data (KYC fields, payout fields, session tokens, seller identity) is
 - Types of data involved:
   - **High risk**: KYC fields (name, address, ID numbers, financial), payout fields (bank details)
   - **Medium risk**: Wallet addresses, payment history, API key metadata
-  - **Low risk**: Logs (already redacted per `docs/pr-27-logging.md`), analytics
+  - **Low risk**: Logs (secrets and PII are redacted by the pino config in `apps/api/src/logger.ts`, covered by `apps/api/test/logger-redaction.test.ts`), analytics
 
 ### 3. Notify (within 72 hours of awareness)
 
