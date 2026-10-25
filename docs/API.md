@@ -659,6 +659,9 @@ settled.
 
 ## Cash-out (off-ramp) flow
 
+For the merchant's point of view (what the dashboard shows and what each wallet
+signature does), see [`MERCHANT-CASH-OUT.md`](MERCHANT-CASH-OUT.md).
+
 Cashing out a paid link to local currency is several calls, and with a real
 anchor (`OFFRAMP=testanchor|anchor`) the seller's own wallet signs the parts
 that matter. Which adapter runs is set by `OFFRAMP`: `mock` (the default for

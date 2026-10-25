@@ -412,6 +412,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 - **[Architecture](docs/ARCHITECTURE.md)** — package graph, the three ports, sequence diagrams for each flow, the status machine, and how to add a new chain/anchor/rail.
 - **[Seller-signed anchor threat model](docs/THREAT-MODEL.md)** — assets, trust boundaries, implemented controls, failure paths, and open risks in anchor authentication and withdrawals.
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
+- **[Cashing out: a merchant guide](docs/MERCHANT-CASH-OUT.md)** — connect to the anchor, verify identity, quote, cash out and send the transfer, step by step, with what each wallet signature can and cannot do.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
 - **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, [anchor outage](docs/RUNBOOK.md#anchor-outage), [anchor incidents](docs/RUNBOOK.md#anchor-incidents), watcher-stuck, stuck off-ramp jobs, and the incident template.
 - **[Mainnet cutover](docs/MAINNET.md)** — choosing a production anchor, generating and funding real keys, the public-network guardrails and why each refuses to boot, and the pre-announcement verification list.
