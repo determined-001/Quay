@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { InvalidCursorError } from "@checkout/core";
 
 process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = "1".repeat(64);

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { kycRoutes } from "../src/routes/kyc";
 import { generateApiKey, hashApiKey, type ApiKeyScope } from "../src/services/api-keys";
 import { createTestContainer, type TestContainer } from "./setup";

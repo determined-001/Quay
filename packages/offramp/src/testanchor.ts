@@ -297,7 +297,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     // The seller's choice wins; the operator-wide OFFRAMP_TYPE is only the
     // fallback default (issue 5.24). resolveWithdrawType still rejects a type
     // the anchor does not offer, carrying availableTypes for the 400 upstream.
-    const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
+    const { type: withdrawType, feeFixed, feePercent } = await resolveWithdrawType(
       requireTransferServer(d),
       input.sourceAsset.code,
       input.sourceAmount,

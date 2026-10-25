@@ -2,9 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   shouldShowAnchorReconnectBanner,
   shouldShowReconnectHint,
-  calculateAnchorRecheckDelay,
-  EXPIRATION_WARNING_MS,
-} from "../lib/anchor-session";
+  calculateAnchorRecheckDelay } from "../lib/anchor-session";
 import type { AnchorAuthView, PaymentLink } from "../lib/api";
 
 function mockLink(id: string, status: string): PaymentLink {

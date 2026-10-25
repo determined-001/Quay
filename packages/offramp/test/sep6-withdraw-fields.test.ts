@@ -2,14 +2,12 @@ import { Keypair, Networks } from "@stellar/stellar-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AnchorCustomer, Logger } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
-import {
-  RESERVED_WITHDRAW_PARAMS,
+import { 
   Sep6ValidationError,
   clearSep6InfoCache,
   selectWithdrawFields,
   startSep6Withdraw,
-  type Sep6WithdrawType,
-} from "../src/sep6";
+  type Sep6WithdrawType } from "../src/sep6";
 import { TestAnchorOffRamp } from "../src/testanchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 

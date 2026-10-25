@@ -5,7 +5,7 @@ import { authRoutes } from "../../src/routes/auth";
 import { publicRoutes } from "../../src/routes/public";
 import { rateLimit, MemoryStore } from "../../src/middleware/rate-limit";
 import { createTestContainer, type TestContainer } from "../setup";
-import { Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Keypair, Networks } from "@stellar/stellar-sdk";
 import { ChallengeService } from "../../src/services/challenge";
 
 // ---------------------------------------------------------------------------
