@@ -85,9 +85,6 @@ git config core.hooksPath .githooks
 ```
 
 ## Local development
----
-
-## Local Development
 
 ```bash
 # API + ledger watcher  →  http://localhost:8787
@@ -99,20 +96,148 @@ pnpm --filter @checkout/web dev
 
 ---
 
+## Testing cash-out against testanchor
+
+`OFFRAMP=mock` (the default in `.env.example`) is enough for most work, but it
+is a simulation. Use the real sandbox, `testanchor.stellar.org`, whenever you
+touch the off-ramp, KYC or anything the dashboard does between "Cash out" and
+"settled".
+
+| | `OFFRAMP=mock` | `OFFRAMP=testanchor` |
+|---|---|---|
+| Anchor login (SEP-10) and "Connect to anchor" | none (no anchor, nothing to sign in to) | the seller's wallet signs the anchor's challenge |
+| Identity verification (SEP-12) | not required | required; the cash-out button waits for `ACCEPTED` |
+| Quote | built-in illustrative rates (NGN, KES, GHS) | SEP-38 quote from the anchor (USD or CAD only) |
+| Payout | the job settles itself after about 8 seconds and pays nothing | a real SEP-6 withdrawal; the anchor names a deposit account and your wallet sends USDC to it |
+| Transfer step ("Send with my wallet") | never shown | shown once the anchor names its deposit account |
+| Anchor limits, withdraw types, errors, slow or flaky anchor | not exercised | exercised |
+
+Mock settles in a few seconds without the anchor, so it hides everything that
+only the real anchor does: the seller-signed login, KYC lifecycle, the transfer
+the seller must send, withdraw-type selection and limits. Most anchor bugs so
+far showed up only against the sandbox.
+
+### 1. Environment
+
+Start from `cp .env.example .env`, then set the values below (the names are the
+ones in [`.env.example`](.env.example) and `apps/api/src/env.ts`). The API reads
+the repo-root `.env`. The Next.js web app does not: put the `NEXT_PUBLIC_*`
+lines in `apps/web/.env.local` (or export them in the shell that runs the web
+dev server).
+
+```bash
+# API (repo-root .env)
+OFFRAMP=testanchor
+OFFRAMP_TYPE=bank_account          # testanchor lists two USDC withdrawal types ("cash" and
+                                   # "bank_account"); the adapter will not guess between them
+KYC_ENCRYPTION_KEY=<64 hex chars>  # required for testanchor; see the comment above it in
+                                   # .env.example for the generator command
+COOKIE_SECURE=false                # plain-http local dev: a Secure cookie is otherwise never sent
+
+# Web (apps/web/.env.local)
+NEXT_PUBLIC_OFFRAMP_MODE=testanchor
+NEXT_PUBLIC_OFFRAMP_CURRENCY=USD   # testanchor only quotes USDC against USD and CAD
+NEXT_PUBLIC_ENABLE_WALLET_PAY=true # optional: adds a "pay with wallet" button on the checkout page
+```
+
+Leave `STELLAR_NETWORK=testnet` and `NEXT_PUBLIC_STELLAR_NETWORK=testnet`
+(they must match). `HOME_DOMAIN` can stay unset locally; it falls back to
+`localhost:8787`. `DEFAULT_SELLER_SECRET` is not used: you sign in with your own
+wallet, and the server never signs for you. Restart both dev servers after
+changing env files; `NEXT_PUBLIC_*` values are inlined when Next compiles, so a
+running web server will not pick them up.
+
+### 2. Wallet setup
+
+You need two testnet accounts: the **seller** (signs in to the dashboard and
+cashes out) and a **buyer** (pays the link). Two accounts in one Freighter
+wallet is fine.
+
+1. Install [Freighter](https://www.freighter.app/) and create or import two accounts.
+2. In Freighter, switch the network to **Testnet** (Freighter's network picker).
+3. Fund each account with Friendbot, which gives it test XLM:
+   `https://friendbot.stellar.org/?addr=G...` (your address after `addr=`).
+4. Add a USDC trustline to each account for the testnet issuer in
+   `USDC_ISSUER_TESTNET`, `GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5`:
+   in Freighter use **Manage assets** and add `USDC` with that issuer, or build a
+   Change Trust operation in [Stellar Laboratory](https://lab.stellar.org). The
+   seller needs it too: creating a link fails the trustline check without it.
+5. Get testnet USDC into the **buyer** account (the seller only needs the
+   trustline, since the buyer's payment is what funds it). There is no faucet
+   this repo can promise. Try Circle's faucet at
+   [faucet.circle.com](https://faucet.circle.com) if it lists Stellar testnet, and
+   confirm the USDC issuer it uses matches the one above (a different issuer is a
+   different asset and will not work here). If it does not, testanchor itself lists USDC for deposit on SEP-6 (SEPA or SWIFT,
+   1 to 10 USDC, authentication required), so an anchor-side deposit to the
+   buyer account from a SEP-6 client such as the
+   [Stellar Demo Wallet](https://demo-wallet.stellar.org) is the fallback. Quay
+   itself has no deposit screen.
+
+testanchor limits each withdrawal to **1 to 10 USDC** (its `/sep6/info`), so keep
+the test link in that range.
+
+### 3. Walkthrough
+
+1. `pnpm install`, `pnpm --filter @checkout/api dev` and `pnpm --filter @checkout/web dev`.
+2. Open http://localhost:3000, choose **Connect wallet** and sign in with the
+   **seller** account (the signature proves you own the address; it is never
+   submitted).
+3. Create a link for **5 USDC**.
+4. Open the checkout page of that link and pay it from the **buyer** account with
+   the memo shown (or use the wallet button if you set `NEXT_PUBLIC_ENABLE_WALLET_PAY=true`).
+   The watcher confirms it and the link becomes `paid`.
+5. In the dashboard's identity panel choose **Connect to** the anchor and approve
+   the signature in Freighter. This is a SEP-10 login for the seller account.
+6. **Start verification** (SEP-12), fill the fields the anchor asks for, and wait
+   for `ACCEPTED`. The cash-out button only appears after that.
+7. On the paid link choose **Cash out**, review the quote, and fill the payout
+   fields the anchor asks for.
+8. When the anchor names its deposit account, the modal shows **Send with my
+   wallet** with the amount, destination and memo. Approve the payment in
+   Freighter. The link moves `offramp_pending` then `offramp_settled`.
+
+If a step fails, `docs/RUNBOOK.md` ("Anchor incidents", "Stuck `offramp_pending`
+job") explains what each state means.
+
+### 4. The live test suite
+
+The offramp package has tests that call the real sandbox. They are skipped
+unless you opt in, because testanchor is a shared external service:
+
+```bash
+RUN_LIVE_ANCHOR_TESTS=1 OFFRAMP_TYPE=bank_account pnpm --filter @checkout/offramp test
+```
+
+`OFFRAMP_TYPE` defaults to `bank_account` in the suite. `SELLER_SECRET_KEY` is
+optional: set it to a testnet secret (`S...`) to reuse one account, otherwise a
+random keypair is used. Never use a mainnet key. The nightly
+[`anchor-probe.yml`](.github/workflows/anchor-probe.yml) workflow runs this same
+command with `OFFRAMP_TYPE=bank_account`.
+
+---
+
 ## Before You Open a PR
 
-Run the full check suite from the repo root — this is exactly what CI runs:
+Run these from the repo root. They are the checks in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) that you can run without
+a browser or Docker; CI runs a few more (the Playwright `pnpm e2e` job, a
+dependency audit, a client-bundle check and a Docker build), so treat this as
+"at least these" and read the workflow if a PR fails there:
 
 ```bash
 pnpm typecheck                    # all packages
 pnpm test                         # unit tests
+pnpm test:coverage                # unit tests with coverage thresholds
+pnpm test:scripts                 # tests for the repo's own scripts (db-backup/db-restore)
 pnpm build                        # builds the web app
 pnpm docs:check-status-diagram    # docs/generated/status-diagram.mmd matches status.ts
 pnpm docs:check-domain-boundary   # packages/core imports no chain SDK
 pnpm check:no-server-signing      # no server-held key signs a payment or anchor challenge
+pnpm docs:check-env-docs          # every env var apps/api reads is in .env.example
+pnpm db:check                     # schema and migrations have not drifted
 ```
 
-All six must pass. If you change domain logic in `packages/core`, add or update
+All of them must pass. If you change domain logic in `packages/core`, add or update
 the corresponding unit tests (`packages/core/test/`). New behaviour in the API,
 worker, or adapters should come with tests where practical. If you change
 `LINK_STATUSES`/`TRANSITIONS` in `packages/core/src/domain/status.ts`, run
