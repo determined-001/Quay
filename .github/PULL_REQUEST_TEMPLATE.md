@@ -19,6 +19,7 @@ stays behind a port and the domain (`packages/core`) imports no chain SDK.
 - [ ] Added/updated tests for changed behaviour where practical
 - [ ] Did not change the off-ramp from `seller_initiated` to `inline`
 - [ ] Updated docs (README / API.md) if behaviour or endpoints changed
+- [ ] Added a line under `Unreleased` in `CHANGELOG.md` if operators, integrators or merchants will notice the change (otherwise: internal-only)
 - [ ] Preserved granular commit history (do not squash into a single blob)
 
 ## Bug fix? (skip if not a bug fix)

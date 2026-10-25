@@ -133,6 +133,40 @@ worker, or adapters should come with tests where practical. If you change
 
 ---
 
+## Changelog and releases
+
+[`CHANGELOG.md`](./CHANGELOG.md) follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+It is the one place an operator upgrading a self-hosted deploy, or an integrator
+on the API, looks to see what changed, what broke and what to do about it.
+
+**Every PR that changes behaviour an operator, integrator or merchant can see
+adds a line under `## [Unreleased]`**, in the matching group (`Added`,
+`Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`). That covers API
+routes, request or response fields, error codes, env vars, migrations, webhook
+events and dashboard flows. Pure refactors, tests and internal docs do not need
+one. Rules of thumb:
+
+- A breaking change goes under `Breaking changes` at the top of `Unreleased`,
+  says what to do about it, and uses `!` in the commit type (`fix(offramp)!: ...`).
+- A new, renamed or newly required env var goes under `New or changed
+  environment variables`, with its default, and in `.env.example`.
+- Write for the reader, not the diff: say what changed for them, not which file.
+
+**Cutting a release** (a maintainer, when promoting `dev` to `main`; see
+`docs/RUNBOOK.md` "Promotion: dev to main"):
+
+1. In the `dev` to `main` PR, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`
+   (today's date), add a fresh empty `## [Unreleased]` above it, and update the
+   link references at the bottom. Choose the version with
+   [Semver](https://semver.org/): breaking change is major (while below 1.0, minor),
+   new feature is minor, fixes only is patch. Bump `version` in `package.json` to match.
+2. Merge the PR, then tag the merge commit on `main`: `git tag -a vX.Y.Z -m "vX.Y.Z"`
+   and `git push origin vX.Y.Z`.
+3. Create a GitHub release for the tag (`gh release create vX.Y.Z`) with that
+   version's section from `CHANGELOG.md` as the notes.
+
+---
+
 ## Commit Messages
 
 Use short, conventional-style prefixes where they fit (`feat:`, `fix:`, `docs:`, `chore:`, `test:`). Keep the subject line under ~72 characters.
