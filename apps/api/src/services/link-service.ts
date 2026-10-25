@@ -40,6 +40,7 @@ import {
   type WithdrawTransfer,
 } from "@checkout/core";
 import {
+  AnchorCapabilityError,
   AnchorConfigError,
   AnchorHttpError,
   Sep6ValidationError,
@@ -731,7 +732,7 @@ export class LinkService {
       });
     } catch (err) {
       if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired(route);
-      if (err instanceof AnchorHttpError || err instanceof AnchorConfigError) throw anchorFailure(err, this.deps.logger!);
+      if (err instanceof AnchorHttpError || err instanceof AnchorConfigError || err instanceof AnchorCapabilityError) throw anchorFailure(err, this.deps.logger!);
       throw err;
     }
     if (status !== "ACCEPTED") throw new HttpError(403, "kyc_required");
@@ -1596,6 +1597,15 @@ export function anchorFailure(err: unknown, log: Logger): HttpError {
   // outage and not the seller's to fix, so say so apart from `anchor_error`.
   if (err instanceof AnchorConfigError) {
     log.error({ event: "anchor.config_error", setting: err.setting, value: err.value }, err.message);
+    return new HttpError(502, "anchor_config_error", { message: err.message });
+  }
+  // The anchor does not declare the SEP this deployment needs (OFFRAMP_PROTOCOL,
+  // a SEP-24-only anchor asked for SEP-6): the operator's to fix, and no retry helps.
+  if (err instanceof AnchorCapabilityError) {
+    log.error(
+      { event: "anchor.config_error", setting: "capability", needed: err.needed, declared: err.declared },
+      err.message,
+    );
     return new HttpError(502, "anchor_config_error", { message: err.message });
   }
   if (err instanceof AnchorHttpError) {

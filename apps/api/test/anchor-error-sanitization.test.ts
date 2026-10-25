@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { Logger } from "@checkout/core";
-import { AnchorChallengeError, AnchorConfigError, AnchorHttpError, type SellerAnchorAuth } from "@checkout/offramp";
+import { AnchorCapabilityError, AnchorChallengeError, AnchorConfigError, AnchorHttpError, type SellerAnchorAuth } from "@checkout/offramp";
 import { linkRoutes } from "../src/routes/links";
 import { kycRoutes } from "../src/routes/kyc";
 import { anchorAuthRoutes } from "../src/routes/anchor-auth";
@@ -282,6 +282,20 @@ describe("/seller/kyc: anchor failures", () => {
     expect(await put.json()).toEqual(expected);
 
     expect(lines.some((l) => l.event === "anchor.config_error" && l.value === "bogus")).toBe(true);
+    container.client.close();
+  });
+
+  it("GET maps an anchor that declares no usable server to 502 anchor_config_error", async () => {
+    const { container, app, headers, lines } = await setup(() => {
+      throw new AnchorCapabilityError("a.example", "SEP-12 (KYC_SERVER)", ["sep24"]);
+    });
+    const res = await app.request("/", { headers });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: "anchor_config_error",
+      message: "Anchor a.example does not declare SEP-12 (KYC_SERVER) in its stellar.toml (declared: sep24)",
+    });
+    expect(lines.some((l) => l.event === "anchor.config_error" && l.setting === "capability")).toBe(true);
     container.client.close();
   });
 

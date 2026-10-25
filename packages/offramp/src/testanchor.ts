@@ -20,7 +20,7 @@ import {
 } from "@checkout/core";
 import { NOOP_LOGGER, targetPerSourceRate } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
+import { listsCurrency, requireTransferServer, type Sep1DiscoveryInfo } from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
 import {
   Sep6ValidationError,
@@ -246,7 +246,7 @@ export class TestAnchorOffRamp implements OffRampPort {
   async offrampRequirements(assetCode: string, _customer?: AnchorCustomer): Promise<OfframpRequirementTypes> {
     const d = await this.discover();
     this.assertListed(d, assetCode);
-    const info = await getSep6Info(d.transferServer, this.logger);
+    const info = await getSep6Info(requireTransferServer(d), this.logger);
     const asset = info.withdraw[assetCode];
     if (!asset?.enabled) {
       throw new Error(`SEP-6 anchor does not support withdrawing ${assetCode}`);
@@ -298,7 +298,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     // fallback default (issue 5.24). resolveWithdrawType still rejects a type
     // the anchor does not offer, carrying availableTypes for the 400 upstream.
     const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
-      d.transferServer,
+      requireTransferServer(d),
       input.sourceAsset.code,
       input.sourceAmount,
       input.withdrawType ?? this.preferredWithdrawType,
@@ -507,10 +507,10 @@ export class TestAnchorOffRamp implements OffRampPort {
     // exactly what this PR exists to stop doing.
     const withdrawType =
       q.withdrawType ??
-      (await resolveWithdrawType(dsc.transferServer, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
+      (await resolveWithdrawType(requireTransferServer(dsc), q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
         .type;
 
-    const info = await getSep6Info(dsc.transferServer, baseLog);
+    const info = await getSep6Info(requireTransferServer(dsc), baseLog);
     const asset = info.withdraw[q.sellAsset.code];
     if (!asset) {
       throw new Sep6ValidationError(
@@ -536,7 +536,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     // WE generated — sending it to the anchor would be handing it an id it
     // never issued and never agreed to. What the anchor does quote is the
     // amount and the type, both of which are below.
-    const withdraw = await startSep6Withdraw(dsc.transferServer, jwt, {
+    const withdraw = await startSep6Withdraw(requireTransferServer(dsc), jwt, {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,
       account: input.customer.account,
@@ -603,7 +603,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     const baseLog = (opts.logger ?? this.logger);
     const child = baseLog.child({ jobId, linkId: job.linkId });
     const jwt = await this.auth.token({ sellerId: job.sellerId, account: job.account });
-    const tx = await getSep6Transaction((await this.discover()).transferServer, jwt, jobId, baseLog);
+    const tx = await getSep6Transaction(requireTransferServer(await this.discover()), jwt, jobId, baseLog);
     const mappedStatus = mapSep6Status(tx.status);
     if (!Object.hasOwn(SEP6_STATUS_MAP, tx.status) && !this.unknownStatusesLogged.has(jobId)) {
       this.unknownStatusesLogged.add(jobId);

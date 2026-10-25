@@ -5,6 +5,11 @@ import {
   listsCurrency,
   parseStellarToml,
   Sep1NetworkMismatchError,
+  AnchorCapabilityError,
+  capabilities,
+  requireKycServer,
+  requireTransferServer,
+  requireTransferServerSep24,
 } from "../src/sep1";
 
 const TOML = `
@@ -43,9 +48,10 @@ describe("parseStellarToml — endpoint URLs (issue 3.30)", () => {
 
   it.each([
     ["http://", 'WEB_AUTH_ENDPOINT = "http://a.example/auth"', "webAuthEndpoint", "https://a.example/auth"],
-    ["ftp://", 'TRANSFER_SERVER = "ftp://x"', "transferServer", "https://a.example/sep6"],
-    ["a non-URL string", 'TRANSFER_SERVER_SEP24 = "not a url"', "transferServerSep24", "https://a.example/sep24"],
-  ])("ignores %s and keeps the guessed default with a warning", (_name, line, field, fallback) => {
+    // An undeclared (here: rejected) SEP-6/SEP-24 server is null, never a guessed path (issue 3.19).
+    ["ftp://", 'TRANSFER_SERVER = "ftp://x"', "transferServer", null],
+    ["a non-URL string", 'TRANSFER_SERVER_SEP24 = "not a url"', "transferServerSep24", null],
+  ])("ignores %s and keeps the default with a warning", (_name, line, field, fallback) => {
     const { logger, warn } = warnLogger();
     const info = parseStellarToml(withEndpoints(line), "a.example", logger);
     expect(info[field as "webAuthEndpoint"]).toBe(fallback);
@@ -76,6 +82,63 @@ describe("parseStellarToml — endpoint URLs (issue 3.30)", () => {
     );
     expect(info.transferServer).toBe("https://api.a.example/v2/anchor/sep6");
     expect(info.webAuthEndpoint).toBe("https://a.example/v2/auth");
+  });
+});
+
+describe("parseStellarToml — undeclared endpoints (issue 3.19)", () => {
+  const SIGNING = 'SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"\n';
+
+  it("a TOML declaring only TRANSFER_SERVER has no SEP-24 server and no quote server, and is not a fallback", () => {
+    const info = parseStellarToml(`${SIGNING}TRANSFER_SERVER = "https://a.example/sep6"\n`, "a.example");
+    expect(info.transferServer).toBe("https://a.example/sep6");
+    expect(info.transferServerSep24).toBeNull();
+    expect(info.anchorQuoteServer).toBeNull();
+    expect(info.fallback).toBe(false);
+    expect(capabilities(info)).toEqual({ sep6: true, sep24: false, sep38: false, sep12: true });
+  });
+
+  it("a SEP-24-only TOML has no SEP-6 server, and serves SEP-12 from the SEP-24 server", () => {
+    const info = parseStellarToml(`${SIGNING}TRANSFER_SERVER_SEP0024 = "https://a.example/sep24"\n`, "a.example");
+    expect(info.transferServer).toBeNull();
+    expect(info.transferServerSep24).toBe("https://a.example/sep24");
+    expect(info.kycServer).toBe("https://a.example/sep24");
+    expect(capabilities(info)).toEqual({ sep6: false, sep24: true, sep38: false, sep12: true });
+  });
+
+  it("a TOML declaring no transfer server and no KYC_SERVER has no SEP-12 server either", () => {
+    const info = parseStellarToml(SIGNING, "a.example");
+    expect(info.kycServer).toBeNull();
+    expect(capabilities(info)).toEqual({ sep6: false, sep24: false, sep38: false, sep12: false });
+  });
+
+  it("a declared SEP-38 server shows up as a capability", () => {
+    const info = parseStellarToml(`${SIGNING}ANCHOR_QUOTE_SERVER = "https://a.example/q"\n`, "a.example");
+    expect(capabilities(info).sep38).toBe(true);
+  });
+
+  it("the guessed layout still exists, but only for a fallback", async () => {
+    clearStellarTomlCache();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
+    try {
+      const info = await fetchStellarToml("a.example");
+      expect(info.fallback).toBe(true);
+      expect(info.transferServer).toBe("https://a.example/sep6");
+      expect(info.transferServerSep24).toBe("https://a.example/sep24");
+      expect(info.anchorQuoteServer).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("the require* helpers name the anchor, the missing endpoint and what is declared", () => {
+    const info = parseStellarToml(`${SIGNING}TRANSFER_SERVER_SEP0024 = "https://a.example/sep24"\n`, "a.example");
+    expect(requireTransferServerSep24(info)).toBe("https://a.example/sep24");
+    expect(() => requireTransferServer(info)).toThrow(AnchorCapabilityError);
+    expect(() => requireTransferServer(info)).toThrow(
+      "Anchor a.example does not declare SEP-6 (TRANSFER_SERVER) in its stellar.toml (declared: sep24, sep12)",
+    );
+    const none = parseStellarToml(SIGNING, "b.example");
+    expect(() => requireKycServer(none)).toThrow("declared: none");
   });
 });
 

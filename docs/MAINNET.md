@@ -105,18 +105,36 @@ Share the [anchor due diligence brief](ANCHOR-DUE-DILIGENCE.md) with a prospecti
 Only if you are enabling cash-out. This is the one decision no configuration
 can make for you, and it gates everything else.
 
-Quay's off-ramp adapter speaks SEP-10 (auth), SEP-12 (KYC), SEP-38 (quotes) and
-SEP-6 (withdrawal). Any production anchor implementing that set works with no
-code change — `OFFRAMP=anchor` is the same adapter as `testanchor`, pointed at a
-different host.
+Quay's off-ramp speaks SEP-10 (auth), SEP-12 (KYC) and either SEP-6 or SEP-24
+(withdrawal), with SEP-38 for quotes where the anchor has them. Any production
+anchor implementing that set works with no code change — `OFFRAMP=anchor` is the
+same code as `testanchor`, pointed at a different host.
+
+Which withdrawal protocol is used comes from the anchor's own `stellar.toml`
+(`TRANSFER_SERVER` means SEP-6, `TRANSFER_SERVER_SEP0024` means SEP-24), set by
+`OFFRAMP_PROTOCOL`:
+
+- `auto` (default) uses SEP-6 when the anchor declares it — the seller never
+  leaves the dashboard — and otherwise SEP-24, where the anchor's own page opens
+  for the seller to finish the withdrawal.
+- `sep6` / `sep24` force one. If the anchor does not declare it, the first
+  cash-out fails with `502 anchor_config_error` naming what the anchor does
+  declare. The chosen protocol is logged once at boot (`event: "offramp.protocol"`).
+
+A withdrawal keeps the protocol it started under, so changing `OFFRAMP_PROTOCOL`
+never strands one in flight.
 
 What you need from the anchor before proceeding:
 
 - **A commercial agreement.** Production anchors do not serve anonymous traffic.
-- **The corridor you actually need.** Confirm it quotes USDC against your target
-  currency via SEP-38, and settles to the rail your sellers use.
-- **Its SEP-6 withdrawal types.** If it publishes more than one, set
-  `OFFRAMP_TYPE`; otherwise the adapter refuses rather than guessing a rail.
+- **The corridor you actually need.** Confirm it settles to the rail your sellers
+  use, and how it prices: via SEP-38 (`ANCHOR_QUOTE_SERVER` in its TOML), or, for
+  the many anchors that publish no SEP-38, an indicative rate from
+  `OFFRAMP_RATE_SOURCE` plus the fee in its `/info`. With neither, the adapter
+  refuses to quote rather than invent a rate.
+- **Its SEP-6 withdrawal types** (when it serves SEP-6). If it publishes more
+  than one, set `OFFRAMP_TYPE`; otherwise the adapter refuses rather than
+  guessing a rail. A SEP-24 anchor collects the rail on its own page.
 - **Its KYC requirements.** SEP-12 fields are collected per seller ahead of
   time, not per transaction. If it keys requirements on a SEP-12 customer
   `type`, set `ANCHOR_KYC_TYPE` (and `ANCHOR_KYC_TYPE_ORGANIZATION` for
@@ -134,8 +152,11 @@ Verify before writing any config:
 curl -s https://<anchor-domain>/.well-known/stellar.toml
 ```
 
-Confirm it advertises `WEB_AUTH_ENDPOINT`, `TRANSFER_SERVER`, `KYC_SERVER`,
-`ANCHOR_QUOTE_SERVER`, and that `NETWORK_PASSPHRASE` is
+Confirm it advertises `WEB_AUTH_ENDPOINT` and `SIGNING_KEY`, at least one of
+`TRANSFER_SERVER` (SEP-6) or `TRANSFER_SERVER_SEP0024` (SEP-24), and `KYC_SERVER`
+(when absent, Quay uses the transfer server); `ANCHOR_QUOTE_SERVER` is
+optional (see above). Quay treats anything the TOML does not declare as
+absent, never as a guessed path. Confirm too that `NETWORK_PASSPHRASE` is
 `Public Global Stellar Network ; September 2015`. An anchor whose TOML names the
 testnet passphrase is a sandbox regardless of its domain.
 
@@ -299,10 +320,11 @@ and only shows up when the first seller taps "Connect to anchor". These block:
 | `anchor-toml:fetch` | the toml is unreachable or not a 200 |
 | `anchor-toml:signing-key` | `SIGNING_KEY` is missing or not a `G...` public key |
 | `anchor-toml:network` | `NETWORK_PASSPHRASE` is missing (the runtime lets that through silently) or is not `Public Global Stellar Network ; September 2015` |
-| `anchor-toml:WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `TRANSFER_SERVER`, `ANCHOR_QUOTE_SERVER` | the endpoint is missing or not `https://` (it is only a warning if its host differs from `ANCHOR_URL`) |
+| `anchor-toml:WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `TRANSFER_SERVER`, `TRANSFER_SERVER_SEP0024` | the endpoint is missing or not `https://` (it is only a warning if its host differs from `ANCHOR_URL`). Either transfer server is enough: the toml is blocked only when it declares neither |
+| `anchor-toml:ANCHOR_QUOTE_SERVER` | a warning, not a blocker, when missing (and silent when `OFFRAMP_RATE_SOURCE` is set); blocking only if declared and not `https://` |
 | `anchor-toml:usdc` | `[[CURRENCIES]]` has no `code = "USDC"` entry with Circle's pubnet issuer |
 
-`anchor-toml:withdraw-info` is a warning only: it reads `{TRANSFER_SERVER}/info`
+`anchor-toml:withdraw-info` is a warning only: it reads `{TRANSFER_SERVER}/info` (or `{TRANSFER_SERVER_SEP0024}/info` for a SEP-24-only anchor)
 and flags USDC withdraw not enabled, several withdraw types offered with
 `OFFRAMP_TYPE` unset, or an `OFFRAMP_TYPE` the anchor does not offer. As a
 sanity check, pointing it at the sandbox

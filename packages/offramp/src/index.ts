@@ -5,6 +5,7 @@ export * from "./anchor";
 export * from "./kyc";
 export * from "./sep6";
 export * from "./sep1";
+export * from "./select";
 export * from "./rates";
 export * from "./anchor-session";
 export * from "./sep12";

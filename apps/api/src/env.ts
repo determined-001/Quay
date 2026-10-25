@@ -103,6 +103,19 @@ if (!OFFRAMP_KINDS.includes(offramp)) {
   );
 }
 
+// Which protocol carries a withdrawal (issue 3.19): "auto" reads the anchor's
+// SEP-1 declaration (SEP-6 when both are declared, else SEP-24); "sep6" and
+// "sep24" force one and fail at first use if the anchor does not declare it.
+// Ignored for "mock" and "none".
+export type OffRampProtocol = "auto" | "sep6" | "sep24";
+const OFFRAMP_PROTOCOLS: readonly OffRampProtocol[] = ["auto", "sep6", "sep24"];
+const offrampProtocol = (process.env.OFFRAMP_PROTOCOL?.trim() || "auto") as OffRampProtocol;
+if (!OFFRAMP_PROTOCOLS.includes(offrampProtocol)) {
+  throw new Error(
+    `OFFRAMP_PROTOCOL must be one of ${OFFRAMP_PROTOCOLS.map((k) => `"${k}"`).join(", ")}, got "${offrampProtocol}"`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Mainnet guardrails.
 // ---------------------------------------------------------------------------
@@ -260,6 +273,7 @@ export const env = {
   // Preferred SEP-6 withdrawal type (e.g. "bank_account"). Unset means "read
   // /sep6/info and use the only enabled type, or refuse if there are several".
   offrampType: process.env.OFFRAMP_TYPE || undefined,
+  offrampProtocol,
   // SEP-12 customer type, a different concept from OFFRAMP_TYPE above.
   anchorKycType,
   anchorKycTypeOrganization,

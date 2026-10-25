@@ -107,8 +107,10 @@ cash-out that completes inside the dashboard the seller is already in.
   offer interactive.
 - The dashboard must keep both UX paths working: the dynamic field form and
   the popup-with-fallback-link.
-- Per-anchor selection (#216) is the remaining wiring; until it lands the
-  protocol is fixed by the `OFFRAMP` deployment setting.
+- Selection is wired (#216): `SelectingOffRamp` picks the adapter from the
+  anchor's SEP-1 declaration, `OFFRAMP_PROTOCOL` (`auto` | `sep6` | `sep24`)
+  can force one, and `status()` follows the protocol a job was started under
+  (the `#sep24` suffix on its stored `anchor`) rather than the current setting.
 
 ## Revisit when
 

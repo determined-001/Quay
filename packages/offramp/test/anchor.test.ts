@@ -8,7 +8,7 @@ import { AnchorOffRamp, mapSep24Status } from "../src/anchor";
 import type { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { getSep38Quote } from "../src/sep38";
 import { clearSep24InfoCache, getSep24Info } from "../src/sep24";
-import { parseStellarToml } from "../src/sep1";
+import { parseStellarToml, requireTransferServerSep24 } from "../src/sep1";
 import { FakeOffRampStateRepository } from "./fake-state";
 import { LIVE_ENABLED, isHttpsOnAnchor, makeProbeKeypair, mergeProbeTelemetry, signedInAs } from "./live-probe";
 
@@ -610,10 +610,10 @@ describe("AnchorOffRamp (offline)", () => {
 describe.skipIf(!LIVE_ENABLED)("AnchorOffRamp SEP-24 (live)", () => {
   it("SEP-24: /sep24/info lists USDC withdraw as enabled", async () => {
     const wiring = (await signedInAs(makeProbeKeypair())).wiring;
-    const discovered = await wiring.discovery.get();
-    clearSep24InfoCache(discovered.transferServerSep24);
+    const sep24Server = requireTransferServerSep24(await wiring.discovery.get());
+    clearSep24InfoCache(sep24Server);
 
-    const info = await getSep24Info(discovered.transferServerSep24);
+    const info = await getSep24Info(sep24Server);
 
     expect(info.withdraw.USDC?.enabled).toBe(true);
   }, 60_000);

@@ -1,6 +1,6 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import { NOOP_LOGGER, type Logger } from "@checkout/core";
-import { endpointUrl, fetchStellarToml, type AnchorDiscovery } from "@checkout/offramp";
+import { endpointUrl, fetchStellarToml, requireTransferServerSep24, type AnchorDiscovery } from "@checkout/offramp";
 
 // ---------------------------------------------------------------------------
 // AnchorHealth — background probe + circuit breaker (issue #19, 3.7).
@@ -186,7 +186,9 @@ export class AnchorHealth {
         probes.toml = !toml.fallback;
         if (toml.fallback) throw new Error("TOML probe could not read stellar.toml");
         webAuthEndpoint = toml.webAuthEndpoint;
-        transferServer = toml.transferServer;
+        // Whichever transfer server the anchor declares: a SEP-24-only anchor
+        // has no SEP-6 /info to probe, and the adapter would use the SEP-24 one.
+        transferServer = toml.transferServer ?? requireTransferServerSep24(toml);
 
         // A rotated SIGNING_KEY would otherwise stay cached for the life of the
         // process: every seller's challenge() would fail verification until a

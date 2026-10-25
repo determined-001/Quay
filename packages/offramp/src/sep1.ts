@@ -25,10 +25,16 @@ import { anchorFetch } from "./http";
 export interface Sep1DiscoveryInfo {
   /** SEP-10 web auth endpoint. */
   webAuthEndpoint: string;
-  /** SEP-6 transfer server. */
-  transferServer: string;
-  /** SEP-24 interactive transfer server. */
-  transferServerSep24: string;
+  /**
+   * SEP-6 transfer server (`TRANSFER_SERVER`), or null when a successfully read
+   * stellar.toml does not declare one (issue 3.19). Many production anchors
+   * publish only one of the two transfer servers, so "not declared" has to be
+   * distinguishable from "declared at the guessed path". Only a `fallback`
+   * result (the TOML could not be read) carries guessed paths.
+   */
+  transferServer: string | null;
+  /** SEP-24 interactive transfer server (`TRANSFER_SERVER_SEP0024`), or null when undeclared. */
+  transferServerSep24: string | null;
   /**
    * SEP-38 quote server, or null when the anchor declares none.
    *
@@ -40,8 +46,12 @@ export interface Sep1DiscoveryInfo {
    * a configured RateSourcePort or refuse.
    */
   anchorQuoteServer: string | null;
-  /** SEP-12 KYC server. Anchors that omit it serve KYC from the transfer server. */
-  kycServer: string;
+  /**
+   * SEP-12 KYC server. Anchors that omit `KYC_SERVER` serve KYC from the SEP-6
+   * transfer server, or from the SEP-24 one when that is all they declare.
+   * Null when the TOML declares none of the three.
+   */
+  kycServer: string | null;
   /** The account that signs SEP-10 challenges. Null when the anchor omits it. */
   signingKey: string | null;
   /** Declared network passphrase, or null when the anchor omits it. */
@@ -215,8 +225,16 @@ export function parseStellarToml(
   homeDomain: string,
   logger: Logger = NOOP_LOGGER,
 ): Sep1DiscoveryInfo {
-  const base = fallbackInfo(homeDomain);
-  const info: Sep1DiscoveryInfo = { ...base, fallback: false };
+  // Only the TOML's own words count here: an undeclared SEP-6/SEP-24 server is
+  // null, never `https://<domain>/sep6` (issue 3.19). The guessed layout is
+  // reserved for `fallbackInfo`, when the TOML could not be read at all.
+  const info: Sep1DiscoveryInfo = {
+    ...fallbackInfo(homeDomain),
+    transferServer: null,
+    transferServerSep24: null,
+    kycServer: null,
+    fallback: false,
+  };
   const currencies: string[] = [];
   let inCurrency = false;
   let sawKycServer = false;
@@ -292,11 +310,85 @@ export function parseStellarToml(
   // An anchor that declares no KYC server serves SEP-12 from its transfer
   // server — that is what the spec says, and guessing /sep12 would 404.
   // Keyed on whether the field was present, not on whether its value happens
-  // to equal the guess: plenty of anchors do publish `<domain>/sep12`.
-  if (!sawKycServer) info.kycServer = info.transferServer;
+  // to equal the guess: plenty of anchors do publish `<domain>/sep12`. An
+  // anchor with only a SEP-24 server serves it from there.
+  if (!sawKycServer) info.kycServer = info.transferServer ?? info.transferServerSep24;
 
   info.currencies = currencies;
   return info;
+}
+
+/** Which SEPs an anchor's stellar.toml says it serves (issue 3.19). */
+export interface AnchorCapabilities {
+  sep6: boolean;
+  sep24: boolean;
+  sep38: boolean;
+  sep12: boolean;
+}
+
+/**
+ * What the anchor declared. For a `fallback` result these reflect the guessed
+ * paths (SEP-6/24/12 "present", SEP-38 never), so a caller that must not act on
+ * a guess checks `info.fallback` as well.
+ */
+export function capabilities(info: Sep1DiscoveryInfo): AnchorCapabilities {
+  return {
+    sep6: info.transferServer !== null,
+    sep24: info.transferServerSep24 !== null,
+    sep38: info.anchorQuoteServer !== null,
+    sep12: info.kycServer !== null,
+  };
+}
+
+/**
+ * The anchor does not declare an endpoint a call needs (for example a
+ * SEP-24-only anchor asked for its SEP-6 server). A configuration problem, not
+ * an outage: retrying cannot help. The message names only the domain and the
+ * missing capability, never anchor-supplied text.
+ */
+export class AnchorCapabilityError extends Error {
+  constructor(
+    readonly homeDomain: string,
+    /** What was needed, e.g. "SEP-6 (TRANSFER_SERVER)". */
+    readonly needed: string,
+    /** What the anchor does declare, e.g. ["sep24"]. */
+    readonly declared: string[],
+  ) {
+    super(
+      `Anchor ${homeDomain} does not declare ${needed} in its stellar.toml ` +
+        `(declared: ${declared.length > 0 ? declared.join(", ") : "none"})`,
+    );
+    this.name = "AnchorCapabilityError";
+  }
+}
+
+function declaredList(info: Sep1DiscoveryInfo): string[] {
+  const c = capabilities(info);
+  return (["sep6", "sep24", "sep38", "sep12"] as const).filter((k) => c[k]);
+}
+
+/** The SEP-6 transfer server, or an {@link AnchorCapabilityError} when the anchor declares none. */
+export function requireTransferServer(info: Sep1DiscoveryInfo): string {
+  if (info.transferServer === null) {
+    throw new AnchorCapabilityError(info.homeDomain, "SEP-6 (TRANSFER_SERVER)", declaredList(info));
+  }
+  return info.transferServer;
+}
+
+/** The SEP-24 transfer server, or an {@link AnchorCapabilityError} when the anchor declares none. */
+export function requireTransferServerSep24(info: Sep1DiscoveryInfo): string {
+  if (info.transferServerSep24 === null) {
+    throw new AnchorCapabilityError(info.homeDomain, "SEP-24 (TRANSFER_SERVER_SEP0024)", declaredList(info));
+  }
+  return info.transferServerSep24;
+}
+
+/** The SEP-12 KYC server, or an {@link AnchorCapabilityError} when the anchor declares none. */
+export function requireKycServer(info: Sep1DiscoveryInfo): string {
+  if (info.kycServer === null) {
+    throw new AnchorCapabilityError(info.homeDomain, "SEP-12 (KYC_SERVER)", declaredList(info));
+  }
+  return info.kycServer;
 }
 
 /** Whether the anchor lists `code` in its [[CURRENCIES]]. */

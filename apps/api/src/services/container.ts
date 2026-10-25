@@ -9,14 +9,17 @@ import {
 } from "@checkout/stellar";
 import {
   AnchorDiscovery,
+  AnchorOffRamp,
   DisabledOffRamp,
   MockAnchorOffRamp,
   NoKycRequired,
+  SelectingOffRamp,
   SellerAnchorAuth,
   TESTANCHOR_BASE_URL,
   TESTANCHOR_HOME_DOMAIN,
   TestAnchorKyc,
   deleteSep12Customer,
+  requireKycServer,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
 import type {
@@ -367,7 +370,7 @@ export async function createContainer(): Promise<Container> {
     anchorSessions: anchorSessionsRepo,
     deleteAnchorCustomer: anchor ? async (customer) => {
       const jwt = await anchor.auth.token(customer);
-      const { kycServer } = await anchor.discovery.get();
+      const kycServer = requireKycServer(await anchor.discovery.get());
       return deleteSep12Customer(kycServer, jwt, customer.account);
     } : null,
     telemetry: telemetryRepo,
@@ -626,17 +629,36 @@ function createOffRamp(
     // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
     return new MockAnchorOffRamp({ state, settleAfterMs: 8000 });
   }
-  return new TestAnchorOffRamp({
+  // Present only when OFFRAMP_RATE_SOURCE is configured. With no rate source,
+  // an anchor that declares no ANCHOR_QUOTE_SERVER refuses to quote rather
+  // than being handed a made-up number.
+  const rate = rateSource ? { rateSource } : {};
+  const selecting = new SelectingOffRamp({
     discovery: anchor.discovery,
-    auth: anchor.auth,
+    protocol: env.offrampProtocol,
+    sep6: new TestAnchorOffRamp({
+      discovery: anchor.discovery,
+      auth: anchor.auth,
+      state,
+      preferredWithdrawType: env.offrampType,
+      ...rate,
+      logger,
+    }),
+    sep24: new AnchorOffRamp({ discovery: anchor.discovery, auth: anchor.auth, state, ...rate }),
     state,
-    preferredWithdrawType: env.offrampType,
-    // Present only when OFFRAMP_RATE_SOURCE is configured. With no rate source,
-    // an anchor that declares no ANCHOR_QUOTE_SERVER refuses to quote rather
-    // than being handed a made-up number.
-    ...(rateSource ? { rateSource } : {}),
     logger,
   });
+  // Settle the protocol (and log `offramp.protocol`) now rather than on the
+  // first cash-out. Never fatal and never awaited: an unreachable anchor must
+  // not stop the API booting, and a misdeclared one is reported again, with the
+  // declared list, on the first call that needs the protocol.
+  selecting.protocol().catch((err: unknown) => {
+    logger.warn(
+      { event: "offramp.protocol.unresolved", error: err instanceof Error ? err.message : String(err) },
+      "could not settle the off-ramp protocol at boot",
+    );
+  });
+  return selecting;
 }
 
 /**

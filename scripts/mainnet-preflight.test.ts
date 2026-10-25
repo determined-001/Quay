@@ -418,7 +418,8 @@ describe("checkAnchorToml", () => {
       const results = await checkAnchorToml(ANCHOR_ENV, { fetchText: stubFetch(GOOD_TOML).fetchText });
       expect(byId(results, id)?.ok).toBe(true);
     });
-    it("fails when missing", async () => {
+    // ANCHOR_QUOTE_SERVER is optional (issue 3.19): see "optional endpoints" below.
+    it.skipIf(key === "ANCHOR_QUOTE_SERVER")("fails when missing", async () => {
       const results = await checkAnchorToml(ANCHOR_ENV, { fetchText: stubFetch(without(key)).fetchText });
       expect(byId(results, id)).toMatchObject({ ok: false, level: "blocking" });
     });
@@ -431,6 +432,39 @@ describe("checkAnchorToml", () => {
       const toml = GOOD_TOML.replace(new RegExp(`^(${key}="https://)api\\.anchor\\.example`, "m"), "$1elsewhere.example");
       const results = await checkAnchorToml(ANCHOR_ENV, { fetchText: stubFetch(toml).fetchText });
       expect(byId(results, id)).toMatchObject({ ok: false, level: "warning" });
+    });
+  });
+
+  describe("optional endpoints (issue 3.19)", () => {
+    const SEP24_ONLY = GOOD_TOML.replace(
+      'TRANSFER_SERVER="https://api.anchor.example/sep6"',
+      'TRANSFER_SERVER_SEP0024="https://api.anchor.example/sep24"',
+    ).replace(/^ANCHOR_QUOTE_SERVER=.*\n/m, "");
+
+    it("accepts a SEP-24-only anchor with no SEP-38, warning only about the missing quote server", async () => {
+      const { fetchText, seen } = stubFetch(SEP24_ONLY);
+      const results = await checkAnchorToml(ANCHOR_ENV, { fetchText });
+      expect(results.filter((r) => !r.ok && r.level === "blocking")).toEqual([]);
+      expect(byId(results, "anchor-toml:TRANSFER_SERVER")).toBeUndefined();
+      expect(byId(results, "anchor-toml:TRANSFER_SERVER_SEP0024")?.ok).toBe(true);
+      expect(byId(results, "anchor-toml:ANCHOR_QUOTE_SERVER")).toMatchObject({ ok: false, level: "warning" });
+      // /info is read from the SEP-24 server when there is no SEP-6 one.
+      expect(seen).toContain("https://api.anchor.example/sep24/info");
+    });
+
+    it("is quiet about the quote server when OFFRAMP_RATE_SOURCE supplies the rate", async () => {
+      const results = await checkAnchorToml(
+        { ...ANCHOR_ENV, OFFRAMP_RATE_SOURCE: "static" },
+        { fetchText: stubFetch(SEP24_ONLY).fetchText },
+      );
+      expect(byId(results, "anchor-toml:ANCHOR_QUOTE_SERVER")).toBeUndefined();
+    });
+
+    it("still blocks an anchor that declares neither transfer server", async () => {
+      const toml = SEP24_ONLY.replace(/^TRANSFER_SERVER_SEP0024=.*\n/m, "");
+      const results = await checkAnchorToml(ANCHOR_ENV, { fetchText: stubFetch(toml).fetchText });
+      expect(byId(results, "anchor-toml:TRANSFER_SERVER")).toMatchObject({ ok: false, level: "blocking" });
+      expect(byId(results, "anchor-toml:TRANSFER_SERVER_SEP0024")).toMatchObject({ ok: false, level: "blocking" });
     });
   });
 

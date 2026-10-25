@@ -21,6 +21,7 @@ import {
   putSep12CustomerMultipart,
 } from "./sep12";
 import { selectFieldsForAnchor } from "@checkout/core";
+import { requireKycServer } from "./sep1";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
  *  entry for. Binary fields are handled via file uploads, so they are excluded
@@ -164,7 +165,7 @@ export class TestAnchorKyc implements KycPort {
     }
 
     const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
+    const kycServer = requireKycServer(await this.discovery.get());
     const remote = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
@@ -213,7 +214,7 @@ export class TestAnchorKyc implements KycPort {
     const type = await this.resolveType(customer);
     const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain, type);
     const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
+    const kycServer = requireKycServer(await this.discovery.get());
     const discovery = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
@@ -315,7 +316,7 @@ export class TestAnchorKyc implements KycPort {
     const type = await this.resolveType(customer);
     const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain, type);
     const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
+    const kycServer = requireKycServer(await this.discovery.get());
     const discovery = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),

@@ -18,6 +18,8 @@ import type {
 import { randomBytes } from "node:crypto";
 import { computeIndicativeAmounts } from "./quote-math";
 import { getSep38Quote } from "./sep38";
+import { requireTransferServerSep24 } from "./sep1";
+import { SEP24_JOB_MARKER } from "./select";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import {
   estimateSep24Fee,
@@ -96,9 +98,8 @@ export function mapSep24Status(status: string): OffRampJobStatus {
  * Authenticates per seller, exactly like `TestAnchorOffRamp`: every call runs with the JWT of the seller's own
  * session (`SellerAnchorAuth`), never a server-held key (issue #207; `pnpm check:no-server-signing` enforces it).
  *
- * Exported from `index.ts` (issue 3.16), but not selectable via `OFFRAMP` yet: `TestAnchorOffRamp` (SEP-6) is
- * the adapter wired into the container, so choosing between the two stays issue 3.19. See
- * docs/decisions/0001-sep6-vs-sep24.md for the protocol comparison.
+ * Chosen over `TestAnchorOffRamp` (SEP-6) per anchor by `SelectingOffRamp` from `OFFRAMP_PROTOCOL` and the
+ * anchor's SEP-1 declaration (issue 3.19). See docs/decisions/0001-sep6-vs-sep24.md for the protocol comparison.
  */
 export class AnchorOffRamp implements OffRampPort {
   readonly mode: OffRampMode = "seller_initiated";
@@ -141,7 +142,7 @@ export class AnchorOffRamp implements OffRampPort {
     // The anchor's published limits come first: an amount it will refuse is rejected here (422
     // offramp_rejected, carrying the limits) before a session is opened or a SEP-38 quote burned.
     const assetInfo = validateSep24Withdraw(
-      await getSep24Info(discovery.transferServerSep24),
+      await getSep24Info(requireTransferServerSep24(discovery)),
       input.sourceAsset.code,
       input.sourceAmount,
     );
@@ -316,7 +317,7 @@ export class AnchorOffRamp implements OffRampPort {
       linkId: input.linkId,
       // Suffixed so telemetry and the poller can tell a SEP-24 job from a
       // SEP-6 one at the same anchor (issue 3.16).
-      anchor: `${this.homeDomain}#sep24`,
+      anchor: `${this.homeDomain}${SEP24_JOB_MARKER}`,
       sellerId: input.customer.sellerId,
       account: input.customer.account,
       targetCurrency: q.buyCurrency,

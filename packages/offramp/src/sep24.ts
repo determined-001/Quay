@@ -3,7 +3,7 @@ import { NOOP_LOGGER } from "@checkout/core";
 import { anchorHttpError } from "./anchor-error";
 import { anchorFetch } from "./http";
 import type { AnchorDiscovery } from "./anchor-session";
-import { endpointUrl, type Sep1DiscoveryInfo } from "./sep1";
+import { endpointUrl, requireTransferServerSep24, type Sep1DiscoveryInfo } from "./sep1";
 import { Sep6ValidationError } from "./sep6";
 
 export type { Sep1DiscoveryInfo };
@@ -177,7 +177,7 @@ export class Sep24Client {
   async startInteractiveWithdraw(token: string, input: Sep24WithdrawInteractiveInput): Promise<Sep24InteractiveResult> {
     const discovery = await this.getDiscoveryInfo();
 
-    const endpoint = endpointUrl(discovery.transferServerSep24, "transactions/withdraw/interactive");
+    const endpoint = endpointUrl(requireTransferServerSep24(discovery), "transactions/withdraw/interactive");
 
     const bodyData: Record<string, string> = {
       asset_code: input.assetCode,
@@ -215,7 +215,7 @@ export class Sep24Client {
   async getTransaction(token: string, id: string): Promise<Sep24Transaction> {
     const discovery = await this.getDiscoveryInfo();
 
-    const url = endpointUrl(discovery.transferServerSep24, "transaction");
+    const url = endpointUrl(requireTransferServerSep24(discovery), "transaction");
     url.searchParams.set("id", id);
 
     const res = await anchorFetch(url.toString(), {

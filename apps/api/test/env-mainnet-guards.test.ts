@@ -175,4 +175,38 @@ describe("mainnet guardrails in env.ts", () => {
     const err = await loadEnv();
     expect(err?.message).toMatch(/WATCH_POLL_MS must be a number, got "6 seconds"/);
   });
+
+  it("OFFRAMP_PROTOCOL defaults to auto, accepts sep6 and sep24, and rejects anything else", async () => {
+    setPublicBase({ OFFRAMP_PROTOCOL: "" });
+    vi.resetModules();
+    expect((await import("../src/env")).env.offrampProtocol).toBe("auto");
+
+    for (const value of ["sep6", "sep24", "auto"]) {
+      setPublicBase({ OFFRAMP_PROTOCOL: value });
+      vi.resetModules();
+      expect((await import("../src/env")).env.offrampProtocol).toBe(value);
+    }
+
+    setPublicBase({ OFFRAMP_PROTOCOL: "sep31" });
+    const err = await loadEnv();
+    expect(err?.message).toMatch(/OFFRAMP_PROTOCOL must be one of "auto", "sep6", "sep24", got "sep31"/);
+  });
+
+  it("ANCHOR_KYC_TYPE and ANCHOR_KYC_TYPE_ORGANIZATION are optional tokens", async () => {
+    setPublicBase({ ANCHOR_KYC_TYPE: "", ANCHOR_KYC_TYPE_ORGANIZATION: "" });
+    vi.resetModules();
+    const unset = (await import("../src/env")).env;
+    expect(unset.anchorKycType).toBeUndefined();
+    expect(unset.anchorKycTypeOrganization).toBeUndefined();
+
+    setPublicBase({ ANCHOR_KYC_TYPE: "sep6-individual", ANCHOR_KYC_TYPE_ORGANIZATION: " sep6-business " });
+    vi.resetModules();
+    const set = (await import("../src/env")).env;
+    expect(set.anchorKycType).toBe("sep6-individual");
+    expect(set.anchorKycTypeOrganization).toBe("sep6-business");
+
+    setPublicBase({ ANCHOR_KYC_TYPE: "bad type&x=1" });
+    const err = await loadEnv();
+    expect(err?.message).toMatch(/ANCHOR_KYC_TYPE must be 1-64 characters/);
+  });
 });

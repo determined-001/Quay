@@ -483,8 +483,13 @@ function hostOf(value) {
 const REQUIRED_TOML_ENDPOINTS = [
   { key: "WEB_AUTH_ENDPOINT", aliases: ["WEB_AUTH_URL"], why: "SEP-10: sellers cannot connect to the anchor without it" },
   { key: "KYC_SERVER", aliases: [], why: "SEP-12: seller KYC" },
-  { key: "TRANSFER_SERVER", aliases: [], why: "SEP-6: withdrawals" },
-  { key: "ANCHOR_QUOTE_SERVER", aliases: [], why: "SEP-38: quotes" },
+  // Withdrawals: SEP-6 or SEP-24, either is enough (OFFRAMP_PROTOCOL=auto picks
+  // from what is declared). `missingOk` is what a missing key falls back to.
+  { key: "TRANSFER_SERVER", aliases: [], why: "SEP-6: withdrawals", unlessDeclared: "TRANSFER_SERVER_SEP0024" },
+  { key: "TRANSFER_SERVER_SEP0024", aliases: [], why: "SEP-24: interactive withdrawals", unlessDeclared: "TRANSFER_SERVER" },
+  // Most real anchors publish no SEP-38; quotes then come from OFFRAMP_RATE_SOURCE
+  // or the cash-out is refused, which is worth a warning, not a blocker.
+  { key: "ANCHOR_QUOTE_SERVER", aliases: [], why: "SEP-38: quotes (without it set OFFRAMP_RATE_SOURCE)", optional: true },
 ];
 
 /**
@@ -535,12 +540,16 @@ export async function checkAnchorToml(env, { fetchText = getText } = {}) {
 
   const anchorHost = hostOf(env.ANCHOR_URL ?? "");
   const endpoints = {};
-  for (const { key, aliases, why } of REQUIRED_TOML_ENDPOINTS) {
+  for (const { key, aliases, why, unlessDeclared, optional } of REQUIRED_TOML_ENDPOINTS) {
     const usedKey = [key, ...aliases].find((k) => top[k]);
     const value = usedKey ? top[usedKey] : undefined;
     const id = `anchor-toml:${key}`;
     if (!value) {
-      results.push(fail(id, `stellar.toml has no ${key} (${why}).`));
+      if (unlessDeclared && top[unlessDeclared]) continue; // the other transfer server covers it
+      if (optional && key === "ANCHOR_QUOTE_SERVER" && env.OFFRAMP_RATE_SOURCE) continue;
+      if (optional) results.push(warn(id, `stellar.toml has no ${key} (${why}).`));
+      else if (unlessDeclared) results.push(fail(id, `stellar.toml has neither ${key} nor ${unlessDeclared} (${why}).`));
+      else results.push(fail(id, `stellar.toml has no ${key} (${why}).`));
       continue;
     }
     endpoints[key] = value;
@@ -564,7 +573,7 @@ export async function checkAnchorToml(env, { fetchText = getText } = {}) {
     results.push(fail("anchor-toml:usdc", `[[CURRENCIES]] lists USDC from ${issuers}, not Circle's ${CIRCLE_USDC_ISSUER_PUBNET}. A different issuer's USDC is a different asset.`));
   }
 
-  results.push(await checkAnchorInfo(env, endpoints.TRANSFER_SERVER, fetchText));
+  results.push(await checkAnchorInfo(env, endpoints.TRANSFER_SERVER ?? endpoints.TRANSFER_SERVER_SEP0024, fetchText));
   return results;
 }
 
@@ -572,7 +581,7 @@ export async function checkAnchorToml(env, { fetchText = getText } = {}) {
 async function checkAnchorInfo(env, transferServer, fetchText) {
   const id = "anchor-toml:withdraw-info";
   if (!transferServer || !transferServer.startsWith("https://")) {
-    return skip(id, "no usable TRANSFER_SERVER to ask for /info");
+    return skip(id, "no usable TRANSFER_SERVER or TRANSFER_SERVER_SEP0024 to ask for /info");
   }
   const infoUrl = `${transferServer.replace(/\/+$/, "")}/info`;
   let info;
