@@ -31,6 +31,7 @@ import type {
   OffRampTelemetryRepository,
   RailPort,
   RateSourcePort,
+  PrefillConsentRepository,
   SellerProfileRepository,
   WebhookRepository,
 } from "@checkout/core";
@@ -56,6 +57,7 @@ import {
   DrizzleAnchorSessionRepository,
   ANCHOR_SESSION_SWEEP_GRACE_MS,
   DrizzleKycConsentRepository,
+  DrizzlePrefillConsentRepository,
   DrizzleSellerProfileRepository,
 } from "../repos/index";
 import { LinkService } from "./link-service";
@@ -79,7 +81,10 @@ import { assertKeyConfigured } from "./secret-crypto";
 import { createRateSource } from "./rate-source";
 import { guardWebhookUrl } from "./ssrf-guard";
 import { runKycRetentionSweep } from "./kyc-retention";
-import { PiiAuditService, runPiiAuditSweep } from "./pii-audit";
+import { PiiAuditService, runPiiAuditSweep, type PiiAuditRecorder } from "./pii-audit";
+
+/** `pii_audit.actor_id` for reads of the seller's stored values to pre-fill an anchor's SEP-24 form. */
+const SEP24_PREFILL_ACTOR = "sep24-prefill";
 
 export interface Container {
   service: LinkService;
@@ -92,6 +97,8 @@ export interface Container {
   kyc: KycPort;
   /** Per-anchor KYC consent repository. */
   kycConsents: KycConsentRepository;
+  /** Fields a seller agreed to share with an anchor to pre-fill its SEP-24 form (issue 3.17). Optional so partial test containers stay valid. */
+  prefillConsents?: PrefillConsentRepository;
   /** The seller's reusable SEP-9 profile (issue 4.23). Null unless a real anchor and
    *  KYC_ENCRYPTION_KEY are configured, since values are encrypted with that key. */
   sellerProfile?: SellerProfileRepository | null;
@@ -188,6 +195,7 @@ export async function createContainer(): Promise<Container> {
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
   const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db, logger);
   const kycConsentsRepo = new DrizzleKycConsentRepository(db);
+  const prefillConsentsRepo = new DrizzlePrefillConsentRepository(db);
   const kycKeyring = env.kycEncryptionKey
     ? parsePiiKeyring(env.kycEncryptionKey, env.kycEncryptionKeyPrevious)
     : null;
@@ -256,12 +264,18 @@ export async function createContainer(): Promise<Container> {
     guard: guardWebhookUrl,
     resolveQuoteServer: async () => (await anchor?.discovery.get())?.anchorQuoteServer ?? null,
   });
-  const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger, rateSource), {
-    anchor: anchor?.discovery.homeDomain,
-  });
   const kycAnchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
   const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
   const kyc = createKyc(anchor, kycRepo, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain, logger);
+  const offramp = new CircuitBreakerOffRamp(
+    createOffRamp(anchor, offrampStateRepo, logger, rateSource, {
+      kycRepo,
+      consents: prefillConsentsRepo,
+      resolveType: (customer) => kyc.resolveType?.(customer) ?? Promise.resolve(null),
+      audit: piiAuditService,
+    }),
+    { anchor: anchor?.discovery.homeDomain },
+  );
   const sellerProfileRepo = await createSellerProfile(anchor, db, logger);
   const anchorDomain = anchor?.auth.anchorDomain ?? null;
 
@@ -362,6 +376,7 @@ export async function createContainer(): Promise<Container> {
     db,
     kyc,
     kycConsents: kycConsentsRepo,
+    prefillConsents: prefillConsentsRepo,
     sellerProfile: sellerProfileRepo,
     anchorDomain,
     kycRepo,
@@ -619,6 +634,12 @@ function createOffRamp(
   state: OffRampStateRepository,
   logger: Logger,
   rateSource: RateSourcePort | null,
+  prefill: {
+    kycRepo: DrizzleKycRepository | null;
+    consents: PrefillConsentRepository;
+    resolveType: (customer: AnchorCustomer) => Promise<string | null>;
+    audit: PiiAuditRecorder;
+  },
 ): OffRampPort {
   if (env.offramp === "none") {
     // No cash-out leg. Every method throws OffRampDisabledError, which the
@@ -644,7 +665,31 @@ function createOffRamp(
       ...rate,
       logger,
     }),
-    sep24: new AnchorOffRamp({ discovery: anchor.discovery, auth: anchor.auth, state, ...rate }),
+    sep24: new AnchorOffRamp({
+      discovery: anchor.discovery,
+      auth: anchor.auth,
+      state,
+      ...rate,
+      // SEP-24 form prefill needs the encrypted KYC store, i.e. KYC_ENCRYPTION_KEY (always set with a real anchor).
+      ...(prefill.kycRepo
+        ? {
+            prefill: {
+              kyc: prefill.kycRepo,
+              consents: prefill.consents,
+              resolveType: prefill.resolveType,
+              audit: async (customer: AnchorCustomer, fields: readonly string[]) =>
+                prefill.audit.record({
+                  sellerId: customer.sellerId,
+                  actorType: "system",
+                  actorId: SEP24_PREFILL_ACTOR,
+                  action: "kyc.read",
+                  fields,
+                }),
+            },
+          }
+        : {}),
+      logger,
+    }),
     state,
     logger,
   });

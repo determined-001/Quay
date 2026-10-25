@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Seller } from "@checkout/core";
 import type { Container } from "./container";
-import { DrizzleAnchorSessionRepository } from "../repos/index";
+import { DrizzleAnchorSessionRepository, DrizzlePrefillConsentRepository } from "../repos/index";
 import { kycDisclosureFields, links as linksTable, offrampJobs } from "../db/schema";
 
 /**
@@ -57,6 +57,8 @@ export interface SellerExport {
     revokedAt: string | null;
     noticeVersion: string;
   }[];
+  /** Fields the seller agreed to share with an anchor to pre-fill its SEP-24 form (names only). Omitted when none. */
+  prefillConsents?: { anchorDomain: string; fields: string[]; grantedAt: string }[];
   anchorConnections: { anchorDomain: string; account: string; expiresAt: string }[];
   payoutFields: Record<string, string> | null;
   links: {
@@ -230,6 +232,11 @@ async function consentsSection(c: ExportDeps, sellerId: string): Promise<SellerE
   }));
 }
 
+async function prefillConsentsSection(c: ExportDeps, sellerId: string): Promise<NonNullable<SellerExport["prefillConsents"]>> {
+  const consents = await new DrizzlePrefillConsentRepository(c.db).list(sellerId);
+  return consents.map((k) => ({ anchorDomain: k.anchorDomain, fields: k.fields, grantedAt: iso(k.grantedAt) }));
+}
+
 async function anchorConnectionsSection(
   c: ExportDeps,
   sellerId: string,
@@ -305,12 +312,13 @@ export async function buildSellerExport(
   now: number = Date.now(),
 ): Promise<SellerExport> {
   const id = seller.id;
-  const [profile, kyc, disclosures, consents, anchorConnections, links, payments, jobs, webhooks, apiKeys, piiAccess] =
+  const [profile, kyc, disclosures, consents, prefillConsents, anchorConnections, links, payments, jobs, webhooks, apiKeys, piiAccess] =
     await Promise.all([
       profileSection(c, id),
       kycSection(c, id),
       disclosuresSection(c, id),
       consentsSection(c, id),
+      prefillConsentsSection(c, id),
       anchorConnectionsSection(c, id),
       linksSection(c, id),
       paymentsSection(c, id),
@@ -334,6 +342,7 @@ export async function buildSellerExport(
     ...(kyc ? { kyc } : {}),
     disclosures: cap("disclosures", disclosures),
     consents,
+    ...(prefillConsents.length > 0 ? { prefillConsents } : {}),
     anchorConnections,
     payoutFields: seller.payoutFields,
     links: cap("links", links),

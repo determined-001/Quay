@@ -15,6 +15,8 @@ import type {
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
+  PrefillConsent,
+  PrefillConsentRepository,
   ProfileField,
   ProfileFieldSource,
   ProvidedFieldStatus,
@@ -56,6 +58,7 @@ import {
   offrampTelemetry,
   apiKeys,
   kycConsents,
+  prefillConsents,
   sellerProfile,
 } from "../db/schema";
 import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
@@ -465,6 +468,64 @@ export class DrizzleKycConsentRepository implements KycConsentRepository {
       .where(eq(kycConsents.sellerId, sellerId))
       .orderBy(desc(kycConsents.grantedAt));
     return rows.map(this.rowToConsent);
+  }
+}
+
+/**
+ * Per-seller, per-anchor consent to pre-fill the anchor's SEP-24 form (issue 3.17).
+ * Names only; withdrawing consent deletes the row, so a stored row always has fields.
+ */
+export class DrizzlePrefillConsentRepository implements PrefillConsentRepository {
+  constructor(private readonly db: DB) {}
+
+  private rowToConsent(row: typeof prefillConsents.$inferSelect): PrefillConsent {
+    let fields: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.fields);
+      if (Array.isArray(parsed)) fields = parsed.filter((f): f is string => typeof f === "string");
+    } catch {
+      fields = [];
+    }
+    return { sellerId: row.sellerId, anchorDomain: row.anchorDomain, fields, grantedAt: row.grantedAt };
+  }
+
+  async get(sellerId: string, anchorDomain: string): Promise<PrefillConsent | null> {
+    const rows = await this.db
+      .select()
+      .from(prefillConsents)
+      .where(and(eq(prefillConsents.sellerId, sellerId), eq(prefillConsents.anchorDomain, anchorDomain)))
+      .limit(1);
+    return rows[0] ? this.rowToConsent(rows[0]) : null;
+  }
+
+  async set(
+    sellerId: string,
+    anchorDomain: string,
+    fields: string[],
+    now: number = Date.now(),
+  ): Promise<PrefillConsent | null> {
+    const unique = [...new Set(fields)].sort();
+    if (unique.length === 0) {
+      await this.db
+        .delete(prefillConsents)
+        .where(and(eq(prefillConsents.sellerId, sellerId), eq(prefillConsents.anchorDomain, anchorDomain)));
+      return null;
+    }
+    const row = { sellerId, anchorDomain, fields: JSON.stringify(unique), grantedAt: now };
+    await this.db
+      .insert(prefillConsents)
+      .values(row)
+      .onConflictDoUpdate({ target: [prefillConsents.sellerId, prefillConsents.anchorDomain], set: row });
+    return this.rowToConsent(row);
+  }
+
+  async list(sellerId: string): Promise<PrefillConsent[]> {
+    const rows = await this.db
+      .select()
+      .from(prefillConsents)
+      .where(eq(prefillConsents.sellerId, sellerId))
+      .orderBy(asc(prefillConsents.anchorDomain));
+    return rows.map((r) => this.rowToConsent(r));
   }
 }
 

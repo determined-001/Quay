@@ -1463,6 +1463,53 @@ Revoking when there is no active consent still returns `200`.
 
 ---
 
+## `GET /seller/kyc/prefill-consent` and `PUT /seller/kyc/prefill-consent`
+
+Which of the seller's stored SEP-9 values the configured anchor's **SEP-24**
+interactive form may open pre-filled with. This is a separate consent from
+`/seller/kyc/consent` (which covers what Quay posts to the anchor's SEP-12
+endpoint): it covers what is put in the request body of
+`POST /transactions/withdraw/interactive`. Off until the seller turns a field on;
+with no consent, no SEP-9 field is sent. Names only, never values.
+
+**Requires auth.** Session authentication only — API keys are rejected, as for
+the other consent routes.
+
+`GET` → **200**
+```json
+{
+  "anchorDomain": "anchor.example",
+  "available": ["first_name", "last_name"],
+  "fields": ["first_name"],
+  "grantedAt": 1767225600000
+}
+```
+`available` lists only names that are on file for the seller **and** on the
+prefill allowlist (`first_name`, `last_name`, `given_name`, `family_name`,
+`email_address`, `mobile_number`, `address`, `city`, `state_or_province`,
+`postal_code`, `address_country_code`, `birth_date`, `bank_account_number`,
+`bank_number`, `bank_branch_number`). `fields` is what the seller consented to
+(`[]` and `grantedAt: null` when none).
+
+`PUT` body `{ "fields": ["first_name"] }` replaces the consented set; `[]`
+withdraws consent. Names off the allowlist (`id_number`, `photo_id_*`, bank
+details of the cash-out form) are rejected with
+`400 { "error": "invalid_fields", "fields": [...] }`. At cash-out Quay sends the
+intersection of the allowlist, the consented names and the values on file; each
+such send is recorded in the PII access log (`kyc.read`, actor `sep24-prefill`,
+field names only). Payout (bank) fields from the cash-out form are never sent in
+this request.
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `400` | `invalid_body` / `invalid_fields` | Malformed body, or a name that may not be shared | Fix the request |
+| `401` | `unauthorized` | No or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `offramp:initiate` | Use a key with the scope |
+| `403` | `forbidden` | An API key was used | Use a seller session |
+| `404` | `anchor_unavailable` | No real anchor configured | None |
+
+---
+
 ## `PUT /seller/kyc` — consent enforcement
 
 Submit or update identity fields. **Before any field is sent to the anchor, the

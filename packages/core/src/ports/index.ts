@@ -725,6 +725,30 @@ export interface KycConsentRepository {
 }
 
 // ---------------------------------------------------------------------------
+// SEP-24 prefill consent
+// ---------------------------------------------------------------------------
+// Which of the seller's stored SEP-9 values they agreed to hand to which anchor
+// so its hosted SEP-24 form opens pre-filled (issue 3.17). Separate from
+// {@link KycConsent}, which covers what Quay posts to the anchor's SEP-12
+// endpoint: this is what goes in the interactive request. Names only, never
+// values; off until the seller turns a field on.
+
+export interface PrefillConsent {
+  sellerId: string;
+  anchorDomain: string;
+  /** SEP-9 field names the seller agreed to share. Never empty on a stored consent. */
+  fields: string[];
+  grantedAt: number;
+}
+
+export interface PrefillConsentRepository {
+  get(sellerId: string, anchorDomain: string): Promise<PrefillConsent | null>;
+  /** Replaces the consented fields. An empty list withdraws consent (deletes the row) and returns null. */
+  set(sellerId: string, anchorDomain: string, fields: string[], now?: number): Promise<PrefillConsent | null>;
+  list(sellerId: string): Promise<PrefillConsent[]>;
+}
+
+// ---------------------------------------------------------------------------
 // Anchor sessions (SEP-10, per seller)
 // ---------------------------------------------------------------------------
 // The JWT an anchor issued to a seller's own wallet. It lets Quay read and

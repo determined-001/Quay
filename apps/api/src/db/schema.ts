@@ -385,6 +385,19 @@ export const kycConsents = sqliteTable("kyc_consents", {
 ]);
 
 /**
+ * Which SEP-9 fields a seller agreed to share with an anchor to pre-fill its
+ * SEP-24 form (issue 3.17). Field names only, never values.
+ */
+export const prefillConsents = sqliteTable("prefill_consents", {
+  sellerId: text("seller_id").notNull(),
+  anchorDomain: text("anchor_domain").notNull(),
+  fields: text("fields").notNull(), // JSON string[] of SEP-9 field names
+  grantedAt: integer("granted_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.sellerId, table.anchorDomain] }),
+]);
+
+/**
  * A seller's reusable identity values, one row per (seller, field) (issue 4.23).
  * Field names are canonical SEP-9 names and are not PII; `valueEncrypted` is an
  * AES-256-GCM blob of exactly one value and never plaintext.

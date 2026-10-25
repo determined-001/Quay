@@ -15,11 +15,14 @@ import type {
   StoredOffRampQuote,
   WithdrawTransfer,
 } from "@checkout/core";
+import { NOOP_LOGGER } from "@checkout/core";
+import type { KycRepository, Logger, PrefillConsentRepository } from "@checkout/core";
 import { randomBytes } from "node:crypto";
 import { computeIndicativeAmounts } from "./quote-math";
 import { getSep38Quote } from "./sep38";
 import { requireTransferServerSep24 } from "./sep1";
 import { SEP24_JOB_MARKER } from "./select";
+import { pickPrefill } from "./sep9";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import {
   estimateSep24Fee,
@@ -48,6 +51,21 @@ export interface Sep24OffRampOptions {
    * anchor is refused rather than quoted from an invented rate. Never consulted when SEP-38 exists.
    */
   rateSource?: RateSourcePort;
+  /**
+   * Where a SEP-24 form prefill comes from (issue 3.17). Without it nothing is prefilled. Both are
+   * needed: the seller's stored values (`kyc`) and what they agreed to share with THIS anchor
+   * (`consents`); a field is sent only if it is in both and on the SEP-9 prefill allowlist.
+   * `resolveType` is the SEP-12 customer type the stored record is keyed by (issue 3.15), if any.
+   */
+  prefill?: {
+    kyc: KycRepository;
+    consents: PrefillConsentRepository;
+    resolveType?: (customer: AnchorCustomer) => Promise<string | null>;
+    /** Told which field NAMES are about to leave for the anchor (an access-log hook). Never values. */
+    audit?: (customer: AnchorCustomer, fields: readonly string[]) => Promise<void>;
+  };
+  /** Receives field NAMES only; no seller value is ever logged. */
+  logger?: Logger;
 }
 
 const MEMO_TYPES = ["text", "id", "hash"] as const;
@@ -109,6 +127,8 @@ export class AnchorOffRamp implements OffRampPort {
   private readonly sep24: Sep24Client;
   private readonly state: OffRampStateRepository;
   private readonly rateSource: RateSourcePort | undefined;
+  private readonly prefill: Sep24OffRampOptions["prefill"];
+  private readonly logger: Logger;
 
   constructor(opts: Sep24OffRampOptions) {
     this.homeDomain = opts.discovery.homeDomain;
@@ -118,7 +138,35 @@ export class AnchorOffRamp implements OffRampPort {
     }
     this.state = opts.state;
     this.rateSource = opts.rateSource;
-    this.sep24 = new Sep24Client(opts.discovery);
+    this.prefill = opts.prefill;
+    this.logger = (opts.logger ?? NOOP_LOGGER).child({ component: "offramp.sep24", anchor: this.homeDomain });
+    this.sep24 = new Sep24Client(opts.discovery, this.logger);
+  }
+
+  /**
+   * The SEP-9 values the seller agreed to share with this anchor, for its form to open pre-filled.
+   * No consent (or no source configured) means nothing is sent. A read failure also means nothing is
+   * sent: prefill is a convenience, so it fails closed instead of failing the withdrawal.
+   */
+  private async prefillFor(customer: AnchorCustomer): Promise<Record<string, string>> {
+    if (!this.prefill) return {};
+    try {
+      const consent = await this.prefill.consents.get(customer.sellerId, this.homeDomain);
+      if (!consent || consent.fields.length === 0) return {};
+      const type = (await this.prefill.resolveType?.(customer)) ?? null;
+      const record = await this.prefill.kyc.get(customer.sellerId, this.homeDomain, type);
+      if (!record) return {};
+      const picked = pickPrefill(record.providedFields, consent.fields);
+      const names = Object.keys(picked);
+      if (names.length > 0) await this.prefill.audit?.(customer, names.sort());
+      return picked;
+    } catch (err) {
+      this.logger.warn(
+        { event: "anchor.sep24.prefill.skipped", error: err instanceof Error ? err.name : "error" },
+        "could not load SEP-9 prefill; starting the withdrawal without it",
+      );
+      return {};
+    }
   }
 
   /**
@@ -308,7 +356,7 @@ export class AnchorOffRamp implements OffRampPort {
       account: input.customer.account,
       // An indicative quote id is local; the anchor never issued it.
       quoteId: q.quotedAmounts?.quoteKind === "indicative" ? undefined : input.quoteId,
-      payoutFields: input.payout.fields,
+      prefill: await this.prefillFor(input.customer),
     });
 
     const now = Date.now();

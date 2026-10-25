@@ -9,6 +9,7 @@ export * from "./select";
 export * from "./rates";
 export * from "./anchor-session";
 export * from "./sep12";
+export * from "./sep9";
 export * from "./sep12-callback";
 export * from "./anchor-error";
 export * from "./http";

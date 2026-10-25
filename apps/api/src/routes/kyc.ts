@@ -11,7 +11,13 @@ import {
   type KycConsent,
   type KycUploadFile,
 } from "@checkout/core";
-import { AnchorCapabilityError, AnchorConfigError, AnchorHttpError } from "@checkout/offramp";
+import {
+  AnchorCapabilityError,
+  AnchorConfigError,
+  AnchorHttpError,
+  SEP24_PREFILL_FIELDS,
+  isPrefillField,
+} from "@checkout/offramp";
 import { env } from "../env";
 import type { Container } from "../services/container";
 import { anchorFailure } from "../services/link-service";
@@ -39,6 +45,10 @@ const submitKycSchema = z
 const grantConsentSchema = z.object({
   anchorDomain: z.string().min(1),
   fields: z.array(z.string()).min(1),
+});
+
+const prefillConsentSchema = z.object({
+  fields: z.array(z.string().regex(/^[a-z0-9_.]{1,64}$/)).max(KYC_MAX_FIELDS),
 });
 
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "application/pdf"]);
@@ -222,6 +232,67 @@ export function kycRoutes(
   });
 
   app.route("/consent", consentApp);
+
+  // Which stored SEP-9 values the seller lets the anchor's SEP-24 form open pre-filled with
+  // (issue 3.17). A separate consent from /consent above, which covers what Quay posts to the
+  // anchor's SEP-12 endpoint. Session auth only, like every consent surface; off until turned on.
+  const prefillApp = new Hono<{ Variables: AuthVariables }>();
+
+  prefillApp.use("*", async (ctx, next) => {
+    if (ctx.get("authKind") === "api_key") {
+      return ctx.json({ error: "forbidden", message: "prefill consent requires session authentication" }, 403);
+    }
+    await next();
+  });
+
+  // GET /seller/kyc/prefill-consent — what may be shared, what is on file, what is consented
+  prefillApp.get("/", async (ctx) => {
+    const seller = ctx.get("seller");
+    const anchorDomain = c.anchorDomain;
+    if (!anchorDomain || !c.prefillConsents) return ctx.json({ error: "anchor_unavailable" }, 404);
+    const consent = await c.prefillConsents.get(seller.id, anchorDomain);
+    // Names only. An allowlisted field the seller has no value for is not offered at all.
+    let available: string[] = [];
+    if (c.kycRepo) {
+      const type = (await c.kyc.resolveType?.(customerOf(seller))) ?? null;
+      const record = await c.kycRepo.get(seller.id, anchorDomain, type);
+      if (record) {
+        available = SEP24_PREFILL_FIELDS.filter((name) => (record.providedFields[name] ?? "").trim() !== "");
+      }
+    }
+    return ctx.json({
+      anchorDomain,
+      available,
+      // Withdrawn or never granted: nothing is shared.
+      fields: consent?.fields ?? [],
+      grantedAt: consent?.grantedAt ?? null,
+    });
+  });
+
+  // PUT /seller/kyc/prefill-consent — replace the consented fields; [] withdraws consent
+  prefillApp.put("/", async (ctx) => {
+    const seller = ctx.get("seller");
+    const anchorDomain = c.anchorDomain;
+    if (!anchorDomain || !c.prefillConsents) return ctx.json({ error: "anchor_unavailable" }, 404);
+    const parsed = prefillConsentSchema.safeParse(await safeJson(ctx));
+    if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+    const fields = [...new Set(parsed.data.fields)];
+    const notAllowed = fields.filter((name) => !isPrefillField(name));
+    if (notAllowed.length > 0) {
+      return ctx.json(
+        { error: "invalid_fields", message: "These fields cannot be shared to pre-fill an anchor's form", fields: notAllowed },
+        400,
+      );
+    }
+    const consent = await c.prefillConsents.set(seller.id, anchorDomain, fields);
+    return ctx.json({
+      anchorDomain,
+      fields: consent?.fields ?? [],
+      grantedAt: consent?.grantedAt ?? null,
+    });
+  });
+
+  app.route("/prefill-consent", prefillApp);
 
   // Disclosure history is seller-owned metadata. Never read the encrypted field
   // values into this response, and never infer a send time from a status sync.

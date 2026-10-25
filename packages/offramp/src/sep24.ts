@@ -5,6 +5,7 @@ import { anchorFetch } from "./http";
 import type { AnchorDiscovery } from "./anchor-session";
 import { endpointUrl, requireTransferServerSep24, type Sep1DiscoveryInfo } from "./sep1";
 import { Sep6ValidationError } from "./sep6";
+import { pickPrefill } from "./sep9";
 
 export type { Sep1DiscoveryInfo };
 export { endpointUrl };
@@ -139,7 +140,12 @@ export interface Sep24WithdrawInteractiveInput {
   amount: string;
   account: string;
   quoteId?: string;
-  payoutFields?: Record<string, string>;
+  /**
+   * SEP-9 values to pre-populate the anchor's form, already limited to what the seller consented to
+   * (issue 3.17). Filtered again here against {@link SEP24_PREFILL_FIELDS}: whatever is not on that
+   * allowlist is dropped. Payout (bank) fields from the cash-out form are not accepted at all.
+   */
+  prefill?: Record<string, string>;
 }
 
 export interface Sep24InteractiveResult {
@@ -168,7 +174,14 @@ export interface Sep24Transaction {
  * (from `SellerAnchorAuth`, where the seller's own wallet signed the SEP-10 challenge).
  */
 export class Sep24Client {
-  constructor(private readonly discovery: AnchorDiscovery) {}
+  private readonly logger: Logger;
+
+  constructor(
+    private readonly discovery: AnchorDiscovery,
+    logger?: Logger,
+  ) {
+    this.logger = (logger ?? NOOP_LOGGER).child({ component: "sep24" });
+  }
 
   getDiscoveryInfo(): Promise<Sep1DiscoveryInfo> {
     return this.discovery.get();
@@ -187,9 +200,20 @@ export class Sep24Client {
     if (input.amount) bodyData.amount = input.amount;
     if (input.quoteId) bodyData.quote_id = input.quoteId;
 
-    if (input.payoutFields) {
-      Object.assign(bodyData, input.payoutFields);
-    }
+    // Allowlisted SEP-9 fields only. Set before the request's own keys so a prefill can never
+    // override asset_code, account, amount or quote_id.
+    const prefill = pickPrefill(input.prefill ?? {}, Object.keys(input.prefill ?? {}));
+    const body: Record<string, string> = { ...prefill, ...bodyData };
+
+    // Names only: the values are the seller's identity and never reach a log.
+    this.logger.info(
+      {
+        event: "anchor.sep24.withdraw.start",
+        assetCode: input.assetCode,
+        prefillFields: Object.keys(prefill).sort(),
+      },
+      "starting SEP-24 interactive withdraw",
+    );
 
     const res = await anchorFetch(endpoint.toString(), {
       method: "POST",
@@ -197,7 +221,7 @@ export class Sep24Client {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(bodyData),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {

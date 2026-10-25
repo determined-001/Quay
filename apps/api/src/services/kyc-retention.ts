@@ -4,6 +4,7 @@ import type { DB } from "../db/client";
 import {
   anchorSessions,
   kycConsents,
+  prefillConsents,
   kycDisclosureFields,
   links,
   sellerKyc,
@@ -32,7 +33,7 @@ export interface KycRetentionResult {
  * Erases a seller's identity data locally, in ONE transaction (all or nothing):
  * the reusable profile (`seller_profile`), per-anchor KYC rows (`seller_kyc`,
  * including the encrypted fields and the callback token hash), disclosure
- * history, consent rows (`kyc_consents`), anchor sessions and stored payout
+ * history, consent rows (`kyc_consents`, `prefill_consents`), anchor sessions and stored payout
  * fields. Always scoped to `sellerId`. Never touches the `sellers` row, links,
  * link payments or off-ramp jobs (financial records kept for accounting).
  * Reusable across retention sweeps and self-service privacy erasure requests.
@@ -44,6 +45,7 @@ export async function eraseSellerIdentityLocal(db: DB, sellerId: string): Promis
     db.delete(kycDisclosureFields).where(eq(kycDisclosureFields.sellerId, sellerId)),
     db.delete(sellerKyc).where(eq(sellerKyc.sellerId, sellerId)),
     db.delete(kycConsents).where(eq(kycConsents.sellerId, sellerId)),
+    db.delete(prefillConsents).where(eq(prefillConsents.sellerId, sellerId)),
     db.delete(anchorSessions).where(eq(anchorSessions.sellerId, sellerId)),
     db
       .update(sellers)
