@@ -10,6 +10,7 @@ import {
   type OffRampQuote,
   type OfframpRequirementTypes,
 } from "@checkout/core";
+import { isAnchorRejection } from "@checkout/offramp";
 import { metrics } from "../metrics";
 
 export type CircuitState = "closed" | "half_open" | "open";
@@ -105,11 +106,13 @@ export class CircuitBreakerOffRamp implements OffRampPort {
       metrics.anchorCallDurationSeconds.observe({ anchor: this.anchor, method }, (Date.now() - start) / 1000);
       // A request the anchor refused on its merits (out-of-range amount,
       // unsupported type) or that failed on the seller's side (missing KYC,
-      // expired quote) is not an outage and must not count (issue 3.23).
+      // expired quote, an anchor 400/403/422 on /withdraw or the quote) is not
+      // an outage and must not count (issues 3.23, 3.29).
       const rejected =
         err instanceof OffRampRejectedError ||
         err instanceof KycRequiredError ||
-        err instanceof QuoteExpiredError;
+        err instanceof QuoteExpiredError ||
+        isAnchorRejection(err);
       metrics.anchorCallsTotal.inc({ anchor: this.anchor, method, status: rejected ? "rejected" : "error" });
       // A seller without a live anchor session says nothing about the
       // anchor's health; counting it would let one signed-out seller open the

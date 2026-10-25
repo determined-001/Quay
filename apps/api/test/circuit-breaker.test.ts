@@ -10,7 +10,7 @@ import {
   type OffRampQuote,
   type OfframpRequirementTypes,
 } from "@checkout/core";
-import { Sep6ValidationError } from "@checkout/offramp";
+import { AnchorHttpError, Sep6ValidationError } from "@checkout/offramp";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
 
 const fakeQuote: OffRampQuote = {
@@ -190,6 +190,36 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
     }
     expect(breaker.getState()).toBe("closed");
     expect(inner.quote).toHaveBeenCalledTimes(10);
+  });
+
+  it.each([
+    ["/withdraw 400", "6", "withdraw", 400, "initiate"],
+    ["/withdraw 403", "6", "withdraw", 403, "initiate"],
+    ["/withdraw 422", "6", "withdraw", 422, "initiate"],
+    ["quote 400", "38", "quote", 400, "quote"],
+  ] as const)("never opens on an anchor %s rejection", async (_name, sep, op, status, method) => {
+    const err = new AnchorHttpError({ sep, op, status, body: "{}" });
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(err)),
+      initiate: vi.fn(async () => Promise.reject(err)),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+
+    for (let i = 0; i < 10; i++) {
+      await expect(
+        method === "quote" ? breaker.quote(input) : breaker.initiate({} as never),
+      ).rejects.toBe(err);
+    }
+    expect(breaker.getState()).toBe("closed");
+  });
+
+  it("still opens on a 5xx from /withdraw", async () => {
+    const err = new AnchorHttpError({ sep: "6", op: "withdraw", status: 502, body: "" });
+    const inner = fakePort({ initiate: vi.fn(async () => Promise.reject(err)) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+
+    for (let i = 0; i < 3; i++) await expect(breaker.initiate({} as never)).rejects.toBe(err);
+    expect(breaker.getState()).toBe("open");
   });
 
   it("does not count Sep6ValidationError, which extends the generic rejection", async () => {

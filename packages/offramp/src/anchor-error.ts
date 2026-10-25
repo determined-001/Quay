@@ -59,3 +59,46 @@ export async function anchorHttpError(sep: AnchorSep, op: string, res: Response)
 export function anchorErrorSummary(err: AnchorHttpError): string {
   return `The anchor returned an error (SEP-${err.sep} ${err.op}, HTTP ${err.status}).`;
 }
+
+/** HTTP statuses an anchor uses to say "I will not take this request". */
+const REJECTION_STATUSES: ReadonlySet<number> = new Set([400, 403, 422]);
+
+/**
+ * True when `err` is an anchor refusing a seller's own request (SEP-6
+ * `/withdraw`, SEP-38 quote) with a 400, 403 or 422: an unsupported pair, an
+ * amount it will not take, or "complete KYC first". That says nothing about the
+ * anchor's health, so it is a rejection, not an outage. 5xx, 429 and network
+ * errors are not.
+ */
+export function isAnchorRejection(err: unknown): err is AnchorHttpError {
+  return (
+    err instanceof AnchorHttpError &&
+    REJECTION_STATUSES.has(err.status) &&
+    ((err.sep === "6" && err.op === "withdraw") || (err.sep === "38" && err.op === "quote"))
+  );
+}
+
+/**
+ * The structured part of an anchor rejection that is safe to show the seller:
+ * the SEP-6 `type` (e.g. `non_interactive_customer_info_needed`) and the names
+ * of the `fields` it wants. The free-text `error` and any other content stay in
+ * the server log, because an anchor can echo the seller's own KYC data there.
+ */
+export function anchorRejectionDetail(err: AnchorHttpError): { anchorType?: string; fields?: string[] } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(err.body);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null) return {};
+  const { type, fields } = parsed as { type?: unknown; fields?: unknown };
+  const token = /^[A-Za-z0-9_.-]{1,64}$/;
+  const out: { anchorType?: string; fields?: string[] } = {};
+  if (typeof type === "string" && token.test(type)) out.anchorType = type;
+  if (Array.isArray(fields)) {
+    const names = fields.filter((f): f is string => typeof f === "string" && token.test(f)).slice(0, 20);
+    if (names.length > 0) out.fields = names;
+  }
+  return out;
+}

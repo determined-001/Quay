@@ -4,6 +4,8 @@ import {
   AnchorHttpError,
   anchorErrorSummary,
   anchorHttpError,
+  anchorRejectionDetail,
+  isAnchorRejection,
   getSep6Info,
   truncateAnchorBody,
 } from "../src";
@@ -61,5 +63,44 @@ describe("SEP clients throw AnchorHttpError", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+describe("isAnchorRejection / anchorRejectionDetail", () => {
+  const err = (sep: "6" | "38" | "12", op: string, status: number, body = "") =>
+    new AnchorHttpError({ sep, op, status, body });
+
+  it("is true for a 400, 403 or 422 on SEP-6 withdraw or the SEP-38 quote", () => {
+    for (const status of [400, 403, 422]) {
+      expect(isAnchorRejection(err("6", "withdraw", status))).toBe(true);
+      expect(isAnchorRejection(err("38", "quote", status))).toBe(true);
+    }
+  });
+
+  it("is false for 5xx, 429, other calls and non-anchor errors", () => {
+    for (const status of [429, 500, 502, 503, 404]) {
+      expect(isAnchorRejection(err("6", "withdraw", status))).toBe(false);
+    }
+    expect(isAnchorRejection(err("12", "customer PUT", 400))).toBe(false);
+    expect(isAnchorRejection(err("6", "/info", 400))).toBe(false);
+    expect(isAnchorRejection(new Error("400"))).toBe(false);
+  });
+
+  it("returns only the type and well-formed field names", () => {
+    const body = JSON.stringify({
+      type: "non_interactive_customer_info_needed",
+      fields: ["first_name", "bad field", 7, "email_address"],
+      error: "free text that may echo KYC data",
+    });
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, body))).toEqual({
+      anchorType: "non_interactive_customer_info_needed",
+      fields: ["first_name", "email_address"],
+    });
+  });
+
+  it("returns nothing for a non-JSON, non-object or oddly typed body", () => {
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, "<html>nope</html>"))).toEqual({});
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, "null"))).toEqual({});
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, JSON.stringify({ type: "has spaces", fields: [] })))).toEqual({});
   });
 });

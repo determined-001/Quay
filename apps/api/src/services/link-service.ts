@@ -38,7 +38,14 @@ import {
   type OffRampTelemetryRow,
   type WithdrawTransfer,
 } from "@checkout/core";
-import { AnchorHttpError, Sep6ValidationError, anchorErrorSummary, truncateAnchorBody } from "@checkout/offramp";
+import {
+  AnchorHttpError,
+  Sep6ValidationError,
+  anchorErrorSummary,
+  anchorRejectionDetail,
+  isAnchorRejection,
+  truncateAnchorBody,
+} from "@checkout/offramp";
 import { resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
@@ -1513,6 +1520,21 @@ function anchorAuthRequired(): HttpError {
  * the response or the stored idempotency record (issue 4.36).
  */
 export function anchorFailure(err: unknown, log: Logger): HttpError {
+  // The anchor refusing this seller's request (unsupported pair, KYC needed) is
+  // the seller's to act on, so it is a 422 with the safe part of the anchor's
+  // detail, not a 502 for an outage that did not happen (issue 3.29).
+  if (isAnchorRejection(err)) {
+    log.warn(
+      { event: "anchor.rejected", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },
+      "anchor rejected the request",
+    );
+    return new HttpError(422, "offramp_rejected", {
+      message: `The anchor declined this request (SEP-${err.sep} ${err.op}, HTTP ${err.status}).`,
+      limits: {},
+      availableTypes: [],
+      ...anchorRejectionDetail(err),
+    });
+  }
   if (err instanceof AnchorHttpError) {
     log.error(
       { event: "anchor.error", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },

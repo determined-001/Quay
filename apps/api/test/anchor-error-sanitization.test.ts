@@ -76,16 +76,16 @@ describe("link routes: anchor failures", () => {
     return { container, app, headers, linkId, lines };
   }
 
-  function expectAnchorErrorLog(lines: Record<string, unknown>[], sep = "6", op = "withdraw") {
+  function expectAnchorErrorLog(lines: Record<string, unknown>[], sep = "6", op = "withdraw", statusCode = 400) {
     const entry = lines.find((l) => l.event === "anchor.error" && l.sep === sep);
-    expect(entry).toMatchObject({ event: "anchor.error", sep, op, statusCode: 400 });
+    expect(entry).toMatchObject({ event: "anchor.error", sep, op, statusCode });
     expect(String(entry?.body)).toContain(MARKER);
   }
 
   it("cash-out: 502 anchor_error with a safe message, detail only in the log", async () => {
     const { container, app, headers, linkId, lines } = await setup();
     container.offramp.quote = async () => {
-      throw anchorError();
+      throw anchorError("6", "withdraw", 502);
     };
     const res = await app.request(`/links/${linkId}/cash-out`, {
       method: "POST",
@@ -96,23 +96,75 @@ describe("link routes: anchor failures", () => {
     await expectNoMarker(res.clone());
     expect(await res.json()).toEqual({
       error: "anchor_error",
-      message: "The anchor returned an error (SEP-6 withdraw, HTTP 400).",
+      message: "The anchor returned an error (SEP-6 withdraw, HTTP 502).",
     });
-    expectAnchorErrorLog(lines);
+    expectAnchorErrorLog(lines, "6", "withdraw", 502);
     container.client.close();
   });
 
   it("cash-out quote: 502 anchor_error", async () => {
     const { container, app, headers, linkId, lines } = await setup();
     container.offramp.quote = async () => {
-      throw anchorError("38", "quote");
+      throw anchorError("38", "quote", 503);
     };
     const res = await app.request(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`, { headers });
     expect(res.status).toBe(502);
     await expectNoMarker(res.clone());
     expect(await res.json()).toMatchObject({ error: "anchor_error" });
-    expectAnchorErrorLog(lines, "38", "quote");
+    expectAnchorErrorLog(lines, "38", "quote", 503);
     container.client.close();
+  });
+
+  describe("an anchor 400/403/422 on the seller's own request is a 422 offramp_rejected (3.29)", () => {
+    const rejection = (op: string, sep: AnchorHttpError["sep"], status: number) =>
+      new AnchorHttpError({
+        sep,
+        op,
+        status,
+        body: JSON.stringify({
+          type: "non_interactive_customer_info_needed",
+          fields: ["first_name", "bank account!"],
+          error: `${MARKER} echoes first_name=Ada`,
+        }),
+      });
+
+    it.each([400, 403, 422])("cash-out /withdraw %i: 422 with the anchor's type and field names only", async (status) => {
+      const { container, app, headers, linkId, lines } = await setup();
+      container.offramp.quote = async () => {
+        throw rejection("withdraw", "6", status);
+      };
+      const res = await app.request(`/links/${linkId}/cash-out`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }),
+      });
+      expect(res.status).toBe(422);
+      await expectNoMarker(res.clone());
+      expect(await res.json()).toEqual({
+        error: "offramp_rejected",
+        message: `The anchor declined this request (SEP-6 withdraw, HTTP ${status}).`,
+        limits: {},
+        availableTypes: [],
+        anchorType: "non_interactive_customer_info_needed",
+        fields: ["first_name"],
+      });
+      const entry = lines.find((l) => l.event === "anchor.rejected");
+      expect(entry).toMatchObject({ sep: "6", op: "withdraw", statusCode: status });
+      expect(String(entry?.body)).toContain(MARKER);
+      container.client.close();
+    });
+
+    it("cash-out quote 400 (unsupported pair): 422, not 502", async () => {
+      const { container, app, headers, linkId } = await setup();
+      container.offramp.quote = async () => {
+        throw rejection("quote", "38", 400);
+      };
+      const res = await app.request(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`, { headers });
+      expect(res.status).toBe(422);
+      await expectNoMarker(res.clone());
+      expect(await res.json()).toMatchObject({ error: "offramp_rejected" });
+      container.client.close();
+    });
   });
 
   it("offramp-preview: 502 anchor_error", async () => {

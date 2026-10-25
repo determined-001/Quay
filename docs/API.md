@@ -731,7 +731,7 @@ anchor — see `/seller/anchor-auth` below. Only their wallet can fix this.
 The anchor failed or was unreachable; see Conventions. Nothing from the anchor's
 response body is included.
 
-**422** — `{ "error": "offramp_rejected", "message", "limits": { "minAmount", "maxAmount" }, "availableTypes": [] }`.
+**422** — `{ "error": "offramp_rejected", "message", "limits": { "minAmount", "maxAmount" }, "availableTypes": [] }`. When the anchor itself refuses the request with a 400, 403 or 422 (an unsupported pair, or KYC needed first), the body also carries the anchor's `anchorType` (e.g. `non_interactive_customer_info_needed`) and the `fields` it asked for. The anchor's free-text error is never returned. These replies do not count towards the anchor circuit breaker.
 The anchor refused the request on its merits: the amount is outside the limits it publishes
 (SEP-6 `/info`), the asset is not withdrawable, or a withdraw type is needed. This is the
 seller's to fix (change the amount), it is not an anchor outage, and it does not count towards the
