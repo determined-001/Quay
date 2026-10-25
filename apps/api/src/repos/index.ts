@@ -37,6 +37,7 @@ import type {
   AssetRef,
   WithdrawTransfer,
 } from "@checkout/core";
+import { InvalidCursorError } from "@checkout/core";
 import type { DB } from "../db/client";
 import {
   links,
@@ -665,7 +666,7 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     return (result.rowsAffected ?? 0) > 0;
   }
 
-  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void> {
+  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt"> & { createdAt?: number }): Promise<void> {
     await this.db.insert(webhookDeliveries).values({
       id: newId("whd"),
       webhookId: d.webhookId,
@@ -676,7 +677,7 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       statusCode: d.statusCode,
       ok: d.ok,
       error: d.error,
-      createdAt: Date.now(),
+      createdAt: d.createdAt ?? Date.now(),
     });
   }
 
@@ -808,21 +809,31 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     const owned = await this.getById(webhookId, sellerId, { includeDeleted: true });
     if (!owned) return { deliveries: [], nextCursor: null };
 
-    const cursorCreatedAt = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
+    const cursor = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
     const conditions = [eq(webhookDeliveries.webhookId, webhookId)];
-    if (cursorCreatedAt !== null) conditions.push(lt(webhookDeliveries.createdAt, cursorCreatedAt));
+    if (cursor !== null) {
+      conditions.push(
+        or(
+          lt(webhookDeliveries.createdAt, cursor.createdAt),
+          and(
+            eq(webhookDeliveries.createdAt, cursor.createdAt),
+            lt(webhookDeliveries.id, cursor.id),
+          ),
+        )!,
+      );
+    }
 
     // Fetch one extra row to know whether there's a next page.
     const rows = await this.db
       .select()
       .from(webhookDeliveries)
       .where(and(...conditions))
-      .orderBy(desc(webhookDeliveries.createdAt))
+      .orderBy(desc(webhookDeliveries.createdAt), desc(webhookDeliveries.id))
       .limit(opts.limit + 1);
 
     const page = rows.slice(0, opts.limit);
     const last = page[page.length - 1];
-    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt) : null;
+    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt, last.id) : null;
 
     return { deliveries: page, nextCursor };
   }
@@ -867,14 +878,27 @@ function rowToQueueEntry(row: QueueRow): WebhookQueueEntry {
   };
 }
 
-function encodeDeliveryCursor(createdAt: number): string {
-  return Buffer.from(String(createdAt), "utf8").toString("base64url");
+export function encodeDeliveryCursor(createdAt: number, id: string): string {
+  return Buffer.from(`${createdAt}:${id}`, "utf8").toString("base64url");
 }
 
-function decodeDeliveryCursor(cursor: string): number {
-  const decoded = Number(Buffer.from(cursor, "base64url").toString("utf8"));
-  if (!Number.isFinite(decoded)) throw new Error("Invalid cursor");
-  return decoded;
+export function decodeDeliveryCursor(cursor: string): { createdAt: number; id: string } {
+  let text: string;
+  try {
+    text = Buffer.from(cursor, "base64url").toString("utf8");
+  } catch {
+    throw new InvalidCursorError();
+  }
+  const idx = text.indexOf(":");
+  if (idx === -1) {
+    throw new InvalidCursorError();
+  }
+  const createdAt = Number(text.slice(0, idx));
+  const id = text.slice(idx + 1);
+  if (!Number.isFinite(createdAt) || !id) {
+    throw new InvalidCursorError();
+  }
+  return { createdAt, id };
 }
 
 export class DrizzleWatcherStateRepository implements WatcherStateRepository {

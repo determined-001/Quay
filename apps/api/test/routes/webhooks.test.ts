@@ -516,3 +516,18 @@ describe("Scope gate on /webhooks", () => {
   });
 });
 
+
+describe("GET /webhooks/:id/deliveries — cursor validation", () => {
+  it("returns 400 invalid_query on a malformed cursor", async () => {
+    const hook = await container.webhooks.create({
+      sellerId: container.seller.id,
+      url: "https://example.com/deliveries-test",
+      secret: "deliveries-secret-000",
+    });
+
+    const res = await req(`/webhooks/${hook.id}/deliveries?cursor=garbage!!`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_query");
+  });
+});

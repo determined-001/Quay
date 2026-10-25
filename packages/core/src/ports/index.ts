@@ -418,6 +418,14 @@ export class OffRampDisabledError extends Error {
   }
 }
 
+/** Thrown when a pagination cursor is malformed or cannot be decoded. */
+export class InvalidCursorError extends Error {
+  constructor(message = "Invalid cursor") {
+    super(message);
+    this.name = "InvalidCursorError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Off-ramp state persistence
 // ---------------------------------------------------------------------------
@@ -983,7 +991,7 @@ export interface WebhookRepository {
   rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null>;
   /** Soft delete — keeps delivery history browsable after removal. */
   softDelete(id: string, sellerId: string): Promise<boolean>;
-  recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void>;
+  recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt"> & { createdAt?: number }): Promise<void>;
   listDeliveries(
     webhookId: string,
     sellerId: string,

@@ -26,3 +26,19 @@
 # Add an entry only when there is genuinely no fix, and give it a re-review
 # date. Prefer an override; prefer removing the dependency more.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Accepted 2026-10-25 (owner: determined-001, re-review by 2026-11-25).
+#
+# zod memory exhaustion in array validation (CVSS 7.5). The advisory describes
+# a flaw in zod 4's $ZodArray / handleArrayResult, but its range is written as
+# "< 4.6.6", so it also matches the zod 3.22.4 and 3.25.76 copies that reach
+# the tree only through @creit.tech/stellar-wallets-kit (@reown/appkit,
+# @coinbase/cdp-sdk) - wallet modules this app never imports. No patched 3.x
+# exists, and forcing those onto zod 4 would break the libraries that expect
+# the zod 3 API. Our own zod (apps/api, packages/core) is already 4.6.6.
+# Retire this entry when the wallet kit moves to a patched zod, or when the
+# advisory range is corrected.
+# ---------------------------------------------------------------------------
+GHSA-mrhx-c7xc-m3w5
+1243066
