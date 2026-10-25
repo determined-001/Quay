@@ -396,6 +396,7 @@ const EVERY_ERROR_CODE: Record<ApiErrorCode, true> = {
   server_error: true,
   consent_required: true,
   offramp_rejected: true,
+  quote_mismatch: true,
   unauthorized: true,
   telemetry_not_enabled: true,
   telemetry_error: true,
