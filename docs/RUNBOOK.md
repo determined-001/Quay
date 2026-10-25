@@ -272,6 +272,51 @@ damage is that the watcher resumes from its persisted cursor: a payment is
 marked paid late, not lost. Buying `starter` is what actually removes the
 problem.
 
+### Nightly anchor probe
+
+The probe has two steps. The first runs the protocol endpoints (SEP-1, SEP-10,
+SEP-38, SEP-6 and SEP-24) and needs no setup. The second, **"Full seller-signed
+cash-out"** (`packages/offramp/test/testanchor-full-cashout.test.ts`), does what a
+real seller does against testanchor: sign in with a wallet-signed SEP-10 challenge,
+pass SEP-12 KYC, quote, start the SEP-6 withdrawal, **send the USDC to the anchor on
+Horizon testnet with the anchor's exact memo and memo type**, then poll until the
+anchor moves past `pending_user_transfer_start`. The test process signs that payment
+with the probe key, standing in for the seller's wallet; no server code holds a key.
+
+**Secret to configure.** Add the repository Actions secret
+`TEST_ANCHOR_SELLER_SECRET`: the secret seed of a **dedicated, testnet-only** key,
+used for nothing else. Without it the full cash-out step is skipped (the job
+summary says so) and the first step still runs, with a random throwaway key.
+
+**What the probe sets up itself.** On each run it creates the account through
+Friendbot if it does not exist and adds the testnet USDC trustline
+(`GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5`). It cannot mint USDC.
+
+**Topping up USDC.** Each run sends `PROBE_CASHOUT_AMOUNT` (default `1`) testnet USDC
+to the anchor, so the balance falls by about that much per night. When it runs low
+the **prepare** stage fails with "holds N testnet USDC but needs 1". Refill the key's
+account with testnet USDC from Circle's testnet faucet (<https://faucet.circle.com>,
+Stellar testnet) or through testanchor's deposit flow using the SDF demo wallet
+(<https://demo-wallet.stellar.org>), importing the probe key. Both need a browser
+and cannot be automated by the nightly job; keep 30 or more USDC on the account.
+If testanchor's minimum withdrawal exceeds 1 USDC, add `PROBE_CASHOUT_AMOUNT` (for
+example `"10"`) to that workflow step's `env`.
+
+**Reading a failure.** Tests are named `stage N/7 <stage>` and later stages are
+skipped once one fails, so the first red test is where the flow broke: `prepare`
+(account or balance), `auth` (SEP-10), `kyc` (SEP-12), `quote` (SEP-38), `withdraw`
+(SEP-6 `/withdraw`, or no transfer instructions), `transfer` (Horizon payment),
+`settlement` (the anchor never saw the payment). The job summary also lists the last
+stage completed and per-stage timings, and the auto-filed issue names the failing
+flow and stage.
+
+**Run it locally** with a funded probe key:
+`RUN_LIVE_ANCHOR_TESTS=1 SELLER_SECRET_KEY=S... OFFRAMP_TYPE=bank_account pnpm --filter @checkout/offramp exec vitest run test/testanchor-full-cashout.test.ts`.
+It is skipped, never failed, when `SELLER_SECRET_KEY` is missing. The SEP-12 test
+values the probe submits (`PROBE_KYC_VALUES` in `test/live-probe.ts`) are best
+guesses at what testanchor accepts; if the **kyc** stage fails with "no test value
+for", add that field there.
+
 **Turning the anchor probe off.** `.github/workflows/anchor-probe.yml` runs a
 nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow, plus the SEP-24 interactive path
 (`/sep24/info`, then `initiate()` returning an https interactive URL on the anchor), against `testanchor.stellar.org`.
