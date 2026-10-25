@@ -74,9 +74,11 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
     and `/seller/anchor-auth` routes.
   - `anchor_config_error` (**502**) — the anchor rejected the SEP-12 customer
     `type` the operator configured (`ANCHOR_KYC_TYPE` /
-    `ANCHOR_KYC_TYPE_ORGANIZATION`). It will not clear on retry; the operator has
-    to fix the setting. `message` is `anchor rejected SEP-12 type "<type>"`
-    (the operator's own value, never anchor text); the detail is logged as
+    `ANCHOR_KYC_TYPE_ORGANIZATION`), or it does not declare the SEP that the
+    configured `OFFRAMP_PROTOCOL` (`sep6` / `sep24`) needs. It will not clear on
+    retry; the operator has to fix the setting. `message` is e.g.
+    `anchor rejected SEP-12 type "<type>"` (the operator's own value, never
+    anchor text); the detail is logged as
     `event: "anchor.config_error"`. Returned by the `/seller/kyc` routes and any
     cash-out that checks KYC.
   - `internal_error` (**500**) — an unhandled server error. The body is exactly
