@@ -61,6 +61,13 @@ operator or integrator can observe are repeated here.
   `OFFRAMP_RATE_CURRENCY`, `OFFRAMP_RATE_SOURCE_ASSET`, `OFFRAMP_RATE_URL`,
   `OFFRAMP_RATE_JSON_PATH` (all optional): quote an anchor that has no SEP-38
   from a configured rate.
+- `OFFRAMP_PROTOCOL` (`auto` default, `sep6`, `sep24`): which anchor protocol
+  carries a withdrawal. `auto` uses SEP-6 when the anchor declares it, else
+  SEP-24. Together with `ANCHOR_URL`, `ANCHOR_HOME_DOMAIN`, `OFFRAMP_TYPE` and
+  `OFFRAMP_RATE_SOURCE` it only seeds the new `anchors` table on first boot.
+- `ANCHOR_KYC_TYPE` and `ANCHOR_KYC_TYPE_ORGANIZATION` (optional): the SEP-12
+  customer `type` sent to anchors that key their KYC requirements on it.
+- `TELEMETRY_TOKEN` now also gates `GET /telemetry/pii-audit`.
 - `OFFRAMP_INTERACTIVE_TIMEOUT_MS` (default 1 hour): how long a SEP-24 job may
   sit at `incomplete` before it is failed as abandoned.
 - `KYC_RETENTION_DAYS` (default 730) for the KYC and profile data retention
@@ -95,6 +102,24 @@ docs:check-env-docs` keeps it in step with the code.
   of interactive jobs with abandonment detection; `last poll error` surfaced on
   the link detail and timeline.
 - Circuit breaker and health tracked per anchor.
+- **Anchors live in a table** (`anchors`), managed with `node scripts/anchors.mjs
+  list|add|enable|disable` without a redeploy. `SelectingOffRamp` picks SEP-6 or
+  SEP-24 per anchor, a cash-out is routed to the anchor serving its payout
+  currency (`422 corridor_unavailable` when none does), `/seller/anchor-auth`
+  takes `?anchor=`, and `GET /health` lists every anchor's breaker under
+  `anchors`. See [`docs/RUNBOOK.md`](./docs/RUNBOOK.md#switching-anchors).
+- SEP-24 withdrawals end to end: interactive URL in the cash-out response, form
+  prefill limited to fields the seller consented to share with that anchor
+  (`GET`/`PUT /seller/kyc/prefill-consent`), and abandonment detection.
+- **PII access audit log** (`pii_audit`): every read or write of a seller's
+  identity data records the actor, action and field names (never values),
+  readable with `GET /telemetry/pii-audit` and kept for two years.
+- Metrics: `anchor_auth_required_total`, `offramp_jobs_by_external_status`,
+  `offramp_jobs_awaiting_anchor_auth`, `pii_audit_write_failures_total`,
+  `rate_limit_store_errors_total`, and `offramp_circuit_breaker_state` per
+  anchor.
+- Nightly anchor probe now also runs a full seller-signed cash-out against
+  testanchor (auth, KYC, quote, withdraw, transfer, settlement).
 - Playwright payment-loop end-to-end tests and the `pnpm sweep` pre-entry ritual.
 - Widget API and `postMessage` contract docs; `apps/web` README.
 
@@ -104,6 +129,10 @@ docs:check-env-docs` keeps it in step with the code.
   DDL. Existing databases are stamped with a baseline on first boot. New
   scripts: `pnpm db:generate`, `db:migrate`, `db:status`, `db:check`.
 - A failed cash-out can be retried from `offramp_failed`.
+- `PUT /seller/kyc` bounds its input (at most 50 fields, names matching
+  `^[a-z0-9_.]{1,64}$`, values up to 1,000 characters; violations are `400
+  invalid_body`), and `GET`/`PUT /seller/kyc` return `providedFields: {}` to API
+  keys: only a signed-in session sees the stored values.
 - Anchor limit, withdraw-type and other 400/403/422 rejections now return `422`
   and no longer trip the circuit breaker; anchor 502 bodies are sanitised and
   unhandled errors return JSON.

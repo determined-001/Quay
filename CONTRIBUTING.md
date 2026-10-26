@@ -52,7 +52,9 @@ packages/
   core/      Domain brain — entities, status machine, money math, SEP-7 builder,
              the pure payment matcher, port interfaces, zod schemas.
   stellar/   Stellar adapter — SEP-7 rail + Horizon polling watcher.
-  offramp/   Off-ramp adapter — MockAnchorOffRamp & TestAnchorOffRamp (seller_initiated).
+  offramp/   Off-ramp adapters (seller_initiated) — MockAnchorOffRamp, DisabledOffRamp, TestAnchorOffRamp (SEP-6),
+             AnchorOffRamp (SEP-24) and SelectingOffRamp (picks one per anchor), plus SEP-12 KYC.
+  widget/    Source of the embeddable checkout widget (built and served as widget.js).
 apps/
   api/       Hono API + Drizzle (libSQL) + the ledger-watching worker.
   web/       Next.js seller dashboard + buyer checkout page + widget.js.
@@ -65,7 +67,7 @@ in the domain. Keep that boundary intact — CI enforces it (see
 
 ## Prerequisites
 
-- Node 20+
+- Node 22 (what CI and the API's Docker image run)
 - pnpm 9 (`packageManager` is pinned in `package.json`)
 
 ---
@@ -212,7 +214,8 @@ RUN_LIVE_ANCHOR_TESTS=1 OFFRAMP_TYPE=bank_account pnpm --filter @checkout/offram
 optional: set it to a testnet secret (`S...`) to reuse one account, otherwise a
 random keypair is used. Never use a mainnet key. The nightly
 [`anchor-probe.yml`](.github/workflows/anchor-probe.yml) workflow runs this same
-command with `OFFRAMP_TYPE=bank_account`.
+suite with `OFFRAMP_TYPE=bank_account`, plus a second step for the full
+seller-signed cash-out test (`test/testanchor-full-cashout.test.ts`).
 
 ---
 
@@ -238,7 +241,13 @@ pnpm docs:check-env-docs          # every env var apps/api reads is in .env.exam
 pnpm db:check                     # schema and migrations have not drifted
 ```
 
-All of them must pass. If you change domain logic in `packages/core`, add or update
+All of them must pass. `pnpm typecheck` covers the tests as well as `src` in
+the packages that include them (`packages/offramp` does), so a type error in a
+test fails the check. Every package's `vitest.config.ts` spreads `sharedTest`
+from [`vitest.shared.ts`](vitest.shared.ts) (a 10 s test timeout, because
+`turbo run test` runs all suites at once) and takes its coverage floor through
+`coverage()` in [`vitest.coverage.ts`](vitest.coverage.ts); a new package should
+do the same. If you change domain logic in `packages/core`, add or update
 the corresponding unit tests (`packages/core/test/`). New behaviour in the API,
 worker, or adapters should come with tests where practical. If you change
 `LINK_STATUSES`/`TRANSITIONS` in `packages/core/src/domain/status.ts`, run

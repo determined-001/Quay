@@ -1,6 +1,8 @@
 # Render Blueprint — deploys apps/api (Hono API + ledger watcher + cash-out
-# poller) as ONE always-on Docker web service. Starter plan is mandatory: the
-# free tier spins down after 15 min idle, which stops the watcher loop.
+# poller) as ONE Docker web service. This staging blueprint declares the free
+# plan, which spins down after 15 min idle and so stops the watcher loop until
+# the next request; anything that must watch the ledger continuously needs the
+# starter plan (see render.mainnet.yaml for the trade-off).
 # The web app deploys separately to Vercel; the database is Turso (external).
 #
 # Secrets (sync: false) to set in the Render dashboard on first deploy:

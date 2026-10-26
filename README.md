@@ -169,7 +169,7 @@ So two deliberate boundaries are baked into the architecture:
 
 - **Ports-and-adapters everywhere.** The domain never imports a chain SDK. `RailPort`,
   `WatcherPort`, and `OffRampPort` are the seams. Today: a Stellar (SEP-7 + Horizon) rail and
-  three off-ramp adapters — a real SEP-10/38/6 flow against the testnet reference anchor, a mock
+  four off-ramp modes — a real anchor flow (SEP-10/12/38 plus SEP-6 or SEP-24, chosen per anchor), a mock
   for offline dev, and a disabled mode for mainnet. Tomorrow: the same `PaymentIntent` spine
   behind an `adapter-gateway` (Arc/Circle) or a different chain — without touching the domain or
   the worker.
@@ -225,9 +225,10 @@ packages/
                the pure payment matcher, port interfaces, zod schemas.
   stellar/     Stellar adapter — SEP-7 rail + Horizon polling watcher (RailPort/WatcherPort).
   offramp/     Off-ramp adapters (OffRampPort, seller_initiated) — TestAnchorOffRamp
-               (real SEP-10 → SEP-38 → SEP-6 against testanchor.stellar.org), MockAnchorOffRamp
-               (offline dev), DisabledOffRamp (mainnet), plus TestAnchorKyc (SEP-12) and
-               SellerAnchorAuth (per-seller SEP-10 anchor sessions).
+               (real SEP-10 → SEP-38 → SEP-6, used for testanchor.stellar.org and production
+               anchors alike), AnchorOffRamp (SEP-24 interactive), SelectingOffRamp (picks SEP-6
+               or SEP-24 per anchor), MockAnchorOffRamp (offline dev), DisabledOffRamp (mainnet),
+               plus TestAnchorKyc (SEP-12) and SellerAnchorAuth (per-seller SEP-10 anchor sessions).
   widget/      Source of the embeddable checkout widget (built and served as widget.js).
 apps/
   api/         Hono API + Drizzle (libSQL) + the ledger-watching worker.
@@ -243,7 +244,7 @@ paid / overpaid / underpaid / wrong-asset / no-memo / unknown-reference.
 
 ## Run it locally
 
-Requirements: Node 20+ and pnpm 9.
+Requirements: Node 22 (what CI and the API's Docker image run) and pnpm 9.
 
 ```bash
 pnpm install
@@ -380,10 +381,10 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
 | Persistence | **Real**, libSQL/SQLite — zero-config locally (`file:./local.db`), and the same `DATABASE_URL` points at Turso in production. Note this is libSQL specifically, not "any SQL": the schema is `drizzle-orm/sqlite-core` and the client is `@libsql/client`, so a `postgres://` URL does not work without porting the schema, the bootstrap DDL and the backup scripts. Tables self-initialize on boot. Encrypted backups (`pnpm db:backup`) and a tested restore path (`pnpm db:restore`) exist — see [the runbook](docs/RUNBOOK.md) for the honest RPO/RTO (nightly backups ⇒ up to 24h RPO, not continuous protection). |
 | Account/trustline preflight | **Real.** `POST /links` checks the seller's wallet actually exists and (for USDC) has an authorized, under-limit trustline before the link goes live — `422 destination_cannot_receive` otherwise, with a SEP-7 deep link to add the trustline. Re-checked in `GET /health` so a revoked trustline shows up in ops, not as a dead checkout page. |
-| Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
+| Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-12 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`), or `OFFRAMP=anchor` for a production anchor; the withdrawal runs over SEP-6 or SEP-24 depending on what the anchor declares (`OFFRAMP_PROTOCOL`, default `auto`), and more anchors are added per corridor with `node scripts/anchors.mjs`. Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
 | Metrics | **Real.** `GET /metrics` (Prometheus text format, `METRICS_TOKEN`-gated) — payment/webhook/anchor counters, watcher-lag and latency histograms, a circuit breaker around the off-ramp adapter. See [`docs/API.md`](docs/API.md#get-metrics) and [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json). |
 | Embeddable widget (`/widget.js`) | **Real**, lightweight embeddable script rendering modal checkout. |
-| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; `requireSeller` middleware gates every `/links` and `/webhooks` route (401 unauthenticated, 403 wrong seller), `POST /auth/logout` revokes a token by `jti`. Wallet-connect is wired in the dashboard and is how a seller signs in: the address they authenticate with becomes both their identity and their payout destination, so `POST /links` sets `destination` from the authenticated seller rather than from configuration. See [`docs/API.md`](docs/API.md#authentication). |
+| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; seller-authenticated middleware gates every `/webhooks` route and every `/links` route except the public checkout reads and submit (`GET /links/:id`, `POST /links/:id/submit`) and `GET /r/:reference` (401 unauthenticated, 404 for another seller's link, so ids are not confirmed), `POST /auth/logout` revokes a token by `jti`. Wallet-connect is wired in the dashboard and is how a seller signs in: the address they authenticate with becomes both their identity and their payout destination, so `POST /links` sets `destination` from the authenticated seller rather than from configuration. See [`docs/API.md`](docs/API.md#authentication). |
 
 ---
 
@@ -398,8 +399,8 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Multiple sellers / scale:** the watcher polls per active destination account; for many
-   sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
+4. **Multiple sellers / scale:** the default watcher polls per active destination account; for many
+   sellers try the streaming `WatcherPort` implementation (`WATCH_MODE=stream`, opt-in until you have measured it).
 
 > This README is engineering guidance, not legal advice. Money transmission is the box you do
 > not want to back into by accident.

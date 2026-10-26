@@ -5,7 +5,9 @@ The API is served by `@checkout/api` (Hono) on `http://localhost:8787` by defaul
 
 > **Auth:** `POST /auth` issues a session JWT after a wallet-signed SEP-10
 > challenge; a seller row is created for the wallet on first login. **`/links`
-> and `/webhooks` now require it** — every route under those two prefixes needs
+> and `/webhooks` require it**, except the public checkout reads
+> (`GET /links/:id`, `POST /links/:id/submit`) and `GET /r/:reference`: every
+> other route under those prefixes needs
 > `Authorization: Bearer <token>` (or the httpOnly `session` cookie set by
 > `POST /auth`) and returns `401` without one. The web UI provides wallet login via
 > `SessionGate` (`apps/web/app/components/SessionGate.tsx`), which connects the seller's
@@ -52,9 +54,9 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
 | --- | --- | --- | --- |
 | `links:read` | Read payment links, details, quotes, and export CSVs | `GET /links/export/csv`<br>`GET /links/:id/detail`<br>`GET /links/:id/offramp-preview`<br>`GET /links/:id/offramp-requirements`<br>`GET /links/:id/cash-out/quote` | Yes |
 | `links:write` | Mutate and cancel payment links | `POST /links/:id/cancel` | Yes |
-| `webhooks:manage` | Register, list, delete, and test webhooks | `POST /webhooks`<br>`GET /webhooks`<br>`DELETE /webhooks/:id`<br>`POST /webhooks/:id/test` | Yes |
+| `webhooks:manage` | Register, list, delete and rotate webhooks, and read or replay deliveries | every `/webhooks` route: `POST /webhooks`<br>`GET /webhooks`<br>`DELETE /webhooks/:id`<br>`POST /webhooks/:id/rotate-secret`<br>`GET /webhooks/:id/deliveries`<br>`POST /webhooks/deliveries/:id/replay` | Yes |
 | `api-keys:manage` | Create, list, and revoke API keys | `POST /api-keys`<br>`GET /api-keys`<br>`DELETE /api-keys/:id` | No (opt-in) |
-| `offramp:initiate` | Initiate off-ramp cash-out, submit transfers, manage KYC, and anchor sessions | `POST /links/:id/cash-out`<br>`GET /links/:id/cash-out/transfer`<br>`POST /links/:id/cash-out/transfer-sent`<br>`GET /seller/kyc`<br>`PUT /seller/kyc`<br>`PUT /seller/kyc/files`<br>`GET /seller/anchor-auth`<br>`POST /seller/anchor-auth/challenge`<br>`POST /seller/anchor-auth`<br>`DELETE /seller/anchor-auth` | No (opt-in) |
+| `offramp:initiate` | Initiate off-ramp cash-out, submit transfers, manage KYC, and anchor sessions | `POST /links/:id/cash-out`<br>`GET /links/:id/cash-out/transfer`<br>`POST /links/:id/cash-out/transfer-sent`<br>every `/seller/kyc` route (`GET`/`PUT /seller/kyc`, `PUT /seller/kyc/files`, `/seller/kyc/disclosures`, `/seller/kyc/consent`, `/seller/kyc/prefill-consent`; the consent, prefill-consent, disclosure and file routes are additionally session-only)<br>`GET /seller/anchor-auth`<br>`POST /seller/anchor-auth/challenge`<br>`POST /seller/anchor-auth`<br>`DELETE /seller/anchor-auth` | No (opt-in) |
 
 ## Conventions
 
@@ -74,9 +76,11 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
     and `/seller/anchor-auth` routes.
   - `anchor_config_error` (**502**) — the anchor rejected the SEP-12 customer
     `type` the operator configured (`ANCHOR_KYC_TYPE` /
-    `ANCHOR_KYC_TYPE_ORGANIZATION`). It will not clear on retry; the operator has
-    to fix the setting. `message` is `anchor rejected SEP-12 type "<type>"`
-    (the operator's own value, never anchor text); the detail is logged as
+    `ANCHOR_KYC_TYPE_ORGANIZATION`), or it does not declare the SEP that the
+    configured `OFFRAMP_PROTOCOL` (`sep6` / `sep24`) needs. It will not clear on
+    retry; the operator has to fix the setting. `message` is e.g.
+    `anchor rejected SEP-12 type "<type>"` (the operator's own value, never
+    anchor text); the detail is logged as
     `event: "anchor.config_error"`. Returned by the `/seller/kyc` routes and any
     cash-out that checks KYC.
   - `internal_error` (**500**) — an unhandled server error. The body is exactly
@@ -106,8 +110,12 @@ Rate limit buckets are keyed by client IP (respecting `trustProxyHops`), or by t
 (`api-key:<prefix>`) for requests authenticated with an API key.
 
 - **Standard limiter**: `RATE_LIMIT_MAX` requests per window (default 120 req / 60s).
-- **Strict limiter**: `RATE_LIMIT_STRICT_MAX` requests per window (default 10 req / 60s), applied to sensitive routes:
-  `POST /links`, `POST /links/:id/cash-out`, `POST /auth`, and `/api-keys/*`.
+- **Strict limiter**: `RATE_LIMIT_STRICT_MAX` requests per window (default 20 req / 60s,
+  window `RATE_LIMIT_STRICT_WINDOW_MS`), applied to sensitive routes: `POST /links`,
+  `POST /links/:id/submit`, `POST /links/:id/cash-out`, `POST /links/:id/cash-out/transfer-sent`,
+  `POST /auth`, and `/api-keys/*`. The same budget is also kept as separate buckets per seller for
+  `POST /seller/anchor-auth/challenge`, `POST /seller/anchor-auth` and `PUT /seller/kyc`, and per client
+  IP for `POST /anchor-callbacks/*`.
 - **Receipt limiter**: `Math.floor(RATE_LIMIT_MAX / 2)` (default 60 req / 60s) for `/r/*`.
 - **Privacy export limiter**: 5 requests per seller per hour for `/seller/profile/export`.
 
@@ -144,6 +152,7 @@ touching logs, and the anchor health probe + circuit breaker snapshot.
   "usdcTrustline": { "ok": true },
   "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 },
   "anchor": {
+    "domain": "testanchor.stellar.org",
     "state": "closed",
     "consecutiveFailures": 0,
     "lastCheckedAt": 1750000000000,
@@ -151,7 +160,8 @@ touching logs, and the anchor health probe + circuit breaker snapshot.
     "lastError": null,
     "url": "https://testanchor.stellar.org",
     "probes": { "toml": true, "sep10": true, "info": true }
-  }
+  },
+  "anchors": [ { "domain": "testanchor.stellar.org", "state": "closed", "...": "same shape as anchor" } ]
 }
 ```
 `ok` is pure liveness (the process is up) — check `horizon.degraded` for whether
@@ -167,10 +177,11 @@ to the primary automatically on the next successful call. `400`/`404` responses
 (e.g. an account that doesn't exist yet) are treated as a normal, prompt answer —
 never retried, never counted against `consecutiveFailures`.
 
-The `anchor` field reports the anchor health probe + circuit breaker snapshot (`apps/api/src/services/link-service.ts:AnchorHealth`).
+The `anchor` field reports the primary anchor's health probe + circuit breaker snapshot (`AnchorHealth` in `apps/api/src/services/anchor-health.ts`),
+and `anchors` lists the same snapshot for every configured anchor (one entry per row of the `anchors` table).
 `state` reflects the circuit breaker status (`closed`, `half_open`, or `open`), allowing operators to distinguish
 an anchor outage from API degradation. `probes` reports the latest health checks across the anchor's `stellar.toml`,
-SEP-10 web auth, and SEP-6/24 `/info` endpoints.
+SEP-10 web auth, and SEP-6/24 `/info` endpoints; `sep10` is `"skipped"` when the probe has no way to run the check.
 
 When the seller's own wallet can't currently receive USDC:
 ```json
@@ -186,6 +197,7 @@ When the seller's own wallet can't currently receive USDC:
   },
   "horizon": { "degraded": false, "usingFallback": false, "consecutiveFailures": 0 },
   "anchor": {
+    "domain": "testanchor.stellar.org",
     "state": "closed",
     "consecutiveFailures": 0,
     "lastCheckedAt": 1750000000000,
@@ -193,7 +205,8 @@ When the seller's own wallet can't currently receive USDC:
     "lastError": null,
     "url": "https://testanchor.stellar.org",
     "probes": { "toml": true, "sep10": true, "info": true }
-  }
+  },
+  "anchors": [ { "domain": "testanchor.stellar.org", "state": "closed", "...": "same shape as anchor" } ]
 }
 ```
 
@@ -257,6 +270,7 @@ prints it once (so the endpoint is never open by default, even locally).
 | `anchor_auth_required_total` | `route` (`kyc_get`, `kyc_put`, `quote`, `cash_out`, `poll`) — seller had no live anchor session (403 `anchor_auth_required`); `poll` counts one per poll tick of a blocked job. Not counted by the circuit breaker, so invisible in `anchor_calls_total` |
 | `quay_kyc_retention_purged_total` | — (total inactive sellers whose KYC and identity data was purged under retention policy) |
 | `pii_audit_write_failures_total` | — (PII access audit rows that failed to write while the request still succeeded; any increase means access went unrecorded, alert on it) |
+| `rate_limit_store_errors_total` | `limiter` — the shared (Redis) rate-limit store failed and that limiter fell back to its in-memory store |
 
 **Histograms**
 | Metric | Labels |
@@ -273,7 +287,8 @@ prints it once (so the endpoint is never open by default, even locally).
 | `pending_cash_outs` | links in `offramp_pending` |
 | `offramp_jobs_by_external_status` | `external_status` — `offramp_pending` links by the anchor's raw transaction status, set at scrape time. Known SEP-6/SEP-24 statuses (e.g. `pending_user_transfer_start` = waiting on the seller's transfer, `pending_anchor`, `incomplete`) are always present (0 when empty); any other value, or a job not yet polled, is counted under `other`. Sums to `pending_cash_outs` |
 | `webhook_deliveries_in_flight` | webhook deliveries currently being attempted, including retries |
-| `offramp_circuit_breaker_state` | `0`=closed, `1`=half_open, `2`=open — see below |
+| `offramp_jobs_awaiting_anchor_auth` | cash-out jobs whose polling is blocked because the seller's anchor session is missing or expired |
+| `offramp_circuit_breaker_state` | label `anchor`: `0`=closed, `1`=half_open, `2`=open — see below |
 | `watcher_lag_seconds` | seconds since the watcher's last completed poll tick |
 | `kyc_non_primary_key_rows` | number of seller KYC rows encrypted with legacy or non-primary encryption keys |
 
@@ -330,6 +345,9 @@ On success, a seller row is created for the wallet if one doesn't exist yet
 
 **401** — `{ "error": "<reason>" }`, e.g. signature verification failed, challenge
 already used, or the transaction doesn't match what we issued.
+
+**503** — `{ "error": "horizon_unavailable" }`: the request was fine but Horizon
+could not be reached to look up the account's signers. Retry.
 
 ---
 
@@ -612,7 +630,8 @@ only what is safe to hand a stranger holding the link. It never includes
 `offrampFeeAmount`, `offrampNetTargetAmount`) — a buyer must not learn the
 seller's realized FX rate or anchor fees.
 
-Only settled links resolve. An `active`, `expired` or `cancelled` link returns
+Only settled links resolve (`paid`, `offramp_pending`, `offramp_settled`, `offramp_failed`).
+An `active`, `underpaid`, `expired` or `cancelled` link returns
 `404`: an unpaid link is not a receipt.
 
 **200**
@@ -648,17 +667,9 @@ you everything needed to check it.
   from an issuer that is not Circle's is a different token and worth nothing.
 
 If those three agree with what this page told you, the receipt is real
-regardless of who is running the API.
-
-```bash
-REF=pl_0eipnodm7s2o
-REFHASH=$(node -e "console.log(require('crypto').createHash('sha256').update('$REF').digest('hex'))")
-
-stellar contract invoke \
-  --id CD6AFLZTNUKC6CWXWLAVOEH3FY4ZN47SVX6DPYQBZBTPBBSN6LEFIFZ3 \
-  --source <any-funded-account> --network testnet --send=no \
-  -- verify --ref_hash $REFHASH
-```
+regardless of who is running the API. (There is no on-chain attestation
+contract to query: it was removed because the classic transaction and its memo
+are already the proof.)
 
 **404** — `{ "error": "not_found" }`: unknown reference, or the link is not
 settled.
@@ -991,9 +1002,10 @@ response carries at most one of the two top-level fields.
 | `interactiveUrl` | A SEP-24 anchor needs the seller in a browser (always `https`; the dashboard refuses any other scheme). | `pending` | Open it and keep polling the link |
 | neither | The anchor accepted the withdrawal but has not named a deposit account yet (a SEP-6 anchor still reviewing). The mock adapter also answers this way. | `pending` | Poll; the instructions arrive later through the `offramp.transfer_required` webhook and [`GET /links/:id/cash-out/transfer`](#get-linksidcash-outtransfer) |
 
-The link is `offramp_pending` in all three cases, and the adapters shipped today
-are SEP-6, so `interactiveUrl` is additive: a client that ignores it behaves as
-before.
+The link is `offramp_pending` in all three cases. Which of the three you get
+depends on the protocol `SelectingOffRamp` picked for the anchor (SEP-6, or SEP-24 when
+the anchor offers only that or `OFFRAMP_PROTOCOL=sep24`), so a client must handle
+`interactiveUrl` as well as `transfer`.
 
 **`transfer.memoType` and the memo encoding.** `memo` is the anchor's value
 passed through unchanged, so how to turn it into a Stellar memo depends on
@@ -1812,6 +1824,11 @@ in plaintext); the API can never show it to you again after this response, only 
 { "id": "...", "url": "https://example.com/hooks/checkout", "secretLast4": "a1b2", "secret": "<hex>" }
 ```
 
+**400** — `invalid_body` (`issues` lists why).
+**422** — `{ "error": "invalid_webhook_url", "reason": "<why>" }`: the SSRF guard
+refused the URL (not `https://` in production, a non-standard port, a hostname that
+does not resolve, or an address in a private or reserved range).
+
 ---
 
 ## `GET /webhooks`
@@ -2380,6 +2397,7 @@ entries that matter. Rows older than two years are deleted by a daily sweep.
 | `400` | `invalid_cursor`, `invalid_limit` | Malformed `cursor` or non-numeric `limit` |
 | `401` | `unauthorized` | Missing or invalid `TELEMETRY_TOKEN` in `Authorization: Bearer` |
 | `404` | `telemetry_not_enabled` | `TELEMETRY_TOKEN` is unset in the server environment |
+| `503` | `pii_audit_unavailable` | The audit log is not wired in this deployment |
 
 ---
 

@@ -80,7 +80,7 @@ Remaining for this path:
 
 - [x] ~~Set `OFFRAMP=none` and `NEXT_PUBLIC_OFFRAMP_MODE=none` in the mainnet
       deployment, and leave `DEFAULT_SELLER_SECRET` unset.~~ — live on mainnet
-      since 2026-09-06. `render.mainnet.yaml:109-110` declares `OFFRAMP=none`
+      since 2026-09-06. `render.mainnet.yaml` declares `OFFRAMP=none`
       (payments-only) and leaves `DEFAULT_SELLER_SECRET` unset; the web deployment
       sets `NEXT_PUBLIC_OFFRAMP_MODE=none`.
 - [x] ~~Add an `OFFRAMP=none` variant to `render.mainnet.yaml`~~ — done. The
@@ -231,8 +231,8 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
 - [x] ~~**`TestAnchorOffRamp` requires SEP-38**~~ — resolved in issue 3.22
       (#219). SEP-38 is now optional: `TestAnchorOffRamp.quote` calls
       `getSep38Quote` only when the anchor declares `ANCHOR_QUOTE_SERVER`
-      (`packages/offramp/src/testanchor.ts:307`) and otherwise uses
-      `quoteWithoutSep38` (`:363`, `:386`) with fees from `/sep6/info`
+      (`TestAnchorOffRamp.quote` in `packages/offramp/src/testanchor.ts`) and otherwise uses
+      its `quoteWithoutSep38` helper with fees from `/sep6/info`
       (`feeFixed` / `feePercent`) and a configured rate source (`RateSourcePort`).
       Which production anchor to trust remains an operational choice.
 - [ ] **`REDIS_URL` unset.** Rate-limit counters live in an in-process `Map`, so
@@ -247,8 +247,9 @@ Worth a testnet spike while audits run. Not worth stopping shipping for.
       unexported**~~ — its server-key signing is gone (issue #207). It used to sign the
       seller's send leg (`tx.sign(sellerKeypair)`) and log in with `Sep10Client`; it now
       runs on per-seller `SellerAnchorAuth` sessions and returns transfer instructions
-      for the seller's wallet. It stays unwired (SEP-6 `TestAnchorOffRamp` is the
-      selected adapter). `scripts/check-no-server-signing.mjs` fails CI if a signing
+      for the seller's wallet. It has since been wired: `SelectingOffRamp` chooses it
+      or the SEP-6 `TestAnchorOffRamp` per anchor (issue 3.19, #216).
+      `scripts/check-no-server-signing.mjs` fails CI if a signing
       path comes back.
 - [ ] **`db-backup.yml` has no database to back up yet.** (Corrected 2026-09-05:
       it does not point at testnet — it reads `PROD_DATABASE_URL` /
@@ -282,14 +283,14 @@ about real money.
 
 - [x] ~~**SEP-10 challenge nonces (#160) are per-process**~~ — closed in #175
       (issue 6.7). Shared Redis-backed challenge store implemented;
-      `apps/api/src/env.ts:232-235` and `container.ts` require `REDIS_URL` or
+      the public-network boot guards in `apps/api/src/env.ts` require `REDIS_URL` or
       `SINGLE_INSTANCE=true` on public networks. (Setting `REDIS_URL` in production
       remains tracked in §5).
 - [ ] **A real database.** Tracked in §1; repeated here because it is the single
       item that loses the payment ledger rather than degrading a feature.
 - [x] ~~**A least-privilege API key for the synthetic uptime check** (#163)~~ —
       closed in #181 (issue 8.9). Workflow supports `UPTIME_API_KEY` and
-      `UPTIME_MAINNET_API_KEY` (`.github/workflows/uptime.yml:38-47`); confirming
+      `UPTIME_MAINNET_API_KEY` (`.github/workflows/uptime.yml`); confirming
       the repo secret is set remains with the maintainer.
 - [x] ~~**Mainnet monitoring targets** (#162)~~ — closed in #179 (issue 8.8).
       Multi-environment monitoring is implemented and reads `UPTIME_MAINNET_API_URL`;
