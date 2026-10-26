@@ -420,7 +420,6 @@ export class DrizzleKycConsentRepository implements KycConsentRepository {
   }
 
   async grant(consent: Omit<KycConsent, "id">): Promise<KycConsent> {
-    const now = Date.now();
     const row = {
       id: newId("cnc"),
       sellerId: consent.sellerId,

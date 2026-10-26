@@ -99,7 +99,6 @@ export class WatcherLoop {
   private running = false;
   private readonly pageLimit: number;
   private readonly maxPagesPerTick: number;
-  private currentTick: Promise<void> | null = null;
   private accountStates = new Map<string, AccountState>();
   private roundRobinCursor = 0;
   private metrics: WatcherMetrics = {
@@ -137,12 +136,11 @@ export class WatcherLoop {
     };
     const tick = () => {
       if (!this.running) return;
-      this.currentTick = this.runOnce()
+      void this.runOnce()
         .catch((err) => {
           this.deps.log?.(`watcher tick error: ${stringifyErr(err)}`);
         })
         .finally(() => {
-          this.currentTick = null;
           scheduleNext();
         });
     };

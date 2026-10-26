@@ -1,9 +1,9 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it } from "vitest";
 import { kycRoutes } from "../src/routes/kyc";
 import { generateApiKey, hashApiKey, type ApiKeyScope } from "../src/services/api-keys";
-import { createTestContainer, type TestContainer } from "./setup";
+import { createTestContainer } from "./setup";
 import type { Container } from "../src/services/container";
-import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord, type KycConsent } from "@checkout/core";
+import {  type AnchorCustomer, type KycRecord, type KycConsent } from "@checkout/core";
 
 describe("kycRoutes — consent endpoints (issue 4.26)", () => {
   const record: KycRecord = {

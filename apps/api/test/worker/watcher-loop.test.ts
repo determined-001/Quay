@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { WatcherLoop } from "../../src/worker/watcher-loop";
 import { LinkService } from "../../src/services/link-service";
 import { FakeRailPort, FakeWatcherPort, FakeOffRampPort, testStellarConfig, withTestDb } from "../setup";

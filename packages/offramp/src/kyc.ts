@@ -8,7 +8,6 @@ import {
   type KycStatusOptions,
   type KycRecord,
   type KycRepository,
-  type ProvidedFieldStatus,
   type KycUploadFile,
   type Logger,
   type SellerProfileKind,
@@ -224,9 +223,6 @@ export class TestAnchorKyc implements KycPort {
     if (discovery.staleCustomerId) {
       console.warn(JSON.stringify({ event: "kyc.customer_id.stale", sellerId: customer.sellerId }));
     }
-
-    // Get the reusable profile for this seller
-    const profile = await this.profileRepo.get(customer.sellerId);
 
     // If the anchor has no customer record yet (discovery returns empty requiredFields),
     // send the fields directly to create the record, then re-read requirements.

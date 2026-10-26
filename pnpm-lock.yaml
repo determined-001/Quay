@@ -169,9 +169,6 @@ importers:
       '@stellar/stellar-sdk':
         specifier: 16.2.0
         version: 16.2.0
-      pino:
-        specifier: ^10.3.1
-        version: 10.3.1
     devDependencies:
       '@vitest/coverage-v8':
         specifier: 4.1.10

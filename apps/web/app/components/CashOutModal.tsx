@@ -111,12 +111,6 @@ function validate(
   return errs;
 }
 
-/** Mask a string for display (last 4 visible, rest stars). */
-function mask(v: string): string {
-  if (v.length <= 4) return "****";
-  return `${"*".repeat(v.length - 4)}${v.slice(-4)}`;
-}
-
 // Countdown math lives in lib/quote-countdown.ts (issue 5.22), where the
 // node-environment tests can reach it.
 

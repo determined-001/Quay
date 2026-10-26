@@ -1,4 +1,4 @@
-import { createClient, type RedisClientType } from "redis";
+import { createClient } from "redis";
 import type { RateLimitStore } from "./rate-limit";
 
 export interface RedisStoreClient {

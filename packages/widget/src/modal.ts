@@ -4,7 +4,6 @@ const listeners = new Map<QuayEventType, Set<QuayEventHandler>>();
 const modalUnsubscribers: Array<() => void> = [];
 
 let activeOverlay: HTMLElement | null = null;
-let activeIframe: HTMLIFrameElement | null = null;
 let activeLinkId: string | null = null;
 // Always overwritten before use in openModal() - resolveHost() throws rather
 // than letting a call proceed with no host resolved (issue 5.10).
@@ -70,7 +69,6 @@ export function closeModal(): void {
   const linkId = activeLinkId;
 
   activeOverlay = null;
-  activeIframe = null;
   activeLinkId = null;
 
   try {
@@ -233,7 +231,6 @@ export function openModal(linkIdOrOpts: string | QuayOpenOptions, opts?: Partial
   document.body.appendChild(overlay);
 
   activeOverlay = overlay;
-  activeIframe = iframe;
 
   // Backdrop click to close
   overlay.addEventListener("click", (e) => {

@@ -4,7 +4,6 @@ import type { AnchorCustomer } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { clearStellarTomlCache } from "../src/sep1";
 import { clearSep6InfoCache, getSep6Transaction, startSep6Withdraw, Sep6ResponseError, Sep6TransactionError } from "../src/sep6";
-import { AnchorHttpError } from "../src/anchor-error";
 import { TestAnchorOffRamp } from "../src/testanchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 

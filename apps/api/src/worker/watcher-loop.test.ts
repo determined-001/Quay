@@ -12,8 +12,6 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "../env";
 import {
   WatcherLoop,
-  type AccountCircuitBreakerStatus,
-  type WatcherMetrics,
 } from "./watcher-loop";
 import type {
   WatcherPort,
@@ -78,7 +76,7 @@ describe("WatcherLoop fan-out with fairness", () => {
     (mockLinks.activeDestinations as any).mockResolvedValue(accounts);
 
     // Mock successful responses for all accounts
-    for (const account of accounts) {
+    for (const _account of accounts) {
       (mockState.getCursor as any).mockResolvedValueOnce("initial_cursor");
       (mockWatcher.fetchSince as any).mockResolvedValueOnce([]);
       (mockLinks.openLinksForDestination as any).mockResolvedValueOnce([]);

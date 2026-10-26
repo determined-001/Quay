@@ -1,13 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AnchorCustomer, OffRampInitiation, OffRampJob, OffRampQuote, SellerPayoutRef } from "@checkout/core";
+import type { AnchorCustomer, OffRampInitiation, OffRampJob, OffRampQuote } from "@checkout/core";
 import {
   AnchorRegistry,
   anchorDomainOfJob,
   seedAnchorsFromEnv,
-  type AnchorEntry,
   type AnchorRecord,
-  type AnchorRepository,
-} from "../src/services/anchor-registry";
+  type AnchorRepository } from "../src/services/anchor-registry";
 import { DrizzleAnchorRepository } from "../src/repos/index";
 import { LinkService } from "../src/services/link-service";
 import {
