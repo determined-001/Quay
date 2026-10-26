@@ -4,6 +4,7 @@ import { generateApiKey, hashApiKey, type ApiKeyScope } from "../src/services/ap
 import { createTestContainer, type TestContainer } from "./setup";
 import type { Container } from "../src/services/container";
 import { AnchorAuthRequiredError, type AnchorCustomer, type KycRecord } from "@checkout/core";
+import { authRequiredCount } from "./auth-required-count";
 
 /**
  * Regression, BUG-6.6.
@@ -194,13 +195,17 @@ describe("kycRoutes — authentication and scoping", () => {
     });
     const headers = { authorization: `Bearer ${plaintext}`, "content-type": "application/json" };
 
+    const getBefore = authRequiredCount("kyc_get");
+    const putBefore = authRequiredCount("kyc_put");
     const read = await app.request("/", { headers });
     expect(read.status).toBe(403);
     expect(await read.json()).toEqual({ error: "anchor_auth_required" });
+    expect(authRequiredCount("kyc_get")).toBe(getBefore + 1);
 
     const write = await app.request("/", { method: "PUT", headers, body: JSON.stringify({ first_name: "Ada" }) });
     expect(write.status).toBe(403);
     expect(await write.json()).toEqual({ error: "anchor_auth_required" });
+    expect(authRequiredCount("kyc_put")).toBe(putBefore + 1);
     container.client.close();
   });
 });

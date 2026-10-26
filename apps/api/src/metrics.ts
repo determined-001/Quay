@@ -231,8 +231,8 @@ const webhookAttemptsTotal = registry.counter(
 
 const anchorCallsTotal = registry.counter(
   "anchor_calls_total",
-  'Off-ramp adapter calls by method (quote~SEP-38, initiate/status~SEP-6) and result.',
-  ["method", "status"], // status: "ok" | "error" | "rejected"
+  'Off-ramp adapter calls by anchor, method (quote~SEP-38, initiate/status~SEP-6) and result.',
+  ["anchor", "method", "status"], // status: "ok" | "error" | "rejected"
 );
 
 const watcherTickDurationSeconds = registry.histogram(
@@ -249,9 +249,9 @@ const paymentToPaidLatencySeconds = registry.histogram(
 
 const anchorCallDurationSeconds = registry.histogram(
   "anchor_call_duration_seconds",
-  "Off-ramp adapter call latency by method.",
+  "Off-ramp adapter call latency by anchor and method.",
   [0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60],
-  ["method"],
+  ["anchor", "method"],
 );
 
 const quoteToSettlementDurationSeconds = registry.histogram(
@@ -267,9 +267,24 @@ const webhookQueueDepth = registry.gauge(
   "webhook_deliveries_in_flight",
   "Webhook deliveries currently being attempted, including in-progress retries.",
 );
+const offrampJobsAwaitingAnchorAuth = registry.gauge(
+  "offramp_jobs_awaiting_anchor_auth",
+  "Cash-out jobs whose polling is blocked because the seller's anchor session is missing or expired.",
+);
 const circuitBreakerState = registry.gauge(
   "offramp_circuit_breaker_state",
-  "Off-ramp adapter circuit breaker state: 0=closed, 1=half_open, 2=open.",
+  "Off-ramp adapter circuit breaker state per anchor: 0=closed, 1=half_open, 2=open.",
+  ["anchor"],
+);
+const anchorAuthRequiredTotal = registry.counter(
+  "anchor_auth_required_total",
+  "Requests and polls that needed a seller anchor session the seller does not have (never counted by the circuit breaker), by route.",
+  ["route"], // AnchorAuthRoute
+);
+const offrampJobsByExternalStatus = registry.gauge(
+  "offramp_jobs_by_external_status",
+  "Cash-outs in offramp_pending by the anchor's raw transaction status (unrecognised values bucket to other).",
+  ["external_status"],
 );
 const watcherLagSeconds = registry.gauge(
   "watcher_lag_seconds",
@@ -279,9 +294,18 @@ const kycRetentionPurgedTotal = registry.counter(
   "quay_kyc_retention_purged_total",
   "Total number of inactive sellers whose KYC and identity data was purged under the retention policy.",
 );
+const piiAuditWriteFailuresTotal = registry.counter(
+  "pii_audit_write_failures_total",
+  "PII access audit rows that failed to write (the request still succeeded). Any increase means access went unrecorded.",
+);
 const kycNonPrimaryKeyRows = registry.gauge(
   "kyc_non_primary_key_rows",
   "Number of seller KYC rows encrypted with legacy or non-primary encryption keys.",
+);
+const rateLimitStoreErrorsTotal = registry.counter(
+  "rate_limit_store_errors_total",
+  "Rate-limit store errors resulting in fallback to in-memory store by limiter name.",
+  ["limiter"],
 );
 
 export const metrics = {
@@ -298,8 +322,72 @@ export const metrics = {
   accountsWatched,
   pendingCashOuts,
   webhookQueueDepth,
+  offrampJobsAwaitingAnchorAuth,
+  anchorAuthRequiredTotal,
+  offrampJobsByExternalStatus,
   circuitBreakerState,
   watcherLagSeconds,
   kycRetentionPurgedTotal,
+  piiAuditWriteFailuresTotal,
   kycNonPrimaryKeyRows,
+  rateLimitStoreErrorsTotal,
 };
+
+
+/** Where an `anchor_auth_required` outcome was produced: the `route` label of `anchor_auth_required_total`. */
+export type AnchorAuthRoute = "kyc_get" | "kyc_put" | "quote" | "cash_out" | "poll";
+
+/** Count one `anchor_auth_required` outcome. A typed helper so the label can never drift outside the bounded set. */
+export function recordAnchorAuthRequired(route: AnchorAuthRoute): void {
+  anchorAuthRequiredTotal.inc({ route });
+}
+
+/**
+ * The `external_status` values `offramp_jobs_by_external_status` reports on
+ * their own: SEP-6 transaction statuses plus the SEP-24 ones the poller can
+ * store. Anything else (a typo, a vendor-specific status, NULL before the first
+ * poll) is folded into {@link OTHER_EXTERNAL_STATUS} so an anchor cannot grow
+ * the label set without bound.
+ */
+export const KNOWN_EXTERNAL_STATUSES = [
+  "incomplete",
+  "pending_user_transfer_start",
+  "pending_user_transfer_complete",
+  "pending_external",
+  "pending_anchor",
+  "pending_stellar",
+  "pending_trust",
+  "pending_user",
+  "pending_receiver",
+  "on_hold",
+  "completed",
+  "refunded",
+  "expired",
+  "error",
+  "no_market",
+  "too_small",
+  "too_large",
+] as const;
+export const OTHER_EXTERNAL_STATUS = "other";
+
+const KNOWN_EXTERNAL_STATUS_SET: ReadonlySet<string> = new Set(KNOWN_EXTERNAL_STATUSES);
+
+export function bucketExternalStatus(status: string | null | undefined): string {
+  return status && KNOWN_EXTERNAL_STATUS_SET.has(status) ? status : OTHER_EXTERNAL_STATUS;
+}
+
+/**
+ * Replace `offramp_jobs_by_external_status` with a fresh snapshot. Every known
+ * bucket is written (zero included) so a status that drained since the last
+ * scrape reads 0 instead of keeping its stale value, and the series set is stable.
+ */
+export function setOfframpJobsByExternalStatus(rows: ReadonlyArray<{ externalStatus: string | null; count: number }>): void {
+  const totals = new Map<string, number>();
+  for (const s of [...KNOWN_EXTERNAL_STATUSES, OTHER_EXTERNAL_STATUS]) totals.set(s, 0);
+  for (const { externalStatus, count } of rows) {
+    const bucket = bucketExternalStatus(externalStatus);
+    totals.set(bucket, (totals.get(bucket) ?? 0) + count);
+  }
+  offrampJobsByExternalStatus.reset();
+  for (const [external_status, count] of totals) offrampJobsByExternalStatus.set({ external_status }, count);
+}

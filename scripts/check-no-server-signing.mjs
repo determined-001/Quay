@@ -85,6 +85,13 @@ export const ALLOWLIST = new Map([
       "the seed is materialized so a malformed SERVER_SIGNING_SECRET/DEFAULT_SELLER_SECRET fails " +
       "at boot with a sentence instead of a stack trace inside the SDK's base32 decoder.",
   ],
+  [
+    "apps/api/src/services/client-domain-signer.ts",
+    "SEP-10 `client_domain` co-signing (issue 3.12). It signs only a sequence-0 manageData " +
+      "challenge that names Quay's own client_domain and is sourced by Quay's SEP-10 key. A " +
+      "sequence-0 transaction cannot be submitted to the network, so this signature cannot move " +
+      "funds or log anyone in anywhere else; it exists so anchors can attribute sellers to Quay.",
+  ],
 ]);
 
 /** Every forbidden pattern in one file's source text, with 1-based line numbers. */

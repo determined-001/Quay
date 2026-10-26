@@ -1,4 +1,4 @@
-import type { AssetRef, CannotReceiveReason } from "@checkout/core";
+import { fromStroops, toStroops, type AssetRef, type CannotReceiveReason } from "@checkout/core";
 
 /** The subset of a Horizon balance-line entry the trustline check needs —
  *  kept minimal and independent of any specific stellar-sdk type export path. */
@@ -22,14 +22,44 @@ export function findAssetBalance(balances: readonly BalanceLine[], asset: AssetR
  * it, or `null` if it can. No network I/O; this is the part worth unit-testing
  * in isolation, same spirit as `matchPayment` in packages/core.
  */
-export function checkBalance(balance: BalanceLine | undefined, _asset: AssetRef): CannotReceiveReason | null {
+export function checkBalance(
+  balance: BalanceLine | undefined,
+  _asset: AssetRef,
+  amount?: string,
+): CannotReceiveReason | null {
   if (!balance) return "no_trustline";
   if (balance.is_authorized === false) return "trustline_not_authorized";
-  if (balance.limit !== undefined && Number(balance.balance) >= Number(balance.limit)) return "trustline_limit_exceeded";
+  if (balance.limit === undefined) return null;
+
+  try {
+    const balStroops = toStroops(balance.balance);
+    const limStroops = toStroops(balance.limit);
+
+    if (amount !== undefined) {
+      const amtStroops = toStroops(amount);
+      if (limStroops - balStroops < amtStroops) {
+        return "trustline_limit_exceeded";
+      }
+    } else {
+      if (balStroops >= limStroops) {
+        return "trustline_limit_exceeded";
+      }
+    }
+  } catch {
+    // If a value cannot be parsed as an amount, fail-open (return null)
+    return null;
+  }
+
   return null;
 }
 
-export function messageFor(reason: CannotReceiveReason, account: string, asset: AssetRef, balance?: BalanceLine): string {
+export function messageFor(
+  reason: CannotReceiveReason,
+  account: string,
+  asset: AssetRef,
+  balance?: BalanceLine,
+  amount?: string,
+): string {
   switch (reason) {
     case "account_not_found":
       return (
@@ -40,7 +70,21 @@ export function messageFor(reason: CannotReceiveReason, account: string, asset: 
       return `Account ${account} has no trustline for ${asset.code} (issuer ${asset.issuer}) — add one before this link can be paid.`;
     case "trustline_not_authorized":
       return `The ${asset.code} trustline on ${account} is not authorized by the issuer (frozen/deauthorized).`;
-    case "trustline_limit_exceeded":
+    case "trustline_limit_exceeded": {
+      if (amount !== undefined && balance?.limit !== undefined) {
+        try {
+          const balStroops = toStroops(balance.balance);
+          const limStroops = toStroops(balance.limit);
+          const headroom = limStroops - balStroops;
+          if (headroom > 0n) {
+            const headroomStr = fromStroops(headroom);
+            return `The ${asset.code} trustline on ${account} has only ${headroomStr} headroom remaining, which cannot receive ${amount} — raise the limit to receive more.`;
+          }
+        } catch {
+          // Fall back to default message if parsing fails
+        }
+      }
       return `The ${asset.code} trustline on ${account} is already at its limit (${balance?.limit}) — raise it to receive more.`;
+    }
   }
 }

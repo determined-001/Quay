@@ -8,7 +8,7 @@ export interface RetryOptions {
   maxAttempts?: number;
   /** Base for exponential backoff in ms (default 200). */
   baseDelayMs?: number;
-  /** Backoff ceiling in ms, before jitter (default 5000). */
+  /** Ceiling for any single sleep in ms, including a server-supplied Retry-After (default 5000). */
   maxDelayMs?: number;
   /** Called before each retry sleep — for logging/metrics, never for control flow. */
   onRetry?: (attempt: number, err: unknown, delayMs: number) => void;
@@ -30,17 +30,27 @@ export function retryAfterMs(err: unknown): number | null {
   const headers = (err as { response?: { headers?: unknown } } | undefined)?.response?.headers;
   if (!headers) return null;
 
-  const raw =
-    typeof (headers as { get?: (k: string) => string | null }).get === "function"
-      ? (headers as { get: (k: string) => string | null }).get("retry-after")
-      : ((headers as Record<string, string>)["retry-after"] ?? (headers as Record<string, string>)["Retry-After"]);
-  if (!raw) return null;
+  let raw: unknown;
+  if (typeof (headers as { get?: (k: string) => string | null }).get === "function") {
+    raw = (headers as { get: (k: string) => string | null }).get("retry-after");
+  } else if (typeof headers === "object" && headers !== null) {
+    const h = headers as Record<string, unknown>;
+    raw = h["retry-after"] ?? h["Retry-After"];
+    if (raw === undefined) {
+      const foundKey = Object.keys(h).find((k) => k.toLowerCase() === "retry-after");
+      if (foundKey) raw = h[foundKey];
+    }
+  }
+  if (raw === undefined || raw === null) return null;
 
-  const seconds = Number(raw);
-  if (!Number.isNaN(seconds)) return Math.max(0, seconds * 1000);
+  const str = String(raw).trim();
+  if (str === "") return null;
 
-  const atMs = Date.parse(raw);
-  if (!Number.isNaN(atMs)) return Math.max(0, atMs - Date.now());
+  const seconds = Number(str);
+  if (!Number.isNaN(seconds) && Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+
+  const atMs = Date.parse(str);
+  if (!Number.isNaN(atMs) && Number.isFinite(atMs)) return Math.max(0, atMs - Date.now());
 
   return null;
 }
@@ -68,7 +78,8 @@ export async function withHorizonRetry<T>(fn: () => Promise<T>, opts: RetryOptio
       return await fn();
     } catch (err) {
       if (attempt >= maxAttempts || !isRetryable(err)) throw err;
-      const delay = retryAfterMs(err) ?? backoffWithFullJitter(attempt, baseDelayMs, maxDelayMs);
+      const rawDelay = retryAfterMs(err) ?? backoffWithFullJitter(attempt, baseDelayMs, maxDelayMs);
+      const delay = Math.min(rawDelay, maxDelayMs);
       opts.onRetry?.(attempt, err, delay);
       await sleep(delay);
     }

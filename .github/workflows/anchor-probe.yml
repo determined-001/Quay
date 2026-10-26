@@ -13,12 +13,14 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # SEP flows take about a minute; the full cash-out step may wait up to ~10 minutes
+    # for the KYC review and for the anchor to see the seller's transfer.
+    timeout-minutes: 30
     # This probe watches testanchor.stellar.org, which is the sandbox the
-    # TESTNET deploy cashes out through. A payments-only mainnet (OFFRAMP=none)
-    # has no anchor at all, so the probe would file nightly issues about a
-    # dependency the product no longer has. Set the repo variable
-    # ANCHOR_PROBE_DISABLED=1 to turn it off — see docs/RUNBOOK.md.
+    # TESTNET deploy cashes out through, and it is the only live check of that
+    # path. Keep it on while the testnet deploy runs OFFRAMP=testanchor. Set the
+    # repo variable ANCHOR_PROBE_DISABLED=1 only if nothing you operate cashes
+    # out through an anchor — see docs/RUNBOOK.md.
     if: vars.ANCHOR_PROBE_DISABLED != '1'
 
     steps:
@@ -35,7 +37,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: SEP-1 → SEP-10 → SEP-38 → SEP-6 live probe
+      - name: SEP-1 → SEP-10 → SEP-38 → SEP-6 and SEP-24 live probe
         id: probe
         continue-on-error: true
         env:
@@ -49,11 +51,41 @@ jobs:
           # type here also makes the probe test the rail a real deployment
           # would use, rather than whichever one happened to be the only one.
           OFFRAMP_TYPE: bank_account
+        # The full cash-out suite has its own step below, so a failure there names
+        # its stage and this step stays about the protocol endpoints.
         run: |
-          pnpm --filter @checkout/offramp test --reporter=verbose 2>&1 | tee probe-output.txt
+          pnpm --filter @checkout/offramp exec vitest run --reporter=verbose --exclude '**/testanchor-full-cashout.test.ts' 2>&1 | tee probe-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
           echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
           exit ${EXIT_CODE}
+
+      # Moves real (testnet) USDC: signs a payment to the anchor with the probe key
+      # in the test process, standing in for the seller's wallet. Needs the funded
+      # TEST_ANCHOR_SELLER_SECRET (docs/RUNBOOK.md, "Nightly anchor probe"). Without
+      # it the step is skipped, not failed.
+      - name: Full seller-signed cash-out probe (auth → KYC → quote → withdraw → transfer → settlement)
+        id: full
+        continue-on-error: true
+        env:
+          RUN_LIVE_ANCHOR_TESTS: "1"
+          SELLER_SECRET_KEY: ${{ secrets.TEST_ANCHOR_SELLER_SECRET }}
+          OFFRAMP_TYPE: bank_account
+        run: |
+          if [ -z "${SELLER_SECRET_KEY}" ]; then
+            echo "TEST_ANCHOR_SELLER_SECRET is not set; skipping the full cash-out probe."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pnpm --filter @checkout/offramp exec vitest run test/testanchor-full-cashout.test.ts --reporter=verbose 2>&1 | tee probe-full-cashout-output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          exit ${EXIT_CODE}
+
+      - name: Name the failing suites
+        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0'
+        run: node scripts/anchor-probe-report.mjs failing-suites.md probe-output.txt probe-full-cashout-output.txt
 
       - name: Publish telemetry summary
         if: always()
@@ -69,15 +101,28 @@ jobs:
               RATE=$(jq -r '.rate // "N/A"' "${TELEMETRY}")
               QUOTE_LATENCY=$(jq -r '.quoteLatencyMs // "N/A"' "${TELEMETRY}")
               WITHDRAW_LATENCY=$(jq -r '.withdrawLatencyMs // "N/A"' "${TELEMETRY}")
+              SEP24_INITIATE=$(jq -r '.sep24InitiateLatencyMs // "N/A"' "${TELEMETRY}")
+              SEP24_STATUS=$(jq -r '.sep24StatusLatencyMs // "N/A"' "${TELEMETRY}")
               echo "| Quoted rate (USDC→USD) | ${RATE} |"
               echo "| SEP-38 quote latency | ${QUOTE_LATENCY}ms |"
               echo "| SEP-6 status poll latency | ${WITHDRAW_LATENCY}ms |"
+              echo "| SEP-24 initiate latency | ${SEP24_INITIATE}ms |"
+              echo "| SEP-24 status poll latency | ${SEP24_STATUS}ms |"
+              if [ "${{ steps.full.outputs.skipped }}" = "true" ]; then
+                echo "| Full cash-out | Skipped (TEST_ANCHOR_SELLER_SECRET not set) |"
+              else
+                echo "| Full cash-out: last stage completed | $(jq -r '.fullCashoutLastStage // "none"' "${TELEMETRY}") |"
+                echo "| Full cash-out: failed stage | $(jq -r '.fullCashoutFailedStage // "none"' "${TELEMETRY}") |"
+                echo "| Full cash-out: auth / KYC / quote / withdraw | $(jq -r '[.fullCashoutAuthMs, .fullCashoutKycMs, .fullCashoutQuoteMs, .fullCashoutWithdrawMs] | map(. // "N/A" | tostring) | join(" / ")' "${TELEMETRY}") ms |"
+                echo "| Full cash-out: transfer / settlement | $(jq -r '[.fullCashoutTransferMs, .fullCashoutSettlementMs] | map(. // "N/A" | tostring) | join(" / ")' "${TELEMETRY}") ms |"
+                echo "| Full cash-out: anchor status after transfer | $(jq -r '.fullCashoutFinalStatus // "N/A"' "${TELEMETRY}") |"
+              fi
             else
               echo "| Status | No telemetry emitted (probe may have failed before measurement) |"
             fi
 
             echo ""
-            echo "**Probe exit code:** ${{ steps.probe.outputs.exit_code }}"
+            echo "**Probe exit code:** SEP flows ${{ steps.probe.outputs.exit_code }}, full cash-out ${{ steps.full.outputs.exit_code }}"
             echo ""
             echo "Anchor: https://testanchor.stellar.org"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -89,19 +134,24 @@ jobs:
           name: probe-results
           path: |
             probe-output.txt
+            probe-full-cashout-output.txt
+            failing-suites.md
             packages/offramp/probe-telemetry.json
           retention-days: 7
 
       - name: Report success
-        if: steps.probe.outputs.exit_code == '0'
+        if: steps.probe.outputs.exit_code == '0' && steps.full.outputs.exit_code == '0'
         run: |
           echo "✅ Anchor probe passed — all SEP flows operational against testanchor.stellar.org" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open or update failure issue
-        if: steps.probe.outputs.exit_code != '0'
+        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0'
         uses: actions/github-script@v9
         with:
           script: |
+            const fs = require("fs");
+            let whatBroke = "See the failed run for details.";
+            try { whatBroke = fs.readFileSync("failing-suites.md", "utf8").trim(); } catch {}
             const label = "anchor-probe";
             const issueTitle = "⚠️ Nightly anchor probe failed";
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
@@ -109,7 +159,9 @@ jobs:
             const body = `The nightly [anchor probe](${runUrl}) against \`testanchor.stellar.org\` failed.
 
             ### What broke
-            The SEP-1 → SEP-10 → SEP-38 → SEP-6 live flow is not completing successfully. Check the [failed run](${runUrl}) for details.
+            ${whatBroke}
+
+            The probe covers two steps: the protocol endpoints (SEP-1 → SEP-10 → SEP-38 → SEP-6, plus SEP-24) and, when \`TEST_ANCHOR_SELLER_SECRET\` is set, a full seller-signed cash-out (auth → KYC → quote → withdraw → transfer → settlement). Check the [failed run](${runUrl}) for details.
 
             ### Impact
             - The testanchor sandbox off-ramp demo may be broken.
@@ -151,3 +203,12 @@ jobs:
               });
               core.info("Created new failure issue");
             }
+
+      # The probe step is continue-on-error so the telemetry and issue steps
+      # above still run, which also means the job would otherwise finish green.
+      # Fail the run here so the Actions list and the README badge go red too.
+      - name: Fail the run if the probe failed
+        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0'
+        run: |
+          echo "::error::Anchor probe failed (SEP flows exit ${{ steps.probe.outputs.exit_code }}, full cash-out exit ${{ steps.full.outputs.exit_code }}). See the filed issue and the probe-results artifact."
+          exit 1

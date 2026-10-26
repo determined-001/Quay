@@ -1,23 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AnchorAuthRequiredError,
+  KycRequiredError,
   OffRampDisabledError,
   OffRampRejectedError,
+  QuoteExpiredError,
   type OffRampInitiation,
   type OffRampJob,
   type OffRampPort,
   type OffRampQuote,
   type OfframpRequirementTypes,
 } from "@checkout/core";
-import {
-  AnchorHttpError,
-  AnchorRejectedError,
-  Sep6ValidationError,
-  getSep38Quote,
-  startSep6Withdraw,
-} from "@checkout/offramp";
+import { AnchorHttpError, Sep6ValidationError } from "@checkout/offramp";
 import { CircuitBreakerOffRamp } from "../src/services/circuit-breaker";
-import { metrics } from "../src/metrics";
 
 const fakeQuote: OffRampQuote = {
   quoteId: "q1",
@@ -198,6 +193,47 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
     expect(inner.quote).toHaveBeenCalledTimes(10);
   });
 
+  it.each([
+    ["/withdraw 400", "6", "withdraw", 400, "initiate"],
+    ["/withdraw 403", "6", "withdraw", 403, "initiate"],
+    ["/withdraw 422", "6", "withdraw", 422, "initiate"],
+    ["quote 400", "38", "quote", 400, "quote"],
+  ] as const)("never opens on an anchor %s rejection", async (_name, sep, op, status, method) => {
+    const err = new AnchorHttpError({ sep, op, status, body: "{}" });
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(err)),
+      initiate: vi.fn(async () => Promise.reject(err)),
+    });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+
+    for (let i = 0; i < 10; i++) {
+      await expect(
+        method === "quote" ? breaker.quote(input) : breaker.initiate({} as never),
+      ).rejects.toBe(err);
+    }
+    expect(breaker.getState()).toBe("closed");
+  });
+
+  it("never opens on OffRampDisabledError: OFFRAMP=none is not an anchor outage", async () => {
+    const inner = fakePort({ quote: vi.fn(async () => Promise.reject(new OffRampDisabledError("quote"))) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 2 });
+
+    for (let i = 0; i < 6; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(OffRampDisabledError);
+    }
+    expect(breaker.getState()).toBe("closed");
+    expect(inner.quote).toHaveBeenCalledTimes(6);
+  });
+
+  it("still opens on a 5xx from /withdraw", async () => {
+    const err = new AnchorHttpError({ sep: "6", op: "withdraw", status: 502, body: "" });
+    const inner = fakePort({ initiate: vi.fn(async () => Promise.reject(err)) });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
+
+    for (let i = 0; i < 3; i++) await expect(breaker.initiate({} as never)).rejects.toBe(err);
+    expect(breaker.getState()).toBe("open");
+  });
+
   it("does not count Sep6ValidationError, which extends the generic rejection", async () => {
     const inner = fakePort({
       quote: vi.fn(async () => Promise.reject(new Sep6ValidationError("above max", { maxAmount: 10 }))),
@@ -207,176 +243,33 @@ describe("CircuitBreakerOffRamp — rejected requests", () => {
     expect(breaker.getState()).toBe("closed");
   });
 
-  it("does not count OffRampDisabledError as failure or error, and keeps breaker closed", async () => {
-    metrics.anchorCallsTotal.reset();
-    const inner = fakePort({
-      quote: vi.fn(async () => Promise.reject(new OffRampDisabledError("quote"))),
-    });
-    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
-
-    for (let i = 0; i < 5; i++) {
-      await expect(breaker.quote(input)).rejects.toBeInstanceOf(OffRampDisabledError);
-    }
-    expect(breaker.getState()).toBe("closed");
-    expect(inner.quote).toHaveBeenCalledTimes(5);
-    expect(metrics.anchorCallsTotal.render()).not.toContain('status="error"');
-  });
-
   it("still opens on genuine anchor failures", async () => {
     const inner = fakePort({ quote: vi.fn(async () => Promise.reject(new Error("502 from anchor"))) });
     const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
     for (let i = 0; i < 3; i++) await expect(breaker.quote(input)).rejects.toThrow("502");
     expect(breaker.getState()).toBe("open");
   });
-});
 
-// Issue 3.29: a 400/403/404/422 the anchor chose to send is an answer, not an
-// outage. One seller asking for a pair the anchor does not quote, or being told
-// to finish KYC first, must not open the circuit and pause cash-outs for
-// everybody. These go through the real SEP clients so the classification under
-// test is the one production actually uses.
-describe("CircuitBreakerOffRamp — anchor 4xx are answers, not outages", () => {
-  const input = {
-    linkId: "lnk_1",
-    sourceAsset: { code: "USDC", issuer: "G" },
-    sourceAmount: "25",
-    targetCurrency: "USD",
-    customer: { sellerId: "sel_1", account: "G" },
-  };
-  const initiateInput = {
-    linkId: "lnk_1",
-    quoteId: "q1",
-    payout: { currency: "NGN", fields: {} },
-    customer: { sellerId: "sel_1", account: "G" },
-  };
-
-  /** Stubs `fetch` with one anchor answer and hands back what the call threw. */
-  async function errorFrom(status: number, body: string, call: () => Promise<unknown>): Promise<unknown> {
-    const original = globalThis.fetch;
-    globalThis.fetch = (async () => new Response(body, { status })) as typeof fetch;
-    try {
-      return await call().then(
-        () => {
-          throw new Error("expected the call to reject");
-        },
-        (err: unknown) => err,
-      );
-    } finally {
-      globalThis.fetch = original;
-    }
-  }
-
-  const withdrawError = (status: number, body: string) =>
-    errorFrom(status, body, () =>
-      startSep6Withdraw("https://anchor-reject.test", "jwt", {
-        assetCode: "USDC",
-        amount: "25",
-        account: "GSELLER",
-        type: "bank_account",
-      }),
-    );
-
-  const quoteError = (status: number, body: string) =>
-    errorFrom(status, body, () =>
-      getSep38Quote("https://anchor-reject.test", "jwt", {
-        sellAsset: { code: "USDC", issuer: "G" },
-        sellAmount: "25",
-        buyCurrency: "NGN",
-      }),
-    );
-
-  function anchorCalls(method: string, status: string): number {
-    const prefix = `anchor_calls_total{method="${method}",status="${status}"}`;
-    const line = metrics.registry.render().split("\n").find((l) => l.startsWith(prefix));
-    return line ? Number(line.split(" ").pop()) : 0;
-  }
-
-  it("never opens on a 400 and a 403 from /withdraw and a 400 from the quote", async () => {
-    const withdraw400 = await withdrawError(
-      400,
-      JSON.stringify({ type: "non_interactive_customer_info_needed", fields: ["phone_number"] }),
-    );
-    const withdraw403 = await withdrawError(403, JSON.stringify({ type: "customer_info_status" }));
-    const quote400 = await quoteError(400, JSON.stringify({ error: "unsupported asset pair" }));
-    for (const err of [withdraw400, withdraw403, quote400]) {
-      expect(err).toBeInstanceOf(AnchorRejectedError);
-      expect(err).toBeInstanceOf(OffRampRejectedError);
-    }
-
-    const answers = [withdraw400, withdraw403, quote400];
-    let step = 0;
-    const next = () => answers[step++ % answers.length]!;
+  it("does not open on a missing-KYC rejection (KycRequiredError)", async () => {
     const inner = fakePort({
-      initiate: vi.fn(async () => Promise.reject(next())),
-      quote: vi.fn(async () => Promise.reject(next())),
+      quote: vi.fn(async () => Promise.reject(new KycRequiredError(["email_address"]))),
     });
-    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 3 });
-
-    const quoteRejectedBefore = anchorCalls("quote", "rejected");
-    const quoteErrorBefore = anchorCalls("quote", "error");
-
-    for (let i = 0; i < 10; i++) {
-      await expect(breaker.initiate(initiateInput)).rejects.toBeInstanceOf(AnchorRejectedError);
-      await expect(breaker.quote(input)).rejects.toBeInstanceOf(AnchorRejectedError);
-    }
-
-    // Past the threshold three times over — the circuit never moved.
-    expect(breaker.getState()).toBe("closed");
-    expect(breaker.getStateNumeric()).toBe(0);
-    expect(inner.initiate).toHaveBeenCalledTimes(10);
-    expect(inner.quote).toHaveBeenCalledTimes(10);
-
-    // The metric must report these as rejections, not outages.
-    expect(anchorCalls("quote", "rejected") - quoteRejectedBefore).toBe(10);
-    expect(anchorCalls("quote", "error")).toBe(quoteErrorBefore);
-    expect(anchorCalls("initiate", "rejected")).toBeGreaterThan(0);
-  });
-
-  it("still opens on a 502 from /withdraw and from the quote", async () => {
-    const withdraw502 = await withdrawError(502, "upstream down");
-    const quote502 = await quoteError(502, "upstream down");
-    expect(withdraw502).toBeInstanceOf(AnchorHttpError);
-    expect(quote502).toBeInstanceOf(AnchorHttpError);
-    expect(withdraw502).not.toBeInstanceOf(AnchorRejectedError);
-
-    const withdrawBreaker = new CircuitBreakerOffRamp(fakePort({ initiate: vi.fn(async () => Promise.reject(withdraw502)) }), {
-      failureThreshold: 3,
-    });
-    for (let i = 0; i < 3; i++) await expect(withdrawBreaker.initiate(initiateInput)).rejects.toBeInstanceOf(AnchorHttpError);
-    expect(withdrawBreaker.getState()).toBe("open");
-
-    const quoteBreaker = new CircuitBreakerOffRamp(fakePort({ quote: vi.fn(async () => Promise.reject(quote502)) }), {
-      failureThreshold: 3,
-    });
-    for (let i = 0; i < 3; i++) await expect(quoteBreaker.quote(input)).rejects.toBeInstanceOf(AnchorHttpError);
-    expect(quoteBreaker.getState()).toBe("open");
-  });
-
-  it("stays closed on 404 and 422, the other two rejection statuses", async () => {
-    const quote404 = await quoteError(404, JSON.stringify({ error: "pair not quoted" }));
-    const withdraw422 = await withdrawError(422, JSON.stringify({ type: "error" }));
-    expect(quote404).toBeInstanceOf(AnchorRejectedError);
-    expect(withdraw422).toBeInstanceOf(AnchorRejectedError);
-
-    const inner = fakePort({
-      quote: vi.fn(async () => Promise.reject(quote404)),
-      initiate: vi.fn(async () => Promise.reject(withdraw422)),
-    });
-    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 1 });
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 2 });
     for (let i = 0; i < 5; i++) {
-      await expect(breaker.quote(input)).rejects.toBeInstanceOf(AnchorRejectedError);
-      await expect(breaker.initiate(initiateInput)).rejects.toBeInstanceOf(AnchorRejectedError);
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(KycRequiredError);
     }
+    // A seller who has not finished KYC is not an anchor outage.
     expect(breaker.getState()).toBe("closed");
   });
 
-  it("opens on 429, which is rate-limiting and not an answer to the request", async () => {
-    const quote429 = await quoteError(429, "slow down");
-    expect(quote429).toBeInstanceOf(AnchorHttpError);
-    const breaker = new CircuitBreakerOffRamp(fakePort({ quote: vi.fn(async () => Promise.reject(quote429)) }), {
-      failureThreshold: 3,
+  it("does not open on an expired quote (QuoteExpiredError)", async () => {
+    const inner = fakePort({
+      quote: vi.fn(async () => Promise.reject(new QuoteExpiredError("q1"))),
     });
-    for (let i = 0; i < 3; i++) await expect(breaker.quote(input)).rejects.toBeInstanceOf(AnchorHttpError);
-    expect(breaker.getState()).toBe("open");
+    const breaker = new CircuitBreakerOffRamp(inner, { failureThreshold: 2 });
+    for (let i = 0; i < 5; i++) {
+      await expect(breaker.quote(input)).rejects.toBeInstanceOf(QuoteExpiredError);
+    }
+    expect(breaker.getState()).toBe("closed");
   });
 });

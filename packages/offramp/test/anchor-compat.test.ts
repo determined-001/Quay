@@ -48,7 +48,7 @@ describe("Anchor Fixture Compatibility Suite (#221)", () => {
       vi.stubGlobal("fetch", fixtureFetch(domain));
       const info = await getSep6Info("https://testanchor.stellar.org/sep6");
       expect(info.withdraw.USDC).toBeDefined();
-      expect(info.withdraw.USDC.enabled).toBe(true);
+      expect(info.withdraw.USDC?.enabled).toBe(true);
 
       const resolved = await resolveWithdrawType("https://testanchor.stellar.org/sep6", "USDC", "5", "bank_account");
       expect(resolved.type).toBe("bank_account");
@@ -82,7 +82,7 @@ describe("Anchor Fixture Compatibility Suite (#221)", () => {
       vi.stubGlobal("fetch", fixtureFetch(domain));
       const info = await getSep6Info("https://api.cowrie.exchange/transfer");
       expect(info.withdraw.NGNT).toBeDefined();
-      expect(info.withdraw.NGNT.enabled).toBe(true);
+      expect(info.withdraw.NGNT?.enabled).toBe(true);
 
       const resolved = await resolveWithdrawType("https://api.cowrie.exchange/transfer", "NGNT", "500");
       expect(resolved.type).toBe("bank_account");

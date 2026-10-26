@@ -1,9 +1,11 @@
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { anchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
 import type { AnchorDiscovery } from "./anchor-session";
-import { endpointUrl, type Sep1DiscoveryInfo } from "./sep1";
+import { endpointUrl, requireTransferServerSep24, type Sep1DiscoveryInfo } from "./sep1";
 import { Sep6ValidationError } from "./sep6";
+import { pickPrefill } from "./sep9";
 
 export type { Sep1DiscoveryInfo };
 export { endpointUrl };
@@ -44,7 +46,7 @@ export async function getSep24Info(baseUrl: string, logger?: Logger): Promise<Se
   if (cached && Date.now() - cached.at < INFO_TTL_MS) return cached.info;
 
   const log = (logger ?? NOOP_LOGGER).child({ component: "sep24", baseUrl });
-  const res = await fetch(endpointUrl(baseUrl, "info"));
+  const res = await anchorFetch(endpointUrl(baseUrl, "info"));
   if (!res.ok) {
     log.warn({ event: "anchor.sep24.info.fail", statusCode: res.status }, "SEP-24 /info failed");
     throw await anchorHttpError("24", "/info", res);
@@ -138,7 +140,12 @@ export interface Sep24WithdrawInteractiveInput {
   amount: string;
   account: string;
   quoteId?: string;
-  payoutFields?: Record<string, string>;
+  /**
+   * SEP-9 values to pre-populate the anchor's form, already limited to what the seller consented to
+   * (issue 3.17). Filtered again here against {@link SEP24_PREFILL_FIELDS}: whatever is not on that
+   * allowlist is dropped. Payout (bank) fields from the cash-out form are not accepted at all.
+   */
+  prefill?: Record<string, string>;
 }
 
 export interface Sep24InteractiveResult {
@@ -167,7 +174,14 @@ export interface Sep24Transaction {
  * (from `SellerAnchorAuth`, where the seller's own wallet signed the SEP-10 challenge).
  */
 export class Sep24Client {
-  constructor(private readonly discovery: AnchorDiscovery) {}
+  private readonly logger: Logger;
+
+  constructor(
+    private readonly discovery: AnchorDiscovery,
+    logger?: Logger,
+  ) {
+    this.logger = (logger ?? NOOP_LOGGER).child({ component: "sep24" });
+  }
 
   getDiscoveryInfo(): Promise<Sep1DiscoveryInfo> {
     return this.discovery.get();
@@ -176,7 +190,7 @@ export class Sep24Client {
   async startInteractiveWithdraw(token: string, input: Sep24WithdrawInteractiveInput): Promise<Sep24InteractiveResult> {
     const discovery = await this.getDiscoveryInfo();
 
-    const endpoint = endpointUrl(discovery.transferServerSep24, "transactions/withdraw/interactive");
+    const endpoint = endpointUrl(requireTransferServerSep24(discovery), "transactions/withdraw/interactive");
 
     const bodyData: Record<string, string> = {
       asset_code: input.assetCode,
@@ -186,17 +200,28 @@ export class Sep24Client {
     if (input.amount) bodyData.amount = input.amount;
     if (input.quoteId) bodyData.quote_id = input.quoteId;
 
-    if (input.payoutFields) {
-      Object.assign(bodyData, input.payoutFields);
-    }
+    // Allowlisted SEP-9 fields only. Set before the request's own keys so a prefill can never
+    // override asset_code, account, amount or quote_id.
+    const prefill = pickPrefill(input.prefill ?? {}, Object.keys(input.prefill ?? {}));
+    const body: Record<string, string> = { ...prefill, ...bodyData };
 
-    const res = await fetch(endpoint.toString(), {
+    // Names only: the values are the seller's identity and never reach a log.
+    this.logger.info(
+      {
+        event: "anchor.sep24.withdraw.start",
+        assetCode: input.assetCode,
+        prefillFields: Object.keys(prefill).sort(),
+      },
+      "starting SEP-24 interactive withdraw",
+    );
+
+    const res = await anchorFetch(endpoint.toString(), {
       method: "POST",
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(bodyData),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
@@ -214,10 +239,10 @@ export class Sep24Client {
   async getTransaction(token: string, id: string): Promise<Sep24Transaction> {
     const discovery = await this.getDiscoveryInfo();
 
-    const url = endpointUrl(discovery.transferServerSep24, "transaction");
+    const url = endpointUrl(requireTransferServerSep24(discovery), "transaction");
     url.searchParams.set("id", id);
 
-    const res = await fetch(url.toString(), {
+    const res = await anchorFetch(url.toString(), {
       headers: { authorization: `Bearer ${token}` },
     });
 

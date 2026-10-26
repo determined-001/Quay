@@ -81,7 +81,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "targets": [
-        { "expr": "sum(rate(anchor_calls_total[5m])) by (method, status)", "legendFormat": "{{method}} — {{status}}", "refId": "A" }
+        { "expr": "sum(rate(anchor_calls_total[5m])) by (anchor, method, status)", "legendFormat": "{{anchor}} {{method}} {{status}}", "refId": "A" }
       ],
       "description": "method ~ SEP call: quote~SEP-38, initiate/status~SEP-6."
     },
@@ -92,7 +92,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum(rate(anchor_call_duration_seconds_bucket[5m])) by (le, method))", "legendFormat": "{{method}} p95", "refId": "A" }
+        { "expr": "histogram_quantile(0.95, sum(rate(anchor_call_duration_seconds_bucket[5m])) by (le, anchor, method))", "legendFormat": "{{anchor}} {{method}} p95", "refId": "A" }
       ]
     },
     {
@@ -120,7 +120,7 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "offramp_circuit_breaker_state", "legendFormat": "state", "refId": "A" }
+        { "expr": "offramp_circuit_breaker_state", "legendFormat": "{{anchor}}", "refId": "A" }
       ]
     },
     {
@@ -143,6 +143,31 @@
         { "expr": "accounts_watched", "legendFormat": "accounts watched", "refId": "A" },
         { "expr": "pending_cash_outs", "legendFormat": "pending cash-outs", "refId": "B" }
       ]
+    },
+    {
+      "id": 13,
+      "title": "Anchor sign-in required (rate by route)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(anchor_auth_required_total[5m])) by (route)", "legendFormat": "{{route}}", "refId": "A" }
+      ],
+      "description": "Sellers without a live anchor session (403 anchor_auth_required). Not counted by the circuit breaker or anchor_calls_total. route=poll counts one per poll tick of a blocked job, so it tracks how long sellers stay signed out; a spike often follows a JWT secret or anchor SIGNING_KEY change."
+    },
+    {
+      "id": 14,
+      "title": "Pending cash-outs by anchor status (stacked)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 40 } },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "sum(offramp_jobs_by_external_status) by (external_status)", "legendFormat": "{{external_status}}", "refId": "A" }
+      ],
+      "description": "offramp_pending links by the anchor's raw status. pending_user_transfer_start = waiting on the seller to send the asset; pending_anchor / pending_external = the anchor is processing; other = unrecognised or not yet polled."
     }
   ]
 }

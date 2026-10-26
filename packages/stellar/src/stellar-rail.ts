@@ -6,8 +6,7 @@ import { buildChangeTrustUri } from "./trustline-uri";
 import { checkBalance, findAssetBalance, messageFor } from "./trustline-check";
 
 interface CacheEntry {
-  expiresAt: number;
-  error: CannotReceiveError | null; // null = "can receive", cached as a pass
+  expiresAt: number; // presence of an entry = "can receive"; failures are never cached
 }
 
 const PREFLIGHT_CACHE_TTL_MS = 60_000;
@@ -70,26 +69,19 @@ export class StellarRail implements RailPort {
     return StrKey.isValidEd25519PublicKey(address);
   }
 
-  async assertCanReceive(account: string, asset: AssetRef): Promise<void> {
-    const cacheKey = `${account}:${asset.code}:${asset.issuer ?? "native"}`;
+  async assertCanReceive(account: string, asset: AssetRef, amount?: string): Promise<void> {
+    const cacheKey = `${account}:${asset.code}:${asset.issuer ?? "native"}:${amount ?? "any"}`;
     const cached = this.preflightCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      if (cached.error) throw cached.error;
-      return;
-    }
+    if (cached && cached.expiresAt > Date.now()) return;
 
-    try {
-      await this.checkCanReceive(account, asset);
-      this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS, error: null });
-    } catch (err) {
-      if (err instanceof CannotReceiveError) {
-        this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS, error: err });
-      }
-      throw err;
-    }
+    // Only a pass is cached. A failure is never served from cache: a seller who
+    // just added the trustline (or funded the account) must be re-checked, and
+    // the error's trustlineUri embeds the sequence number at check time.
+    await this.checkCanReceive(account, asset, amount);
+    this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS });
   }
 
-  private async checkCanReceive(account: string, asset: AssetRef): Promise<void> {
+  private async checkCanReceive(account: string, asset: AssetRef, amount?: string): Promise<void> {
     // Typed from loadAccount's own return, not a guessed SDK type-export path —
     // the exact Horizon.* namespace for this has moved between SDK versions.
     let horizonAccount: Awaited<ReturnType<Horizon.Server["loadAccount"]>>;
@@ -106,11 +98,11 @@ export class StellarRail implements RailPort {
     if (isNative(asset)) return;
 
     const balance = findAssetBalance(horizonAccount.balances, asset);
-    const reason = checkBalance(balance, asset);
+    const reason = checkBalance(balance, asset, amount);
     if (reason === null) return;
 
     const trustlineUri = reason === "no_trustline" ? buildChangeTrustUri(horizonAccount, asset, this.cfg.networkPassphrase) : undefined;
-    throw new CannotReceiveError(reason, messageFor(reason, account, asset, balance), trustlineUri);
+    throw new CannotReceiveError(reason, messageFor(reason, account, asset, balance, amount), trustlineUri);
   }
 }
 

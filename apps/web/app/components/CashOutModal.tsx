@@ -19,7 +19,7 @@
  *      The modal never auto-closes on a (possibly blocked) popup.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { WithdrawTransfer } from "@checkout/core";
 import {
   api,
@@ -39,6 +39,7 @@ import {
   parseInteractiveUrl,
 } from "../../lib/interactive-cashout";
 import TransferStep from "./TransferStep";
+import { useFocusTrap } from "./useFocusTrap";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -110,12 +111,6 @@ function validate(
   return errs;
 }
 
-/** Mask a string for display (last 4 visible, rest stars). */
-function mask(v: string): string {
-  if (v.length <= 4) return "****";
-  return `${"*".repeat(v.length - 4)}${v.slice(-4)}`;
-}
-
 // Countdown math lives in lib/quote-countdown.ts (issue 5.22), where the
 // node-environment tests can reach it.
 
@@ -169,11 +164,31 @@ export default function CashOutModal({
   const interactivePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const interactiveOpenedAtRef = useRef<number>(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const onSuccessRef = useRef(onSuccess);
-  onSuccessRef.current = onSuccess;
   // Set when the anchor is waiting for the asset. TransferStep (shared with
   // the resume flow) owns the wallet send; the payout starts once it is sent.
   const [transfer, setTransfer] = useState<WithdrawTransfer | null>(null);
+  // True while TransferStep is waiting on the wallet; Escape must not close the
+  // modal under a signature request (issue 5.27).
+  const [transferSending, setTransferSending] = useState(false);
+
+  // ---- dialog a11y (issue 5.27) -------------------------------------------
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const headingId = useId();
+  const submitInFlight = step === "confirming" || step === "submitting" || transferSending;
+  // Focus moves in on open (to the heading, which names the dialog), Tab is
+  // trapped, Escape closes unless a submit is in flight, and focus returns to
+  // the opener on close.
+  useFocusTrap(dialogRef, true, () => {
+    if (!submitInFlight) onClose();
+  });
+  // A step change can unmount the control that had focus (Get quote becomes
+  // Confirm, the form is replaced by the quote). Park focus on the heading
+  // rather than letting it fall to <body>, behind the modal.
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) headingRef.current?.focus();
+  }, [step]);
 
   // ---- fetch requirements on mount ----------------------------------------
   useEffect(() => {
@@ -217,6 +232,13 @@ export default function CashOutModal({
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
   }, []);
+
+  // The latest onSuccess, read at call time. Dashboard passes a new function on
+  // every render (it re-renders every 5 s), and listing that in the poll
+  // effect's dependencies restarted the timer each time, so after the 30 s
+  // back-off the poll never fired (issue 5.31).
+  const onSuccessRef = useRef(onSuccess);
+  onSuccessRef.current = onSuccess;
 
   // ---- interactive polling -------------------------------------------------
   // While the interactive step is open, poll the link detail for the
@@ -387,7 +409,13 @@ export default function CashOutModal({
       setErrorMsg(msg);
       // An expired or mismatched quote cannot be confirmed; the countdown is
       // forced to zero so the panel offers a fresh quote instead.
-      if (/quote_expired|quote_mismatch/.test(msg)) setCountdown(0);
+      if (e instanceof CheckoutError && (e.code === "quote_expired" || e.code === "quote_mismatch")) {
+        if (countdownRef.current) {
+          clearInterval(countdownRef.current);
+          countdownRef.current = null;
+        }
+        setCountdown(0);
+      }
       setStep("quote");
     }
   }
@@ -413,9 +441,10 @@ export default function CashOutModal({
   // ---- render --------------------------------------------------------------
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
-      aria-label="Cash out to local currency"
+      aria-labelledby={headingId}
       style={{
         position: "fixed",
         inset: 0,
@@ -452,7 +481,13 @@ export default function CashOutModal({
             marginBottom: 20,
           }}
         >
-          <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
+          <h2
+            id={headingId}
+            ref={headingRef}
+            tabIndex={-1}
+            data-autofocus
+            style={{ margin: 0, fontSize: 15, fontWeight: 600, outline: "none" }}
+          >
             Cash out to {targetCurrency}
             {isMock && (
               <span
@@ -485,6 +520,18 @@ export default function CashOutModal({
           </button>
         </div>
 
+        {/* One persistent live region for in-flight states: it exists before its
+            text changes, which is what makes screen readers announce it. */}
+        <div role="status" className="visually-hidden">
+          {step === "loading"
+            ? "Loading payout requirements…"
+            : step === "confirming"
+              ? "Getting your quote…"
+              : step === "submitting"
+                ? "Submitting your cash-out…"
+                : ""}
+        </div>
+
         {/* Loading */}
         {step === "loading" && (
           <div style={{ textAlign: "center", padding: "32px 0", color: "var(--muted)" }}>
@@ -496,7 +543,7 @@ export default function CashOutModal({
         {/* Error */}
         {step === "error" && (
           <div>
-            <div className="err" style={{ marginBottom: 16 }}>
+            <div className="err" role="alert" style={{ marginBottom: 16 }}>
               {errorMsg}
             </div>
             <button className="btn btn--block" onClick={onClose}>
@@ -616,7 +663,7 @@ export default function CashOutModal({
 
             {/* General error */}
             {errorMsg && step === "form" && (
-              <div className="err" style={{ marginBottom: 14 }}>
+              <div className="err" role="alert" style={{ marginBottom: 14 }}>
                 {errorMsg}
               </div>
             )}
@@ -714,7 +761,7 @@ export default function CashOutModal({
             </div>
 
             {errorMsg && (
-              <div className="err" style={{ marginBottom: 14 }}>
+              <div className="err" role="alert" style={{ marginBottom: 14 }}>
                 {errorMsg}
               </div>
             )}
@@ -770,7 +817,12 @@ export default function CashOutModal({
         {/* The anchor is waiting for the asset. The seller's wallet sends it
             straight to the anchor; nothing passes through Quay. */}
         {step === "transfer" && transfer && (
-          <TransferStep transfer={transfer} linkId={linkId} onDone={onSuccess} />
+          <TransferStep
+            transfer={transfer}
+            linkId={linkId}
+            onDone={onSuccess}
+            onBusyChange={setTransferSending}
+          />
         )}
 
         {/* The anchor needs the seller in its own window. Opened from a real

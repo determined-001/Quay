@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import { Keypair } from "@stellar/stellar-sdk";
 import {
   resolveStellarConfig,
   StellarRail,
@@ -9,14 +9,17 @@ import {
 } from "@checkout/stellar";
 import {
   AnchorDiscovery,
+  AnchorOffRamp,
   DisabledOffRamp,
   MockAnchorOffRamp,
   NoKycRequired,
+  SelectingOffRamp,
   SellerAnchorAuth,
   TESTANCHOR_BASE_URL,
   TESTANCHOR_HOME_DOMAIN,
   TestAnchorKyc,
   deleteSep12Customer,
+  requireKycServer,
   TestAnchorOffRamp,
 } from "@checkout/offramp";
 import type {
@@ -28,17 +31,19 @@ import type {
   OffRampTelemetryRepository,
   RailPort,
   RateSourcePort,
+  PrefillConsentRepository,
   SellerProfileRepository,
   WebhookRepository,
 } from "@checkout/core";
 import { KycConsentRepository } from "@checkout/core";
-import { env, type OffRampKind } from "../env";
+import { env } from "../env";
 import { createDb, bootstrap, type DB } from "../db/client";
 import { parsePiiKey, parsePiiKeyring } from "../crypto/pii";
 import { metrics } from "../metrics";
 import { createLogger } from "../logger";
 import { WebhookSender } from "./webhook-sender";
 import { KycEvents } from "./kyc-events";
+import { createClientDomainSigner } from "./client-domain-signer";
 import {
   DrizzleLinkRepository,
   DrizzleSellerRepository,
@@ -51,10 +56,13 @@ import {
   DrizzleApiKeyRepository,
   DrizzleAnchorSessionRepository,
   ANCHOR_SESSION_SWEEP_GRACE_MS,
+  DrizzleAnchorRepository,
   DrizzleKycConsentRepository,
+  DrizzlePrefillConsentRepository,
   DrizzleSellerProfileRepository,
 } from "../repos/index";
-import { LinkService, AnchorHealth } from "./link-service";
+import { LinkService } from "./link-service";
+import { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
 import {
   WatcherLoop,
   startCashOutPoller,
@@ -74,6 +82,12 @@ import { assertKeyConfigured } from "./secret-crypto";
 import { createRateSource } from "./rate-source";
 import { guardWebhookUrl } from "./ssrf-guard";
 import { runKycRetentionSweep } from "./kyc-retention";
+import { AnchorRegistry, seedAnchorsFromEnv, type AnchorRecord } from "./anchor-registry";
+import { newId } from "./ids";
+import { PiiAuditService, runPiiAuditSweep, type PiiAuditRecorder } from "./pii-audit";
+
+/** `pii_audit.actor_id` for reads of the seller's stored values to pre-fill an anchor's SEP-24 form. */
+const SEP24_PREFILL_ACTOR = "sep24-prefill";
 
 export interface Container {
   service: LinkService;
@@ -86,16 +100,26 @@ export interface Container {
   kyc: KycPort;
   /** Per-anchor KYC consent repository. */
   kycConsents: KycConsentRepository;
+  /** Fields a seller agreed to share with an anchor to pre-fill its SEP-24 form (issue 3.17). Optional so partial test containers stay valid. */
+  prefillConsents?: PrefillConsentRepository;
   /** The seller's reusable SEP-9 profile (issue 4.23). Null unless a real anchor and
    *  KYC_ENCRYPTION_KEY are configured, since values are encrypted with that key. */
   sellerProfile?: SellerProfileRepository | null;
   /** The anchor's home domain (e.g. "testanchor.stellar.org") for consent tracking. Null when no real anchor. */
   anchorDomain: string | null;
   kycRepo?: DrizzleKycRepository | null;
+  /** Audit log of access to seller identity data (issue 8.15). Optional so partial test containers stay valid. */
+  piiAudit?: PiiAuditService;
   /** Sellers' own SEP-10 sessions with the anchor. Null when there is no real
    *  anchor (OFFRAMP=mock|none), so nothing to sign in to. */
   anchorAuth: SellerAnchorAuth | null;
-  deleteAnchorCustomer?: ((customer: AnchorCustomer) => Promise<"deleted" | "not_found">) | null;
+  /** The anchors the deployment can cash out through (issue 3.21). Null for mock / none. */
+  anchors?: AnchorRegistry | null;
+  /** Home domains of every registered anchor (enabled or not), for erasure across all of them. */
+  anchorDomains?: () => Promise<string[]>;
+  anchorSessions?: DrizzleAnchorSessionRepository | null;
+  /** Asks one anchor (the default when `anchorDomain` is omitted) to erase the seller's SEP-12 customer. */
+  deleteAnchorCustomer?: ((customer: AnchorCustomer, anchorDomain?: string) => Promise<"deleted" | "not_found">) | null;
   telemetry: OffRampTelemetryRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string | null; kycStatusCacheMs?: number };
   horizonStatus(): HorizonStatus;
@@ -119,7 +143,7 @@ export interface Container {
     allowedOrigins: string[];
   };
   start(): void;
-  stop(): void;
+  stop(): void | Promise<void>;
   /** Readiness probe: can this instance actually serve traffic right now (i.e. is the database reachable)? Distinct from liveness (`/health`) - a process can be alive but not yet/no-longer able to serve. */
   ready(): Promise<boolean>;
   getWatcherCircuitBreakerStatus(): AccountCircuitBreakerStatus[];
@@ -153,7 +177,7 @@ export async function createContainer(): Promise<Container> {
   const { db, client } = createDb(env.databaseUrl, env.databaseAuthToken);
   // A real anchor's home domain attributes pre-4.24 seller_kyc rows to it; with
   // none configured they stay "legacy" and are never reused for a customer id.
-  await bootstrap(client, {
+  await bootstrap(client, db, {
     kycAnchorDomain:
       env.offramp === "testanchor" || env.offramp === "anchor"
         ? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN
@@ -177,11 +201,13 @@ export async function createContainer(): Promise<Container> {
   const offrampStateRepo = new DrizzleOffRampStateRepository(db);
   const telemetryRepo = new DrizzleOfframpTelemetryRepository(db);
   const apiKeysRepo = new DrizzleApiKeyRepository(db);
-  const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db);
+  const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db, logger);
   const kycConsentsRepo = new DrizzleKycConsentRepository(db);
+  const prefillConsentsRepo = new DrizzlePrefillConsentRepository(db);
   const kycKeyring = env.kycEncryptionKey
     ? parsePiiKeyring(env.kycEncryptionKey, env.kycEncryptionKeyPrevious)
     : null;
+  const piiAuditService = new PiiAuditService(db, logger);
   const kycRepo = kycKeyring ? new DrizzleKycRepository(db, kycKeyring) : null;
 
   // Optional. Quay is multi-tenant: a seller signs in with their own wallet
@@ -225,39 +251,91 @@ export async function createContainer(): Promise<Container> {
     env.watchMode === "stream"
       ? new StreamingHorizonWatcher(stellar.horizonUrl, { log: (m) => console.log(`[watcher:stream] ${m}`) })
       : pollingWatcher;
-  const anchor = createAnchor(db, logger, stellar.networkPassphrase, anchorSessionsRepo);
-  // Built before the off-ramp so a misconfigured rate source is a boot failure.
-  const rateSource = await createRateSource({
-    kind: env.offrampRateSource,
-    anchorDomain: anchor?.discovery.homeDomain ?? null,
-    offramp: env.offramp,
-    ...(env.offrampRate ? { rate: env.offrampRate } : {}),
-    ...(env.offrampRateExpiresAt ? { rateExpiresAt: env.offrampRateExpiresAt } : {}),
-    ...(env.offrampRateCurrency ? { currency: env.offrampRateCurrency } : {}),
-    ...(env.offrampRateSourceAsset ? { sourceAsset: env.offrampRateSourceAsset } : {}),
-    ...(env.offrampRateUrl ? { url: env.offrampRateUrl } : {}),
-    ...(env.offrampRateJsonPath ? { jsonPath: env.offrampRateJsonPath } : {}),
-    // Same SSRF guard as seller-supplied webhook URLs: operator config is still
-    // an outbound request to a hostname.
-    guard: guardWebhookUrl,
-    resolveQuoteServer: async () => (await anchor?.discovery.get())?.anchorQuoteServer ?? null,
-  });
-  const offramp = new CircuitBreakerOffRamp(createOffRamp(anchor, offrampStateRepo, logger, rateSource));
-  const kycAnchorDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
-  const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
-  const kyc = createKyc(anchor, kycRepo, sellersRepo, webhooksRepo, webhookSender, kycAnchorDomain, logger);
-  const sellerProfileRepo = await createSellerProfile(anchor, db, logger);
-  const anchorDomain = anchor?.auth.anchorDomain ?? null;
-
-  // Anchor health probe + circuit breaker (issue #19, 3.7). With mock or no
-  // off-ramp the probe is disabled and short-circuits to "always available" so
-  // the surface still works offline; for testanchor/anchor we hit the real
-  // anchor.
-  const anchorHealth = buildAnchorHealth(env.offramp, sellerWallet);
-
   // The platform's stable SEP-10 identity: the key wallets authenticate
-  // against and the SIGNING_KEY advertised in stellar.toml.
+  // against and the SIGNING_KEY advertised in stellar.toml. Resolved before the
+  // anchor wiring so the SEP-10 client_domain co-signer can be built from it.
   const serverKeypair = resolveServerSigningKeypair();
+  const realAnchors = env.offramp === "testanchor" || env.offramp === "anchor";
+  const webhookSender = new WebhookSender(webhooksRepo, { maxAttempts: 1, logger });
+  // Anchor health probe + circuit breaker (issue #19, 3.7; per-anchor registry
+  // issue 3.23). Empty for mock/none, where every anchor reads as available;
+  // each real anchor registers its own probe when the registry builds it.
+  const anchorHealth = new AnchorHealthRegistry();
+
+  // Anchors (issue 3.21). A deployment that predates the table gets one row
+  // seeded from the environment on its first boot, so it keeps working
+  // unchanged; after that the table is the source of truth.
+  const anchorsRepo = new DrizzleAnchorRepository(db);
+  let anchorRegistry: AnchorRegistry | null = null;
+  if (realAnchors) {
+    const envDomain = env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN;
+    const seeded = await seedAnchorsFromEnv(
+      anchorsRepo,
+      {
+        offramp: env.offramp,
+        homeDomain: envDomain,
+        baseUrl: env.anchorUrl ?? TESTANCHOR_BASE_URL,
+        protocol: env.offrampProtocol,
+        withdrawType: env.offrampType,
+        rateSource: env.offrampRateSource,
+      },
+      () => newId("anc"),
+    );
+    if (seeded) {
+      logger.info({ event: "anchors.seeded", anchor: seeded.homeDomain }, "seeded the anchors table from the environment");
+    } else {
+      warnIfEnvAnchorDiverges(await anchorsRepo.list(), envDomain, logger);
+    }
+    anchorRegistry = new AnchorRegistry({
+      repo: anchorsRepo,
+      preferredDomain: envDomain,
+      logger,
+      build: async (record) => {
+        const wiring = createAnchor(record, logger, stellar.networkPassphrase, serverKeypair, anchorSessionsRepo);
+        // A misconfigured rate source fails the build: at boot that stops the process.
+        const rateSource = await createRateSource({
+          kind: record.rateSource ?? undefined,
+          anchorDomain: record.homeDomain,
+          offramp: env.offramp,
+          ...(env.offrampRate ? { rate: env.offrampRate } : {}),
+          ...(env.offrampRateExpiresAt ? { rateExpiresAt: env.offrampRateExpiresAt } : {}),
+          ...(env.offrampRateCurrency ? { currency: env.offrampRateCurrency } : {}),
+          ...(env.offrampRateSourceAsset ? { sourceAsset: env.offrampRateSourceAsset } : {}),
+          ...(env.offrampRateUrl ? { url: env.offrampRateUrl } : {}),
+          ...(env.offrampRateJsonPath ? { jsonPath: env.offrampRateJsonPath } : {}),
+          // Same SSRF guard as seller-supplied webhook URLs: operator config is still
+          // an outbound request to a hostname.
+          guard: guardWebhookUrl,
+          resolveQuoteServer: async () => (await wiring.discovery.get()).anchorQuoteServer ?? null,
+        });
+        const kyc = createKyc(wiring, kycRepo, sellersRepo, webhooksRepo, webhookSender, record.homeDomain, logger);
+        const offramp = new CircuitBreakerOffRamp(
+          createOffRamp(wiring, record, offrampStateRepo, logger, rateSource, {
+            kycRepo,
+            consents: prefillConsentsRepo,
+            resolveType: (customer) => kyc.resolveType?.(customer) ?? Promise.resolve(null),
+            audit: piiAuditService,
+          }),
+          { anchor: record.homeDomain },
+        );
+        const health = buildAnchorHealth(record, sellerWallet, wiring.discovery, logger);
+        anchorHealth.register(record.homeDomain, health);
+        return { discovery: wiring.discovery, auth: wiring.auth, offramp, kyc, health };
+      },
+    });
+    // Strict: a misconfigured enabled anchor stops the boot rather than a cash-out.
+    await anchorRegistry.warm();
+  }
+  const defaultAnchor = anchorRegistry ? await anchorRegistry.fallback() : null;
+
+  // No anchors (mock / none), or none enabled: the single-adapter fields below
+  // are never reached through the router; they keep today's mock / none behaviour.
+  const offramp = defaultAnchor
+    ? defaultAnchor.offramp
+    : new CircuitBreakerOffRamp(createOffRamp(null, null, offrampStateRepo, logger, null, null), {});
+  const kyc: KycPort = defaultAnchor ? defaultAnchor.kyc : new NoKycRequired();
+  const sellerProfileRepo = await createSellerProfile(realAnchors, db, logger);
+  const anchorDomain = defaultAnchor?.record.homeDomain ?? null;
 
   const service = new LinkService({
     links: linksRepo,
@@ -271,9 +349,17 @@ export async function createContainer(): Promise<Container> {
     operatorWallet: sellerWallet ?? undefined,
     telemetry: telemetryRepo,
     health: anchorHealth,
+    anchorDomain: defaultAnchor?.record.homeDomain,
+    ...(anchorRegistry ? { anchors: anchorRegistry } : {}),
     correlation: env.correlation,
     interactiveTimeoutMs: env.offrampInteractiveTimeoutMs,
     logger,
+    // sessionExpiry is async: comparing the bare Promise to null was always true,
+    // so the poller's pre-check never blocked on an expired session.
+    hasLiveAnchorSession: anchorRegistry
+      ? (customer, anchorLabel) => anchorRegistry.hasLiveSession(customer, anchorLabel)
+      : undefined,
+    piiAudit: piiAuditService,
   });
 
   // A link stuck in `offramp_pending` whose job has no row in offramp_jobs was
@@ -326,6 +412,7 @@ export async function createContainer(): Promise<Container> {
   let stopPoller: (() => void) | null = null;
   let stopRevocationSweep: (() => void) | null = null;
   let stopRetentionSweep: (() => void) | null = null;
+  let stopAuditSweep: (() => void) | null = null;
   let stopProbe: (() => void) | null = null;
 
   return {
@@ -338,15 +425,24 @@ export async function createContainer(): Promise<Container> {
     db,
     kyc,
     kycConsents: kycConsentsRepo,
+    prefillConsents: prefillConsentsRepo,
     sellerProfile: sellerProfileRepo,
     anchorDomain,
     kycRepo,
-    anchorAuth: anchor?.auth ?? null,
-    deleteAnchorCustomer: anchor ? async (customer) => {
-      const jwt = await anchor.auth.token(customer);
-      const { kycServer } = await anchor.discovery.get();
-      return deleteSep12Customer(kycServer, jwt, customer.account);
-    } : null,
+    piiAudit: piiAuditService,
+    anchorAuth: defaultAnchor?.auth ?? null,
+    anchors: anchorRegistry,
+    anchorDomains: anchorRegistry ? async () => (await anchorRegistry.list()).map((r) => r.homeDomain) : undefined,
+    anchorSessions: anchorSessionsRepo,
+    deleteAnchorCustomer: anchorRegistry
+      ? async (customer, domain) => {
+          const entry = domain ? await anchorRegistry.byDomain(domain) : await anchorRegistry.fallback();
+          if (!entry) throw new Error(`unknown anchor ${domain ?? "(default)"}`);
+          const jwt = await entry.auth.token(customer);
+          const kycServer = requireKycServer(await entry.discovery.get());
+          return deleteSep12Customer(kycServer, jwt, customer.account);
+        }
+      : null,
     telemetry: telemetryRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet, kycStatusCacheMs: env.kycStatusCacheMs },
     horizonStatus: () => pollingWatcher.getStatus(),
@@ -385,7 +481,7 @@ export async function createContainer(): Promise<Container> {
       }
       const sweepTimer = setInterval(() => {
         void revocationsRepo.sweepExpired(Math.floor(Date.now() / 1000));
-        if (anchor) {
+        if (realAnchors) {
           void anchorSessionsRepo
             .sweepExpired(Date.now(), ANCHOR_SESSION_SWEEP_GRACE_MS)
             .then((count) => {
@@ -399,6 +495,15 @@ export async function createContainer(): Promise<Container> {
         }
       }, 60 * 60 * 1000); // hourly — revocation rows are cheap and self-limiting (max 24h lifetime) anyway
       stopRevocationSweep = () => clearInterval(sweepTimer);
+
+      // Audit rows are kept for two years, then deleted. Runs daily and is not
+      // configurable: shortening it would defeat the point of the log.
+      const auditTimer = setInterval(() => {
+        void runPiiAuditSweep({ db, logger }).catch((err) => {
+          logger.error({ err }, "pii audit retention sweep error");
+        });
+      }, 24 * 60 * 60 * 1000);
+      stopAuditSweep = () => clearInterval(auditTimer);
 
       if (env.kycRetentionDays > 0) {
         const sweepKyc = () => {
@@ -421,6 +526,7 @@ export async function createContainer(): Promise<Container> {
       stopPoller?.();
       stopRevocationSweep?.();
       stopRetentionSweep?.();
+      stopAuditSweep?.();
       if (watcher instanceof StreamingHorizonWatcher) watcher.stop();
       stopProbe?.();
       stopPoller = null;
@@ -446,29 +552,59 @@ export async function createContainer(): Promise<Container> {
 }
 
 /**
- * Build an AnchorHealth with sensible defaults anchored at the public Stellar
- * testnet reference sandbox. Caller can override via env (read raw — we keep
- * the surface minimal and don't pollute env.ts which lives outside the
- * scope of issue 3.7).
+ * One anchor's health probe + circuit breaker. Defaults come from env (read
+ * raw — we keep the surface minimal and don't pollute env.ts which lives
+ * outside the scope of issue 3.7). Issue 3.23 keys the registry by home domain
+ * so a second anchor gets its own breaker; the caller registers this one.
  */
-function buildAnchorHealth(offrampKind: OffRampKind, probeAccount: string | null): AnchorHealth {
-  const enabled = offrampKind === "testanchor" || offrampKind === "anchor";
-  // For OFFRAMP=anchor env.ts already required both of these, so the ??
-  // fallbacks only ever apply to the testanchor sandbox preset.
-  const url = enabled ? env.anchorUrl ?? TESTANCHOR_BASE_URL : null;
-  const homeDomain = enabled ? env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN : null;
+function buildAnchorHealth(
+  record: AnchorRecord,
+  probeAccount: string | null,
+  discovery: AnchorDiscovery,
+  logger: Logger,
+): AnchorHealth {
   const failureThreshold = Number(process.env.ANCHOR_PROBE_FAILURE_THRESHOLD ?? "3");
   const cooldownMs = Number(process.env.ANCHOR_PROBE_COOLDOWN_MS ?? "30000");
   return new AnchorHealth({
-    enabled,
-    url,
-    homeDomain,
+    enabled: true,
+    url: record.baseUrl,
+    homeDomain: record.homeDomain,
     // The configured seller wallet is a real, funded account, which is what the
-    // anchor requires to issue a challenge.
-    probeAccount: enabled ? probeAccount : null,
+    // anchor requires to issue a challenge. With no wallet configured the probe
+    // generates one per tick and reports SEP-10 as "skipped" if declined.
+    probeAccount,
     failureThreshold: Number.isFinite(failureThreshold) && failureThreshold > 0 ? failureThreshold : 3,
     cooldownMs: Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : 30_000,
+    discovery,
+    logger,
   });
+}
+
+/**
+ * The first boot after the `anchors` table exists is the only time the env
+ * names an anchor to the table. If a later boot's env disagrees with the row,
+ * say so once, so an operator editing `.env` is not left wondering why nothing
+ * changed.
+ */
+function warnIfEnvAnchorDiverges(records: AnchorRecord[], envDomain: string, logger: Logger): void {
+  const row = records.find((r) => r.homeDomain.toLowerCase() === envDomain.toLowerCase());
+  if (!row) {
+    logger.warn(
+      { event: "anchors.env_anchor_unregistered", anchor: envDomain },
+      "ANCHOR_HOME_DOMAIN names an anchor that is not in the anchors table; add it with scripts/anchors.mjs",
+    );
+    return;
+  }
+  const differs: string[] = [];
+  if (row.protocol !== env.offrampProtocol) differs.push("OFFRAMP_PROTOCOL");
+  if ((row.withdrawType ?? undefined) !== env.offrampType) differs.push("OFFRAMP_TYPE");
+  if ((row.rateSource ?? undefined) !== env.offrampRateSource) differs.push("OFFRAMP_RATE_SOURCE");
+  if (differs.length > 0) {
+    logger.warn(
+      { event: "anchors.env_ignored", anchor: row.homeDomain, settings: differs },
+      "these env settings only seed the anchors table on first boot; the stored row is in force",
+    );
+  }
 }
 
 /**
@@ -521,27 +657,40 @@ interface AnchorWiring {
  * a seller's funds.
  */
 function createAnchor(
-  db: DB,
+  record: AnchorRecord,
   logger: Logger,
   networkPassphrase: string,
-  sessions: DrizzleAnchorSessionRepository = new DrizzleAnchorSessionRepository(db),
-): AnchorWiring | null {
-  if (env.offramp !== "testanchor" && env.offramp !== "anchor") return null;
-  // For OFFRAMP=anchor env.ts already required both; the fallbacks are the
-  // testanchor sandbox preset.
+  serverSigningKeypair: Keypair,
+  sessions: DrizzleAnchorSessionRepository,
+): AnchorWiring {
   const discovery = new AnchorDiscovery({
-    homeDomain: env.anchorHomeDomain ?? TESTANCHOR_HOME_DOMAIN,
-    fallbackBaseUrl: env.anchorUrl ?? TESTANCHOR_BASE_URL,
+    homeDomain: record.homeDomain,
+    fallbackBaseUrl: record.baseUrl,
     // SEP-1 discovery refuses an anchor declaring a different network, so a
     // mainnet deployment cannot quote against a testnet anchor by mistake.
     expectedNetworkPassphrase: networkPassphrase,
     logger,
   });
+  // SEP-10 client_domain (issue 3.12): off by default. When on, the anchor is
+  // asked for a client_domain op and Quay's SEP-10 identity co-signs it so the
+  // anchor can attribute the seller. The signer holds Quay's login key, which
+  // moves no funds; see client-domain-signer.ts.
+  const clientDomain = env.anchorClientDomain
+    ? {
+        clientDomain: env.homeDomain,
+        signClientDomain: createClientDomainSigner({
+          keypair: serverSigningKeypair,
+          networkPassphrase,
+          clientDomain: env.homeDomain,
+        }),
+      }
+    : {};
   const auth = new SellerAnchorAuth({
     discovery,
     networkPassphrase,
     sessions,
     logger,
+    ...clientDomain,
   });
   return { discovery, auth };
 }
@@ -553,30 +702,80 @@ function createAnchor(
  */
 function createOffRamp(
   anchor: AnchorWiring | null,
+  record: AnchorRecord | null,
   state: OffRampStateRepository,
   logger: Logger,
   rateSource: RateSourcePort | null,
+  prefill: {
+    kycRepo: DrizzleKycRepository | null;
+    consents: PrefillConsentRepository;
+    resolveType: (customer: AnchorCustomer) => Promise<string | null>;
+    audit: PiiAuditRecorder;
+  } | null,
 ): OffRampPort {
   if (env.offramp === "none") {
     // No cash-out leg. Every method throws OffRampDisabledError, which the
     // routes translate to 501 — see packages/offramp/src/disabled.ts.
     return new DisabledOffRamp();
   }
-  if (!anchor) {
+  if (!anchor || !record || !prefill) {
     // Demo off-ramp: settles 8s after a seller triggers cash-out. NOT a real anchor.
     return new MockAnchorOffRamp({ state, settleAfterMs: 8000 });
   }
-  return new TestAnchorOffRamp({
+  // Present only when OFFRAMP_RATE_SOURCE is configured. With no rate source,
+  // an anchor that declares no ANCHOR_QUOTE_SERVER refuses to quote rather
+  // than being handed a made-up number.
+  const rate = rateSource ? { rateSource } : {};
+  const selecting = new SelectingOffRamp({
     discovery: anchor.discovery,
-    auth: anchor.auth,
+    protocol: record.protocol,
+    sep6: new TestAnchorOffRamp({
+      discovery: anchor.discovery,
+      auth: anchor.auth,
+      state,
+      preferredWithdrawType: record.withdrawType ?? undefined,
+      ...rate,
+      logger,
+    }),
+    sep24: new AnchorOffRamp({
+      discovery: anchor.discovery,
+      auth: anchor.auth,
+      state,
+      ...rate,
+      // SEP-24 form prefill needs the encrypted KYC store, i.e. KYC_ENCRYPTION_KEY (always set with a real anchor).
+      ...(prefill.kycRepo
+        ? {
+            prefill: {
+              kyc: prefill.kycRepo,
+              consents: prefill.consents,
+              resolveType: prefill.resolveType,
+              audit: async (customer: AnchorCustomer, fields: readonly string[]) =>
+                prefill.audit.record({
+                  sellerId: customer.sellerId,
+                  actorType: "system",
+                  actorId: SEP24_PREFILL_ACTOR,
+                  action: "kyc.read",
+                  fields,
+                }),
+            },
+          }
+        : {}),
+      logger,
+    }),
     state,
-    preferredWithdrawType: env.offrampType,
-    // Present only when OFFRAMP_RATE_SOURCE is configured. With no rate source,
-    // an anchor that declares no ANCHOR_QUOTE_SERVER refuses to quote rather
-    // than being handed a made-up number.
-    ...(rateSource ? { rateSource } : {}),
     logger,
   });
+  // Settle the protocol (and log `offramp.protocol`) now rather than on the
+  // first cash-out. Never fatal and never awaited: an unreachable anchor must
+  // not stop the API booting, and a misdeclared one is reported again, with the
+  // declared list, on the first call that needs the protocol.
+  selecting.protocol().catch((err: unknown) => {
+    logger.warn(
+      { event: "offramp.protocol.unresolved", error: err instanceof Error ? err.message : String(err) },
+      "could not settle the off-ramp protocol at boot",
+    );
+  });
+  return selecting;
 }
 
 /**
@@ -586,11 +785,11 @@ function createOffRamp(
  * once; the migration is idempotent and logs counts, never values.
  */
 async function createSellerProfile(
-  anchor: AnchorWiring | null,
+  hasAnchor: boolean,
   db: DB,
   logger: Logger,
 ): Promise<DrizzleSellerProfileRepository | null> {
-  if (!anchor) return null;
+  if (!hasAnchor) return null;
   const keyring = parsePiiKeyring(env.kycEncryptionKey as string, env.kycEncryptionKeyPrevious);
   const repo = new DrizzleSellerProfileRepository(db, keyring);
   const result = await repo.migrateFromSellerKyc();
@@ -602,7 +801,7 @@ async function createSellerProfile(
 }
 
 function createKyc(
-  anchor: AnchorWiring | null,
+  anchor: AnchorWiring,
   repo: DrizzleKycRepository | null,
   sellersRepo: DrizzleSellerRepository,
   webhooks: WebhookRepository | undefined,
@@ -643,6 +842,9 @@ function createKyc(
     repo,
     profileRepo,
     callbackBaseUrl,
+    kycType: env.anchorKycType,
+    kycTypeOrganization: env.anchorKycTypeOrganization,
+    profileKindOf: async (sellerId) => (await sellersRepo.findById(sellerId))?.profileKind ?? null,
     logger,
   });
   if (webhooks && sender && anchorDomain) {

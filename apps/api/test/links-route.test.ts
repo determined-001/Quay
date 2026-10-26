@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { NOOP_LOGGER, OffRampDisabledError, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
-import { DisabledOffRamp } from "@checkout/offramp";
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
-import { HttpError, LinkService } from "../src/services/link-service";
+import { HttpError } from "../src/services/link-service";
 
 const owner: Seller = { id: "sel_owner", name: "Owner", wallet: "GOWNER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
 const other: Seller = { id: "sel_other", name: "Other", wallet: "GOTHER", profileKind: "individual", payoutFields: null, createdAt: Date.now() };
@@ -235,6 +234,36 @@ describe("POST /links/:id/submit — public wallet relay", () => {
   });
 });
 
+describe("cash-out routes — offramp_disabled (OFFRAMP=none)", () => {
+  function appThatIsDisabled() {
+    const container = fakeContainer();
+    const service = container.service as unknown as Record<string, unknown>;
+    const disabled = async () => {
+      throw new OffRampDisabledError("disabled");
+    };
+    service.getOfframpRequirements = disabled;
+    service.quoteCashOut = disabled;
+    service.triggerCashOut = disabled;
+    return { container, app: linkRoutes(container, async (_c, next) => next()) };
+  }
+
+  it.each([
+    ["GET", "/offramp-requirements"],
+    ["GET", "/cash-out/quote?targetCurrency=NGN"],
+    ["POST", "/cash-out"],
+  ])("%s %s answers 501 offramp_disabled, not a 502 anchor_error", async (method, path) => {
+    const { container, app } = appThatIsDisabled();
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(`/${ownedLink.id}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      ...(method === "POST" ? { body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }) } : {}),
+    });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toMatchObject({ error: "offramp_disabled" });
+  });
+});
+
 describe("cash-out routes — offramp_rejected", () => {
   const rejection = () =>
     new HttpError(422, "offramp_rejected", {
@@ -276,76 +305,67 @@ describe("cash-out routes — offramp_rejected", () => {
     expect(res.status).toBe(422);
     expect(await res.json()).toMatchObject({ error: "offramp_rejected", limits: { maxAmount: 10 } });
   });
-});
 
-describe("cash-out routes — offramp_disabled (OFFRAMP=none)", () => {
-  function appWithDisabledOfframp() {
+  it("GET /:id/cash-out/quote normalises lower-case targetCurrency to upper-case before calling quoteCashOut", async () => {
     const container = fakeContainer();
-    const service = new LinkService({
-      links: {
-        findById: async (id: string) => (id === ownedLink.id ? { ...ownedLink, status: "paid" } : null),
-        get: async (id: string) => (id === ownedLink.id ? { ...ownedLink, status: "paid" } : null),
-        save: async () => {},
-        update: async () => {},
-      } as any,
-      sellers: container.sellers,
-      webhooks: { enqueue: async () => {} } as any,
-      rail: { assertCanReceive: async () => {}, buildRequest: () => ({} as any), isValidDestination: () => true } as any,
-      offramp: new DisabledOffRamp(),
-      offrampState: { saveQuote: async () => {}, getQuote: async () => null, saveJob: async () => {}, getJob: async () => null } as any,
-      kyc: { status: async () => ({ status: "ACCEPTED" }) } as any,
-      stellar: {
-        network: "testnet",
-        horizonUrl: "https://horizon-testnet.stellar.org",
-        networkPassphrase: "Test SDF Network ; September 2015",
-        usdcIssuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
-      },
-      telemetry: { upsert: async () => {} } as any,
-      correlation: "memo",
-    });
-    (container as any).service = service;
-    return { container, app: linkRoutes(container, async (_c, next) => next()) };
-  }
-
-  it("GET /:id/offramp-requirements returns 501 offramp_disabled", async () => {
-    const { container, app } = appWithDisabledOfframp();
+    let quotedCurrency: string | undefined;
+    (container.service as unknown as Record<string, unknown>).quoteCashOut = async (
+      _linkId: string,
+      currency: string,
+    ) => {
+      quotedCurrency = currency;
+      return { grossAmount: "100", feeAmount: "2", netAmount: "98", rate: "1650", expiresAt: 1750000000000 };
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
     const token = await tokenFor(container.auth.session, owner.id);
-    const res = await app.request(`/${ownedLink.id}/offramp-requirements`, {
+    const res = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=ngn`, {
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(res.status).toBe(501);
-    expect(await res.json()).toEqual({
-      error: "offramp_disabled",
-      message: "This deployment has no cash-out leg. Payments settle directly to the seller's wallet.",
-    });
+    expect(res.status).toBe(200);
+    expect(quotedCurrency).toBe("NGN");
   });
 
-  it("GET /:id/cash-out/quote returns 501 offramp_disabled", async () => {
-    const { container, app } = appWithDisabledOfframp();
+  it("GET /:id/cash-out/quote rejects malformed or missing targetCurrency without calling quoteCashOut", async () => {
+    const container = fakeContainer();
+    let quoteCalled = false;
+    (container.service as unknown as Record<string, unknown>).quoteCashOut = async () => {
+      quoteCalled = true;
+      return {};
+    };
+    const app = linkRoutes(container, async (_c, next) => next());
     const token = await tokenFor(container.auth.session, owner.id);
-    const res = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=NGN`, {
+
+    // Empty targetCurrency
+    const emptyRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=`, {
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(res.status).toBe(501);
-    expect(await res.json()).toEqual({
-      error: "offramp_disabled",
-      message: "This deployment has no cash-out leg. Payments settle directly to the seller's wallet.",
-    });
-  });
+    expect(emptyRes.status).toBe(400);
+    expect(await emptyRes.json()).toMatchObject({ error: "invalid_query", message: "targetCurrency is required" });
+    expect(quoteCalled).toBe(false);
 
-  it("POST /:id/cash-out returns 501 offramp_disabled", async () => {
-    const { container, app } = appWithDisabledOfframp();
-    const token = await tokenFor(container.auth.session, owner.id);
-    const res = await app.request(`/${ownedLink.id}/cash-out`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }),
+    // Too short (2 letters)
+    const shortRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=NG`, {
+      headers: { authorization: `Bearer ${token}` },
     });
-    expect(res.status).toBe(501);
-    expect(await res.json()).toEqual({
-      error: "offramp_disabled",
-      message: "This deployment has no cash-out leg. Payments settle directly to the seller's wallet.",
+    expect(shortRes.status).toBe(400);
+    expect(await shortRes.json()).toMatchObject({ error: "invalid_query", issues: expect.any(Array) });
+    expect(quoteCalled).toBe(false);
+
+    // Too long (4 letters)
+    const longRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=NGNN`, {
+      headers: { authorization: `Bearer ${token}` },
     });
+    expect(longRes.status).toBe(400);
+    expect(await longRes.json()).toMatchObject({ error: "invalid_query", issues: expect.any(Array) });
+    expect(quoteCalled).toBe(false);
+
+    // Non-alphabetical
+    const nonAlphaRes = await app.request(`/${ownedLink.id}/cash-out/quote?targetCurrency=123`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(nonAlphaRes.status).toBe(400);
+    expect(await nonAlphaRes.json()).toMatchObject({ error: "invalid_query", issues: expect.any(Array) });
+    expect(quoteCalled).toBe(false);
   });
 });
 

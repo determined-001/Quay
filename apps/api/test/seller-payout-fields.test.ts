@@ -1,10 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createDb, bootstrap } from "../src/db/client";
 import { DrizzleSellerRepository } from "../src/repos/index";
-import { parsePiiKey, encryptPii } from "../src/crypto/pii";
-import { sellers } from "../src/db/schema";
-import { eq } from "drizzle-orm";
-import { createLogger } from "../src/logger";
+import { parsePiiKey } from "../src/crypto/pii";
 
 const TEST_KEY_HEX = "a".repeat(64);
 const OTHER_KEY_HEX = "b".repeat(64);

@@ -147,6 +147,38 @@ describe("DELETE /seller/profile (issue 239)", () => {
     h.container.client.close();
   });
 
+  it("asks every registered anchor to erase, enabled or not, and reports each (issue 3.21)", async () => {
+    const asked: Array<string | undefined> = [];
+    const container = await createTestContainer();
+    const key = randomBytes(32);
+    const app = profileRoutes({
+      ...container,
+      sellerProfile: new DrizzleSellerProfileRepository(container.db, key),
+      anchorDomain: DOMAIN,
+      anchorDomains: async () => [DOMAIN, "second.example", "disabled.example"],
+      deleteAnchorCustomer: async (_c: AnchorCustomer, domain?: string) => {
+        asked.push(domain);
+        if (domain === "second.example") throw new AnchorAuthRequiredError(domain);
+        return "deleted";
+      },
+    } as unknown as Container);
+    const token = await container.tokenFor(container.seller.id, container.seller.wallet);
+    const res = await app.request("/", {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ confirm: container.seller.wallet }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(asked).toEqual([DOMAIN, "second.example", "disabled.example"]);
+    expect(((await res.json()) as any).anchors).toEqual([
+      { anchorDomain: DOMAIN, result: "erased" },
+      { anchorDomain: "second.example", result: "not_attempted:no_session" },
+      { anchorDomain: "disabled.example", result: "erased" },
+    ]);
+    container.client.close();
+  });
+
   it("still completes when the anchor holds nothing (404)", async () => {
     const h = await harness(async () => "not_found");
     const res = await h.erase({ confirm: h.seller.wallet });

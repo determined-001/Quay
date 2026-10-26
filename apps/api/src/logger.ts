@@ -55,6 +55,9 @@ export const REDACT_PATHS: string[] = [
   "*.payoutFieldsJson",
   "payoutFieldsEncrypted",
   "*.payoutFieldsEncrypted",
+  // SEP-24 interactive prefill: SEP-9 values handed to the anchor (issue 3.17)
+  "prefill",
+  "*.prefill",
   // SEP-12 KYC PII — every field is personal data
   ...kycRedactionPaths(SEP9_SENSITIVE_FIELD_NAMES),
   "fields",

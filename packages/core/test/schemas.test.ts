@@ -1,360 +1,251 @@
-import { describe, expect, it } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   assetCodeSchema,
-  cashOutSchema,
-  createLinkSchema,
-  listWebhookDeliveriesQuerySchema,
-  registerWebhookSchema,
   submitPaymentSchema,
+  createLinkSchema,
+  registerWebhookSchema,
+  listWebhookDeliveriesQuerySchema,
+  cashOutSchema,
+  cashOutQuoteQuerySchema,
+  currencyCodeSchema,
   transferSentSchema,
 } from "../src/schemas";
 
+// ── assetCodeSchema ──────────────────────────────────────────────────────────
+
 describe("assetCodeSchema", () => {
-  it("accepts allowed asset codes", () => {
+  it("accepts the two MVP assets", () => {
     expect(assetCodeSchema.safeParse("USDC").success).toBe(true);
     expect(assetCodeSchema.safeParse("XLM").success).toBe(true);
   });
 
-  it("rejects unlisted asset codes and invalid types", () => {
-    expect(assetCodeSchema.safeParse("EUR").success).toBe(false);
-    expect(assetCodeSchema.safeParse("").success).toBe(false);
-    expect(assetCodeSchema.safeParse(123).success).toBe(false);
-    expect(assetCodeSchema.safeParse(null).success).toBe(false);
+  it("rejects anything outside the allowlist, case-sensitively", () => {
+    for (const code of ["BTC", "usdc", "xlm", "", "USDC "]) {
+      expect(assetCodeSchema.safeParse(code).success).toBe(false);
+    }
   });
 });
+
+// ── submitPaymentSchema ──────────────────────────────────────────────────────
 
 describe("submitPaymentSchema", () => {
-  it("accepts signedXdr within bounds", () => {
-    const res = submitPaymentSchema.safeParse({ signedXdr: "AAAA" });
-    expect(res.success).toBe(true);
+  it("accepts a body at the 64,000-character bound", () => {
+    const parsed = submitPaymentSchema.safeParse({ signedXdr: "a".repeat(64_000) });
+    expect(parsed.success).toBe(true);
   });
 
-  it("accepts signedXdr at upper bound of 64,000 characters", () => {
-    const res = submitPaymentSchema.safeParse({
-      signedXdr: "A".repeat(64_000),
-    });
-    expect(res.success).toBe(true);
+  it("trims before measuring, so padding does not spend the bound", () => {
+    const parsed = submitPaymentSchema.safeParse({ signedXdr: "  abc  " });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.signedXdr).toBe("abc");
   });
 
-  it("rejects signedXdr exceeding 64,000 characters", () => {
-    const res = submitPaymentSchema.safeParse({
-      signedXdr: "A".repeat(64_001),
-    });
-    expect(res.success).toBe(false);
-  });
-
-  it("rejects empty or whitespace-only signedXdr", () => {
-    expect(submitPaymentSchema.safeParse({ signedXdr: "" }).success).toBe(
-      false,
-    );
-    expect(submitPaymentSchema.safeParse({ signedXdr: "   " }).success).toBe(
-      false,
-    );
+  it("rejects 64,001 characters and anything empty after trimming", () => {
+    expect(submitPaymentSchema.safeParse({ signedXdr: "a".repeat(64_001) }).success).toBe(false);
+    expect(submitPaymentSchema.safeParse({ signedXdr: "" }).success).toBe(false);
+    expect(submitPaymentSchema.safeParse({ signedXdr: "   " }).success).toBe(false);
+    expect(submitPaymentSchema.safeParse({}).success).toBe(false);
   });
 });
+
+// ── createLinkSchema ─────────────────────────────────────────────────────────
 
 describe("createLinkSchema", () => {
-  it("accepts valid payload and applies defaults", () => {
-    const res = createLinkSchema.safeParse({
-      title: "  Invoice #101  ",
-      amount: "25.50",
-    });
-    expect(res.success).toBe(true);
-    if (!res.success) return;
-    expect(res.data.title).toBe("Invoice #101");
-    expect(res.data.assetCode).toBe("USDC");
-    expect(res.data.expiresInMinutes).toBeUndefined();
-    expect(res.data.isDemo).toBeUndefined();
+  it("trims the title and pins its bounds", () => {
+    const parsed = createLinkSchema.safeParse({ title: "  Coffee fund  ", amount: "1" });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.title).toBe("Coffee fund");
+
+    expect(createLinkSchema.safeParse({ title: "a".repeat(120), amount: "1" }).success).toBe(true);
+    expect(createLinkSchema.safeParse({ title: "a".repeat(121), amount: "1" }).success).toBe(false);
+    expect(createLinkSchema.safeParse({ title: "   ", amount: "1" }).success).toBe(false);
+    expect(createLinkSchema.safeParse({ amount: "1" }).success).toBe(false);
   });
 
-  it("validates title bounds and trimming", () => {
-    expect(
-      createLinkSchema.safeParse({
-        title: "T".repeat(120),
-        amount: "10",
-      }).success,
-    ).toBe(true);
-
-    expect(
-      createLinkSchema.safeParse({
-        title: "T".repeat(121),
-        amount: "10",
-      }).success,
-    ).toBe(false);
-
-    expect(
-      createLinkSchema.safeParse({ title: "", amount: "10" }).success,
-    ).toBe(false);
-    expect(
-      createLinkSchema.safeParse({ title: "   ", amount: "10" }).success,
-    ).toBe(false);
+  it("accepts positive amounts the money regex accepts and rejects the rest", () => {
+    for (const amount of ["1", "12.3456789", " 7 "]) {
+      expect(createLinkSchema.safeParse({ title: "t", amount }).success).toBe(true);
+    }
+    // "0" is well-formed but not positive (issue 1.10).
+    for (const amount of ["", "abc", "0", "1.12345678", "1.", ".5", "-1", "1e3", "   "]) {
+      expect(createLinkSchema.safeParse({ title: "t", amount }).success).toBe(false);
+    }
   });
 
-  it("validates amount boundaries with isValidAmount refinement", () => {
-    expect(
-      createLinkSchema.safeParse({ title: "Valid", amount: "0.0000001" })
-        .success,
-    ).toBe(true);
-    expect(
-      createLinkSchema.safeParse({ title: "Valid", amount: "100.1234567" })
-        .success,
-    ).toBe(true);
-    // Note: "0" passes isValidAmount regex /^\d+(\.\d{1,7})?$/ (tracked in separate issue 1.10)
-    expect(
-      createLinkSchema.safeParse({ title: "Zero", amount: "0" }).success,
-    ).toBe(true);
+  it("defaults assetCode to USDC and validates the allowlist", () => {
+    const parsed = createLinkSchema.safeParse({ title: "t", amount: "1" });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.assetCode).toBe("USDC");
 
-    expect(
-      createLinkSchema.safeParse({ title: "Negative", amount: "-5" }).success,
-    ).toBe(false);
-    expect(
-      createLinkSchema.safeParse({ title: "8 decimals", amount: "1.12345678" })
-        .success,
-    ).toBe(false);
-    expect(
-      createLinkSchema.safeParse({ title: "Letters", amount: "abc" }).success,
-    ).toBe(false);
-    expect(
-      createLinkSchema.safeParse({ title: "Empty", amount: "" }).success,
-    ).toBe(false);
+    expect(createLinkSchema.safeParse({ title: "t", amount: "1", assetCode: "XLM" }).success).toBe(true);
+    expect(createLinkSchema.safeParse({ title: "t", amount: "1", assetCode: "BTC" }).success).toBe(false);
   });
 
-  it("validates expiresInMinutes boundaries", () => {
-    const maxMinutes = 60 * 24 * 30; // 43,200
-    expect(
-      createLinkSchema.safeParse({
-        title: "Max expiry",
-        amount: "10",
-        expiresInMinutes: maxMinutes,
-      }).success,
-    ).toBe(true);
-
-    expect(
-      createLinkSchema.safeParse({
-        title: "Exceeds max",
-        amount: "10",
-        expiresInMinutes: maxMinutes + 1,
-      }).success,
-    ).toBe(false);
-
-    expect(
-      createLinkSchema.safeParse({
-        title: "Zero minutes",
-        amount: "10",
-        expiresInMinutes: 0,
-      }).success,
-    ).toBe(false);
-
-    expect(
-      createLinkSchema.safeParse({
-        title: "Negative minutes",
-        amount: "10",
-        expiresInMinutes: -1,
-      }).success,
-    ).toBe(false);
-
-    expect(
-      createLinkSchema.safeParse({
-        title: "Non-integer minutes",
-        amount: "10",
-        expiresInMinutes: 10.5,
-      }).success,
-    ).toBe(false);
+  it("pins expiresInMinutes to 43,200 minutes (30 days)", () => {
+    expect(createLinkSchema.safeParse({ title: "t", amount: "1", expiresInMinutes: 43_200 }).success).toBe(true);
+    expect(createLinkSchema.safeParse({ title: "t", amount: "1", expiresInMinutes: 43_201 }).success).toBe(false);
+    for (const minutes of [0, -1, 1.5, Number.NaN, "60"]) {
+      expect(createLinkSchema.safeParse({ title: "t", amount: "1", expiresInMinutes: minutes }).success).toBe(false);
+    }
   });
 
-  it("accepts isDemo boolean flag", () => {
-    const resTrue = createLinkSchema.safeParse({
-      title: "Demo",
-      amount: "10",
-      isDemo: true,
-    });
-    expect(resTrue.success).toBe(true);
-    if (resTrue.success) {
-      expect(resTrue.data.isDemo).toBe(true);
+  it("leaves expiresInMinutes and isDemo undefined when omitted, and types isDemo", () => {
+    const parsed = createLinkSchema.safeParse({ title: "t", amount: "1" });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.expiresInMinutes).toBeUndefined();
+      expect(parsed.data.isDemo).toBeUndefined();
     }
 
-    const resFalse = createLinkSchema.safeParse({
-      title: "Demo",
-      amount: "10",
-      isDemo: false,
-    });
-    expect(resFalse.success).toBe(true);
-    if (resFalse.success) {
-      expect(resFalse.data.isDemo).toBe(false);
-    }
-
-    expect(
-      createLinkSchema.safeParse({
-        title: "Demo",
-        amount: "10",
-        isDemo: "yes",
-      }).success,
-    ).toBe(false);
+    expect(createLinkSchema.safeParse({ title: "t", amount: "1", isDemo: true }).success).toBe(true);
+    expect(createLinkSchema.safeParse({ title: "t", amount: "1", isDemo: "true" }).success).toBe(false);
   });
 });
+
+// ── registerWebhookSchema ────────────────────────────────────────────────────
 
 describe("registerWebhookSchema", () => {
-  it("accepts valid URL", () => {
-    expect(
-      registerWebhookSchema.safeParse({ url: "https://example.com/webhook" })
-        .success,
-    ).toBe(true);
-    expect(
-      registerWebhookSchema.safeParse({ url: "http://localhost:3000/api" })
-        .success,
-    ).toBe(true);
+  it("accepts absolute http(s) URLs", () => {
+    expect(registerWebhookSchema.safeParse({ url: "https://example.com/hooks/pay" }).success).toBe(true);
+    expect(registerWebhookSchema.safeParse({ url: "http://localhost:3000/hook" }).success).toBe(true);
   });
 
-  it("rejects invalid URLs", () => {
-    expect(registerWebhookSchema.safeParse({ url: "not-a-url" }).success).toBe(
-      false,
-    );
-    expect(registerWebhookSchema.safeParse({ url: "" }).success).toBe(false);
+  it("rejects anything that is not a URL", () => {
+    for (const url of ["example.com", "/hooks/pay", "", "not a url"]) {
+      expect(registerWebhookSchema.safeParse({ url }).success).toBe(false);
+    }
+    expect(registerWebhookSchema.safeParse({}).success).toBe(false);
   });
 });
+
+// ── listWebhookDeliveriesQuerySchema ─────────────────────────────────────────
 
 describe("listWebhookDeliveriesQuerySchema", () => {
-  it("coerces string limit and applies default", () => {
-    const resDefault = listWebhookDeliveriesQuerySchema.safeParse({});
-    expect(resDefault.success).toBe(true);
-    if (resDefault.success) {
-      expect(resDefault.data.limit).toBe(20);
-      expect(resDefault.data.cursor).toBeUndefined();
-    }
-
-    const resCoerced = listWebhookDeliveriesQuerySchema.safeParse({
-      limit: "50",
-    });
-    expect(resCoerced.success).toBe(true);
-    if (resCoerced.success) {
-      expect(resCoerced.data.limit).toBe(50);
+  it("applies the limit default and leaves cursor undefined", () => {
+    const parsed = listWebhookDeliveriesQuerySchema.safeParse({});
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.limit).toBe(20);
+      expect(parsed.data.cursor).toBeUndefined();
     }
   });
 
-  it("enforces limit bounds (1 to 100)", () => {
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ limit: 1 }).success,
-    ).toBe(true);
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ limit: 100 }).success,
-    ).toBe(true);
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ limit: 0 }).success,
-    ).toBe(false);
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ limit: -1 }).success,
-    ).toBe(false);
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ limit: 101 }).success,
-    ).toBe(false);
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ limit: 1.5 }).success,
-    ).toBe(false);
+  it("coerces the query string the URL gives it", () => {
+    const parsed = listWebhookDeliveriesQuerySchema.safeParse({ limit: "25" });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.limit).toBe(25);
   });
 
-  it("validates cursor trimming and minimum length", () => {
-    const res = listWebhookDeliveriesQuerySchema.safeParse({
-      cursor: "  cur_abc123  ",
-    });
-    expect(res.success).toBe(true);
-    if (res.success) {
-      expect(res.data.cursor).toBe("cur_abc123");
+  it("pins the limit to 100 and rejects nonsense", () => {
+    expect(listWebhookDeliveriesQuerySchema.safeParse({ limit: "100" }).success).toBe(true);
+    expect(listWebhookDeliveriesQuerySchema.safeParse({ limit: 100 }).success).toBe(true);
+    for (const limit of ["101", 101, "0", 0, "-1", "20.5", "abc"]) {
+      expect(listWebhookDeliveriesQuerySchema.safeParse({ limit }).success).toBe(false);
     }
+  });
 
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ cursor: "" }).success,
-    ).toBe(false);
-    expect(
-      listWebhookDeliveriesQuerySchema.safeParse({ cursor: "   " }).success,
-    ).toBe(false);
+  it("requires a non-empty cursor when one is given", () => {
+    expect(listWebhookDeliveriesQuerySchema.safeParse({ cursor: "abc" }).success).toBe(true);
+    expect(listWebhookDeliveriesQuerySchema.safeParse({ cursor: "" }).success).toBe(false);
+    expect(listWebhookDeliveriesQuerySchema.safeParse({ cursor: "   " }).success).toBe(false);
   });
 });
+
+// ── cashOutSchema ────────────────────────────────────────────────────────────
 
 describe("cashOutSchema", () => {
-  it("uppercases targetCurrency and applies defaults", () => {
-    const res = cashOutSchema.safeParse({});
-    expect(res.success).toBe(true);
-    if (res.success) {
-      expect(res.data.targetCurrency).toBe("NGN");
-      expect(res.data.payoutFields).toEqual({});
-      expect(res.data.quoteId).toBeUndefined();
-      expect(res.data.withdrawType).toBeUndefined();
-    }
-
-    const resCustom = cashOutSchema.safeParse({
-      targetCurrency: "usd",
-      payoutFields: { bank: "044", account: "1234567890" },
-      quoteId: "quote-99",
-      withdrawType: "  bank_transfer  ",
-    });
-    expect(resCustom.success).toBe(true);
-    if (resCustom.success) {
-      expect(resCustom.data.targetCurrency).toBe("USD");
-      expect(resCustom.data.payoutFields).toEqual({
-        bank: "044",
-        account: "1234567890",
-      });
-      expect(resCustom.data.quoteId).toBe("quote-99");
-      expect(resCustom.data.withdrawType).toBe("bank_transfer");
+  it("defaults targetCurrency to NGN and payoutFields to {}", () => {
+    const parsed = cashOutSchema.safeParse({});
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.targetCurrency).toBe("NGN");
+      expect(parsed.data.payoutFields).toEqual({});
     }
   });
 
-  it("enforces targetCurrency length of 3", () => {
-    expect(cashOutSchema.safeParse({ targetCurrency: "EUR" }).success).toBe(
-      true,
-    );
-    expect(cashOutSchema.safeParse({ targetCurrency: "EU" }).success).toBe(
-      false,
-    );
-    expect(cashOutSchema.safeParse({ targetCurrency: "USDC" }).success).toBe(
-      false,
-    );
-    expect(cashOutSchema.safeParse({ targetCurrency: "" }).success).toBe(false);
+  it("upper-cases targetCurrency after trimming", () => {
+    for (const [input, want] of [["ngn", "NGN"], [" ngn ", "NGN"]] as const) {
+      const parsed = cashOutSchema.safeParse({ targetCurrency: input });
+      expect(parsed.success).toBe(true);
+      if (parsed.success) expect(parsed.data.targetCurrency).toBe(want);
+    }
   });
 
-  it("rejects empty quoteId or empty withdrawType when provided", () => {
-    expect(cashOutSchema.safeParse({ quoteId: "" }).success).toBe(false);
+  it("rejects targetCurrency that is not exactly three characters", () => {
+    for (const targetCurrency of ["ng", "ngnn", "", "   "]) {
+      expect(cashOutSchema.safeParse({ targetCurrency }).success).toBe(false);
+    }
+  });
+
+  it("takes string payout fields and rejects other value types", () => {
+    const parsed = cashOutSchema.safeParse({ payoutFields: { bank: "GTB", account: "0123456" } });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.payoutFields).toEqual({ bank: "GTB", account: "0123456" });
+
+    expect(cashOutSchema.safeParse({ payoutFields: { bank: 1 } }).success).toBe(false);
+  });
+
+  it("keeps withdrawType optional but non-empty when present", () => {
+    expect(cashOutSchema.safeParse({ withdrawType: "cash" }).success).toBe(true);
+    const parsed = cashOutSchema.safeParse({});
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.withdrawType).toBeUndefined();
+
     expect(cashOutSchema.safeParse({ withdrawType: "" }).success).toBe(false);
-    expect(cashOutSchema.safeParse({ withdrawType: "   " }).success).toBe(
-      false,
-    );
+    expect(cashOutSchema.safeParse({ withdrawType: "   " }).success).toBe(false);
   });
 });
 
+// ── transferSentSchema ───────────────────────────────────────────────────────
+
 describe("transferSentSchema", () => {
-  const sampleHex =
-    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+  const hash = "AB".repeat(32);
 
-  it("accepts 64-character lowercase hex", () => {
-    const res = transferSentSchema.safeParse({ hash: sampleHex });
-    expect(res.success).toBe(true);
-    if (res.success) {
-      expect(res.data.hash).toBe(sampleHex);
-    }
+  it("accepts a 64-character hex hash and lower-cases it", () => {
+    const parsed = transferSentSchema.safeParse({ hash });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.hash).toBe(hash.toLowerCase());
   });
 
-  it("transforms uppercase 64-character hex to lowercase", () => {
-    const upperHex = sampleHex.toUpperCase();
-    const res = transferSentSchema.safeParse({ hash: `  ${upperHex}  ` });
-    expect(res.success).toBe(true);
-    if (res.success) {
-      expect(res.data.hash).toBe(sampleHex);
-    }
+  it("trims before validating", () => {
+    const parsed = transferSentSchema.safeParse({ hash: `  ${hash}  ` });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.hash).toBe(hash.toLowerCase());
   });
 
-  it("rejects invalid hash length or non-hex characters", () => {
-    expect(transferSentSchema.safeParse({ hash: "a".repeat(63) }).success).toBe(
-      false,
-    );
-    expect(transferSentSchema.safeParse({ hash: "a".repeat(65) }).success).toBe(
-      false,
-    );
-    expect(
-      transferSentSchema.safeParse({
-        hash: "g".repeat(64),
-      }).success,
-    ).toBe(false);
+  it("rejects 63 and 65 characters, and non-hex of the right length", () => {
+    expect(transferSentSchema.safeParse({ hash: "a".repeat(63) }).success).toBe(false);
+    expect(transferSentSchema.safeParse({ hash: "a".repeat(65) }).success).toBe(false);
+    expect(transferSentSchema.safeParse({ hash: "g".repeat(64) }).success).toBe(false);
     expect(transferSentSchema.safeParse({ hash: "" }).success).toBe(false);
-    expect(transferSentSchema.safeParse({ hash: "   " }).success).toBe(false);
+    expect(transferSentSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+// ── currencyCodeSchema / cashOutQuoteQuerySchema (issue 4.53) ───────────────
+
+describe("currencyCodeSchema", () => {
+  it("normalises lower-case 3-letter codes to upper-case and trims whitespace", () => {
+    expect(currencyCodeSchema.parse("ngn")).toBe("NGN");
+    expect(currencyCodeSchema.parse("  usd  ")).toBe("USD");
+    expect(currencyCodeSchema.parse("EUR")).toBe("EUR");
+  });
+
+  it("rejects codes that are not 3 ASCII letters", () => {
+    for (const code of ["", "NG", "NGNN", "N N", "123", "$$$"]) {
+      expect(currencyCodeSchema.safeParse(code).success).toBe(false);
+    }
+  });
+});
+
+describe("cashOutQuoteQuerySchema", () => {
+  it("normalises targetCurrency and accepts an optional withdrawType", () => {
+    const res = cashOutQuoteQuerySchema.parse({ targetCurrency: "ngn", withdrawType: "bank_account" });
+    expect(res).toEqual({ targetCurrency: "NGN", withdrawType: "bank_account" });
+  });
+
+  it("rejects missing or malformed targetCurrency", () => {
+    expect(cashOutQuoteQuerySchema.safeParse({}).success).toBe(false);
+    expect(cashOutQuoteQuerySchema.safeParse({ targetCurrency: "123" }).success).toBe(false);
   });
 });

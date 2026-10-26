@@ -73,6 +73,7 @@ async function main(): Promise<void> {
       max: env.rateLimitMax,
       store: rateLimitStore,
       trustProxyHops: env.trustProxyHops,
+      name: "global",
     }),
   );
   // Strict limiter for money/management routes. `keyFor` gives every API key
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
     store: rateLimitStore,
     trustProxyHops: env.trustProxyHops,
     keyFor: apiKeyRateLimitKey(container.apiKeys),
+    name: "strict",
   });
   // Anchor SEP-10 requests trigger outbound calls to the anchor. Keep their
   // strict budget per authenticated seller so one credential cannot amplify
@@ -93,6 +95,17 @@ async function main(): Promise<void> {
     max: env.rateLimitStrictMax,
     store: rateLimitStore,
     keyFor: (ctx) => `anchor-auth:${ctx.get("seller").id}`,
+    name: "anchor_auth",
+  });
+
+  // PUT /seller/kyc forwards a seller's identity to the anchor, so it gets the
+  // strict budget per authenticated seller (issue 8.17), like the anchor auth routes.
+  const kycWriteLimit = rateLimit({
+    windowMs: env.rateLimitStrictWindowMs,
+    max: env.rateLimitStrictMax,
+    store: rateLimitStore,
+    keyFor: (ctx) => `kyc-write:${ctx.get("seller").id}`,
+    name: "kyc_write",
   });
 
   // The data-subject export reads every table that holds a seller's personal
@@ -107,6 +120,7 @@ async function main(): Promise<void> {
     max: env.rateLimitStrictMax,
     store: rateLimitStore,
     trustProxyHops: env.trustProxyHops,
+    name: "anchor_callback",
   });
 
   // Liveness: the process is up and answering HTTP at all.
@@ -122,8 +136,10 @@ async function main(): Promise<void> {
       horizon: container.horizonStatus(),
       // Anchor health probe + circuit breaker (issue #19, 3.7) so an operator
       // can tell "the anchor is down" apart from "the API is down" without
-      // tailing logs.
+      // tailing logs. `anchors` reports every configured anchor's breaker
+      // side by side (issue 3.23); `anchor` stays for the primary anchor.
       anchor: container.service.healthSnapshot(),
+      anchors: container.service.healthSnapshots(),
     });
   });
 
@@ -203,10 +219,13 @@ async function main(): Promise<void> {
       revocations: container.auth.revocations,
       secureCookie: container.auth.secureCookie,
       allowedOrigins: container.auth.allowedOrigins,
+      onLogout: async (sellerId: string) => {
+        await container.anchorSessions?.deleteAllForSeller(sellerId);
+      },
     }),
   );
   app.route("/.well-known", wellKnownRoutes(container.auth.stellarToml));
-  app.route("/seller/kyc", kycRoutes(container));
+  app.route("/seller/kyc", kycRoutes(container, kycWriteLimit));
   // Before profileRoutes: both live under /seller/profile, and the first router
   // to match answers, so /export is handled here and never reaches the profile
   // router's auth + store guards.
@@ -262,13 +281,19 @@ async function main(): Promise<void> {
     const forceExit = setTimeout(() => {
       logger.warn({ event: "api.shutdown.forced" }, "shutdown grace period elapsed - forcing exit");
       process.exit(1);
-    }, 10_000);
+    }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
     server.close(() => {
-      container.stop();
-      clearTimeout(forceExit);
-      process.exit(0);
+      void (async () => {
+        try {
+          await container.stop();
+        } catch (err) {
+          logger.warn({ event: "api.shutdown.stop_failed", err }, "container stop failed during shutdown");
+        }
+        clearTimeout(forceExit);
+        process.exit(0);
+      })();
     });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));

@@ -44,17 +44,19 @@ describe("DisabledOffRamp (OFFRAMP=none)", () => {
     // Optional on the port. Leaving it undefined is what makes LinkService
     // degrade to an empty price list instead of surfacing an error, so the
     // dashboard's preview call stays a 200.
-    expect(new DisabledOffRamp().indicativePrices).toBeUndefined();
+    expect((new DisabledOffRamp() as { indicativePrices?: unknown }).indicativePrices).toBeUndefined();
   });
 
   it("is not confused with a transient anchor outage", async () => {
     // The distinction the routes rely on: 501 (permanent) vs 502 (retry).
-    const err = await new DisabledOffRamp().quote({
-      linkId: "lnk_1",
-      sourceAsset: ASSET,
-      sourceAmount: "10",
-      targetCurrency: "NGN",
-    }).catch((e) => e as Error);
+    const err = (await new DisabledOffRamp()
+      .quote({
+        linkId: "lnk_1",
+        sourceAsset: ASSET,
+        sourceAmount: "10",
+        targetCurrency: "NGN",
+      })
+      .catch((e: unknown) => e)) as Error;
     expect(err.name).toBe("OffRampDisabledError");
     expect(err.message).toMatch(/settle directly to the seller's wallet/);
   });

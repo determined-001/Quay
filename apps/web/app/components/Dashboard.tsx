@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   api,
   CheckoutError,
@@ -301,6 +301,7 @@ export default function Dashboard() {
   const [pendingTransferLinkId, setPendingTransferLinkId] = useState<string | null>(null);
 
   const [tab, setTab] = useState<"links" | "api-keys">("links");
+  const [apiKeysOpened, setApiKeysOpened] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -506,14 +507,6 @@ export default function Dashboard() {
     setTimeout(() => setCopied((c) => (c === id ? null : c)), 1500);
   }
 
-  async function copyWidgetHtml(link: PaymentLink) {
-    const host = window.location.origin;
-    const snippet = `<script src="${host}/widget.js" defer></script>\n<button data-quay-link="${link.id}" data-quay-label="Pay ${link.amount} ${link.asset.code}">Pay</button>`;
-    await navigator.clipboard.writeText(snippet);
-    setCopied(`widget_${link.id}`);
-    setTimeout(() => setCopied((c) => (c === `widget_${link.id}` ? null : c)), 1500);
-  }
-
   /**
    * Cash-out flow (issue #32): the button opens CashOutModal, which fetches the
    * anchor's field descriptors + the seller's masked saved payout fields, then
@@ -572,7 +565,10 @@ export default function Dashboard() {
             key={t}
             role="tab"
             aria-selected={tab === t}
-            onClick={() => setTab(t)}
+            onClick={() => {
+              setTab(t);
+              if (t === "api-keys") setApiKeysOpened(true);
+            }}
             style={{
               background: "none",
               border: "none",
@@ -813,13 +809,17 @@ export default function Dashboard() {
       )}
         </>
       )}
+      {apiKeysOpened && (
+        <div hidden={tab !== "api-keys"}>
+          <ApiKeys />
+        </div>
+      )}
+
       <footer style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid var(--border)", display: "flex", justifyContent: "center", gap: 16, fontSize: 13, color: "var(--text-2, #6b7280)" }}>
         <Link href="/privacy" style={{ color: "var(--blue)" }}>Privacy Notice</Link>
         <span aria-hidden="true">·</span>
         <a href="https://github.com/determined-001/Quay" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue)" }}>GitHub</a>
       </footer>
-
-      {tab === "api-keys" && <ApiKeys />}
     </>
   );
 }

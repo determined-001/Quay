@@ -8,9 +8,9 @@ import {
   type KycStatusOptions,
   type KycRecord,
   type KycRepository,
-  type ProvidedFieldStatus,
   type KycUploadFile,
   type Logger,
+  type SellerProfileKind,
 } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
 import {
@@ -20,6 +20,7 @@ import {
   putSep12CustomerMultipart,
 } from "./sep12";
 import { selectFieldsForAnchor } from "@checkout/core";
+import { requireKycServer } from "./sep1";
 
 /** Non-optional fields in `required` that `values` doesn't have a non-blank
  *  entry for. Binary fields are handled via file uploads, so they are excluded
@@ -50,6 +51,12 @@ export interface TestAnchorKycOptions {
   profileRepo: { get(sellerId: string): Promise<{ fields: Record<string, string> } | null> };
   /** Optional public API base URL (e.g. https://api.example.com) for registering SEP-12 callback. */
   callbackBaseUrl?: string;
+  /** SEP-12 customer `type` sent on every GET/PUT (`ANCHOR_KYC_TYPE`). Unset = no type. */
+  kycType?: string;
+  /** Type used instead for a seller whose profile kind is `organization` (`ANCHOR_KYC_TYPE_ORGANIZATION`). */
+  kycTypeOrganization?: string;
+  /** Looks up the seller's profile kind; needed only for `kycTypeOrganization`. */
+  profileKindOf?: (sellerId: string) => Promise<SellerProfileKind | null>;
   logger?: Logger;
 }
 
@@ -69,6 +76,9 @@ export class TestAnchorKyc implements KycPort {
   private readonly repo: KycRepository;
   private readonly profileRepo: TestAnchorKycOptions["profileRepo"];
   private readonly callbackBaseUrl?: string;
+  private readonly kycType?: string;
+  private readonly kycTypeOrganization?: string;
+  private readonly profileKindOf?: TestAnchorKycOptions["profileKindOf"];
   private readonly logger: Logger;
 
   constructor(opts: TestAnchorKycOptions) {
@@ -77,7 +87,22 @@ export class TestAnchorKyc implements KycPort {
     this.repo = opts.repo;
     this.profileRepo = opts.profileRepo;
     this.callbackBaseUrl = opts.callbackBaseUrl;
+    this.kycType = opts.kycType || undefined;
+    this.kycTypeOrganization = opts.kycTypeOrganization || undefined;
+    this.profileKindOf = opts.profileKindOf;
     this.logger = opts.logger ?? NOOP_LOGGER;
+  }
+
+  /**
+   * The SEP-12 type for this seller: the organization type when one is
+   * configured and the seller's profile kind is `organization`, otherwise the
+   * general type. Null when no type is configured, which sends no `type`.
+   */
+  async resolveType(customer: AnchorCustomer): Promise<string | null> {
+    if (this.kycTypeOrganization && this.profileKindOf) {
+      if ((await this.profileKindOf(customer.sellerId)) === "organization") return this.kycTypeOrganization;
+    }
+    return this.kycType ?? null;
   }
 
   private async registerCallbackIfConfigured(
@@ -117,7 +142,8 @@ export class TestAnchorKyc implements KycPort {
   }
 
   async status(customer: AnchorCustomer, opts: KycStatusOptions = {}): Promise<KycRecord> {
-    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
+    const type = await this.resolveType(customer);
+    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain, type);
 
     if (
       opts.maxAgeMs !== undefined &&
@@ -138,10 +164,11 @@ export class TestAnchorKyc implements KycPort {
     }
 
     const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
+    const kycServer = requireKycServer(await this.discovery.get());
     const remote = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
+      ...typeParam(type),
     });
 
     if (remote.staleCustomerId) {
@@ -165,6 +192,7 @@ export class TestAnchorKyc implements KycPort {
     const record: KycRecord = {
       sellerId: customer.sellerId,
       anchorDomain: this.auth.anchorDomain,
+      type,
       account: customer.account,
       customerId: remote.customerId,
       status: remote.status,
@@ -182,20 +210,19 @@ export class TestAnchorKyc implements KycPort {
   }
 
   async submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord> {
-    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
+    const type = await this.resolveType(customer);
+    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain, type);
     const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
+    const kycServer = requireKycServer(await this.discovery.get());
     const discovery = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
+      ...typeParam(type),
     });
 
     if (discovery.staleCustomerId) {
       console.warn(JSON.stringify({ event: "kyc.customer_id.stale", sellerId: customer.sellerId }));
     }
-
-    // Get the reusable profile for this seller
-    const profile = await this.profileRepo.get(customer.sellerId);
 
     // If the anchor has no customer record yet (discovery returns empty requiredFields),
     // send the fields directly to create the record, then re-read requirements.
@@ -230,6 +257,7 @@ export class TestAnchorKyc implements KycPort {
       account: customer.account,
       customerId: discovery.customerId,
       fields: selection.send,
+      ...typeParam(type),
     });
 
     // The anchor may reveal more required fields only after seeing this
@@ -237,6 +265,7 @@ export class TestAnchorKyc implements KycPort {
     const after = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: put.customerId,
+      ...typeParam(type),
     });
 
     // Merge the new fields into the existing providedFields for future submissions
@@ -255,6 +284,7 @@ export class TestAnchorKyc implements KycPort {
     const record: KycRecord = {
       sellerId: customer.sellerId,
       anchorDomain: this.auth.anchorDomain,
+      type,
       account: customer.account,
       customerId: put.customerId,
       status: after.status,
@@ -279,23 +309,27 @@ export class TestAnchorKyc implements KycPort {
    * in `sentFields`.
    */
   async submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord> {
-    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain);
+    const type = await this.resolveType(customer);
+    const existing = await this.repo.get(customer.sellerId, this.auth.anchorDomain, type);
     const jwt = await this.auth.token(customer);
-    const { kycServer } = await this.discovery.get();
+    const kycServer = requireKycServer(await this.discovery.get());
     const discovery = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: reusableCustomerId(existing, customer, this.auth.anchorDomain),
+      ...typeParam(type),
     });
 
     const put = await putSep12CustomerMultipart(kycServer, jwt, {
       account: customer.account,
       customerId: discovery.customerId,
       files,
+      ...typeParam(type),
     });
 
     const after = await getSep12Customer(kycServer, jwt, {
       account: customer.account,
       customerId: put.customerId,
+      ...typeParam(type),
     });
 
     const cleanProvided = stripBinaryFields(existing?.providedFields ?? {}, [
@@ -306,6 +340,7 @@ export class TestAnchorKyc implements KycPort {
     const record: KycRecord = {
       sellerId: customer.sellerId,
       anchorDomain: this.auth.anchorDomain,
+      type,
       account: customer.account,
       customerId: put.customerId,
       status: after.status,
@@ -321,6 +356,10 @@ export class TestAnchorKyc implements KycPort {
     await this.repo.save(record);
     return record;
   }
+}
+
+function typeParam(type: string | null): { type?: string } {
+  return type ? { type } : {};
 }
 
 /**

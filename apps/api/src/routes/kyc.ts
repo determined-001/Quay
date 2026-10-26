@@ -1,39 +1,68 @@
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   AnchorAuthRequiredError,
   KycRequiredError,
-  ConsentRequiredError,
   type KycFieldSpec,
   type KycRecord,
   type KycConsent,
   type KycUploadFile,
 } from "@checkout/core";
-import { AnchorHttpError } from "@checkout/offramp";
+import {
+  AnchorCapabilityError,
+  AnchorConfigError,
+  AnchorHttpError,
+  SEP24_PREFILL_FIELDS,
+  isPrefillField,
+} from "@checkout/offramp";
 import { env } from "../env";
 import type { Container } from "../services/container";
 import { anchorFailure } from "../services/link-service";
 import { getLogger } from "../request-context";
+import { recordAnchorAuthRequired } from "../metrics";
 import { customerOf } from "../services/link-service";
 import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middleware/auth";
 import { kycDisclosureFields, sellerKyc } from "../db/schema";
+import { auditActor } from "../services/pii-audit";
 
-const submitKycSchema = z.record(z.string(), z.string());
+/**
+ * Bounds on what a seller can submit, because the whole map is forwarded to the
+ * anchor: at most 50 fields, SEP-9 style snake_case names, values up to 1,000
+ * characters (issue 8.17). Real SEP-9 fields are short; a legitimate KYC form
+ * is nowhere near these limits.
+ */
+export const KYC_MAX_FIELDS = 50;
+export const KYC_MAX_VALUE_LENGTH = 1000;
+const submitKycSchema = z
+  .record(z.string().regex(/^[a-z0-9_.]{1,64}$/), z.string().max(KYC_MAX_VALUE_LENGTH))
+  .refine((fields) => Object.keys(fields).length <= KYC_MAX_FIELDS, {
+    message: `at most ${KYC_MAX_FIELDS} fields`,
+  });
 
 const grantConsentSchema = z.object({
   anchorDomain: z.string().min(1),
   fields: z.array(z.string()).min(1),
 });
 
+const prefillConsentSchema = z.object({
+  fields: z.array(z.string().regex(/^[a-z0-9_.]{1,64}$/)).max(KYC_MAX_FIELDS),
+});
+
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "application/pdf"]);
 
-function toResponse(record: KycRecord) {
+/**
+ * `providedFields` holds the seller's decrypted identity. A programmatic API key
+ * has no need to read it back (consent, disclosures and file upload already
+ * refuse keys), so only a signed-in seller session gets the values; a key gets
+ * the status and what is still required (issue 8.17).
+ */
+function toResponse(record: KycRecord, authKind: "session" | "api_key" | undefined) {
   return {
     status: record.status,
     requiredFields: record.requiredFields,
-    providedFields: record.providedFields,
+    providedFields: authKind === "api_key" ? {} : record.providedFields,
     message: record.message,
     lastSyncedAt: record.lastSyncedAt,
   };
@@ -69,7 +98,14 @@ function consentToResponse(consent: KycConsent) {
  * reaches the client (issue 4.36); unknown errors are left to `app.onError`.
  */
 function anchorFailureResponse(ctx: Context<{ Variables: AuthVariables }>, err: unknown) {
-  if (!(err instanceof AnchorHttpError) && !isNetworkError(err)) return null;
+  if (
+    !(err instanceof AnchorHttpError) &&
+    !(err instanceof AnchorConfigError) &&
+    !(err instanceof AnchorCapabilityError) &&
+    !isNetworkError(err)
+  ) {
+    return null;
+  }
   const failure = anchorFailure(err, getLogger(ctx));
   return ctx.json({ error: failure.message, ...failure.extra }, 502);
 }
@@ -80,8 +116,17 @@ function isNetworkError(err: unknown): boolean {
   return err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
 }
 
-export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
+export function kycRoutes(
+  c: Container,
+  kycWriteLimit: MiddlewareHandler = async (_ctx, next) => next(),
+): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
+
+  // Identity data must never sit in a shared cache or the browser's history.
+  app.use("*", async (ctx, next) => {
+    await next();
+    ctx.header("Cache-Control", "no-store");
+  });
 
   app.use(
     "*",
@@ -187,6 +232,67 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
 
   app.route("/consent", consentApp);
 
+  // Which stored SEP-9 values the seller lets the anchor's SEP-24 form open pre-filled with
+  // (issue 3.17). A separate consent from /consent above, which covers what Quay posts to the
+  // anchor's SEP-12 endpoint. Session auth only, like every consent surface; off until turned on.
+  const prefillApp = new Hono<{ Variables: AuthVariables }>();
+
+  prefillApp.use("*", async (ctx, next) => {
+    if (ctx.get("authKind") === "api_key") {
+      return ctx.json({ error: "forbidden", message: "prefill consent requires session authentication" }, 403);
+    }
+    await next();
+  });
+
+  // GET /seller/kyc/prefill-consent — what may be shared, what is on file, what is consented
+  prefillApp.get("/", async (ctx) => {
+    const seller = ctx.get("seller");
+    const anchorDomain = c.anchorDomain;
+    if (!anchorDomain || !c.prefillConsents) return ctx.json({ error: "anchor_unavailable" }, 404);
+    const consent = await c.prefillConsents.get(seller.id, anchorDomain);
+    // Names only. An allowlisted field the seller has no value for is not offered at all.
+    let available: string[] = [];
+    if (c.kycRepo) {
+      const type = (await c.kyc.resolveType?.(customerOf(seller))) ?? null;
+      const record = await c.kycRepo.get(seller.id, anchorDomain, type);
+      if (record) {
+        available = SEP24_PREFILL_FIELDS.filter((name) => (record.providedFields[name] ?? "").trim() !== "");
+      }
+    }
+    return ctx.json({
+      anchorDomain,
+      available,
+      // Withdrawn or never granted: nothing is shared.
+      fields: consent?.fields ?? [],
+      grantedAt: consent?.grantedAt ?? null,
+    });
+  });
+
+  // PUT /seller/kyc/prefill-consent — replace the consented fields; [] withdraws consent
+  prefillApp.put("/", async (ctx) => {
+    const seller = ctx.get("seller");
+    const anchorDomain = c.anchorDomain;
+    if (!anchorDomain || !c.prefillConsents) return ctx.json({ error: "anchor_unavailable" }, 404);
+    const parsed = prefillConsentSchema.safeParse(await safeJson(ctx));
+    if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+    const fields = [...new Set(parsed.data.fields)];
+    const notAllowed = fields.filter((name) => !isPrefillField(name));
+    if (notAllowed.length > 0) {
+      return ctx.json(
+        { error: "invalid_fields", message: "These fields cannot be shared to pre-fill an anchor's form", fields: notAllowed },
+        400,
+      );
+    }
+    const consent = await c.prefillConsents.set(seller.id, anchorDomain, fields);
+    return ctx.json({
+      anchorDomain,
+      fields: consent?.fields ?? [],
+      grantedAt: consent?.grantedAt ?? null,
+    });
+  });
+
+  app.route("/prefill-consent", prefillApp);
+
   // Disclosure history is seller-owned metadata. Never read the encrypted field
   // values into this response, and never infer a send time from a status sync.
   app.get("/disclosures", async (ctx) => {
@@ -237,14 +343,15 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       return ctx.json({ error: "forbidden", message: "deletion requires session authentication" }, 403);
     }
     const anchorDomain = ctx.req.param("anchorDomain");
-    if (!c.anchorDomain || anchorDomain !== c.anchorDomain || !c.deleteAnchorCustomer) {
+    const known = c.anchorDomains ? await c.anchorDomains() : c.anchorDomain ? [c.anchorDomain] : [];
+    if (!known.includes(anchorDomain) || !c.deleteAnchorCustomer) {
       return ctx.json({ error: "anchor_unavailable" }, 404);
     }
     const seller = ctx.get("seller");
     const customer = customerOf(seller);
     try {
       await c.kycConsents.revoke(seller.id, anchorDomain);
-      const anchorResult = await c.deleteAnchorCustomer(customer);
+      const anchorResult = await c.deleteAnchorCustomer(customer, anchorDomain);
       await c.db.delete(sellerKyc).where(and(eq(sellerKyc.sellerId, seller.id), eq(sellerKyc.anchorDomain, anchorDomain)));
       await c.db.delete(kycDisclosureFields).where(and(eq(kycDisclosureFields.sellerId, seller.id), eq(kycDisclosureFields.anchorDomain, anchorDomain)));
       return ctx.json({ anchorDomain, anchorResult, localDataErased: true });
@@ -260,9 +367,20 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       const refresh = ctx.req.query("refresh") === "1" || ctx.req.query("refresh") === "true";
       const maxAgeMs = refresh ? 0 : (c.config.kycStatusCacheMs ?? 60_000);
       const record = await c.kyc.status(customerOf(ctx.get("seller")), { maxAgeMs });
-      return ctx.json(toResponse(record));
+      const body = toResponse(record, ctx.get("authKind"));
+      // Names of the identity fields whose values this response carries. An API
+      // key gets none (see toResponse), so its row says it only saw the status.
+      await c.piiAudit?.record({
+        ...auditActor(ctx),
+        action: "kyc.read",
+        fields: Object.keys(body.providedFields),
+      });
+      return ctx.json(body);
     } catch (err) {
-      if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      if (err instanceof AnchorAuthRequiredError) {
+        recordAnchorAuthRequired("kyc_get");
+        return ctx.json({ error: "anchor_auth_required" }, 403);
+      }
       const failed = anchorFailureResponse(ctx, err);
       if (failed) return failed;
       throw err;
@@ -270,7 +388,7 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
   });
 
   // Submit or update identity fields. Enforces per-anchor consent.
-  app.put("/", async (ctx) => {
+  app.put("/", kycWriteLimit, async (ctx) => {
     const parsed = submitKycSchema.safeParse(await safeJson(ctx));
     if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
 
@@ -287,30 +405,49 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
         return ctx.json({ error: "server_error", message: "No anchor configured" }, 500);
       }
 
-      // Determine which fields are about to be sent (the "send" set from 4.25)
-      // These are the fields that are either new/updated in this request, or already on file
-      // and the anchor requires them (requiredFields). The anchor will receive all providedFields.
-      const allProvidedFields = { ...record.providedFields, ...fields };
-      const fieldsToSend = Object.keys(allProvidedFields).filter((f) => record.requiredFields.some((rf) => rf.name === f));
+      const isFirstSubmission = record.requiredFields.length === 0;
+      let fieldsToSendToAnchor: Record<string, string>;
 
-      if (fieldsToSend.length > 0) {
+      if (isFirstSubmission) {
+        // On first submission, requiredFields is empty because discovery has not run yet.
+        // Never send unconsented profile fields to the anchor:
+        // - Without active consent, send no fields ({}) so discovery runs safely (same as PUT {})
+        // - If active consent exists, transmit only fields covered by that consent
         const consent = await c.kycConsents.active(seller.id, anchorDomain);
         if (!consent) {
-          return ctx.json({ error: "consent_required", anchorDomain, fields: fieldsToSend }, 403);
+          fieldsToSendToAnchor = {};
+        } else {
+          fieldsToSendToAnchor = Object.fromEntries(
+            Object.entries(fields).filter(([k]) => consent.fields.includes(k)),
+          );
         }
+      } else {
+        // Determine which fields are about to be sent (the "send" set from 4.25)
+        // These are the fields that are either new/updated in this request, or already on file
+        // and the anchor requires them (requiredFields). The anchor will receive all providedFields.
+        const allProvidedFields = { ...record.providedFields, ...fields };
+        const fieldsToSend = Object.keys(allProvidedFields).filter((f) => record.requiredFields.some((rf) => rf.name === f));
 
-        // Check that all fields to be sent are covered by the consent
-        const uncovered = fieldsToSend.filter((f) => !consent.fields.includes(f));
-        if (uncovered.length > 0) {
-          return ctx.json({ error: "consent_required", anchorDomain, fields: uncovered }, 403);
+        if (fieldsToSend.length > 0) {
+          const consent = await c.kycConsents.active(seller.id, anchorDomain);
+          if (!consent) {
+            return ctx.json({ error: "consent_required", anchorDomain, fields: fieldsToSend }, 403);
+          }
+
+          // Check that all fields to be sent are covered by the consent
+          const uncovered = fieldsToSend.filter((f) => !consent.fields.includes(f));
+          if (uncovered.length > 0) {
+            return ctx.json({ error: "consent_required", anchorDomain, fields: uncovered }, 403);
+          }
         }
+        fieldsToSendToAnchor = fields;
       }
 
       // Values typed directly in the KYC form for this anchor in the same session
       // request count as consented for those fields only if the request carries consent: true
       // (handled by the UI calling the consent endpoint first)
 
-      const updatedRecord = await c.kyc.submit(customer, fields);
+      const updatedRecord = await c.kyc.submit(customer, fieldsToSendToAnchor);
       if (updatedRecord.sentFields.length > 0) {
         const sentAt = Date.now();
         await c.db.insert(kycDisclosureFields).values(updatedRecord.sentFields.map((fieldName) => ({
@@ -324,9 +461,13 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
         });
       }
       await c.sellers.touchLastActive?.(seller.id);
-      return ctx.json(toResponse(updatedRecord));
+      await c.piiAudit?.record({ ...auditActor(ctx), action: "kyc.submit", fields: Object.keys(fields) });
+      return ctx.json(toResponse(updatedRecord, ctx.get("authKind")));
     } catch (err) {
-      if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+      if (err instanceof AnchorAuthRequiredError) {
+        recordAnchorAuthRequired("kyc_put");
+        return ctx.json({ error: "anchor_auth_required" }, 403);
+      }
       if (err instanceof KycRequiredError) {
         return ctx.json({ error: "kyc_required", missingFields: err.missingFields }, 422);
       }
@@ -360,7 +501,10 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       try {
         record = await c.kyc.status(customer);
       } catch (err) {
-        if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+        if (err instanceof AnchorAuthRequiredError) {
+          recordAnchorAuthRequired("kyc_put");
+          return ctx.json({ error: "anchor_auth_required" }, 403);
+        }
         const failed = anchorFailureResponse(ctx, err);
         if (failed) return failed;
         throw err;
@@ -434,9 +578,13 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
       try {
         const updated = await c.kyc.submitFiles(customer, uploadFiles);
         await c.sellers.touchLastActive?.(seller.id);
-        return ctx.json(toResponse(updated));
+        await c.piiAudit?.record({ ...auditActor(ctx), action: "kyc.submit", fields: uploadedFields });
+        return ctx.json(toResponse(updated, "session"));
       } catch (err) {
-        if (err instanceof AnchorAuthRequiredError) return ctx.json({ error: "anchor_auth_required" }, 403);
+        if (err instanceof AnchorAuthRequiredError) {
+          recordAnchorAuthRequired("kyc_put");
+          return ctx.json({ error: "anchor_auth_required" }, 403);
+        }
         if (err instanceof KycRequiredError) {
           return ctx.json({ error: "kyc_required", missingFields: err.missingFields }, 422);
         }

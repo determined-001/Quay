@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { ApiKeyScope } from "../services/api-keys";
 import { decodeScopesFromDb, encodeScopesForDb } from "../services/api-keys";
 import type {
@@ -15,6 +15,8 @@ import type {
   LinkRepository,
   OffRampStateRepository,
   PaymentLink,
+  PrefillConsent,
+  PrefillConsentRepository,
   ProfileField,
   ProfileFieldSource,
   ProvidedFieldStatus,
@@ -37,6 +39,7 @@ import type {
   AssetRef,
   WithdrawTransfer,
 } from "@checkout/core";
+import { InvalidCursorError } from "@checkout/core";
 import type { DB } from "../db/client";
 import {
   links,
@@ -55,10 +58,13 @@ import {
   offrampTelemetry,
   apiKeys,
   kycConsents,
+  anchors,
+  prefillConsents,
   sellerProfile,
 } from "../db/schema";
 import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
+import type { AnchorRecord, AnchorRepository } from "../services/anchor-registry";
 import { computeKeyId, decryptPii, encryptPii, getBlobKeyId, type PiiKeyring } from "../crypto/pii";
 import { decryptSecret, encryptSecret, last4 } from "../services/secret-crypto";
 import type { Logger } from "pino";
@@ -166,6 +172,21 @@ export class DrizzleLinkRepository implements LinkRepository {
     return rows.map(rowToLink);
   }
 
+  /**
+   * Cash-outs in `offramp_pending` grouped by the anchor's raw status
+   * (`offramp_jobs.external_status`, NULL until the first poll). One grouped
+   * query rather than loading every job; the caller buckets unknown values.
+   */
+  async countPendingByExternalStatus(): Promise<Array<{ externalStatus: string | null; count: number }>> {
+    const rows = await this.db
+      .select({ externalStatus: offrampJobs.externalStatus, count: sql<number>`count(*)` })
+      .from(links)
+      .innerJoin(offrampJobs, eq(offrampJobs.jobId, links.offrampJobId))
+      .where(eq(links.status, "offramp_pending"))
+      .groupBy(offrampJobs.externalStatus);
+    return rows.map((r) => ({ externalStatus: r.externalStatus ?? null, count: Number(r.count) }));
+  }
+
   async activeDestinations(): Promise<string[]> {
     const rows = await this.db
       .select({ destination: links.destination })
@@ -204,6 +225,28 @@ export class DrizzleLinkRepository implements LinkRepository {
         updatedAt: Date.now(),
       })
       .where(eq(links.id, link.id));
+  }
+
+  async claimForCashOut(id: string, allowedStatuses: Array<PaymentLink["status"]>): Promise<boolean> {
+    const updated = await this.db
+      .update(links)
+      .set({
+        status: "offramp_pending",
+        updatedAt: Date.now(),
+      })
+      .where(and(eq(links.id, id), inArray(links.status, allowedStatuses)))
+      .returning({ id: links.id });
+    return updated.length > 0;
+  }
+
+  async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
+    await this.db
+      .update(links)
+      .set({
+        status: restoreStatus,
+        updatedAt: Date.now(),
+      })
+      .where(and(eq(links.id, id), eq(links.status, "offramp_pending")));
   }
 
   /**
@@ -377,7 +420,6 @@ export class DrizzleKycConsentRepository implements KycConsentRepository {
   }
 
   async grant(consent: Omit<KycConsent, "id">): Promise<KycConsent> {
-    const now = Date.now();
     const row = {
       id: newId("cnc"),
       sellerId: consent.sellerId,
@@ -430,6 +472,122 @@ export class DrizzleKycConsentRepository implements KycConsentRepository {
   }
 }
 
+/**
+ * Per-seller, per-anchor consent to pre-fill the anchor's SEP-24 form (issue 3.17).
+ * Names only; withdrawing consent deletes the row, so a stored row always has fields.
+ */
+export class DrizzlePrefillConsentRepository implements PrefillConsentRepository {
+  constructor(private readonly db: DB) {}
+
+  private rowToConsent(row: typeof prefillConsents.$inferSelect): PrefillConsent {
+    let fields: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.fields);
+      if (Array.isArray(parsed)) fields = parsed.filter((f): f is string => typeof f === "string");
+    } catch {
+      fields = [];
+    }
+    return { sellerId: row.sellerId, anchorDomain: row.anchorDomain, fields, grantedAt: row.grantedAt };
+  }
+
+  async get(sellerId: string, anchorDomain: string): Promise<PrefillConsent | null> {
+    const rows = await this.db
+      .select()
+      .from(prefillConsents)
+      .where(and(eq(prefillConsents.sellerId, sellerId), eq(prefillConsents.anchorDomain, anchorDomain)))
+      .limit(1);
+    return rows[0] ? this.rowToConsent(rows[0]) : null;
+  }
+
+  async set(
+    sellerId: string,
+    anchorDomain: string,
+    fields: string[],
+    now: number = Date.now(),
+  ): Promise<PrefillConsent | null> {
+    const unique = [...new Set(fields)].sort();
+    if (unique.length === 0) {
+      await this.db
+        .delete(prefillConsents)
+        .where(and(eq(prefillConsents.sellerId, sellerId), eq(prefillConsents.anchorDomain, anchorDomain)));
+      return null;
+    }
+    const row = { sellerId, anchorDomain, fields: JSON.stringify(unique), grantedAt: now };
+    await this.db
+      .insert(prefillConsents)
+      .values(row)
+      .onConflictDoUpdate({ target: [prefillConsents.sellerId, prefillConsents.anchorDomain], set: row });
+    return this.rowToConsent(row);
+  }
+
+  async list(sellerId: string): Promise<PrefillConsent[]> {
+    const rows = await this.db
+      .select()
+      .from(prefillConsents)
+      .where(eq(prefillConsents.sellerId, sellerId))
+      .orderBy(asc(prefillConsents.anchorDomain));
+    return rows.map((r) => this.rowToConsent(r));
+  }
+}
+
+/** The `anchors` table (issue 3.21). */
+export class DrizzleAnchorRepository implements AnchorRepository {
+  constructor(private readonly db: DB) {}
+
+  private rowToRecord(row: typeof anchors.$inferSelect): AnchorRecord {
+    let corridors: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.corridors);
+      if (Array.isArray(parsed)) corridors = parsed.filter((c): c is string => typeof c === "string");
+    } catch {
+      corridors = [];
+    }
+    return {
+      id: row.id,
+      homeDomain: row.homeDomain,
+      baseUrl: row.baseUrl,
+      displayName: row.displayName,
+      enabled: row.enabled,
+      protocol: row.protocol,
+      withdrawType: row.withdrawType ?? null,
+      corridors,
+      rateSource: row.rateSource ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async list(): Promise<AnchorRecord[]> {
+    const rows = await this.db.select().from(anchors).orderBy(asc(anchors.createdAt), asc(anchors.homeDomain));
+    return rows.map((r) => this.rowToRecord(r));
+  }
+
+  async insert(record: AnchorRecord): Promise<void> {
+    await this.db.insert(anchors).values({
+      id: record.id,
+      homeDomain: record.homeDomain,
+      baseUrl: record.baseUrl,
+      displayName: record.displayName,
+      enabled: record.enabled,
+      protocol: record.protocol,
+      withdrawType: record.withdrawType,
+      corridors: JSON.stringify(record.corridors),
+      rateSource: record.rateSource,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    });
+  }
+
+  async setEnabled(homeDomain: string, enabled: boolean, now: number = Date.now()): Promise<boolean> {
+    const updated = await this.db
+      .update(anchors)
+      .set({ enabled, updatedAt: now })
+      .where(eq(anchors.homeDomain, homeDomain))
+      .returning({ id: anchors.id });
+    return updated.length > 0;
+  }
+}
+
 export class DrizzleSellerRepository implements SellerRepository {
   constructor(
     private readonly db: DB,
@@ -437,15 +595,15 @@ export class DrizzleSellerRepository implements SellerRepository {
     private readonly logger?: Logger | null,
   ) {}
 
-  /** Seed (once) and return the single demo seller. */
+  /**
+   * Seed (once) and return the default seller for the given wallet.
+   * If a seller with this wallet already exists, it is returned without modification.
+   * Note that changing DEFAULT_SELLER_WALLET creates a second seller instead of renaming the first.
+   */
   async ensureDefault(wallet: string, name: string): Promise<Seller> {
-    const existing = await this.db.select().from(sellers).limit(1);
-    if (existing[0]) {
-      // keep the wallet in sync if it changed in env
-      if (existing[0].wallet !== wallet) {
-        await this.db.update(sellers).set({ wallet }).where(eq(sellers.id, existing[0].id));
-      }
-      return rowToSeller({ ...existing[0], wallet }, this.piiKey, this.logger);
+    const existing = await this.findByWallet(wallet);
+    if (existing) {
+      return existing;
     }
     const now = Date.now();
     const seller: typeof sellers.$inferSelect = {
@@ -458,8 +616,12 @@ export class DrizzleSellerRepository implements SellerRepository {
       payoutFieldsEncrypted: null,
       createdAt: now,
     };
-    await this.db.insert(sellers).values(seller);
-    return rowToSeller(seller, this.piiKey, this.logger);
+    await this.db.insert(sellers).values(seller).onConflictDoNothing({ target: sellers.wallet });
+    const created = await this.findByWallet(wallet);
+    if (!created) {
+      throw new Error(`failed to create or find default seller for wallet ${wallet}`);
+    }
+    return created;
   }
 
   async findById(id: string): Promise<Seller | null> {
@@ -608,11 +770,7 @@ export class DrizzleWebhookRepository implements WebhookRepository {
    * Routes must keep using `getById`, which enforces ownership.
    */
   async findWebhookById(id: string): Promise<Webhook | null> {
-    const rows = await this.db
-      .select()
-      .from(webhooks)
-      .where(and(eq(webhooks.id, id), isNull(webhooks.deletedAt)))
-      .limit(1);
+    const rows = await this.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
     return rows[0] ? rowToWebhook(rows[0]) : null;
   }
 
@@ -643,7 +801,7 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     return (result.rowsAffected ?? 0) > 0;
   }
 
-  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void> {
+  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt"> & { createdAt?: number }): Promise<void> {
     await this.db.insert(webhookDeliveries).values({
       id: newId("whd"),
       webhookId: d.webhookId,
@@ -654,7 +812,7 @@ export class DrizzleWebhookRepository implements WebhookRepository {
       statusCode: d.statusCode,
       ok: d.ok,
       error: d.error,
-      createdAt: Date.now(),
+      createdAt: d.createdAt ?? Date.now(),
     });
   }
 
@@ -786,21 +944,31 @@ export class DrizzleWebhookRepository implements WebhookRepository {
     const owned = await this.getById(webhookId, sellerId, { includeDeleted: true });
     if (!owned) return { deliveries: [], nextCursor: null };
 
-    const cursorCreatedAt = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
+    const cursor = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
     const conditions = [eq(webhookDeliveries.webhookId, webhookId)];
-    if (cursorCreatedAt !== null) conditions.push(lt(webhookDeliveries.createdAt, cursorCreatedAt));
+    if (cursor !== null) {
+      conditions.push(
+        or(
+          lt(webhookDeliveries.createdAt, cursor.createdAt),
+          and(
+            eq(webhookDeliveries.createdAt, cursor.createdAt),
+            lt(webhookDeliveries.id, cursor.id),
+          ),
+        )!,
+      );
+    }
 
     // Fetch one extra row to know whether there's a next page.
     const rows = await this.db
       .select()
       .from(webhookDeliveries)
       .where(and(...conditions))
-      .orderBy(desc(webhookDeliveries.createdAt))
+      .orderBy(desc(webhookDeliveries.createdAt), desc(webhookDeliveries.id))
       .limit(opts.limit + 1);
 
     const page = rows.slice(0, opts.limit);
     const last = page[page.length - 1];
-    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt) : null;
+    const nextCursor = rows.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt, last.id) : null;
 
     return { deliveries: page, nextCursor };
   }
@@ -845,14 +1013,27 @@ function rowToQueueEntry(row: QueueRow): WebhookQueueEntry {
   };
 }
 
-function encodeDeliveryCursor(createdAt: number): string {
-  return Buffer.from(String(createdAt), "utf8").toString("base64url");
+export function encodeDeliveryCursor(createdAt: number, id: string): string {
+  return Buffer.from(`${createdAt}:${id}`, "utf8").toString("base64url");
 }
 
-function decodeDeliveryCursor(cursor: string): number {
-  const decoded = Number(Buffer.from(cursor, "base64url").toString("utf8"));
-  if (!Number.isFinite(decoded)) throw new Error("Invalid cursor");
-  return decoded;
+export function decodeDeliveryCursor(cursor: string): { createdAt: number; id: string } {
+  let text: string;
+  try {
+    text = Buffer.from(cursor, "base64url").toString("utf8");
+  } catch {
+    throw new InvalidCursorError();
+  }
+  const idx = text.indexOf(":");
+  if (idx === -1) {
+    throw new InvalidCursorError();
+  }
+  const createdAt = Number(text.slice(0, idx));
+  const id = text.slice(idx + 1);
+  if (!Number.isFinite(createdAt) || !id) {
+    throw new InvalidCursorError();
+  }
+  return { createdAt, id };
 }
 
 export class DrizzleWatcherStateRepository implements WatcherStateRepository {
@@ -932,6 +1113,7 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
     sellAmount: row.sellAmount,
     buyCurrency: row.buyCurrency,
     price: row.price,
+    withdrawType: row.withdrawType ?? undefined,
     ...(row.quotedRate !== null &&
     row.quotedTargetAmount !== null &&
     row.quotedFeeAmount !== null &&
@@ -994,6 +1176,7 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       sellAmount: quote.sellAmount,
       buyCurrency: quote.buyCurrency,
       price: quote.price,
+      withdrawType: quote.withdrawType ?? null,
       quotedRate: quote.quotedAmounts?.rate ?? null,
       quotedTargetAmount: quote.quotedAmounts?.targetAmount ?? null,
       quotedFeeAmount: quote.quotedAmounts?.feeAmount ?? null,
@@ -1090,6 +1273,7 @@ export class DrizzleKycRepository implements KycRepository {
     return {
       sellerId: row.sellerId,
       anchorDomain: row.anchorDomain,
+      ...(row.kycType === "" ? {} : { type: row.kycType }),
       account: row.account ?? null,
       customerId: row.customerId ?? null,
       status: row.status as KycStatus,
@@ -1104,11 +1288,17 @@ export class DrizzleKycRepository implements KycRepository {
     };
   }
 
-  async get(sellerId: string, anchorDomain: string): Promise<KycRecord | null> {
+  async get(sellerId: string, anchorDomain: string, type?: string | null): Promise<KycRecord | null> {
     const rows = await this.db
       .select()
       .from(sellerKyc)
-      .where(and(eq(sellerKyc.sellerId, sellerId), eq(sellerKyc.anchorDomain, anchorDomain)))
+      .where(
+        and(
+          eq(sellerKyc.sellerId, sellerId),
+          eq(sellerKyc.anchorDomain, anchorDomain),
+          eq(sellerKyc.kycType, type ?? ""),
+        ),
+      )
       .limit(1);
     return rows[0] ? this.rowToRecord(rows[0]) : null;
   }
@@ -1119,7 +1309,7 @@ export class DrizzleKycRepository implements KycRepository {
       .select()
       .from(sellerKyc)
       .where(eq(sellerKyc.sellerId, sellerId))
-      .orderBy(asc(sellerKyc.anchorDomain));
+      .orderBy(asc(sellerKyc.anchorDomain), asc(sellerKyc.kycType));
     return rows.map((row) => this.rowToRecord(row));
   }
 
@@ -1151,6 +1341,7 @@ export class DrizzleKycRepository implements KycRepository {
     const row = {
       sellerId: record.sellerId,
       anchorDomain: record.anchorDomain,
+      kycType: record.type ?? "",
       account: record.account,
       customerId: record.customerId,
       status: record.status,
@@ -1166,7 +1357,7 @@ export class DrizzleKycRepository implements KycRepository {
     await this.db
       .insert(sellerKyc)
       .values(row)
-      .onConflictDoUpdate({ target: [sellerKyc.sellerId, sellerKyc.anchorDomain], set: row });
+      .onConflictDoUpdate({ target: [sellerKyc.sellerId, sellerKyc.anchorDomain, sellerKyc.kycType], set: row });
   }
 
   async countNonPrimaryRows(): Promise<number> {
@@ -1334,7 +1525,10 @@ export const ANCHOR_SESSION_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
  * decrypted in-process when a call to the anchor needs it.
  */
 export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
-  constructor(private readonly db: DB) {}
+  constructor(
+    private readonly db: DB,
+    private readonly logger?: Logger,
+  ) {}
 
   async get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null> {
     const rows = await this.db
@@ -1344,11 +1538,27 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
       .limit(1);
     const row = rows[0];
     if (!row) return null;
+    let token: string;
+    try {
+      token = decryptSecret(row.tokenEncrypted);
+    } catch {
+      // The row was written under a different WEBHOOK_SECRET_ENCRYPTION_KEY
+      // (or is corrupt), so the token can never be read again. Drop it and
+      // answer "no session": callers then raise AnchorAuthRequiredError and the
+      // seller is asked to reconnect, instead of every anchor call returning a
+      // 500. No token material is logged.
+      this.logger?.warn(
+        { event: "anchor_session.undecryptable", sellerId, anchorDomain },
+        "stored anchor session could not be decrypted; dropping it",
+      );
+      await this.delete(sellerId, anchorDomain);
+      return null;
+    }
     return {
       sellerId: row.sellerId,
       anchorDomain: row.anchorDomain,
       account: row.account,
-      token: decryptSecret(row.tokenEncrypted),
+      token,
       expiresAt: row.expiresAt,
       createdAt: row.createdAt,
     };
@@ -1391,6 +1601,13 @@ export class DrizzleAnchorSessionRepository implements AnchorSessionRepository {
     await this.db
       .delete(anchorSessions)
       .where(and(eq(anchorSessions.sellerId, sellerId), eq(anchorSessions.anchorDomain, anchorDomain)));
+  }
+
+  async deleteAllForSeller(sellerId: string): Promise<number> {
+    const res = await this.db
+      .delete(anchorSessions)
+      .where(eq(anchorSessions.sellerId, sellerId));
+    return res.rowsAffected ?? 0;
   }
 
   /**

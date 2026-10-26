@@ -1,18 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { OffRampRejectedError } from "@checkout/core";
 import {
   ANCHOR_ERROR_BODY_MAX_BYTES,
   AnchorHttpError,
-  AnchorRejectedError,
-  anchorCallError,
   anchorErrorSummary,
   anchorHttpError,
-  anchorRejectionSummary,
-  getSep38Quote,
+  anchorRejectionDetail,
+  isAnchorRejection,
   getSep6Info,
-  isAnchorRejectionStatus,
-  parseAnchorRejection,
-  startSep6Withdraw,
   truncateAnchorBody,
 } from "../src";
 
@@ -51,7 +45,7 @@ describe("AnchorHttpError", () => {
     expect(ok.body).toBe("<html>boom</html>");
 
     const res = new Response("x", { status: 502 });
-    res.text = () => Promise.reject(new Error("stream broke"));
+    Object.defineProperty(res, "text", { value: () => Promise.reject(new Error("stream broke")) });
     expect((await anchorHttpError("38", "quote", res)).body).toBe("");
   });
 });
@@ -72,143 +66,41 @@ describe("SEP clients throw AnchorHttpError", () => {
   });
 });
 
-/** Stubs `fetch` with one answer and hands back whatever the call threw. */
-async function errorFrom(status: number, body: string, call: () => Promise<unknown>): Promise<unknown> {
-  const original = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(body, { status })) as typeof fetch;
-  try {
-    return await call().then(
-      () => {
-        throw new Error("expected the call to reject");
-      },
-      (err: unknown) => err,
-    );
-  } finally {
-    globalThis.fetch = original;
-  }
-}
+describe("isAnchorRejection / anchorRejectionDetail", () => {
+  const err = (sep: "6" | "38" | "12", op: string, status: number, body = "") =>
+    new AnchorHttpError({ sep, op, status, body });
 
-const withdraw = () =>
-  startSep6Withdraw("https://anchor-reject.test", "jwt", {
-    assetCode: "USDC",
-    amount: "25",
-    account: "GSELLER",
-    type: "bank_account",
-  });
-
-const quote = () =>
-  getSep38Quote("https://anchor-reject.test", "jwt", {
-    sellAsset: { code: "USDC", issuer: "G" },
-    sellAmount: "25",
-    buyCurrency: "NGN",
-  });
-
-describe("anchorCallError classifies the answer", () => {
-  it.each([400, 403, 404, 422])("treats HTTP %i as a rejection, not an outage", async (status) => {
-    const err = await anchorCallError("6", "withdraw", new Response("{}", { status }));
-    expect(err).toBeInstanceOf(AnchorRejectedError);
-    expect(err).toBeInstanceOf(OffRampRejectedError);
-    expect(err).not.toBeInstanceOf(AnchorHttpError);
-    expect((err as AnchorRejectedError).status).toBe(status);
-  });
-
-  it.each([401, 429, 500, 502, 503])("keeps HTTP %i as an anchor failure", async (status) => {
-    const err = await anchorCallError("6", "withdraw", new Response("{}", { status }));
-    expect(err).toBeInstanceOf(AnchorHttpError);
-    expect(err).not.toBeInstanceOf(AnchorRejectedError);
-  });
-
-  it("carries the structured SEP error but never the anchor's prose in the message", async () => {
-    const body = JSON.stringify({
-      type: "non_interactive_customer_info_needed",
-      error: "SECRET-MARKER first_name=Ada account=1234567890",
-      fields: ["phone_number", "id_number"],
-    });
-    const err = (await anchorCallError("6", "withdraw", new Response(body, { status: 400 }))) as AnchorRejectedError;
-    expect(err).toBeInstanceOf(AnchorRejectedError);
-    expect(err.anchorType).toBe("non_interactive_customer_info_needed");
-    expect(err.anchorFields).toEqual(["phone_number", "id_number"]);
-    expect(err.anchorError).toContain("SECRET-MARKER");
-    expect(err.message).toBe(anchorRejectionSummary("6", "withdraw", 400));
-    expect(err.message).not.toContain("SECRET-MARKER");
-    expect(err.body).toContain("SECRET-MARKER");
-  });
-
-  it("reads an HTML or non-object body as no detail at all (issue 4.36)", async () => {
-    for (const body of ["<html>SECRET-MARKER</html>", '"just a string"', "[1,2,3]"]) {
-      const err = (await anchorCallError("6", "withdraw", new Response(body, { status: 400 }))) as AnchorRejectedError;
-      expect(err).toBeInstanceOf(AnchorRejectedError);
-      expect(err.anchorType).toBeUndefined();
-      expect(err.anchorError).toBeUndefined();
-      expect(err.anchorFields).toBeUndefined();
-      expect(err.message).not.toContain("SECRET-MARKER");
+  it("is true for a 400, 403 or 422 on SEP-6 withdraw or the SEP-38 quote", () => {
+    for (const status of [400, 403, 422]) {
+      expect(isAnchorRejection(err("6", "withdraw", status))).toBe(true);
+      expect(isAnchorRejection(err("38", "quote", status))).toBe(true);
     }
   });
 
-  it("bounds every value it carries", () => {
-    const detail = parseAnchorRejection(
-      JSON.stringify({
-        type: "t".repeat(5_000),
-        error: "e".repeat(50_000),
-        fields: Array.from({ length: 200 }, () => "f".repeat(500)),
-      }),
-    );
-    expect(new TextEncoder().encode(detail.type!).length).toBeLessThan(200);
-    expect(new TextEncoder().encode(detail.error!).length).toBeLessThan(600);
-    expect(detail.fields).toHaveLength(20);
-    expect(detail.fields!.every((f) => new TextEncoder().encode(f).length < 100)).toBe(true);
+  it("is false for 5xx, 429, other calls and non-anchor errors", () => {
+    for (const status of [429, 500, 502, 503, 404]) {
+      expect(isAnchorRejection(err("6", "withdraw", status))).toBe(false);
+    }
+    expect(isAnchorRejection(err("12", "customer PUT", 400))).toBe(false);
+    expect(isAnchorRejection(err("6", "/info", 400))).toBe(false);
+    expect(isAnchorRejection(new Error("400"))).toBe(false);
   });
 
-  it("ignores malformed field entries rather than carrying them", () => {
-    expect(parseAnchorRejection(JSON.stringify({ type: 7, error: { nested: true }, fields: ["ok", 42, null] }))).toEqual({
-      fields: ["ok"],
+  it("returns only the type and well-formed field names", () => {
+    const body = JSON.stringify({
+      type: "non_interactive_customer_info_needed",
+      fields: ["first_name", "bad field", 7, "email_address"],
+      error: "free text that may echo KYC data",
     });
-    expect(parseAnchorRejection("")).toEqual({});
-  });
-});
-
-describe("isAnchorRejectionStatus", () => {
-  it("is the 4xx set the anchors answer with", () => {
-    expect([400, 403, 404, 422].every(isAnchorRejectionStatus)).toBe(true);
-    expect([200, 401, 409, 429, 500, 502, 503].some(isAnchorRejectionStatus)).toBe(false);
-  });
-});
-
-describe("SEP-6 /withdraw and SEP-38 quote throw AnchorRejectedError", () => {
-  it("SEP-6 withdraw: 400 customer_info_needed is a rejection", async () => {
-    const err = await errorFrom(
-      400,
-      JSON.stringify({ type: "non_interactive_customer_info_needed", fields: ["phone_number"] }),
-      withdraw,
-    );
-    expect(err).toBeInstanceOf(AnchorRejectedError);
-    expect(err).toBeInstanceOf(OffRampRejectedError);
-    expect(err).toMatchObject({ sep: "6", op: "withdraw", status: 400 });
-    expect((err as AnchorRejectedError).anchorFields).toEqual(["phone_number"]);
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, body))).toEqual({
+      anchorType: "non_interactive_customer_info_needed",
+      fields: ["first_name", "email_address"],
+    });
   });
 
-  it("SEP-6 withdraw: 403 customer_info_status is a rejection", async () => {
-    const err = await errorFrom(403, JSON.stringify({ type: "customer_info_status" }), withdraw);
-    expect(err).toBeInstanceOf(AnchorRejectedError);
-    expect(err).toMatchObject({ status: 403 });
-  });
-
-  it("SEP-38 quote: 400 for an unsupported pair is a rejection", async () => {
-    const err = await errorFrom(400, JSON.stringify({ error: "unsupported asset pair" }), quote);
-    expect(err).toBeInstanceOf(AnchorRejectedError);
-    expect(err).toMatchObject({ sep: "38", op: "quote", status: 400 });
-    expect((err as AnchorRejectedError).anchorError).toBe("unsupported asset pair");
-  });
-
-  it.each([429, 502])("a %i from either call stays an outage", async (status) => {
-    expect(await errorFrom(status, "upstream down", withdraw)).toBeInstanceOf(AnchorHttpError);
-    expect(await errorFrom(status, "upstream down", quote)).toBeInstanceOf(AnchorHttpError);
-  });
-
-  it("a 400 from /withdraw still keeps a non-JSON body off the message", async () => {
-    const err = await errorFrom(400, "<html>SECRET-MARKER</html>", withdraw);
-    expect(err).toBeInstanceOf(AnchorRejectedError);
-    expect((err as AnchorRejectedError).message).not.toContain("SECRET-MARKER");
-    expect((err as AnchorRejectedError).body).toContain("SECRET-MARKER");
+  it("returns nothing for a non-JSON, non-object or oddly typed body", () => {
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, "<html>nope</html>"))).toEqual({});
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, "null"))).toEqual({});
+    expect(anchorRejectionDetail(err("6", "withdraw", 400, JSON.stringify({ type: "has spaces", fields: [] })))).toEqual({});
   });
 });

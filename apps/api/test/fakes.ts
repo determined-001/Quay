@@ -29,6 +29,7 @@ import {
   type WebhookRepository,
 } from "@checkout/core";
 import { encryptSecret } from "../src/services/secret-crypto";
+import { decodeDeliveryCursor, encodeDeliveryCursor } from "../src/repos/index";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 const ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
@@ -149,6 +150,23 @@ export class FakeLinkRepository implements LinkRepository {
     return this.payments.find((p) => p.txHash === txHash)?.ledger ?? null;
   }
 
+  async claimForCashOut(id: string, allowedStatuses: Array<PaymentLink["status"]>): Promise<boolean> {
+    const link = this.byId.get(id);
+    if (!link) return false;
+    if (!allowedStatuses.includes(link.status)) return false;
+    link.status = "offramp_pending";
+    link.updatedAt = Date.now();
+    return true;
+  }
+
+  async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
+    const link = this.byId.get(id);
+    if (!link) return;
+    if (link.status === "offramp_pending") {
+      link.status = restoreStatus;
+      link.updatedAt = Date.now();
+    }
+  }
 
   get(id: string): PaymentLink | undefined {
     return this.byId.get(id);
@@ -179,7 +197,7 @@ export class FakeWebhookRepository implements WebhookRepository {
   }
 
   async findWebhookById(id: string): Promise<Webhook | null> {
-    return this.hooks.find((h) => h.id === id && h.deletedAt === null) ?? null;
+    return this.hooks.find((h) => h.id === id) ?? null;
   }
 
   async enqueue(
@@ -276,8 +294,8 @@ export class FakeWebhookRepository implements WebhookRepository {
     return true;
   }
 
-  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void> {
-    this.deliveries.push({ ...d, id: `whd_${this.deliveries.length}`, createdAt: Date.now() });
+  async recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt"> & { createdAt?: number }): Promise<void> {
+    this.deliveries.push({ ...d, id: `whd_${this.deliveries.length}`, createdAt: d.createdAt ?? Date.now() });
   }
 
   async listDeliveries(
@@ -287,10 +305,24 @@ export class FakeWebhookRepository implements WebhookRepository {
   ): Promise<{ deliveries: WebhookDelivery[]; nextCursor: string | null }> {
     const owned = await this.getById(webhookId, sellerId, { includeDeleted: true });
     if (!owned) return { deliveries: [], nextCursor: null };
-    const matching = this.deliveries
+    const cursor = opts.cursor ? decodeDeliveryCursor(opts.cursor) : null;
+    let matching = this.deliveries
       .filter((d) => d.webhookId === webhookId)
-      .sort((a, b) => b.createdAt - a.createdAt);
-    return { deliveries: matching.slice(0, opts.limit), nextCursor: null };
+      .sort((a, b) => {
+        if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
+        return b.id.localeCompare(a.id);
+      });
+    if (cursor !== null) {
+      matching = matching.filter(
+        (d) =>
+          d.createdAt < cursor.createdAt ||
+          (d.createdAt === cursor.createdAt && d.id < cursor.id),
+      );
+    }
+    const page = matching.slice(0, opts.limit);
+    const last = page[page.length - 1];
+    const nextCursor = matching.length > opts.limit && last ? encodeDeliveryCursor(last.createdAt, last.id) : null;
+    return { deliveries: page, nextCursor };
   }
 }
 

@@ -1,40 +1,30 @@
+/**
+ * Block-explorer links for the network this deployment runs on.
+ *
+ * Reads `NEXT_PUBLIC_STELLAR_NETWORK`, the one variable docs/MAINNET.md tells
+ * operators to set on the web service. The API-side `STELLAR_NETWORK` has no
+ * `NEXT_PUBLIC_` prefix, so a separately deployed web app never sees it and
+ * every mainnet receipt linked to the testnet explorer (issue 5.30).
+ */
 export type StellarNetwork = "public" | "testnet";
 
-export function getNetwork(override?: string): StellarNetwork {
-  const raw = override ?? process.env.NEXT_PUBLIC_STELLAR_NETWORK;
-  return raw === "public" ? "public" : "testnet";
+export function stellarNetwork(): StellarNetwork {
+  return process.env.NEXT_PUBLIC_STELLAR_NETWORK === "public" ? "public" : "testnet";
 }
 
-export function networkLabel(network?: string): string {
-  return getNetwork(network) === "public" ? "Mainnet" : "Testnet";
+function explorerBase(network: StellarNetwork): string {
+  return network === "public" ? "https://stellar.expert/explorer/public" : "https://stellar.expert/explorer/testnet";
 }
 
-export function explorerUrl(hash: string, network?: string): string;
-export function explorerUrl(network: string, hash: string): string;
-export function explorerUrl(arg1: string, arg2?: string): string {
-  if (arg2 !== undefined) {
-    if (arg1 === "public" || arg1 === "testnet") {
-      const net = getNetwork(arg1);
-      return `https://stellar.expert/explorer/${net}/tx/${arg2}`;
-    }
-    const net = getNetwork(arg2);
-    return `https://stellar.expert/explorer/${net}/tx/${arg1}`;
-  }
-  const net = getNetwork();
-  return `https://stellar.expert/explorer/${net}/tx/${arg1}`;
+export function explorerUrl(hash: string, network: StellarNetwork = stellarNetwork()): string {
+  return `${explorerBase(network)}/tx/${hash}`;
 }
 
-export function addressUrl(addr: string, network?: string): string;
-export function addressUrl(network: string, addr: string): string;
-export function addressUrl(arg1: string, arg2?: string): string {
-  if (arg2 !== undefined) {
-    if (arg1 === "public" || arg1 === "testnet") {
-      const net = getNetwork(arg1);
-      return `https://stellar.expert/explorer/${net}/account/${arg2}`;
-    }
-    const net = getNetwork(arg2);
-    return `https://stellar.expert/explorer/${net}/account/${arg1}`;
-  }
-  const net = getNetwork();
-  return `https://stellar.expert/explorer/${net}/account/${arg1}`;
+export function addressUrl(address: string, network: StellarNetwork = stellarNetwork()): string {
+  return `${explorerBase(network)}/account/${address}`;
+}
+
+/** "Mainnet" or "Testnet", for copy such as "Settled on Stellar Mainnet". */
+export function networkLabel(network: StellarNetwork = stellarNetwork()): string {
+  return network === "public" ? "Mainnet" : "Testnet";
 }

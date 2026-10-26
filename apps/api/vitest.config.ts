@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import { coverage } from "../../vitest.coverage";
+import { sharedTest } from "../../vitest.shared";
 export default defineConfig({
   test: {
     coverage: coverage({ lines: 75, statements: 73, functions: 72, branches: 66 }),
@@ -17,9 +18,6 @@ export default defineConfig({
       OFFRAMP: "mock",
       KYC_ENCRYPTION_KEY: "0".repeat(64),
     },
-    // The off-ramp poll-backoff tests wait on a real 2s backoff; 5s is too
-    // tight under parallel load.
-    testTimeout: 10_000,
-    hookTimeout: 10_000,
+    ...sharedTest,
   },
 });

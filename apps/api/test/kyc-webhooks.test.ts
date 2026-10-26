@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
-import type { AnchorCustomer, KycPort, KycRecord, KycUploadFile, Webhook } from "@checkout/core";
-import { createDb, bootstrap, type DB } from "../src/db/client";
+import type { AnchorCustomer, KycPort, KycRecord, KycUploadFile } from "@checkout/core";
+import { createDb, bootstrap } from "../src/db/client";
 import { DrizzleKycRepository, DrizzleWebhookRepository } from "../src/repos/index";
 import { WebhookSender } from "../src/services/webhook-sender";
 import { KycEvents } from "../src/services/kyc-events";
 import { webhookQueue } from "../src/db/schema";
-import { eq } from "drizzle-orm";
 
 async function makeTestSetup() {
   const { db, client } = createDb(":memory:");

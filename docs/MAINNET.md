@@ -10,12 +10,14 @@ skip the verification at the end of each phase.
 
 **Read this first:** the public-network guardrails throw at boot rather than
 warn. A service that refuses to start is loud; one that quietly settles into a
-sandbox anchor is not. The guards are split across two files: the OFFRAMP and
-anchor-URL checks fire in `apps/api/src/env.ts` at module load (lines
-114–142), as does the USDC issuer check (line 189); the
-`SERVER_SIGNING_SECRET` (line 489), and `JWT_SECRET` (line 512) checks fire in
-`apps/api/src/services/container.ts` inside `createContainer()`. If a guard
-fires, fix the configuration — never relax the guard to get a green deploy.
+sandbox anchor is not. The guards are split across three places: the OFFRAMP,
+seller-secret, anchor-URL and e2e checks and the USDC issuer check fire in
+`apps/api/src/env.ts` at module load; the `SERVER_SIGNING_SECRET` and
+`JWT_SECRET` checks (`resolveServerSigningKeypair`, `resolveJwtSecret`) and the
+`REDIS_URL` / `SINGLE_INSTANCE` check (`assertSharedStateOrSingleInstance`) fire
+in `apps/api/src/services/container.ts` inside `createContainer()`, which also
+calls `assertKeyConfigured()` from `apps/api/src/services/secret-crypto.ts` for
+the webhook-secret key. If a guard fires, fix the configuration — never relax the guard to get a green deploy.
 
 ---
 
@@ -25,19 +27,28 @@ fires, fix the configuration — never relax the guard to get a green deploy.
 |---|---|
 | `OFFRAMP=mock` | The mock anchor fakes settlement 8s after cash-out and pays out nothing. Sellers would see completed cash-outs against real funds that never left. Use `none`, not `mock`, to ship without a cash-out leg. |
 | `OFFRAMP=testanchor` | `testanchor.stellar.org` is the SDF testnet sandbox. It does not settle real money. |
+| `DEFAULT_SELLER_SECRET` set (`STELLAR_NETWORK=public`) | Quay never signs for a seller; each seller's wallet signs its own anchor login and withdrawals. A server-side seller secret is only for the testnet demo scripts. |
 | `OFFRAMP=anchor` without `ANCHOR_URL` / `ANCHOR_HOME_DOMAIN` | There is deliberately no default. A default would mean "the sandbox". |
 | `ANCHOR_URL` over plain HTTP | SEP-10 auth tokens and SEP-12 KYC fields cross this connection. |
 | Missing `USDC_ISSUER_PUBLIC` | Without an issuer the watcher cannot tell real USDC from an impostor asset. |
-| Missing `KYC_ENCRYPTION_KEY` (`OFFRAMP=anchor`) | Seller SEP-12 PII would be stored unencrypted. Not required under `OFFRAMP=none`, which collects none. |
+| Missing `KYC_ENCRYPTION_KEY` (`OFFRAMP=testanchor` or `anchor`; on pubnet that means `anchor`) | Seller SEP-12 PII would be stored unencrypted. Not required under `OFFRAMP=none`, which collects none. |
 | Missing `SERVER_SIGNING_SECRET` | A per-boot SEP-10 identity changes the advertised `SIGNING_KEY` on every restart, breaking every wallet that cached it. |
 | Missing `JWT_SECRET` | Every seller is logged out on each deploy. |
+| Missing `REDIS_URL` without `SINGLE_INSTANCE=true` (`STELLAR_NETWORK=public`) | Rate-limit counters and SEP-10 single-use challenge claims are per-process without Redis, so N instances allow N times every limit and N redemptions of one signed challenge. Set `REDIS_URL`, or set `SINGLE_INSTANCE=true` to state that this deployment runs exactly one instance. |
+| Missing `WEBHOOK_SECRET_ENCRYPTION_KEY` (`NODE_ENV=production`, any network) | It encrypts webhook signing secrets and seller anchor session tokens at rest. The trigger is `NODE_ENV=production`, not `STELLAR_NETWORK=public`. A value that does not decode to exactly 32 bytes (64 hex chars, or base64 of 32 bytes) is also refused. |
+| `E2E_TEST_MODE=1` with `NODE_ENV=production` or `STELLAR_NETWORK=public` | The e2e harness mounts routes that mint sessions and mark links paid without authentication or a ledger. |
+| Unrecognised `STELLAR_NETWORK`, `OFFRAMP`, `WATCH_MODE` or `CORRELATION` value | Each is validated against its allowed set at module load. |
 | A blank or non-numeric numeric var | A blank value used to yield `0` — `TRUST_PROXY_HOPS=` silently collapsed every client into one rate-limit bucket. A typo yields `NaN`, and `setInterval(NaN)` is a tight loop against Horizon, not a slow poll. |
 
-The OFFRAMP, USDC issuer, anchor-URL, and KYC key guards are covered by
-`apps/api/test/env-mainnet-guards.test.ts`. The
-`SERVER_SIGNING_SECRET`, and `JWT_SECRET` guards live in
-`apps/api/src/services/container.ts` and are not yet covered by a dedicated
-test file.
+The `env.ts` guards (OFFRAMP, `DEFAULT_SELLER_SECRET`, anchor URL, USDC
+issuer, KYC key, unknown OFFRAMP value) are covered by
+`apps/api/test/env-mainnet-guards.test.ts`. The `REDIS_URL` / `SINGLE_INSTANCE`
+guard is covered by `apps/api/test/single-instance-guard.test.ts` and the
+webhook-key guard by `apps/api/test/secret-crypto.test.ts`. The
+`SERVER_SIGNING_SECRET` and `JWT_SECRET` guards
+(`resolveServerSigningKeypair`, `resolveJwtSecret` in
+`apps/api/src/services/container.ts`) and the `E2E_TEST_MODE` guard have no
+dedicated test.
 
 ---
 
@@ -94,25 +105,52 @@ Share the [anchor due diligence brief](ANCHOR-DUE-DILIGENCE.md) with a prospecti
 Only if you are enabling cash-out. This is the one decision no configuration
 can make for you, and it gates everything else.
 
-Quay's off-ramp adapter speaks SEP-10 (auth), SEP-12 (KYC), SEP-38 (quotes) and
-SEP-6 (withdrawal). Any production anchor implementing that set works with no
-code change — `OFFRAMP=anchor` is the same adapter as `testanchor`, pointed at a
-different host.
+Quay's off-ramp speaks SEP-10 (auth), SEP-12 (KYC) and either SEP-6 or SEP-24
+(withdrawal), with SEP-38 for quotes where the anchor has them. Any production
+anchor implementing that set works with no code change — `OFFRAMP=anchor` is the
+same code as `testanchor`, pointed at a different host.
+
+Which withdrawal protocol is used comes from the anchor's own `stellar.toml`
+(`TRANSFER_SERVER` means SEP-6, `TRANSFER_SERVER_SEP0024` means SEP-24), set by
+`OFFRAMP_PROTOCOL`:
+
+- `auto` (default) uses SEP-6 when the anchor declares it — the seller never
+  leaves the dashboard — and otherwise SEP-24, where the anchor's own page opens
+  for the seller to finish the withdrawal.
+- `sep6` / `sep24` force one. If the anchor does not declare it, the first
+  cash-out fails with `502 anchor_config_error` naming what the anchor does
+  declare. The chosen protocol is logged once at boot (`event: "offramp.protocol"`).
+
+A withdrawal keeps the protocol it started under, so changing `OFFRAMP_PROTOCOL`
+never strands one in flight.
 
 What you need from the anchor before proceeding:
 
 - **A commercial agreement.** Production anchors do not serve anonymous traffic.
-- **The corridor you actually need.** Confirm it quotes USDC against your target
-  currency via SEP-38, and settles to the rail your sellers use.
-- **Its SEP-6 withdrawal types.** If it publishes more than one, set
-  `OFFRAMP_TYPE`; otherwise the adapter refuses rather than guessing a rail.
+- **The corridor you actually need.** Confirm it settles to the rail your sellers
+  use, and how it prices: via SEP-38 (`ANCHOR_QUOTE_SERVER` in its TOML), or, for
+  the many anchors that publish no SEP-38, an indicative rate from
+  `OFFRAMP_RATE_SOURCE` plus the fee in its `/info`. With neither, the adapter
+  refuses to quote rather than invent a rate.
+- **Its SEP-6 withdrawal types** (when it serves SEP-6). If it publishes more
+  than one, set `OFFRAMP_TYPE`; otherwise the adapter refuses rather than
+  guessing a rail. A SEP-24 anchor collects the rail on its own page.
 - **Its KYC requirements.** SEP-12 fields are collected per seller ahead of
-  time, not per transaction.
+  time, not per transaction. If it keys requirements on a SEP-12 customer
+  `type`, set `ANCHOR_KYC_TYPE` (and `ANCHOR_KYC_TYPE_ORGANIZATION` for
+  organization sellers); Quay then sends it on every `/customer` call and keeps
+  a separate status per type.
 - **That it serves each seller as their own customer.** Every seller signs the
   anchor's SEP-10 challenge with their own wallet (dashboard → identity
   verification → *Connect to anchor*), so the anchor's customer is the seller's
   account, not Quay's. Each seller also signs the USDC transfer that funds their
   withdrawal. Nothing is sent from an account Quay controls.
+
+`ANCHOR_URL` and `ANCHOR_HOME_DOMAIN` name the first anchor and seed the
+`anchors` table on the first boot. More anchors (another corridor, or a move to
+a different production anchor) are added afterwards with
+`node scripts/anchors.mjs add|disable|list`, without a redeploy; see
+[Switching anchors](RUNBOOK.md#switching-anchors).
 
 Verify before writing any config:
 
@@ -120,8 +158,11 @@ Verify before writing any config:
 curl -s https://<anchor-domain>/.well-known/stellar.toml
 ```
 
-Confirm it advertises `WEB_AUTH_ENDPOINT`, `TRANSFER_SERVER`, `KYC_SERVER`,
-`ANCHOR_QUOTE_SERVER`, and that `NETWORK_PASSPHRASE` is
+Confirm it advertises `WEB_AUTH_ENDPOINT` and `SIGNING_KEY`, at least one of
+`TRANSFER_SERVER` (SEP-6) or `TRANSFER_SERVER_SEP0024` (SEP-24), and `KYC_SERVER`
+(when absent, Quay uses the transfer server); `ANCHOR_QUOTE_SERVER` is
+optional (see above). Quay treats anything the TOML does not declare as
+absent, never as a guessed path. Confirm too that `NETWORK_PASSPHRASE` is
 `Public Global Stellar Network ; September 2015`. An anchor whose TOML names the
 testnet passphrase is a sandbox regardless of its domain.
 
@@ -146,7 +187,7 @@ Copy each value straight into your platform's secret manager, then close the
 terminal.
 
 It generates `JWT_SECRET`, `KYC_ENCRYPTION_KEY`,
-`WEBHOOK_SECRET_ENCRYPTION_KEY`, `METRICS_TOKEN`, the seller keypair, and
+`WEBHOOK_SECRET_ENCRYPTION_KEY`, `METRICS_TOKEN`, and
 `SERVER_SIGNING_SECRET`. It does not generate `ANCHOR_URL`,
 `ANCHOR_HOME_DOMAIN`, `DATABASE_URL`, `DATABASE_AUTH_TOKEN` or `CORS_ORIGINS` —
 supply those by hand.
@@ -275,6 +316,28 @@ It exits non-zero only on blocking findings; warnings are printed but do not
 fail the run. Read them anyway — `REDIS_URL` is the one that decides whether you
 may run more than one instance.
 
+With `OFFRAMP=anchor` it also fetches the anchor's
+`https://$ANCHOR_HOME_DOMAIN/.well-known/stellar.toml` (SEP-1) and audits it,
+because at runtime a missing or incomplete toml degrades to guessed endpoints
+and only shows up when the first seller taps "Connect to anchor". These block:
+
+| Check | Fails when |
+| --- | --- |
+| `anchor-toml:fetch` | the toml is unreachable or not a 200 |
+| `anchor-toml:signing-key` | `SIGNING_KEY` is missing or not a `G...` public key |
+| `anchor-toml:network` | `NETWORK_PASSPHRASE` is missing (the runtime lets that through silently) or is not `Public Global Stellar Network ; September 2015` |
+| `anchor-toml:WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `TRANSFER_SERVER`, `TRANSFER_SERVER_SEP0024` | the endpoint is missing or not `https://` (it is only a warning if its host differs from `ANCHOR_URL`). Either transfer server is enough: the toml is blocked only when it declares neither |
+| `anchor-toml:ANCHOR_QUOTE_SERVER` | a warning, not a blocker, when missing (and silent when `OFFRAMP_RATE_SOURCE` is set); blocking only if declared and not `https://` |
+| `anchor-toml:usdc` | `[[CURRENCIES]]` has no `code = "USDC"` entry with Circle's pubnet issuer |
+
+`anchor-toml:withdraw-info` is a warning only: it reads `{TRANSFER_SERVER}/info` (or `{TRANSFER_SERVER_SEP0024}/info` for a SEP-24-only anchor)
+and flags USDC withdraw not enabled, several withdraw types offered with
+`OFFRAMP_TYPE` unset, or an `OFFRAMP_TYPE` the anchor does not offer. As a
+sanity check, pointing it at the sandbox
+(`STELLAR_NETWORK=public OFFRAMP=anchor ANCHOR_URL=https://testanchor.stellar.org
+ANCHOR_HOME_DOMAIN=testanchor.stellar.org pnpm preflight:mainnet`) should fail
+`anchor-toml:network`.
+
 Then work down this list against the deployed mainnet service. Stop at the
 first failure.
 
@@ -339,11 +402,11 @@ Not blockers for a first cutover, but each has a real production cost:
 - **`.github/workflows/anchor-probe.yml` probes `testanchor.stellar.org`** and
   auto-files a GitHub issue when that sandbox is down. On a mainnet project it
   is watching the wrong host — repoint it at your anchor or disable it.
-- **No server-held key signs anything for a seller (issue #207).** The unwired SEP-24
+- **No server-held key signs anything for a seller (issue #207).** The SEP-24
   adapter (`AnchorOffRamp`, `packages/offramp/src/anchor.ts`) used to sign the seller's send
   leg and log in to the anchor with a platform keypair; it now authenticates per seller
   through `SellerAnchorAuth` and returns the send leg as transfer instructions for the
   seller's wallet to sign, and `Sep10Client` moved to `packages/offramp/test/`.
-  `TestAnchorOffRamp` (SEP-6) is the adapter that is wired in.
+  Both it and the SEP-6 `TestAnchorOffRamp` are wired in behind `SelectingOffRamp`.
   `scripts/check-no-server-signing.mjs` fails CI if a server-side signing path
   reappears.

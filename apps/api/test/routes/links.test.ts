@@ -89,6 +89,28 @@ describe("POST /links", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns 400 for zero amount", async () => {
+    const res = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Zero amount", amount: "0" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_body");
+  });
+
+  it("returns 400 for an amount above the int64 stroop ceiling", async () => {
+    const res = await req("/links", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Too big", amount: "922337203685.4775808" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_body");
+  });
+
   it("returns 400 for empty title", async () => {
     const res = await req("/links", {
       method: "POST",

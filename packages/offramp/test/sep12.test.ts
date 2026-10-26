@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AnchorConfigError, AnchorHttpError } from "../src/anchor-error";
 import {
   deleteSep12Customer,
   getSep12Customer,
   putSep12Callback,
   putSep12Customer,
   putSep12CustomerMultipart,
+  toKycStatus,
+  toProvidedFieldStatus,
 } from "../src/sep12";
 
 const BASE_URL = "https://testanchor.stellar.org";
@@ -16,7 +19,56 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("toProvidedFieldStatus", () => {
+  it("returns an empty array when fields is undefined", () => {
+    expect(toProvidedFieldStatus(undefined)).toEqual([]);
+  });
+
+  it("maps provided field specs with null defaults for missing status or error", () => {
+    const raw = {
+      first_name: { status: "ACCEPTED" as const },
+      photo_id_front: { status: "REJECTED" as const, error: "blurry" },
+      middle_name: {},
+    };
+    expect(toProvidedFieldStatus(raw)).toEqual([
+      { name: "first_name", status: "ACCEPTED", error: null },
+      { name: "photo_id_front", status: "REJECTED", error: "blurry" },
+      { name: "middle_name", status: null, error: null },
+    ]);
+  });
+});
+
+describe("toKycStatus", () => {
+  it("returns PROCESSING and logs a warning when status is missing/undefined", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = toKycStatus(undefined as unknown as string);
+    expect(result).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: undefined }),
+    );
+  });
+
+  it("returns PROCESSING and logs a warning for lower-case 'accepted'", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = toKycStatus("accepted");
+    expect(result).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: "accepted" }),
+    );
+  });
+
+  it.each(["ACCEPTED", "REJECTED", "NEEDS_INFO", "PROCESSING"] as const)(
+    "passes through known status '%s' without logging a warning",
+    (status) => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(toKycStatus(status)).toBe(status);
+      expect(warnSpy).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("deleteSep12Customer", () => {
@@ -28,7 +80,7 @@ describe("deleteSep12Customer", () => {
     expect(await deleteSep12Customer(`${BASE_URL}/sep12`, JWT, ACCOUNT)).toBe("not_found");
     const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect(url.toString()).toBe(`${BASE_URL}/sep12/customer/${ACCOUNT}`);
-    expect(init).toEqual({ method: "DELETE", headers: { authorization: `Bearer ${JWT}` } });
+    expect(init).toMatchObject({ method: "DELETE", headers: { authorization: `Bearer ${JWT}` } });
   });
 
   it("does not report deletion when the anchor rejects the request", async () => {
@@ -224,6 +276,64 @@ describe("getSep12Customer", () => {
       JSON.stringify({ event: "kyc.status.unknown", status: "NEEDS_VERIFICATION" }),
     );
   });
+
+  it("populates providedFieldStatus from the anchor's provided_fields reply", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+          status: "ACCEPTED",
+          provided_fields: {
+            first_name: { status: "ACCEPTED" },
+            photo_id_front: { status: "REJECTED", error: "blurry" },
+            middle_name: {},
+          },
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.providedFieldStatus).toEqual([
+      { name: "first_name", status: "ACCEPTED", error: null },
+      { name: "photo_id_front", status: "REJECTED", error: "blurry" },
+      { name: "middle_name", status: null, error: null },
+    ]);
+  });
+
+  it("returns requiredFields as [] when the reply omits the fields key", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+          status: "PROCESSING",
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.requiredFields).toEqual([]);
+    expect(result.status).toBe("PROCESSING");
+  });
+
+  it("falls back to PROCESSING when the 200 reply omits the status field entirely", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.status).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: undefined }),
+    );
+  });
 });
 
 describe("putSep12Callback", () => {
@@ -305,5 +415,156 @@ describe("putSep12CustomerMultipart", () => {
     const formData = init.body as FormData;
     expect(formData.get("id")).toBe("cust_existing");
     expect(formData.get("account")).toBeNull();
+  });
+
+  it("rejects with an AnchorHttpError on a 400 response without leaking anchor body text into message", async () => {
+    const anchorBody = "invalid file format uploaded";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(anchorBody, { status: 400 })));
+
+    const fileBlob = new Blob(["fake-bytes"], { type: "image/jpeg" });
+    const errPromise = putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      files: [{ name: "photo_id_front", blob: fileBlob, filename: "front.jpg" }],
+    });
+
+    await expect(errPromise).rejects.toBeInstanceOf(AnchorHttpError);
+    await errPromise.catch((err: AnchorHttpError) => {
+      expect(err.sep).toBe("12");
+      expect(err.op).toBe("customer PUT (files)");
+      expect(err.status).toBe(400);
+      expect(err.message).toBe("SEP-12 customer PUT (files) failed: 400");
+      expect(err.message).not.toContain(anchorBody);
+      expect(err.body).toBe(anchorBody);
+    });
+  });
+
+  it("rejects with an AnchorHttpError on a 500 response without leaking anchor body text into message", async () => {
+    const anchorBody = "internal server error: S3 bucket unreachable";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(anchorBody, { status: 500 })));
+
+    const fileBlob = new Blob(["fake-bytes"], { type: "image/jpeg" });
+    const errPromise = putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      files: [{ name: "photo_id_front", blob: fileBlob, filename: "front.jpg" }],
+    });
+
+    await expect(errPromise).rejects.toBeInstanceOf(AnchorHttpError);
+    await errPromise.catch((err: AnchorHttpError) => {
+      expect(err.sep).toBe("12");
+      expect(err.op).toBe("customer PUT (files)");
+      expect(err.status).toBe(500);
+      expect(err.message).toBe("SEP-12 customer PUT (files) failed: 500");
+      expect(err.message).not.toContain(anchorBody);
+      expect(err.body).toBe(anchorBody);
+    });
+  });
+});
+
+describe("SEP-12 customer type (issue 3.15)", () => {
+  const TYPE_ERROR = { error: "unrecognized 'type' value. see valid values in the /info response" };
+
+  it("GET carries ?type= on the id lookup and on the account fallback", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("stale", { status: 404 }))
+      .mockResolvedValueOnce(jsonResponse({ id: "cust_2", status: "NEEDS_INFO" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, customerId: "cust_1", type: "sep31-receiver" });
+
+    const urls = fetchMock.mock.calls.map((c) => new URL(String(c[0])));
+    expect(urls[0]!.searchParams.get("id")).toBe("cust_1");
+    expect(urls[0]!.searchParams.get("type")).toBe("sep31-receiver");
+    expect(urls[1]!.searchParams.get("account")).toBe(ACCOUNT);
+    expect(urls[1]!.searchParams.get("type")).toBe("sep31-receiver");
+  });
+
+  it("GET leaves the request unchanged when no type is configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1", status: "ACCEPTED" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+
+    const url = new URL(String(fetchMock.mock.calls[0]![0]));
+    expect(url.searchParams.has("type")).toBe(false);
+    expect([...url.searchParams.keys()]).toEqual(["account"]);
+  });
+
+  it("PUT carries type in the body, and a field named type cannot override it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Customer(BASE_URL, JWT, {
+      account: ACCOUNT,
+      fields: { first_name: "Ada", type: "other" },
+      type: "sep31-receiver",
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ account: ACCOUNT, first_name: "Ada", type: "sep31-receiver" });
+  });
+
+  it("PUT body has no type key when none is configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "cust_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: { first_name: "Ada" } });
+
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect("type" in JSON.parse(init.body as string)).toBe(false);
+  });
+
+  it("the multipart PUT carries type before the files, and omits it when unset", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ id: "cust_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const files = [{ name: "photo_id_front", blob: new Blob(["x"]), filename: "front.jpg" }];
+
+    await putSep12CustomerMultipart(BASE_URL, JWT, { account: ACCOUNT, files, type: "sep31-receiver" });
+    await putSep12CustomerMultipart(BASE_URL, JWT, { account: ACCOUNT, files });
+
+    const typed = (fetchMock.mock.calls[0]![1] as RequestInit).body as FormData;
+    expect([...typed.keys()]).toEqual(["account", "type", "photo_id_front"]);
+    expect(typed.get("type")).toBe("sep31-receiver");
+    const untyped = (fetchMock.mock.calls[1]![1] as RequestInit).body as FormData;
+    expect(untyped.has("type")).toBe(false);
+  });
+
+  it.each([
+    ["GET", () => getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, type: "bogus" })],
+    ["PUT", () => putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {}, type: "bogus" })],
+    [
+      "PUT (files)",
+      () =>
+        putSep12CustomerMultipart(BASE_URL, JWT, {
+          account: ACCOUNT,
+          files: [{ name: "photo_id_front", blob: new Blob(["x"]), filename: "f.jpg" }],
+          type: "bogus",
+        }),
+    ],
+  ])("a 400 about the type on %s becomes an AnchorConfigError naming the type", async (_op, call) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(TYPE_ERROR, 400)));
+    const err = await call().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AnchorConfigError);
+    expect((err as AnchorConfigError).message).toBe('anchor rejected SEP-12 type "bogus"');
+    expect((err as AnchorConfigError).value).toBe("bogus");
+  });
+
+  it("a 400 that is not about the type stays a plain AnchorHttpError", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "bad first_name" }, 400)));
+    await expect(putSep12Customer(BASE_URL, JWT, { account: ACCOUNT, fields: {}, type: "t" })).rejects.toBeInstanceOf(
+      AnchorHttpError,
+    );
+  });
+
+  it("without a configured type, a 400 mentioning type is not blamed on configuration", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(TYPE_ERROR, 400)));
+    await expect(getSep12Customer(BASE_URL, JWT, { account: ACCOUNT })).rejects.toBeInstanceOf(AnchorHttpError);
+  });
+
+  it("a non-400 failure with a type configured is still an AnchorHttpError", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(TYPE_ERROR, 500)));
+    await expect(getSep12Customer(BASE_URL, JWT, { account: ACCOUNT, type: "t" })).rejects.toBeInstanceOf(
+      AnchorHttpError,
+    );
   });
 });

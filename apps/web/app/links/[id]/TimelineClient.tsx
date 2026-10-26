@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { PendingTransferModal } from "../../components/TransferStep";
 
 export function TimelineClient({
@@ -11,11 +11,23 @@ export function TimelineClient({
   reference: string;
 }) {
   const [copied, setCopied] = useState(false);
+  const [origin, setOrigin] = useState("");
 
-  const receiptUrl = `${window.location.origin}/r/${reference}`;
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setOrigin(window.location.origin);
+    }
+  }, []);
+
+  const receiptUrl = origin ? `${origin}/r/${reference}` : `/r/${reference}`;
 
   async function copyLink() {
-    await navigator.clipboard.writeText(receiptUrl);
+    const fullUrl = origin
+      ? `${origin}/r/${reference}`
+      : typeof window !== "undefined"
+        ? `${window.location.origin}/r/${reference}`
+        : `/r/${reference}`;
+    await navigator.clipboard.writeText(fullUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }

@@ -60,6 +60,17 @@ export class FakeAnchorSessionRepository implements AnchorSessionRepository {
     this.sessions.delete(`${sellerId} ${anchorDomain}`);
   }
 
+  async deleteAllForSeller(sellerId: string): Promise<number> {
+    let count = 0;
+    for (const [key, s] of this.sessions.entries()) {
+      if (s.sellerId === sellerId) {
+        this.sessions.delete(key);
+        count++;
+      }
+    }
+    return count;
+  }
+
   async sweepExpired(now: number, graceMs: number): Promise<number> {
     const cutoff = now - graceMs;
     let count = 0;

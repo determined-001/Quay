@@ -39,11 +39,12 @@ export interface RailPort {
   /**
    * Throws `CannotReceiveError` if `account` cannot currently receive `asset` —
    * the account doesn't exist yet, or (for issued assets) has no trustline, an
-   * unauthorized one, or one already at its limit. Resolves silently if it can.
+   * unauthorized one, or one with insufficient limit headroom for `amount`
+   * (or already at its limit if `amount` is omitted). Resolves silently if it can.
    * Implementations should cache a short TTL per (account, asset) so calling
    * this on every link creation stays cheap.
    */
-  assertCanReceive(account: string, asset: AssetRef): Promise<void>;
+  assertCanReceive(account: string, asset: AssetRef, amount?: string): Promise<void>;
 }
 
 export type CannotReceiveReason =
@@ -417,6 +418,14 @@ export class OffRampDisabledError extends Error {
   }
 }
 
+/** Thrown when a pagination cursor is malformed or cannot be decoded. */
+export class InvalidCursorError extends Error {
+  constructor(message = "Invalid cursor") {
+    super(message);
+    this.name = "InvalidCursorError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Off-ramp state persistence
 // ---------------------------------------------------------------------------
@@ -585,6 +594,11 @@ export interface KycRecord {
    *  and `requiredFields` are that anchor's decision; `"legacy"` marks a row
    *  that predates per-anchor keys and could not be attributed. */
   anchorDomain: string;
+  /** The SEP-12 customer `type` this record was read under (`ANCHOR_KYC_TYPE`),
+   *  or null/absent when none is used. One customer can hold a different status
+   *  per type, so it is part of the record's key: a status for one type is
+   *  never read as another's. */
+  type?: string | null;
   /** The Stellar account the anchor's customer record belongs to. A stored
    *  `customerId` is only reused while this still matches the seller's wallet;
    *  null on rows written when every seller shared the platform's account. */
@@ -653,16 +667,20 @@ export interface KycPort {
   /** Submits binary/file fields directly to the anchor via multipart/form-data.
    *  Never persists binary file data. */
   submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord>;
+  /** The SEP-12 type the next call will use for this customer, or null for none.
+   *  Lets a wrapper look up the same stored record the call will read. */
+  resolveType?(customer: AnchorCustomer): Promise<string | null>;
 }
 
-/** Persistence for `KycRecord`, keyed by (seller, anchor): SEP-12 state belongs
+/** Persistence for `KycRecord`, keyed by (seller, anchor, type): SEP-12 state belongs
  *  to one anchor, so two anchors never share or overwrite a record.
  *  `providedFields` is PII and must be encrypted at rest by the implementation. */
 export interface KycRepository {
-  get(sellerId: string, anchorDomain: string): Promise<KycRecord | null>;
+  /** `type` is the SEP-12 customer type; omitted/null reads the untyped record. */
+  get(sellerId: string, anchorDomain: string, type?: string | null): Promise<KycRecord | null>;
   getByCallbackTokenHash(tokenHash: string): Promise<KycRecord | null>;
   save(record: KycRecord): Promise<void>;
-  /** Removes the seller's record for one anchor, or for every anchor when omitted. */
+  /** Removes the seller's records (every type) for one anchor, or for every anchor when omitted. */
   delete(sellerId: string, anchorDomain?: string): Promise<void>;
 }
 
@@ -707,6 +725,30 @@ export interface KycConsentRepository {
 }
 
 // ---------------------------------------------------------------------------
+// SEP-24 prefill consent
+// ---------------------------------------------------------------------------
+// Which of the seller's stored SEP-9 values they agreed to hand to which anchor
+// so its hosted SEP-24 form opens pre-filled (issue 3.17). Separate from
+// {@link KycConsent}, which covers what Quay posts to the anchor's SEP-12
+// endpoint: this is what goes in the interactive request. Names only, never
+// values; off until the seller turns a field on.
+
+export interface PrefillConsent {
+  sellerId: string;
+  anchorDomain: string;
+  /** SEP-9 field names the seller agreed to share. Never empty on a stored consent. */
+  fields: string[];
+  grantedAt: number;
+}
+
+export interface PrefillConsentRepository {
+  get(sellerId: string, anchorDomain: string): Promise<PrefillConsent | null>;
+  /** Replaces the consented fields. An empty list withdraws consent (deletes the row) and returns null. */
+  set(sellerId: string, anchorDomain: string, fields: string[], now?: number): Promise<PrefillConsent | null>;
+  list(sellerId: string): Promise<PrefillConsent[]>;
+}
+
+// ---------------------------------------------------------------------------
 // Anchor sessions (SEP-10, per seller)
 // ---------------------------------------------------------------------------
 // The JWT an anchor issued to a seller's own wallet. It lets Quay read and
@@ -727,6 +769,7 @@ export interface AnchorSessionRepository {
   get(sellerId: string, anchorDomain: string): Promise<AnchorSession | null>;
   save(session: AnchorSession): Promise<void>;
   delete(sellerId: string, anchorDomain: string): Promise<void>;
+  deleteAllForSeller(sellerId: string): Promise<number>;
   sweepExpired(now: number, graceMs: number): Promise<number>;
 }
 
@@ -790,6 +833,18 @@ export interface LinkRepository {
   /** Ledger a recorded payment settled in; null if the tx isn't on the ledger
    *  table, or predates the column. */
   paymentLedger(txHash: string): Promise<number | null>;
+  /**
+   * Atomically claims a link for cash-out by transitioning its status from one of
+   * `allowedStatuses` to `offramp_pending`. Returns `true` if the transition
+   * succeeded, or `false` if the link does not exist or its current status was not
+   * in `allowedStatuses`.
+   */
+  claimForCashOut(id: string, allowedStatuses: Array<PaymentLink["status"]>): Promise<boolean>;
+  /**
+   * Releases a cash-out claim by transitioning status from `offramp_pending` back to
+   * `restoreStatus`, only if the status is still `offramp_pending`.
+   */
+  releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void>;
 }
 
 /**
@@ -969,7 +1024,7 @@ export interface WebhookRepository {
   rotateSecret(id: string, sellerId: string, newSecret: string, overlapMs: number): Promise<Webhook | null>;
   /** Soft delete — keeps delivery history browsable after removal. */
   softDelete(id: string, sellerId: string): Promise<boolean>;
-  recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt">): Promise<void>;
+  recordDelivery(d: Omit<WebhookDelivery, "id" | "createdAt"> & { createdAt?: number }): Promise<void>;
   listDeliveries(
     webhookId: string,
     sellerId: string,

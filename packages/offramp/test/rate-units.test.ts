@@ -44,7 +44,7 @@ const SEP38_QUOTE_BODY = {
 function stubAnchorFetch(): void {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.includes("/.well-known/stellar.toml")) {
         return {
@@ -146,7 +146,6 @@ describe("OffRampQuote.rate direction (issue 5.21)", () => {
       sourceAsset: { code: "USDC", issuer: "G".padEnd(56, "A") },
       sourceAmount: "10",
       targetCurrency: "NGN",
-      customer: { sellerId: "sel_ru", account: Keypair.random().publicKey() },
     });
     expect(Number(quote.rate) * 10).toBeCloseTo(Number(quote.targetAmount), 2);
   });

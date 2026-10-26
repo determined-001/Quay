@@ -1,5 +1,6 @@
 import type { Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
+import { anchorFetch } from "./http";
 
 /**
  * SEP-1 (`stellar.toml`) discovery.
@@ -24,10 +25,16 @@ import { NOOP_LOGGER } from "@checkout/core";
 export interface Sep1DiscoveryInfo {
   /** SEP-10 web auth endpoint. */
   webAuthEndpoint: string;
-  /** SEP-6 transfer server. */
-  transferServer: string;
-  /** SEP-24 interactive transfer server. */
-  transferServerSep24: string;
+  /**
+   * SEP-6 transfer server (`TRANSFER_SERVER`), or null when a successfully read
+   * stellar.toml does not declare one (issue 3.19). Many production anchors
+   * publish only one of the two transfer servers, so "not declared" has to be
+   * distinguishable from "declared at the guessed path". Only a `fallback`
+   * result (the TOML could not be read) carries guessed paths.
+   */
+  transferServer: string | null;
+  /** SEP-24 interactive transfer server (`TRANSFER_SERVER_SEP0024`), or null when undeclared. */
+  transferServerSep24: string | null;
   /**
    * SEP-38 quote server, or null when the anchor declares none.
    *
@@ -39,8 +46,12 @@ export interface Sep1DiscoveryInfo {
    * a configured RateSourcePort or refuse.
    */
   anchorQuoteServer: string | null;
-  /** SEP-12 KYC server. Anchors that omit it serve KYC from the transfer server. */
-  kycServer: string;
+  /**
+   * SEP-12 KYC server. Anchors that omit `KYC_SERVER` serve KYC from the SEP-6
+   * transfer server, or from the SEP-24 one when that is all they declare.
+   * Null when the TOML declares none of the three.
+   */
+  kycServer: string | null;
   /** The account that signs SEP-10 challenges. Null when the anchor omits it. */
   signingKey: string | null;
   /** Declared network passphrase, or null when the anchor omits it. */
@@ -106,6 +117,8 @@ export interface FetchTomlOptions {
   logger?: Logger;
   /** Skip the cache for this call (the result is still cached). */
   force?: boolean;
+  /** Timeout in ms for the stellar.toml fetch. */
+  timeoutMs?: number;
 }
 
 /**
@@ -118,6 +131,20 @@ export interface FetchTomlOptions {
  * wrong chain, which no fallback can make safe. Fallbacks are not cached, so a
  * transient outage does not pin bad endpoints for five minutes.
  */
+function assertNetworkPassphrase(
+  homeDomain: string,
+  info: Sep1DiscoveryInfo,
+  expectedNetworkPassphrase?: string,
+): void {
+  if (
+    expectedNetworkPassphrase &&
+    info.networkPassphrase &&
+    info.networkPassphrase !== expectedNetworkPassphrase
+  ) {
+    throw new Sep1NetworkMismatchError(homeDomain, info.networkPassphrase, expectedNetworkPassphrase);
+  }
+}
+
 export async function fetchStellarToml(
   homeDomain: string,
   opts: FetchTomlOptions = {},
@@ -126,13 +153,16 @@ export async function fetchStellarToml(
 
   if (!opts.force) {
     const hit = cache.get(homeDomain);
-    if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.info;
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+      assertNetworkPassphrase(homeDomain, hit.info, opts.expectedNetworkPassphrase);
+      return hit.info;
+    }
   }
 
   const url = `https://${homeDomain}/.well-known/stellar.toml`;
   let info: Sep1DiscoveryInfo;
   try {
-    const res = await fetch(url);
+    const res = await anchorFetch(url, { timeoutMs: opts.timeoutMs });
     if (!res.ok) throw new Error(`stellar.toml fetch returned ${res.status}`);
     info = parseStellarToml(await res.text(), homeDomain, log);
   } catch (err) {
@@ -143,13 +173,7 @@ export async function fetchStellarToml(
     return fallbackInfo(homeDomain);
   }
 
-  if (
-    opts.expectedNetworkPassphrase &&
-    info.networkPassphrase &&
-    info.networkPassphrase !== opts.expectedNetworkPassphrase
-  ) {
-    throw new Sep1NetworkMismatchError(homeDomain, info.networkPassphrase, opts.expectedNetworkPassphrase);
-  }
+  assertNetworkPassphrase(homeDomain, info, opts.expectedNetworkPassphrase);
 
   cache.set(homeDomain, { at: Date.now(), info });
   log.info(
@@ -182,40 +206,35 @@ function fallbackInfo(homeDomain: string): Sep1DiscoveryInfo {
 }
 
 /**
- * Validates that an endpoint URL parses and uses the https: protocol.
- * Returns the normalized or original valid URL string, or null if invalid / non-HTTPS.
- */
-function sanitizeEndpointUrl(key: string, val: string, log?: Logger): string | null {
-  try {
-    const url = new URL(val);
-    if (url.protocol !== "https:") {
-      log?.warn(
-        { event: "anchor.sep1.invalid_endpoint", key, url: val, reason: "protocol must be https:" },
-        `Ignoring ${key} endpoint "${val}": protocol must be https:`,
-      );
-      return null;
-    }
-    return val;
-  } catch (err) {
-    log?.warn(
-      { event: "anchor.sep1.invalid_endpoint", key, url: val, reason: "malformed URL" },
-      `Ignoring ${key} endpoint "${val}": malformed URL`,
-    );
-    return null;
-  }
-}
-
-/**
  * Minimal TOML reader for the handful of keys SEP-1 defines that we use.
  *
  * Deliberately not a general TOML parser: this runs against a file fetched
  * from a third party, and the subset we need is flat key/value pairs plus the
  * `code` of each `[[CURRENCIES]]` block. A full parser would be more surface
  * area for no more capability.
+ *
+ * An endpoint is accepted only if it parses as a URL and is `https:`. The
+ * seller's SEP-10 bearer JWT is sent to these, so an `http://` value would put
+ * it on the wire in the clear, and an unparsable one would fail deep inside the
+ * endpoint builder instead of at discovery. A rejected key is ignored (with a
+ * warning on `logger`) and keeps its default: the guessed path, or null for the
+ * quote server.
  */
-export function parseStellarToml(tomlText: string, homeDomain: string, logger?: Logger): Sep1DiscoveryInfo {
-  const base = fallbackInfo(homeDomain);
-  const info: Sep1DiscoveryInfo = { ...base, fallback: false };
+export function parseStellarToml(
+  tomlText: string,
+  homeDomain: string,
+  logger: Logger = NOOP_LOGGER,
+): Sep1DiscoveryInfo {
+  // Only the TOML's own words count here: an undeclared SEP-6/SEP-24 server is
+  // null, never `https://<domain>/sep6` (issue 3.19). The guessed layout is
+  // reserved for `fallbackInfo`, when the TOML could not be read at all.
+  const info: Sep1DiscoveryInfo = {
+    ...fallbackInfo(homeDomain),
+    transferServer: null,
+    transferServerSep24: null,
+    kycServer: null,
+    fallback: false,
+  };
   const currencies: string[] = [];
   let inCurrency = false;
   let sawKycServer = false;
@@ -242,37 +261,41 @@ export function parseStellarToml(tomlText: string, homeDomain: string, logger?: 
       continue;
     }
 
+    const isEndpoint =
+      key === "WEB_AUTH_ENDPOINT" ||
+      key === "WEB_AUTH_URL" ||
+      key === "TRANSFER_SERVER" ||
+      key === "TRANSFER_SERVER_SEP0024" ||
+      key === "TRANSFER_SERVER_SEP24" ||
+      key === "ANCHOR_QUOTE_SERVER" ||
+      key === "KYC_SERVER";
+    if (isEndpoint && !isHttpsUrl(val)) {
+      logger.warn(
+        { event: "anchor.sep1.endpoint_rejected", homeDomain, key, reason: "not an https URL" },
+        "ignoring stellar.toml endpoint that is not an https URL",
+      );
+      continue;
+    }
+
     switch (key) {
       case "WEB_AUTH_ENDPOINT":
-      case "WEB_AUTH_URL": {
-        const validated = sanitizeEndpointUrl(key, val, logger);
-        if (validated) info.webAuthEndpoint = validated;
+      case "WEB_AUTH_URL":
+        info.webAuthEndpoint = val;
         break;
-      }
-      case "TRANSFER_SERVER": {
-        const validated = sanitizeEndpointUrl(key, val, logger);
-        if (validated) info.transferServer = validated;
+      case "TRANSFER_SERVER":
+        info.transferServer = val;
         break;
-      }
       case "TRANSFER_SERVER_SEP0024":
-      case "TRANSFER_SERVER_SEP24": {
-        const validated = sanitizeEndpointUrl(key, val, logger);
-        if (validated) info.transferServerSep24 = validated;
+      case "TRANSFER_SERVER_SEP24":
+        info.transferServerSep24 = val;
         break;
-      }
-      case "ANCHOR_QUOTE_SERVER": {
-        const validated = sanitizeEndpointUrl(key, val, logger);
-        if (validated) info.anchorQuoteServer = validated;
+      case "ANCHOR_QUOTE_SERVER":
+        info.anchorQuoteServer = val;
         break;
-      }
-      case "KYC_SERVER": {
-        const validated = sanitizeEndpointUrl(key, val, logger);
-        if (validated) {
-          info.kycServer = validated;
-          sawKycServer = true;
-        }
+      case "KYC_SERVER":
+        info.kycServer = val;
+        sawKycServer = true;
         break;
-      }
       case "SIGNING_KEY":
         info.signingKey = val;
         break;
@@ -287,11 +310,85 @@ export function parseStellarToml(tomlText: string, homeDomain: string, logger?: 
   // An anchor that declares no KYC server serves SEP-12 from its transfer
   // server — that is what the spec says, and guessing /sep12 would 404.
   // Keyed on whether the field was present, not on whether its value happens
-  // to equal the guess: plenty of anchors do publish `<domain>/sep12`.
-  if (!sawKycServer) info.kycServer = info.transferServer;
+  // to equal the guess: plenty of anchors do publish `<domain>/sep12`. An
+  // anchor with only a SEP-24 server serves it from there.
+  if (!sawKycServer) info.kycServer = info.transferServer ?? info.transferServerSep24;
 
   info.currencies = currencies;
   return info;
+}
+
+/** Which SEPs an anchor's stellar.toml says it serves (issue 3.19). */
+export interface AnchorCapabilities {
+  sep6: boolean;
+  sep24: boolean;
+  sep38: boolean;
+  sep12: boolean;
+}
+
+/**
+ * What the anchor declared. For a `fallback` result these reflect the guessed
+ * paths (SEP-6/24/12 "present", SEP-38 never), so a caller that must not act on
+ * a guess checks `info.fallback` as well.
+ */
+export function capabilities(info: Sep1DiscoveryInfo): AnchorCapabilities {
+  return {
+    sep6: info.transferServer !== null,
+    sep24: info.transferServerSep24 !== null,
+    sep38: info.anchorQuoteServer !== null,
+    sep12: info.kycServer !== null,
+  };
+}
+
+/**
+ * The anchor does not declare an endpoint a call needs (for example a
+ * SEP-24-only anchor asked for its SEP-6 server). A configuration problem, not
+ * an outage: retrying cannot help. The message names only the domain and the
+ * missing capability, never anchor-supplied text.
+ */
+export class AnchorCapabilityError extends Error {
+  constructor(
+    readonly homeDomain: string,
+    /** What was needed, e.g. "SEP-6 (TRANSFER_SERVER)". */
+    readonly needed: string,
+    /** What the anchor does declare, e.g. ["sep24"]. */
+    readonly declared: string[],
+  ) {
+    super(
+      `Anchor ${homeDomain} does not declare ${needed} in its stellar.toml ` +
+        `(declared: ${declared.length > 0 ? declared.join(", ") : "none"})`,
+    );
+    this.name = "AnchorCapabilityError";
+  }
+}
+
+function declaredList(info: Sep1DiscoveryInfo): string[] {
+  const c = capabilities(info);
+  return (["sep6", "sep24", "sep38", "sep12"] as const).filter((k) => c[k]);
+}
+
+/** The SEP-6 transfer server, or an {@link AnchorCapabilityError} when the anchor declares none. */
+export function requireTransferServer(info: Sep1DiscoveryInfo): string {
+  if (info.transferServer === null) {
+    throw new AnchorCapabilityError(info.homeDomain, "SEP-6 (TRANSFER_SERVER)", declaredList(info));
+  }
+  return info.transferServer;
+}
+
+/** The SEP-24 transfer server, or an {@link AnchorCapabilityError} when the anchor declares none. */
+export function requireTransferServerSep24(info: Sep1DiscoveryInfo): string {
+  if (info.transferServerSep24 === null) {
+    throw new AnchorCapabilityError(info.homeDomain, "SEP-24 (TRANSFER_SERVER_SEP0024)", declaredList(info));
+  }
+  return info.transferServerSep24;
+}
+
+/** The SEP-12 KYC server, or an {@link AnchorCapabilityError} when the anchor declares none. */
+export function requireKycServer(info: Sep1DiscoveryInfo): string {
+  if (info.kycServer === null) {
+    throw new AnchorCapabilityError(info.homeDomain, "SEP-12 (KYC_SERVER)", declaredList(info));
+  }
+  return info.kycServer;
 }
 
 /** Whether the anchor lists `code` in its [[CURRENCIES]]. */
@@ -300,6 +397,14 @@ export function listsCurrency(info: Sep1DiscoveryInfo, code: string): boolean {
   // absent, so this cannot be treated as a rejection.
   if (info.currencies.length === 0) return true;
   return info.currencies.some((c) => c.toUpperCase() === code.toUpperCase());
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function unquote(raw: string): string {

@@ -40,17 +40,27 @@ import {
   type WithdrawTransfer,
 } from "@checkout/core";
 import {
+  AnchorCapabilityError,
+  AnchorConfigError,
   AnchorHttpError,
-  AnchorRejectedError,
   Sep6ValidationError,
   anchorErrorSummary,
+  anchorRejectionDetail,
+  isAnchorRejection,
   truncateAnchorBody,
 } from "@checkout/offramp";
-import { canReceiveAsset, resolveAsset, type StellarConfig } from "@checkout/stellar";
+import { resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
-import { metrics } from "../metrics";
+import { AnchorHealthRegistry, type AnchorHealth, type AnchorHealthSnapshot } from "./anchor-health";
+import { metrics, recordAnchorAuthRequired, type AnchorAuthRoute } from "../metrics";
+import type { PiiAuditRecorder } from "./pii-audit";
+
+// Re-exported for callers that historically imported them from LinkService
+// (issue 3.23 moved the implementation into ./anchor-health).
+export { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
+export type { AnchorHealthSnapshot, CircuitState, Sep10Probe, AnchorProbeConfig } from "./anchor-health";
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -60,199 +70,36 @@ export interface LinkWithRequest {
 /** Per-call logger override — omit to fall back to the service's own ambient logger. */
 export interface ServiceCallOptions {
   logger?: Logger;
+  /** The inbound request's id, carried into PII audit rows written on its behalf. */
+  requestId?: string;
 }
 
-// ---------------------------------------------------------------------------
-// AnchorHealth — background probe + circuit breaker (issue #19, 3.7).
-// ---------------------------------------------------------------------------
-// A live `AnchorHealth` distinguishes a dead anchor from a slow one. A
-// background timer pings TOML + SEP-10 + /info every `intervalMs`. After
-// `failureThreshold` consecutive failures the breaker opens; while open,
-// `triggerCashOut` fails fast with 503 "anchor_unavailable" instead of
-// hammering a dead endpoint. After `cooldownMs` the breaker transitions to
-// `half_open` and the very next probe decides whether we go back to `closed`
-// (success) or stay `open` (another failure).
-
-export type CircuitState = "closed" | "open" | "half_open";
-
-export interface AnchorHealthSnapshot {
-  state: CircuitState;
-  consecutiveFailures: number;
-  lastCheckedAt: number | null;
-  lastSuccessAt: number | null;
-  lastError: string | null;
-  url: string | null;
-  probes: { toml: boolean; sep10: boolean; info: boolean };
+/**
+ * One anchor as the service sees it: the adapters to call and the domain its
+ * circuit breaker is keyed by (issue 3.21).
+ */
+export interface AnchorRoute {
+  domain: string;
+  offramp: OffRampPort;
+  kyc: KycPort;
 }
 
-export interface AnchorProbeConfig {
-  /** When false (mock mode), `probe()` short-circuits to a success without any network IO. */
-  enabled: boolean;
-  /** Anchor base URL (e.g. https://testanchor.stellar.org). */
-  url: string | null;
-  /** Home domain used for TOML and SEP-10. */
-  homeDomain: string | null;
-  /**
-   * Account the SEP-10 liveness probe asks for a challenge for. Must be a real
-   * Stellar account: anchors validate the `account` parameter and reject a
-   * placeholder, which makes every probe fail and looks exactly like an outage.
-   */
-  probeAccount: string | null;
-  /** Defaults to 3. */
-  failureThreshold?: number;
-  /** Defaults to 30_000 ms. */
-  cooldownMs?: number;
-  /** Defaults to 5_000 ms per individual probe HTTP call. */
-  requestTimeoutMs?: number;
+/**
+ * Picks the anchor for a piece of work. Present when a deployment can hold
+ * several anchors (`OFFRAMP=testanchor|anchor`); absent, the service uses its
+ * single `offramp` and `kyc` exactly as before.
+ */
+export interface AnchorRouter {
+  /** The enabled anchor serving a payout currency, or null when none does. */
+  forCurrency(targetCurrency: string): Promise<AnchorRoute | null>;
+  /** The anchor that owns a stored job (`offramp_jobs.anchor`), or null when unknown. */
+  forJob(anchorLabel: string): Promise<AnchorRoute | null>;
+  /** The default anchor, for work that names no currency; null when none is enabled. */
+  fallback(): Promise<AnchorRoute | null>;
 }
 
-export class AnchorHealth {
-  private state: CircuitState = "closed";
-  private consecutiveFailures = 0;
-  private openedAt: number | null = null;
-  private lastCheckedAt: number | null = null;
-  private lastSuccessAt: number | null = null;
-  private lastError: string | null = null;
-  private probes = { toml: false, sep10: false, info: false };
-
-  private readonly enabled: boolean;
-  private readonly url: string | null;
-  private readonly homeDomain: string | null;
-  private readonly probeAccount: string | null;
-  private readonly failureThreshold: number;
-  private readonly cooldownMs: number;
-  private readonly requestTimeoutMs: number;
-
-  constructor(cfg: AnchorProbeConfig) {
-    this.enabled = cfg.enabled;
-    this.url = cfg.url;
-    this.homeDomain = cfg.homeDomain;
-    this.probeAccount = cfg.probeAccount;
-    this.failureThreshold = cfg.failureThreshold ?? 3;
-    this.cooldownMs = cfg.cooldownMs ?? 30_000;
-    this.requestTimeoutMs = cfg.requestTimeoutMs ?? 5_000;
-  }
-
-  /**
-   * Snapshot of the current breaker state. The returned `state` reflects the
-   * promotion (open → half_open on cooldown expiry) — see `tickState` for the
-   * explicit time-advance mutation this triggers.
-   */
-  snapshot(): AnchorHealthSnapshot {
-    this.tickState();
-    return {
-      state: this.state,
-      consecutiveFailures: this.consecutiveFailures,
-      lastCheckedAt: this.lastCheckedAt,
-      lastSuccessAt: this.lastSuccessAt,
-      lastError: this.lastError,
-      url: this.url,
-      probes: { ...this.probes },
-    };
-  }
-
-  /**
-   * `true` when cash-out traffic is allowed. `closed` and `half_open` are both
-   * "try it"; only `open` (within the cooldown window) blocks traffic. This
-   * method mutates the stored state on cooldown expiry so callers always see
-   * the most recent decision; the side-effect is explicit in `tickState`.
-   */
-  isAvailable(): boolean {
-    this.tickState();
-    return this.state !== "open";
-  }
-
-  /**
-   * Time-based advance of the breaker. Promotes `open → half_open` once the
-   * cooldown has elapsed, so the next probe becomes a "trial shot". Exposed as
-   * a public helper so callers can be explicit about the mutation if they
-   * want to; we still call it from getters in this file because that's the
-   * sanest policy for snap/decide ergonomics.
-   */
-  tickState(): void {
-    if (
-      this.state === "open" &&
-      this.openedAt !== null &&
-      Date.now() - this.openedAt >= this.cooldownMs
-    ) {
-      this.state = "half_open";
-    }
-  }
-
-  /** Run one probe cycle: TOML → SEP-10 challenge → /info. */
-  async probe(): Promise<AnchorHealthSnapshot> {
-    if (!this.enabled || !this.url || !this.homeDomain || !this.probeAccount) {
-      // Mock mode or unconfigured: short-circuit to a healthy state without IO.
-      this.tickState();
-      this.recordSuccess();
-      return this.snapshot();
-    }
-    // Time-advance before we measure: if the cooldown just elapsed, we want
-    // this probe to count as the half-open trial shot rather than get blocked
-    // by an out-of-date "open" state.
-    this.tickState();
-    this.lastCheckedAt = Date.now();
-    const probes = { toml: false, sep10: false, info: false };
-    try {
-      // 1. TOML reachable.
-      const tomlUrl = `https://${this.homeDomain}/.well-known/stellar.toml`;
-      const tomlRes = await fetchWithTimeout(tomlUrl, this.requestTimeoutMs);
-      probes.toml = tomlRes.ok;
-      if (!tomlRes.ok) throw new Error(`TOML probe returned ${tomlRes.status}`);
-
-      // 2. SEP-10 challenge obtainable (no signing — this is a liveness check).
-      const sep10Url = new URL("/auth", this.url);
-      // A real account, not a placeholder. testanchor answers `400 {"error":
-      // "Invalid account."}` for the all-zero address, so probing with one made
-      // the breaker open on a healthy anchor and fail cash-outs with 503.
-      sep10Url.searchParams.set("account", this.probeAccount);
-      sep10Url.searchParams.set("home_domain", this.homeDomain);
-      const sep10Res = await fetchWithTimeout(sep10Url.toString(), this.requestTimeoutMs);
-      probes.sep10 = sep10Res.ok;
-      if (!sep10Res.ok) throw new Error(`SEP-10 challenge returned ${sep10Res.status}`);
-      const sep10Body = (await sep10Res.json()) as { transaction?: string };
-      if (!sep10Body.transaction) throw new Error("SEP-10 challenge missing transaction");
-
-      // 3. /info 200.
-      // The SAME path the adapter uses (packages/offramp/src/sep6.ts). A probe
-      // that checks an endpoint the product never calls tells you nothing when
-      // it passes and lies when it fails: testanchor answers 404 on /info and
-      // 200 on /sep6/info, so this reported an outage against a healthy anchor.
-      const infoUrl = new URL("/sep6/info", this.url);
-      const infoRes = await fetchWithTimeout(infoUrl.toString(), this.requestTimeoutMs);
-      probes.info = infoRes.ok;
-      if (!infoRes.ok) throw new Error(`/info returned ${infoRes.status}`);
-
-      this.probes = probes;
-      this.recordSuccess();
-    } catch (err) {
-      this.probes = probes;
-      this.recordFailure(err);
-    }
-    return this.snapshot();
-  }
-
-  private recordSuccess(): void {
-    this.state = "closed";
-    this.consecutiveFailures = 0;
-    this.openedAt = null;
-    this.lastSuccessAt = Date.now();
-    this.lastError = null;
-  }
-
-  private recordFailure(err: unknown): void {
-    this.consecutiveFailures++;
-    this.lastError = err instanceof Error ? err.message : String(err);
-    if (this.state === "half_open" || this.consecutiveFailures >= this.failureThreshold) {
-      this.state = "open";
-      this.openedAt = Date.now();
-    }
-  }
-}
-
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-  return fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-}
+/** `actor_id` of the audit row written when the cash-out KYC gate reads a seller's identity. */
+export const CASH_OUT_GATE_ACTOR = "cash-out-gate";
 
 export class LinkService {
   private readonly sender: WebhookSender;
@@ -260,7 +107,8 @@ export class LinkService {
   // process restart mid-cash-out just loses that one latency sample — the
   // link's own status/offrampStatus fields remain the durable source of truth.
   private readonly cashOutStartedAt = new Map<string, number>();
-  private readonly health: AnchorHealth;
+  private readonly health: AnchorHealthRegistry;
+  private readonly anchorDomain: string | undefined;
   /** Per-link last poll error (in-memory; survives only until restart). */
   private readonly lastPollErrorByLinkId = new Map<string, string>();
   /**
@@ -273,6 +121,8 @@ export class LinkService {
   private readonly nextPollAtByLinkId = new Map<string, number>();
   /** Jobs whose `cashout.transfer_required` event was already emitted by this process. */
   private readonly transferRequiredLogged = new Set<string>();
+  /** Links with a cash-out poll in flight; see `pollCashOuts`. */
+  private readonly pollingLinkIds = new Set<string>();
   private static readonly POLL_BACKOFF_BASE_MS = 2_000;
   private static readonly POLL_BACKOFF_CAP_MS = 60_000;
   /**
@@ -283,6 +133,17 @@ export class LinkService {
    */
   static readonly DEFAULT_INTERACTIVE_TIMEOUT_MS = 3_600_000;
   private readonly consecutivePollErrorsByLinkId = new Map<string, number>();
+  /**
+   * Per-link "blocked until re-auth" marker (issue 4.16). Set when a poll hits
+   * `AnchorAuthRequiredError`; cleared when the seller completes
+   * `POST /seller/anchor-auth`. While set, `pollCashOuts()` skips the link
+   * entirely instead of backing off and re-calling `status()` every minute.
+   * The set only dedupes the log line and the gauge; the durable copy of the
+   * state is `offramp_jobs.last_poll_reason = "anchor_auth_required"` (no new
+   * column), and with `hasLiveAnchorSession` wired the skip is re-derived from
+   * the live session on every tick, so a restart loses nothing.
+   */
+  private readonly anchorAuthBlockedLinkIds = new Set<string>();
 
   constructor(
     private readonly deps: {
@@ -303,10 +164,23 @@ export class LinkService {
       operatorWallet?: string;
       telemetry: OffRampTelemetryRepository;
       /**
-       * Optional anchor health probe. When omitted we default to a no-op
-       * "always available" probe so existing test fixtures stay lightweight.
+       * Optional anchor health probe(s). Accepts a bare `AnchorHealth` (single
+       * anchor) or an `AnchorHealthRegistry` keyed by home domain (issue 3.23).
+       * When omitted every anchor reads as available, so existing test fixtures
+       * stay lightweight.
        */
-      health?: AnchorHealth;
+      health?: AnchorHealth | AnchorHealthRegistry;
+      /**
+       * The anchor this deployment cashes out through. Used to select the right
+       * breaker from `health`; omitted means "the only/first anchor".
+       */
+      anchorDomain?: string;
+      /**
+       * Several-anchor routing (issue 3.21). When set, cash-outs go to the anchor
+       * serving the payout currency and polls to the anchor that owns the job;
+       * `offramp`, `kyc` and `anchorDomain` are then only the fallback.
+       */
+      anchors?: AnchorRouter;
       // "memo" (default) or "muxed" — see packages/stellar/src/stellar-rail.ts.
       correlation: "memo" | "muxed";
       /** Optional SSRF guard override, threaded into WebhookSender. Tests inject
@@ -319,14 +193,28 @@ export class LinkService {
        * DEFAULT_INTERACTIVE_TIMEOUT_MS (1 hour).
        */
       interactiveTimeoutMs?: number;
+      /**
+       * Whether the seller has a live anchor session (issue 4.16). Lets the
+       * poller skip a job whose `status()` call would only throw
+       * `AnchorAuthRequiredError`. Injected so LinkService stays independent
+       * of the offramp package; omitted when no anchor session store exists.
+       */
+      hasLiveAnchorSession?: (customer: AnchorCustomer, anchorLabel?: string) => boolean | Promise<boolean>;
       /** Ambient logger, used whenever a call site doesn't pass its own via ServiceCallOptions. */
       logger?: Logger;
+      /** Audit log for system reads of seller identity (the cash-out KYC gate). Omitted = not audited. */
+      piiAudit?: PiiAuditRecorder;
     },
   ) {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
     this.sender = new WebhookSender(deps.webhooks, { guard: deps.webhookGuard, logger: this.deps.logger });
     this.health =
-      deps.health ?? new AnchorHealth({ enabled: false, url: null, homeDomain: null, probeAccount: null });
+      deps.health instanceof AnchorHealthRegistry
+        ? deps.health
+        : new AnchorHealthRegistry(
+            deps.health ? [{ domain: deps.health.domain, health: deps.health }] : [],
+          );
+    this.anchorDomain = deps.anchorDomain;
   }
 
   /** Undelivered rows in the durable webhook queue. Since the queue landed this
@@ -357,10 +245,9 @@ export class LinkService {
       : null;
 
     // Universal receive-preflight (issue #9): every link, not just muxed ones.
-    // Subsumes the muxed-only `canReceiveAsset` check that used to live in the
-    // branch below — this runs first and carries the richer 422 payload.
+    // Runs first, verifies headroom for the link amount, and carries the richer 422 payload.
     try {
-      await this.deps.rail.assertCanReceive(seller.wallet, asset);
+      await this.deps.rail.assertCanReceive(seller.wallet, asset, body.amount);
     } catch (err) {
       if (err instanceof CannotReceiveError) {
         throw new HttpError(422, "destination_cannot_receive", {
@@ -482,12 +369,14 @@ export class LinkService {
     if (link.status !== "paid") {
       throw new HttpError(409, `Link must be paid to preview off-ramp (is "${link.status}")`);
     }
-    if (!this.deps.offramp.indicativePrices) return null;
+    const priceCurrency = targetCurrency ?? link.offrampTargetCurrency ?? undefined;
+    const anchor = priceCurrency ? await this.routeForCurrency(priceCurrency) : await this.defaultRoute();
+    if (!anchor.offramp.indicativePrices) return null;
 
     const sourceAmount = link.paidAmount ?? link.amount;
     let prices: IndicativePrice[];
     try {
-      prices = await this.deps.offramp.indicativePrices({
+      prices = await anchor.offramp.indicativePrices({
         sourceAsset: link.asset,
         sourceAmount,
       });
@@ -516,7 +405,7 @@ export class LinkService {
    * server-side so the form can pre-fill / indicate "already on file" without
    * ever leaking the raw bank account number to the browser (issues #32, 5.24).
    */
-  async getOfframpRequirements(linkId: string): Promise<{
+  async getOfframpRequirements(linkId: string, targetCurrency?: string): Promise<{
     types: OfframpRequirementTypes["types"];
     defaultType: string | null;
     savedFields: Record<string, string> | null;
@@ -527,10 +416,15 @@ export class LinkService {
     const seller = await this.deps.sellers.findById(link.sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
 
+    // The anchor that would serve the seller's payout currency, else the default one.
+    const requirementsCurrency = targetCurrency ?? link.offrampTargetCurrency ?? undefined;
+    const anchor = requirementsCurrency ? await this.routeForCurrency(requirementsCurrency) : await this.defaultRoute();
+
     let requirements: OfframpRequirementTypes;
     try {
-      requirements = await this.deps.offramp.offrampRequirements(link.asset.code, customerOf(seller));
+      requirements = await anchor.offramp.offrampRequirements(link.asset.code, customerOf(seller));
     } catch (err) {
+      // OFFRAMP=none: the route answers 501 offramp_disabled, which clients do not retry.
       if (err instanceof OffRampDisabledError) throw err;
       throw anchorFailure(err, this.deps.logger!);
     }
@@ -850,18 +744,75 @@ export class LinkService {
   }
 
   /**
+   * The anchor a cash-out in `targetCurrency` goes through. Without a router it
+   * is the one anchor this deployment was built with; with one, a currency no
+   * enabled anchor serves is `422 corridor_unavailable`.
+   */
+  private async routeForCurrency(targetCurrency: string): Promise<AnchorRoute> {
+    if (!this.deps.anchors) {
+      return { domain: this.anchorDomain ?? this.deps.offramp.mode, offramp: this.deps.offramp, kyc: this.deps.kyc };
+    }
+    const route = await this.deps.anchors.forCurrency(targetCurrency);
+    if (!route) {
+      throw new HttpError(422, "corridor_unavailable", {
+        message: `No enabled anchor serves payouts in ${targetCurrency}.`,
+        targetCurrency,
+      });
+    }
+    return route;
+  }
+
+  /** The default anchor, for requests that name no currency. */
+  private async defaultRoute(): Promise<AnchorRoute> {
+    if (!this.deps.anchors) {
+      return { domain: this.anchorDomain ?? this.deps.offramp.mode, offramp: this.deps.offramp, kyc: this.deps.kyc };
+    }
+    const route = await this.deps.anchors.fallback();
+    if (!route) {
+      throw new HttpError(422, "corridor_unavailable", { message: "No anchor is enabled for cash-out." });
+    }
+    return route;
+  }
+
+  /**
+   * The off-ramp adapter that owns a stored job. A job keeps polling on the
+   * anchor that created it however the anchor list has changed since; a label
+   * nobody recognises (a legacy row) falls back to the default.
+   */
+  private async offrampForJob(jobId: string): Promise<OffRampPort> {
+    if (!this.deps.anchors) return this.deps.offramp;
+    const stored = await this.deps.offrampState.getJob(jobId).catch(() => null);
+    const route = stored ? await this.deps.anchors.forJob(stored.anchor) : null;
+    return (route ?? (await this.deps.anchors.fallback()))?.offramp ?? this.deps.offramp;
+  }
+
+  /**
    * KYC is keyed by seller, never by link — a live cash-out is impossible
    * until the anchor has actually accepted this seller's identity. `status()`
    * re-syncs rather than trusting a cached value, since paying out against
    * stale/rejected KYC is exactly the failure this gate exists to prevent.
    */
-  private async assertKycAccepted(customer: AnchorCustomer): Promise<void> {
+  private async assertKycAccepted(
+    customer: AnchorCustomer,
+    route: AnchorAuthRoute,
+    opts: ServiceCallOptions = {},
+    kyc: KycPort = this.deps.kyc,
+  ): Promise<void> {
     let status: string;
     try {
-      status = (await this.deps.kyc.status(customer)).status;
+      status = (await kyc.status(customer)).status;
+      // A system read: the gate decrypts the record to learn its status and
+      // hands no identity value to anyone, so the row lists no fields (issue 8.15).
+      await this.deps.piiAudit?.record({
+        sellerId: customer.sellerId,
+        actorType: "system",
+        actorId: CASH_OUT_GATE_ACTOR,
+        action: "kyc.read",
+        requestId: opts.requestId ?? null,
+      });
     } catch (err) {
-      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
-      if (err instanceof AnchorHttpError) throw anchorFailure(err, this.deps.logger!);
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired(route);
+      if (err instanceof AnchorHttpError || err instanceof AnchorConfigError || err instanceof AnchorCapabilityError) throw anchorFailure(err, this.deps.logger!);
       throw err;
     }
     if (status !== "ACCEPTED") throw new HttpError(403, "kyc_required");
@@ -884,25 +835,26 @@ export class LinkService {
     const link = await this.deps.links.findById(linkId);
     if (!link) throw new HttpError(404, "Link not found");
     assertCanCashOut(link);
-    if (!this.health.isAvailable()) {
+    const anchor = await this.routeForCurrency(targetCurrency);
+    if (!this.health.isAvailable(anchor.domain)) {
       throw new HttpError(503, "anchor_unavailable");
     }
     const seller = await this.deps.sellers.findById(link.sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer);
+    await this.assertKycAccepted(customer, "quote", opts, anchor.kyc);
 
     const sourceAmount = link.paidAmount ?? link.amount;
     try {
-      return await this.deps.offramp.quote(
+      return await anchor.offramp.quote(
         { linkId: link.id, sourceAsset: link.asset, sourceAmount, targetCurrency, customer, withdrawType },
         { logger: log },
       );
     } catch (err) {
-      if (err instanceof OffRampDisabledError) throw err;
-      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired("quote");
       throwIfUnknownWithdrawType(err, withdrawType);
-      if (err instanceof OffRampRejectedError) throw offRampRejected(err, log);
+      if (err instanceof OffRampDisabledError) throw err;
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw anchorFailure(err, log);
     }
   }
@@ -937,21 +889,24 @@ export class LinkService {
       ...body.payoutFields,
     };
 
+    // The anchor serving this payout currency (issue 3.21).
+    const anchor = await this.routeForCurrency(body.targetCurrency);
+
     // Fail fast when the breaker is open: never attempt to call a known-dead
     // anchor. The HTTP layer maps this to 503 anchor_unavailable.
-    if (!this.health.isAvailable()) {
+    if (!this.health.isAvailable(anchor.domain)) {
       throw new HttpError(503, "anchor_unavailable");
     }
 
     const customer = customerOf(seller);
-    await this.assertKycAccepted(customer);
+    await this.assertKycAccepted(customer, "cash_out", opts, anchor.kyc);
 
     const sourceAmount = link.paidAmount ?? link.amount;
 
     // Extracted so the expiry guard below can ask for a second, fresh quote
     // without duplicating the request shape.
     const fetchFreshQuote = () =>
-      this.deps.offramp.quote({
+      anchor.offramp.quote({
         linkId: link.id,
         sourceAsset: link.asset,
         sourceAmount,
@@ -959,6 +914,13 @@ export class LinkService {
         customer,
         withdrawType: body.withdrawType,
       }, { logger: child });
+
+    const from = link.status;
+    const claimed = await this.deps.links.claimForCashOut(link.id, ["paid", "offramp_failed"]);
+    if (!claimed) {
+      throw new HttpError(409, "cashout_already_in_progress");
+    }
+    link.status = "offramp_pending";
 
     let quote: OffRampQuote;
     let initiation: OffRampInitiation;
@@ -1014,7 +976,7 @@ export class LinkService {
         child.info(
           {
             event: "cashout.quote",
-            anchor: this.deps.offramp.mode,
+            anchor: anchor.offramp.mode,
             quoteId: quote.quoteId,
             targetCurrency: quote.targetCurrency,
             targetAmount: quote.targetAmount,
@@ -1026,7 +988,7 @@ export class LinkService {
       }
 
       const t1 = Date.now();
-      initiation = await this.deps.offramp.initiate({
+      initiation = await anchor.offramp.initiate({
         linkId: link.id,
         quoteId: quote.quoteId,
         payout: { currency: body.targetCurrency, fields: mergedFields },
@@ -1035,26 +997,28 @@ export class LinkService {
       child.info(
         {
           event: "cashout.initiate",
-          anchor: this.deps.offramp.mode,
+          anchor: anchor.offramp.mode,
           jobId: initiation.jobId,
           durationMs: Date.now() - t1,
         },
         "cash-out initiated",
       );
     } catch (err) {
+      await this.deps.links.releaseCashOutClaim(link.id, from);
+      link.status = from;
       const message = err instanceof Error ? err.message : String(err);
       child.error(
-        { event: "cashout.error", anchor: this.deps.offramp.mode, error: message },
+        { event: "cashout.error", anchor: anchor.offramp.mode, error: message },
         "cash-out failed",
       );
       if (err instanceof HttpError) throw err;
-      if (err instanceof OffRampDisabledError) throw err;
-      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired();
+      if (err instanceof AnchorAuthRequiredError) throw anchorAuthRequired("cash_out");
       if (err instanceof QuoteExpiredError) {
         throw new HttpError(409, `quote_expired: ${err.message}`);
       }
       throwIfUnknownWithdrawType(err, body.withdrawType);
-      if (err instanceof OffRampRejectedError) throw offRampRejected(err, child);
+      if (err instanceof OffRampDisabledError) throw err;
+      if (err instanceof OffRampRejectedError) throw offRampRejected(err);
       throw anchorFailure(err, child);
     }
 
@@ -1063,7 +1027,6 @@ export class LinkService {
       await this.deps.sellers.savePayoutFields(seller.id, mergedFields);
     }
 
-    const from = link.status;
     const jobId = initiation.jobId;
     // A retry starts from a clean slate: nothing from the failed attempt may
     // survive into the new attempt's rate, fee or net-amount fields.
@@ -1120,7 +1083,7 @@ export class LinkService {
     // Passive telemetry (issue #20, 3.8) — never blocks the cash-out response.
     const storedJob = await this.deps.offrampState.getJob(jobId).catch(() => null);
     void this.recordTelemetry(jobId, {
-      anchorDomain: storedJob?.anchor ?? this.deps.offramp.mode,
+      anchorDomain: storedJob?.anchor ?? anchor.offramp.mode,
       corridor: `${link.asset.code}/${quote.targetCurrency}`,
       sellAsset: link.asset.code,
       sellAmount: sourceAmount,
@@ -1178,8 +1141,10 @@ export class LinkService {
     if (!link.offrampJobId) return null;
     try {
       // Circuit breaker open: do not add load to a struggling anchor; the stored copy below answers.
-      if (!this.health.isAvailable()) throw new Error("anchor_unavailable");
-      const job = await this.deps.offramp.status(link.offrampJobId, opts);
+      const stored = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
+      const owner = this.deps.anchors && stored ? await this.deps.anchors.forJob(stored.anchor) : null;
+      if (!this.health.isAvailable(owner?.domain ?? this.anchorDomain)) throw new Error("anchor_unavailable");
+      const job = await (await this.offrampForJob(link.offrampJobId)).status(link.offrampJobId, opts);
       return job.transfer ?? null;
     } catch (err) {
       // No live anchor session for this seller: the seller has to reconnect, same
@@ -1221,43 +1186,99 @@ export class LinkService {
     const log = (opts.logger ?? this.deps.logger!);
     const pending = await this.deps.links.listByStatus("offramp_pending");
     const now = Date.now();
-    for (const link of pending) {
-      if (!link.offrampJobId) {
-        // Should never happen going forward (triggerCashOut always sets it),
-        // but a link like this can't ever resolve — same fate as a lost job.
-        await this.markOffRampFailed(link, "job_state_lost");
+    for (const listed of pending) {
+      // One poll per link at a time. A tick that outlives the interval (slow
+      // anchor, many pending links), or a manual trigger beside the timer,
+      // would otherwise settle the same link twice and fire its webhook twice.
+      if (this.pollingLinkIds.has(listed.id)) {
+        log.debug({ event: "cashout.poll.skipped", linkId: listed.id }, "cash-out poll already in flight");
         continue;
       }
-      // Per-job backoff: while the anchor is sick we don't re-ping it on every
-      // tick. Skip links whose `next_try_at` is still in the future.
-      const next = this.nextPollAtByLinkId.get(link.id);
-      if (next !== undefined && now < next) continue;
-
-      const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
-      let job: OffRampJob;
+      this.pollingLinkIds.add(listed.id);
       try {
-        // Read before polling: status() persists any deposit instructions, so
-        // "had none before this poll" is what makes the event fire once, and
-        // it still does after a restart.
-        const before = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
-        job = await this.deps.offramp.status(link.offrampJobId, { logger: child });
-        if (job.transfer && !before?.transfer && !this.transferRequiredLogged.has(link.offrampJobId)) {
-          this.transferRequiredLogged.add(link.offrampJobId);
-          // Deliberately no memo/destination here: payment instructions stay
-          // out of plaintext logs. The seller still signs; nothing is sent
-          // from the server.
-          child.info(
-            {
-              event: "cashout.transfer_required",
-              linkId: link.id,
-              jobId: link.offrampJobId,
-              assetCode: job.transfer.asset.code,
-              amount: job.transfer.amount,
-            },
-            "anchor published deposit instructions; seller must send the asset",
-          );
-        }
-        // Successful poll clears any prior in-memory last_error + backoff + persisted poll error.
+        // The list may be stale if another tick finished this link since it was read.
+        const link = (await this.deps.links.findById(listed.id)) ?? listed;
+        if (link.status !== "offramp_pending") continue;
+        await this.pollCashOutLink(link, now, log, opts);
+      } finally {
+        this.pollingLinkIds.delete(listed.id);
+      }
+    }
+  }
+
+  /** One link's share of {@link pollCashOuts}. Returns early rather than `continue`. */
+  private async pollCashOutLink(
+    link: PaymentLink,
+    now: number,
+    log: Logger,
+    opts: ServiceCallOptions,
+  ): Promise<void> {
+    if (!link.offrampJobId) {
+      // Should never happen going forward (triggerCashOut always sets it),
+      // but a link like this can't ever resolve — same fate as a lost job.
+      await this.markOffRampFailed(link, "job_state_lost");
+      return;
+    }
+    // Per-job backoff: while the anchor is sick we don't re-ping it on every
+    // tick. Skip links whose `next_try_at` is still in the future.
+    const next = this.nextPollAtByLinkId.get(link.id);
+    if (next !== undefined && now < next) return;
+
+    const child = log.child({ linkId: link.id, jobId: link.offrampJobId });
+    // Read before polling: status() persists any deposit instructions, so
+    // "had none before this poll" is what makes the event fire once, and
+    // it still does after a restart.
+    const before = await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null);
+    // Blocked on the seller's anchor session (issue 4.16): nothing will
+    // change until they re-authenticate, so skip without calling status().
+    // Legacy rows with no seller/account cannot be checked and fall through.
+    if (this.deps.hasLiveAnchorSession && before?.sellerId && before.account) {
+      if (!(await this.deps.hasLiveAnchorSession({ sellerId: before.sellerId, account: before.account }, before.anchor))) {
+        await this.blockOnAnchorAuth(link, child);
+        return;
+      }
+      this.liftAnchorAuthBlock(link.id);
+    } else if (this.anchorAuthBlockedLinkIds.has(link.id)) {
+      // No session check available: stay blocked until re-auth clears it.
+      return;
+    }
+
+    let job: OffRampJob;
+    try {
+      job = await (await this.offrampForJob(link.offrampJobId)).status(link.offrampJobId, { logger: child });
+      if (job.transfer && !before?.transfer && !this.transferRequiredLogged.has(link.offrampJobId)) {
+        this.transferRequiredLogged.add(link.offrampJobId);
+        // Deliberately no memo/destination here: payment instructions stay
+        // out of plaintext logs. The seller still signs; nothing is sent
+        // from the server.
+        child.info(
+          {
+            event: "cashout.transfer_required",
+            linkId: link.id,
+            jobId: link.offrampJobId,
+            assetCode: job.transfer.asset.code,
+            amount: job.transfer.amount,
+          },
+          "anchor published deposit instructions; seller must send the asset",
+        );
+      }
+      // Successful poll clears any prior in-memory last_error + backoff + persisted poll error.
+      this.lastPollErrorByLinkId.delete(link.id);
+      this.consecutivePollErrorsByLinkId.delete(link.id);
+      this.nextPollAtByLinkId.delete(link.id);
+      if (link.offrampJobId) {
+        await this.deps.offrampState.updateJob(link.offrampJobId, {
+          lastPollError: null,
+          lastPollErrorAt: null,
+          lastPollReason: null,
+        });
+      }
+    } catch (err) {
+      if (err instanceof OffRampJobNotFoundError) {
+        // The adapter has no state for this job id at all — not a transient
+        // hiccup, it will never resolve on its own. Fail it out so the
+        // seller has a path forward instead of silent purgatory forever.
+        await this.markOffRampFailed(link, "job_state_lost");
         this.lastPollErrorByLinkId.delete(link.id);
         this.consecutivePollErrorsByLinkId.delete(link.id);
         this.nextPollAtByLinkId.delete(link.id);
@@ -1268,138 +1289,127 @@ export class LinkService {
             lastPollReason: null,
           });
         }
-      } catch (err) {
-        if (err instanceof OffRampJobNotFoundError) {
-          // The adapter has no state for this job id at all — not a transient
-          // hiccup, it will never resolve on its own. Fail it out so the
-          // seller has a path forward instead of silent purgatory forever.
-          await this.markOffRampFailed(link, "job_state_lost");
-          this.lastPollErrorByLinkId.delete(link.id);
-          this.consecutivePollErrorsByLinkId.delete(link.id);
-          this.nextPollAtByLinkId.delete(link.id);
-          if (link.offrampJobId) {
-            await this.deps.offrampState.updateJob(link.offrampJobId, {
-              lastPollError: null,
-              lastPollErrorAt: null,
-              lastPollReason: null,
-            });
-          }
-          continue;
-        }
-        // Classify the poll error into a sanitized, seller-safe reason and message.
-        const { reason, message: safeMessage } = classifyPollError(err);
-        if (link.offrampJobId) {
-          await this.deps.offrampState.updateJob(link.offrampJobId, {
-            lastPollError: safeMessage,
-            lastPollErrorAt: Date.now(),
-            lastPollReason: reason,
-          });
-        }
-        const rawMessage = err instanceof Error ? err.message : String(err);
-        this.lastPollErrorByLinkId.set(link.id, rawMessage);
-        console.warn(`[offramp] poll failed for link ${link.id}: ${rawMessage}`);
-        // Exponential backoff per job (in-memory). Capped so a long-lived
-        // pending job doesn't end up wedged for hours.
-        const prev = this.consecutivePollErrorsByLinkId.get(link.id) ?? 0;
-        const next1 = Math.min(LinkService.POLL_BACKOFF_CAP_MS, LinkService.POLL_BACKOFF_BASE_MS * 2 ** prev);
-        this.consecutivePollErrorsByLinkId.set(link.id, prev + 1);
-        this.nextPollAtByLinkId.set(link.id, Date.now() + next1);
-        continue;
+        return;
       }
-// If the anchor returned transfer instructions and we haven't notified yet,
-      // emit the offramp.transfer_required webhook now.
-      // This handles the case where the transfer instructions arrive late (e.g. after review).
-      // Some off-ramp implementations may return transfer instructions in status().
-      const transfer = (job as unknown as Record<string, unknown>).transfer as WithdrawTransfer | undefined;
-      if (transfer && link.offrampJobId) {
-        const storedJob = await this.deps.offrampState.getJob(link.offrampJobId);
-        if (storedJob && !storedJob.transferNotifiedAt) {
-          await this.fireWebhook(link, "offramp.transfer_required", {
-            transfer,
-            jobId: link.offrampJobId,
-          }, opts);
-          await this.deps.offrampState.updateJob(link.offrampJobId, { transferNotifiedAt: Date.now() });
-        }
+      // The session expired between the check and the call (or no check is
+      // wired): same handling, retrying would hit the same error.
+      if (err instanceof AnchorAuthRequiredError) {
+        await this.blockOnAnchorAuth(link, child);
+        return;
       }
-
-      if (job.status === "settled") {
-        const from = link.status;
-        link.status = "offramp_settled";
-        link.offrampStatus = "settled";
-        await this.deps.links.save(link);
-        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_settled" });
-        this.observeSettlementDuration(link.id, "settled");
-        child.info({ event: "link.transition", from, to: link.status }, "off-ramp settled");
-        await this.fireWebhook(link, "offramp.settled", {
-          targetCurrency: job.targetCurrency,
-          targetAmount: job.targetAmount,
-        }, opts);
-
-        // Passive telemetry (issue #20, 3.8): effective_rate derived from the
-        // anchor-reported amount_out at settlement, NOT the quoted rate — the
-        // whole point of this dataset is measuring the spread between them.
-        // Awaited (errors are swallowed inside recordTelemetry) rather than
-        // fire-and-forget, so a slow store can't race past the write.
-        {
-          const existing = await this.deps.telemetry.get(`tel_${link.offrampJobId}`).catch(() => null);
-          const quotedRate = existing?.quotedRate ?? job.rate;
-          const sourceAmount = link.paidAmount ?? link.amount;
-          // Both rates are TARGET per source (issue 5.21): quote.rate is
-          // documented in that direction and every adapter now returns it so,
-          // which is what makes this fee (quoted gross minus actual target,
-          // in target units) and the summary's spread meaningful for real
-          // anchors, not just the mock.
-          const effectiveRate = String(Number(job.targetAmount) / Number(sourceAmount));
-          const feeAmount = (Number(quotedRate) * Number(sourceAmount) - Number(job.targetAmount)).toFixed(6);
-          await this.recordTelemetry(link.offrampJobId!, {
-            quotedRate,
-            settledAt: Date.now(),
-            effectiveRate,
-            feeAmount,
-            status: "settled",
-          });
-        }
-      } else if (job.status === "failed") {
-        const from = link.status;
-        link.status = "offramp_failed";
-        link.offrampStatus = "failed";
-        await this.deps.links.save(link);
-        metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
-        this.observeSettlementDuration(link.id, "failed");
-        child.info(
-          { event: "link.transition", from, to: link.status, reason: job.reason },
-          "off-ramp failed",
-        );
-        await this.fireWebhook(link, "offramp.failed", { reason: job.reason }, opts);
-
-        await this.recordTelemetry(link.offrampJobId!, {
-          status: "failed",
-          failureReason: job.reason ?? null,
+      // Classify the poll error into a sanitized, seller-safe reason and message.
+      const { reason, message: safeMessage } = classifyPollError(err);
+      if (link.offrampJobId) {
+        await this.deps.offrampState.updateJob(link.offrampJobId, {
+          lastPollError: safeMessage,
+          lastPollErrorAt: Date.now(),
+          lastPollReason: reason,
         });
-      } else {
-        // Still pending at the anchor. An `incomplete` job means the seller
-        // never finished the anchor's window — without a timeout it would sit
-        // in `offramp_pending` indefinitely. `createdAt` is the durable proxy
-        // for "waiting since": it is written once at initiation, unlike
-        // `updatedAt`, which every status poll refreshes.
-        const stored = link.offrampJobId
-          ? await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null)
-          : null;
-        const timeoutMs = this.deps.interactiveTimeoutMs ?? LinkService.DEFAULT_INTERACTIVE_TIMEOUT_MS;
-        if (stored?.externalStatus === "incomplete" && now - stored.createdAt > timeoutMs) {
-          child.info(
-            { event: "link.transition", from: link.status, reason: "interactive_abandoned" },
-            "interactive anchor flow abandoned",
-          );
-          await this.markOffRampFailed(link, "interactive_abandoned");
-        } else if (link.offrampStatus !== job.status) {
-          link.offrampStatus = job.status;
-          await this.deps.links.save(link);
-          child.info(
-            { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
-            "cash-out offrampStatus updated",
-          );
-        }
+      }
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      this.lastPollErrorByLinkId.set(link.id, rawMessage);
+      console.warn(`[offramp] poll failed for link ${link.id}: ${rawMessage}`);
+      // Exponential backoff per job (in-memory). Capped so a long-lived
+      // pending job doesn't end up wedged for hours.
+      const prev = this.consecutivePollErrorsByLinkId.get(link.id) ?? 0;
+      const next1 = Math.min(LinkService.POLL_BACKOFF_CAP_MS, LinkService.POLL_BACKOFF_BASE_MS * 2 ** prev);
+      this.consecutivePollErrorsByLinkId.set(link.id, prev + 1);
+      this.nextPollAtByLinkId.set(link.id, Date.now() + next1);
+      return;
+    }
+// If the anchor returned transfer instructions and we haven't notified yet,
+    // emit the offramp.transfer_required webhook now.
+    // This handles the case where the transfer instructions arrive late (e.g. after review).
+    // Some off-ramp implementations may return transfer instructions in status().
+    const transfer = (job as unknown as Record<string, unknown>).transfer as WithdrawTransfer | undefined;
+    if (transfer && link.offrampJobId) {
+      const storedJob = await this.deps.offrampState.getJob(link.offrampJobId);
+      if (storedJob && !storedJob.transferNotifiedAt) {
+        await this.fireWebhook(link, "offramp.transfer_required", {
+          transfer,
+          jobId: link.offrampJobId,
+        }, opts);
+        await this.deps.offrampState.updateJob(link.offrampJobId, { transferNotifiedAt: Date.now() });
+      }
+    }
+
+    if (job.status === "settled") {
+      const from = link.status;
+      link.status = "offramp_settled";
+      link.offrampStatus = "settled";
+      await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "offramp_settled" });
+      this.observeSettlementDuration(link.id, "settled");
+      child.info({ event: "link.transition", from, to: link.status }, "off-ramp settled");
+      await this.fireWebhook(link, "offramp.settled", {
+        targetCurrency: job.targetCurrency,
+        targetAmount: job.targetAmount,
+      }, opts);
+
+      // Passive telemetry (issue #20, 3.8): effective_rate derived from the
+      // anchor-reported amount_out at settlement, NOT the quoted rate — the
+      // whole point of this dataset is measuring the spread between them.
+      // Awaited (errors are swallowed inside recordTelemetry) rather than
+      // fire-and-forget, so a slow store can't race past the write.
+      {
+        const existing = await this.deps.telemetry.get(`tel_${link.offrampJobId}`).catch(() => null);
+        const quotedRate = existing?.quotedRate ?? job.rate;
+        const sourceAmount = link.paidAmount ?? link.amount;
+        // Both rates are TARGET per source (issue 5.21): quote.rate is
+        // documented in that direction and every adapter now returns it so,
+        // which is what makes this fee (quoted gross minus actual target,
+        // in target units) and the summary's spread meaningful for real
+        // anchors, not just the mock.
+        const effectiveRate = String(Number(job.targetAmount) / Number(sourceAmount));
+        const feeAmount = (Number(quotedRate) * Number(sourceAmount) - Number(job.targetAmount)).toFixed(6);
+        await this.recordTelemetry(link.offrampJobId!, {
+          quotedRate,
+          settledAt: Date.now(),
+          effectiveRate,
+          feeAmount,
+          status: "settled",
+        });
+      }
+    } else if (job.status === "failed") {
+      const from = link.status;
+      link.status = "offramp_failed";
+      link.offrampStatus = "failed";
+      await this.deps.links.save(link);
+      metrics.linkStatusTransitionsTotal.inc({ to: "offramp_failed" });
+      this.observeSettlementDuration(link.id, "failed");
+      child.info(
+        { event: "link.transition", from, to: link.status, reason: job.reason },
+        "off-ramp failed",
+      );
+      await this.fireWebhook(link, "offramp.failed", { reason: job.reason }, opts);
+
+      await this.recordTelemetry(link.offrampJobId!, {
+        status: "failed",
+        failureReason: job.reason ?? null,
+      });
+    } else {
+      // Still pending at the anchor. An `incomplete` job means the seller
+      // never finished the anchor's window — without a timeout it would sit
+      // in `offramp_pending` indefinitely. `createdAt` is the durable proxy
+      // for "waiting since": it is written once at initiation, unlike
+      // `updatedAt`, which every status poll refreshes.
+      const stored = link.offrampJobId
+        ? await this.deps.offrampState.getJob(link.offrampJobId).catch(() => null)
+        : null;
+      const timeoutMs = this.deps.interactiveTimeoutMs ?? LinkService.DEFAULT_INTERACTIVE_TIMEOUT_MS;
+      if (stored?.externalStatus === "incomplete" && now - stored.createdAt > timeoutMs) {
+        child.info(
+          { event: "link.transition", from: link.status, reason: "interactive_abandoned" },
+          "interactive anchor flow abandoned",
+        );
+        await this.markOffRampFailed(link, "interactive_abandoned");
+      } else if (link.offrampStatus !== job.status) {
+        link.offrampStatus = job.status;
+        await this.deps.links.save(link);
+        child.info(
+          { event: "link.offramp_status.update", linkId: link.id, offrampStatus: job.status },
+          "cash-out offrampStatus updated",
+        );
       }
     }
   }
@@ -1446,6 +1456,59 @@ export class LinkService {
   }
 
   /**
+   * Record that a cash-out poll is blocked on the seller's anchor session
+   * (issue 4.16): persist the typed reason, log and count once per blocked
+   * episode, and drop any backoff so the first tick after re-auth polls
+   * immediately. The link is not failed; the withdrawal is still alive at the
+   * anchor.
+   */
+  private async blockOnAnchorAuth(link: PaymentLink, child: Logger): Promise<void> {
+    // Every poll tick that finds the block counts, so the rate tracks how long sellers stay signed out.
+    recordAnchorAuthRequired("poll");
+    if (link.offrampJobId) {
+      await this.deps.offrampState.updateJob(link.offrampJobId, {
+        lastPollError: ANCHOR_AUTH_REQUIRED_POLL.message,
+        lastPollErrorAt: Date.now(),
+        lastPollReason: ANCHOR_AUTH_REQUIRED_POLL.reason,
+      });
+    }
+    if (!this.anchorAuthBlockedLinkIds.has(link.id)) {
+      this.anchorAuthBlockedLinkIds.add(link.id);
+      metrics.offrampJobsAwaitingAnchorAuth.inc();
+      child.info(
+        { event: "cashout.poll.anchor_auth_required", linkId: link.id, jobId: link.offrampJobId },
+        "cash-out poll blocked: seller anchor session required",
+      );
+    }
+    this.nextPollAtByLinkId.delete(link.id);
+    this.consecutivePollErrorsByLinkId.delete(link.id);
+  }
+
+  private liftAnchorAuthBlock(linkId: string): void {
+    if (this.anchorAuthBlockedLinkIds.delete(linkId)) metrics.offrampJobsAwaitingAnchorAuth.dec();
+  }
+
+  /**
+   * Called from `POST /seller/anchor-auth` once the seller has signed in
+   * again: unblock their links so the next `pollCashOuts()` tick polls
+   * immediately. Returns the number of links unblocked.
+   */
+  async clearAnchorAuthBlock(sellerId: string): Promise<number> {
+    const pending = await this.deps.links.listByStatus("offramp_pending");
+    let cleared = 0;
+    for (const link of pending) {
+      if (link.sellerId !== sellerId) continue;
+      if (this.anchorAuthBlockedLinkIds.has(link.id)) {
+        this.liftAnchorAuthBlock(link.id);
+        cleared++;
+      }
+      this.nextPollAtByLinkId.delete(link.id);
+      this.consecutivePollErrorsByLinkId.delete(link.id);
+    }
+    return cleared;
+  }
+
+  /**
    * Read the in-memory last poll error for a single link, if any.
    */
   lastPollErrorFor(linkId: string): string | null {
@@ -1472,7 +1535,15 @@ export class LinkService {
    * from the seller-facing dashboard in a follow-up).
    */
   healthSnapshot(): AnchorHealthSnapshot {
-    return this.health.snapshot();
+    return this.health.snapshot(this.anchorDomain);
+  }
+
+  /**
+   * Every configured anchor's breaker snapshot, so `/health` can report them
+   * side by side once more than one anchor exists (issue 3.23).
+   */
+  healthSnapshots(): AnchorHealthSnapshot[] {
+    return this.health.snapshots();
   }
 
   /**
@@ -1580,7 +1651,8 @@ export function customerOf(seller: Seller): AnchorCustomer {
 }
 
 /** Only the seller's wallet can open an anchor session, so this is theirs to fix. */
-function anchorAuthRequired(): HttpError {
+function anchorAuthRequired(route?: AnchorAuthRoute): HttpError {
+  if (route) recordAnchorAuthRequired(route);
   return new HttpError(403, "anchor_auth_required");
 }
 
@@ -1592,9 +1664,36 @@ function anchorAuthRequired(): HttpError {
  * the response or the stored idempotency record (issue 4.36).
  */
 export function anchorFailure(err: unknown, log: Logger): HttpError {
-  // An answer, not a fault: same 422 a rejection gets anywhere else, so this
-  // can never turn into the 502 that makes a healthy anchor look down.
-  if (err instanceof AnchorRejectedError) return offRampRejected(err, log);
+  // The anchor refusing this seller's request (unsupported pair, KYC needed) is
+  // the seller's to act on, so it is a 422 with the safe part of the anchor's
+  // detail, not a 502 for an outage that did not happen (issue 3.29).
+  if (isAnchorRejection(err)) {
+    log.warn(
+      { event: "anchor.rejected", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },
+      "anchor rejected the request",
+    );
+    return new HttpError(422, "offramp_rejected", {
+      message: `The anchor declined this request (SEP-${err.sep} ${err.op}, HTTP ${err.status}).`,
+      limits: {},
+      availableTypes: [],
+      ...anchorRejectionDetail(err),
+    });
+  }
+  // The anchor refused a value the operator configured (SEP-12 type): not an
+  // outage and not the seller's to fix, so say so apart from `anchor_error`.
+  if (err instanceof AnchorConfigError) {
+    log.error({ event: "anchor.config_error", setting: err.setting, value: err.value }, err.message);
+    return new HttpError(502, "anchor_config_error", { message: err.message });
+  }
+  // The anchor does not declare the SEP this deployment needs (OFFRAMP_PROTOCOL,
+  // a SEP-24-only anchor asked for SEP-6): the operator's to fix, and no retry helps.
+  if (err instanceof AnchorCapabilityError) {
+    log.error(
+      { event: "anchor.config_error", setting: "capability", needed: err.needed, declared: err.declared },
+      err.message,
+    );
+    return new HttpError(502, "anchor_config_error", { message: err.message });
+  }
   if (err instanceof AnchorHttpError) {
     log.error(
       { event: "anchor.error", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },
@@ -1615,26 +1714,7 @@ function assertCanCashOut(link: PaymentLink): void {
 }
 
 /** The anchor refused what the seller asked for; tell them why, with the anchor's own limits. */
-function offRampRejected(err: OffRampRejectedError, log: Logger): HttpError {
-  if (err instanceof AnchorRejectedError) {
-    log.error(
-      { event: "anchor.rejected", sep: err.sep, op: err.op, statusCode: err.status, body: err.body },
-      "anchor rejected the request",
-    );
-    // `type` and `fields` are SEP's structured, bounded vocabulary, so a
-    // seller can re-render the form or finish KYC. The free-text `error`
-    // prose stays in the log: it is anchor body text (issue 4.36) and it can
-    // echo the seller's own KYC and bank fields straight back at us.
-    const anchorRejection: Record<string, unknown> = {};
-    if (err.anchorType !== undefined) anchorRejection.type = err.anchorType;
-    if (err.anchorFields !== undefined) anchorRejection.fields = err.anchorFields;
-    return new HttpError(422, "offramp_rejected", {
-      message: err.message,
-      limits: err.limits,
-      availableTypes: err.availableTypes,
-      ...(Object.keys(anchorRejection).length > 0 ? { anchorRejection } : {}),
-    });
-  }
+function offRampRejected(err: OffRampRejectedError): HttpError {
   return new HttpError(422, "offramp_rejected", {
     message: err.message,
     limits: err.limits,
@@ -1652,12 +1732,14 @@ export class HttpError extends Error {
   }
 }
 
+export const ANCHOR_AUTH_REQUIRED_POLL = {
+  reason: "anchor_auth_required",
+  message: "Anchor session expired or required. Please reconnect your anchor session in settings.",
+} as const;
+
 export function classifyPollError(err: unknown): { reason: string; message: string } {
   if (err instanceof AnchorAuthRequiredError || (err instanceof Error && err.message.includes("anchor_auth_required"))) {
-    return {
-      reason: "anchor_auth_required",
-      message: "Anchor session expired or required. Please reconnect your anchor session in settings.",
-    };
+    return { ...ANCHOR_AUTH_REQUIRED_POLL };
   }
   const rawMsg = err instanceof Error ? err.message : String(err);
   if (rawMsg.toLowerCase().includes("circuit open")) {

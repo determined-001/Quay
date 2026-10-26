@@ -58,7 +58,7 @@ jobs:
       - name: Docs — domain boundary (packages/core stays chain-agnostic)
         run: pnpm docs:check-domain-boundary
 
-      # Issue #207. The dormant SEP-24 AnchorOffRamp signed the seller's send
+      # Issue #207. The SEP-24 AnchorOffRamp used to sign the seller's send
       # leg with a server-held keypair and Sep10Client signed SEP-10 challenges
       # the same way. Both signing paths are gone; this fails the build if either pattern
       # reappears under apps/api/src or packages/offramp/src. The two reviewed
@@ -69,6 +69,9 @@ jobs:
 
       - name: Docs — every env var apps/api reads is documented
         run: pnpm docs:check-env-docs
+
+      - name: DB — schema and migrations have not drifted
+        run: pnpm db:check
 
       - name: Build
         run: pnpm build

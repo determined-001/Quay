@@ -211,7 +211,7 @@ describe("WebhookWorker", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("dead-letters an entry whose webhook has since been soft-deleted", async () => {
+  it("dead-letters a queued entry for a soft-deleted webhook without making an HTTP request", async () => {
     const { repo, hook, sender } = await seed();
     await sender.enqueue([hook], "lnk_1", { event: "link.paid", data: {} });
     await repo.softDelete(hook.id, hook.sellerId);
@@ -219,7 +219,7 @@ describe("WebhookWorker", () => {
     await makeWorker(repo, sender).runOnce();
 
     expect(repo.queue[0]!.status).toBe("dead");
-    expect(repo.queue[0]!.lastError).toBe("webhook not found");
+    expect(repo.queue[0]!.lastError).toBe("webhook deleted");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -230,6 +230,109 @@ describe("WebhookWorker", () => {
 
     await makeWorker(repo, sender).runOnce();
     expect(await repo.countPending()).toBe(0);
+  });
+
+  it("a replayed dead entry that gets one 503 is pending again with attempts: 1, not dead", async () => {
+    const { repo, hook, sender } = await seed();
+    await sender.enqueue([hook], "lnk_1", { event: "link.paid", data: {} });
+
+    const entryId = repo.queue[0]!.id;
+    // Simulate dead-lettered entry after 5 failed attempts
+    await repo.updateQueueEntry(entryId, {
+      status: "dead",
+      attempts: 5,
+      nextAttemptAt: Date.now(),
+      lastStatusCode: 500,
+      lastError: "HTTP 500",
+    });
+
+    // Simulate replay reset: status -> pending, attempts -> 0
+    await repo.updateQueueEntry(entryId, {
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      lastStatusCode: 500,
+      lastError: "HTTP 500",
+    });
+
+    // Worker receives 503 on the replayed attempt
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    const worker = makeWorker(repo, sender, { maxAttempts: 5 });
+    await worker.runOnce();
+
+    expect(repo.queue[0]!.status).toBe("pending");
+    expect(repo.queue[0]!.attempts).toBe(1);
+    expect(repo.deliveries).toHaveLength(1);
+    expect(repo.deliveries[0]!.attempt).toBe(1);
+  });
+
+  it("dead-letters an entry whose secret cannot be decrypted after one tick", async () => {
+    const { repo, sender } = await seed();
+    const badHook = await repo.create({
+      sellerId: "slr_1",
+      url: "https://receiver.example.com/hook",
+      secret: "any",
+    });
+    // Corrupt the encrypted secret in storage
+    badHook.secretEncrypted = "bad.bad.bad";
+
+    await sender.enqueue([badHook], "lnk_1", { event: "link.paid", data: {} });
+
+    await makeWorker(repo, sender).runOnce();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(repo.queue[0]!.status).toBe("dead");
+    expect(repo.queue[0]!.attempts).toBe(1);
+    expect(repo.queue[0]!.lastError).toBe(
+      "webhook secret could not be decrypted; check WEBHOOK_SECRET_ENCRYPTION_KEY or rotate the secret",
+    );
+    expect(repo.deliveries).toHaveLength(1);
+    expect(repo.deliveries[0]!).toMatchObject({
+      ok: false,
+      attempt: 1,
+      statusCode: null,
+      error: "webhook secret could not be decrypted; check WEBHOOK_SECRET_ENCRYPTION_KEY or rotate the secret",
+    });
+  });
+
+  it("handles unexpected throw from deliverOnce as a transient failure instead of leaving row claimed", async () => {
+    const { repo, hook, sender } = await seed();
+    await sender.enqueue([hook], "lnk_1", { event: "link.paid", data: {} });
+
+    vi.spyOn(sender, "deliverOnce").mockRejectedValue(new Error("unexpected crash in deliverOnce"));
+
+    const worker = makeWorker(repo, sender, { maxAttempts: 3 });
+    await worker.runOnce();
+
+    // Must not be left claimed: should be pending with attempts: 1
+    expect(repo.queue[0]!.status).toBe("pending");
+    expect(repo.queue[0]!.attempts).toBe(1);
+    expect(repo.queue[0]!.lastError).toBe("unexpected crash in deliverOnce");
+    expect(repo.deliveries).toHaveLength(1);
+    expect(repo.deliveries[0]!).toMatchObject({
+      ok: false,
+      attempt: 1,
+      error: "unexpected crash in deliverOnce",
+    });
+  });
+
+  it("dead-letters an entry after maxAttempts when deliverOnce continues throwing", async () => {
+    const { repo, hook, sender } = await seed();
+    await sender.enqueue([hook], "lnk_1", { event: "link.paid", data: {} });
+
+    vi.spyOn(sender, "deliverOnce").mockRejectedValue(new Error("persistent crash"));
+
+    const worker = makeWorker(repo, sender, { maxAttempts: 2 });
+    await worker.runOnce();
+    expect(repo.queue[0]!.status).toBe("pending");
+    expect(repo.queue[0]!.attempts).toBe(1);
+
+    await waitUntilDue(repo);
+    await worker.runOnce();
+
+    expect(repo.queue[0]!.status).toBe("dead");
+    expect(repo.queue[0]!.attempts).toBe(2);
+    expect(repo.queue[0]!.lastError).toBe("persistent crash");
   });
 });
 

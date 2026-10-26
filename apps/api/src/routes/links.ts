@@ -2,6 +2,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import {
   createLinkSchema,
   cashOutSchema,
+  cashOutQuoteQuerySchema,
   transferSentSchema,
   submitPaymentSchema,
   OffRampDisabledError,
@@ -67,23 +68,42 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     return ctx.json({ links: await c.service.listLinks(ctx.get("seller").id) });
   });
 
+  const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
   // CSV export of links for a date range.
   // NOTE: must be registered BEFORE /:id to avoid being shadowed by the wildcard.
   // Seller reconciliation export — gated, and scoped to the caller's own links.
   app.get("/export/csv", auth, requireScope("links:read"), async (ctx) => {
     const from = ctx.req.query("from");
     const to = ctx.req.query("to");
+
+    let fromMs: number | undefined;
+    if (from !== undefined) {
+      const isoFrom = DATE_ONLY.test(from) ? `${from}T00:00:00.000Z` : from;
+      fromMs = new Date(isoFrom).getTime();
+      if (Number.isNaN(fromMs)) {
+        return ctx.json({ error: "invalid_query", message: "unparsable 'from' date" }, 400);
+      }
+    }
+
+    let toMs: number | undefined;
+    if (to !== undefined) {
+      const isoTo = DATE_ONLY.test(to) ? `${to}T23:59:59.999Z` : to;
+      toMs = new Date(isoTo).getTime();
+      if (Number.isNaN(toMs)) {
+        return ctx.json({ error: "invalid_query", message: "unparsable 'to' date" }, 400);
+      }
+    }
+
     const links = await c.service.listLinks(ctx.get("seller").id);
 
     // Filter by date range if provided.
     let filtered = links;
-    if (from) {
-      const fromMs = new Date(from).getTime();
-      if (!isNaN(fromMs)) filtered = filtered.filter((l) => l.createdAt >= fromMs);
+    if (fromMs !== undefined) {
+      filtered = filtered.filter((l) => l.createdAt >= fromMs);
     }
-    if (to) {
-      const toMs = new Date(to).getTime();
-      if (!isNaN(toMs)) filtered = filtered.filter((l) => l.createdAt <= toMs);
+    if (toMs !== undefined) {
+      filtered = filtered.filter((l) => l.createdAt <= toMs);
     }
 
     const csv = LINKS_CSV_HEADER + filtered.map(linkToCsvRow).join("\n");
@@ -163,7 +183,8 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
         // the id and leaks the link's existence (issue #41).
         return ctx.json({ error: "not_found" }, 404);
       }
-      const result = await c.service.getOfframpRequirements(ctx.req.param("id"));
+      // Optional ?currency=NGN picks the anchor that serves it when several are configured.
+      const result = await c.service.getOfframpRequirements(ctx.req.param("id"), ctx.req.query("currency") ?? undefined);
       return ctx.json(result);
     } catch (err) {
       if (err instanceof OffRampDisabledError) return ctx.json(OFFRAMP_DISABLED_BODY, 501);
@@ -177,11 +198,16 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
   // this exercises the same KYC/health gates and hits the anchor for real.
   app.get("/:id/cash-out/quote", auth, requireScope("links:read"), async (ctx) => {
     const linkId = ctx.req.param("id");
-    const targetCurrency = ctx.req.query("targetCurrency");
-    if (!targetCurrency) return ctx.json({ error: "invalid_query", message: "targetCurrency is required" }, 400);
-    // The seller's rail choice (issue 5.24); optional — adapters fall back to
-    // the operator default. An unknown type comes back 400 with availableTypes.
-    const withdrawType = ctx.req.query("withdrawType") || undefined;
+    const rawTargetCurrency = ctx.req.query("targetCurrency");
+    if (!rawTargetCurrency) return ctx.json({ error: "invalid_query", message: "targetCurrency is required" }, 400);
+
+    const parsedQuery = cashOutQuoteQuerySchema.safeParse({
+      targetCurrency: rawTargetCurrency,
+      withdrawType: ctx.req.query("withdrawType") || undefined,
+    });
+    if (!parsedQuery.success) return ctx.json({ error: "invalid_query", issues: parsedQuery.error.issues }, 400);
+
+    const { targetCurrency, withdrawType } = parsedQuery.data;
     try {
       const existing = await c.service.getLink(linkId);
       if (!existing) return ctx.json({ error: "not_found" }, 404);
@@ -192,6 +218,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       }
       const quote = await c.service.quoteCashOut(linkId, targetCurrency, withdrawType, {
         logger: getLogger(ctx),
+        requestId: ctx.get("requestId"),
       });
       return ctx.json(quote);
     } catch (err) {
@@ -249,7 +276,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
         // the id and leaks the link's existence (issue #41).
         return ctx.json({ error: "not_found" }, 404);
       }
-      const { job, initiation } = await c.service.triggerCashOut(linkId, parsed.data, { logger: log });
+      const { job, initiation } = await c.service.triggerCashOut(linkId, parsed.data, { logger: log, requestId: ctx.get("requestId") });
       log.info({ event: "cashout.request.ok", linkId, jobId: job.jobId }, "cash-out request succeeded");
       const interactiveUrl = initiation.kind === "interactive" ? initiation.url : undefined;
       // The anchor's deposit instructions for the seller's own wallet to sign

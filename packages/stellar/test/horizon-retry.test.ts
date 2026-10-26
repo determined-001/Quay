@@ -20,6 +20,11 @@ describe("isRetryable", () => {
     expect(isRetryable(errWithStatus(400))).toBe(false);
   });
 
+  it("treats 408 Request Timeout as terminal (only 429 and 5xx retry)", () => {
+    // 408 is a client error (4xx) and is treated as terminal per RFC/Horizon policy
+    expect(isRetryable(errWithStatus(408))).toBe(false);
+  });
+
   it("treats a bare network error (no response) as retryable", () => {
     expect(isRetryable(new Error("ECONNRESET"))).toBe(true);
   });
@@ -37,6 +42,51 @@ describe("retryAfterMs", () => {
   it("returns null for a non-response error", () => {
     expect(retryAfterMs(new Error("x"))).toBeNull();
   });
+
+  it("reads an HTTP-date Retry-After header with exact difference", () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date("2026-10-18T12:00:00Z");
+      vi.setSystemTime(now);
+      const targetDate = new Date("2026-10-18T12:00:10Z").toUTCString();
+      expect(retryAfterMs(errWithStatus(429, { "retry-after": targetDate }))).toBe(10_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 0 for an HTTP-date Retry-After in the past", () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date("2026-10-18T12:00:00Z");
+      vi.setSystemTime(now);
+      const pastDate = new Date("2026-10-18T11:59:50Z").toUTCString();
+      expect(retryAfterMs(errWithStatus(429, { "retry-after": pastDate }))).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads from a Headers instance", () => {
+    const headers = new Headers({ "retry-after": "5" });
+    expect(retryAfterMs({ response: { headers } })).toBe(5000);
+  });
+
+  it("reads from a plain object with capital-case Retry-After", () => {
+    expect(retryAfterMs({ response: { headers: { "Retry-After": "5" } } })).toBe(5000);
+  });
+
+  it("returns null for unparsable string", () => {
+    expect(retryAfterMs(errWithStatus(429, { "retry-after": "abc" }))).toBeNull();
+  });
+
+  it("returns null for Infinity", () => {
+    expect(retryAfterMs(errWithStatus(429, { "retry-after": "Infinity" }))).toBeNull();
+  });
+
+  it("returns null for an empty string", () => {
+    expect(retryAfterMs(errWithStatus(429, { "retry-after": "" }))).toBeNull();
+  });
 });
 
 describe("backoffWithFullJitter", () => {
@@ -50,6 +100,30 @@ describe("backoffWithFullJitter", () => {
 });
 
 describe("withHorizonRetry", () => {
+  it("caps Retry-After at maxDelayMs so a large server delay sleeps no longer than maxDelayMs", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const fn = vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw errWithStatus(429, { "retry-after": "3600" });
+        return "ok";
+      });
+      const onRetry = vi.fn();
+
+      const promise = withHorizonRetry(fn, { maxDelayMs: 50, onRetry });
+      await vi.advanceTimersByTimeAsync(50);
+      const result = await promise;
+
+      expect(result).toBe("ok");
+      expect(fn).toHaveBeenCalledTimes(2);
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onRetry).toHaveBeenCalledWith(1, expect.anything(), 50);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resolves without a caller-visible error on a 429-then-200 sequence", async () => {
     let calls = 0;
     const fn = vi.fn(async () => {

@@ -9,7 +9,7 @@ Operational procedures for the Quay API (deploy target: Render, see
   nightly schedule (`.github/workflows/db-backup.yml`, 03:17 UTC). This is
   **not** continuous protection - a failure right before the next scheduled
   backup loses up to a full day of payment records, off-ramp job state, and
-  (once issue 3.4 ships) KYC data. If that window is unacceptable for a given
+  encrypted KYC data. If that window is unacceptable for a given
   deployment, increase the backup frequency (the cron schedule and
   `pnpm db:backup` support running more often) rather than assume this
   document promises something it doesn't.
@@ -31,10 +31,11 @@ default.
 | Variable | Required when | What breaks without it |
 |---|---|---|
 | `DATABASE_URL` · `DATABASE_AUTH_TOKEN` | always (prod) | No persistence; falls back to a local SQLite file inside the container, which is destroyed on every deploy |
-| `KYC_ENCRYPTION_KEY` | `OFFRAMP=testanchor` | **Process will not boot.** `env.ts` resolves it with `req()` at module load and throws `Missing required env var: KYC_ENCRYPTION_KEY` |
-| `WEBHOOK_SECRET_ENCRYPTION_KEY` | `NODE_ENV=production` | **Process will not boot** (`createContainer()` calls `assertKeyConfigured()`). Before that check existed, it fell back to a hardcoded public dev key and 500'd on the first webhook registration |
-| `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveJwtSecret()` in `apps/api/src/services/container.ts:512` throws). On testnet: auto-generated per boot, so every restart and deploy logs every seller out |
-| `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveServerSigningKeypair()` in `apps/api/src/services/container.ts:489` throws). On testnet: auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
+| `KYC_ENCRYPTION_KEY` | `OFFRAMP=testanchor` or `OFFRAMP=anchor` | **Process will not boot.** `env.ts` resolves it with `req()` at module load and throws `Missing required env var: KYC_ENCRYPTION_KEY` |
+| `ANCHOR_URL` · `ANCHOR_HOME_DOMAIN` | `OFFRAMP=anchor` | **Process will not boot.** `env.ts` resolves each with `req()` and throws `Missing required env var: ANCHOR_URL` (or `ANCHOR_HOME_DOMAIN`). There is deliberately no default. On the public network `ANCHOR_URL` must also be `https://` |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | `NODE_ENV=production` | Encrypts webhook signing secrets **and** seller anchor session tokens. **Process will not boot** (`createContainer()` calls `assertKeyConfigured()`). Before that check existed, it fell back to a hardcoded public dev key and 500'd on the first webhook registration |
+| `JWT_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveJwtSecret()` in `apps/api/src/services/container.ts` throws). On testnet: auto-generated per boot, so every restart and deploy logs every seller out |
+| `SERVER_SIGNING_SECRET` | `STELLAR_NETWORK=public`; strongly advised on testnet | **Process will not boot on public network** (`resolveServerSigningKeypair()` in `apps/api/src/services/container.ts` throws). On testnet: auto-generated per boot, so the `SIGNING_KEY` published in `stellar.toml` changes on every restart and any wallet that cached it breaks |
 | `DEFAULT_SELLER_WALLET` | never — optional everywhere | Multi-tenant: sellers supply their own wallet at SEP-10 login and links pay that address. Set it only to give `/health` a wallet to report a USDC trustline for; unset, that field reads `not_configured`. On testnet, unset auto-generates a throwaway seller so `pnpm dev` needs no config |
 | `HOME_DOMAIN` | any real deployment | Falls back to `localhost:8787`. SEP-10 challenges are issued for localhost and `stellar.toml` advertises `WEB_AUTH_ENDPOINT="https://localhost:8787/auth"` — **wallet login cannot work at all** |
 | `CORS_ORIGINS` | always | The browser refuses the dashboard's cross-origin calls |
@@ -54,13 +55,14 @@ from the Render dashboard on first deploy. Adding a new `req()` call to
 `apps/api/src/env.ts` without adding the matching `render.yaml` entry is what
 caused the 2026-07-31 outage — see `docs/FIXLOG.md` `BUG-4.11`. The same
 mistake is possible in `apps/api/src/services/container.ts`, where
-`SERVER_SIGNING_SECRET` (line 489) and
-`JWT_SECRET` (line 512) are also enforced at boot on public network.
+`resolveServerSigningKeypair()` (`SERVER_SIGNING_SECRET`) and
+`resolveJwtSecret()` (`JWT_SECRET`) are also enforced at boot on public network.
 
 ### Scaling past one instance
 
-Three structures are per-process today, and each silently loses its guarantee
-if a second instance is started. The Render blueprint runs exactly one
+Three structures are per-process unless `REDIS_URL` is set (two of them) or
+at all (the third), and each silently loses its guarantee if a second instance
+is started. The Render blueprint runs exactly one
 instance, which is what makes the current setup correct — treat this as a hard
 prerequisite, not a preference.
 
@@ -72,11 +74,18 @@ failures it prevents — N× every rate limit, and one signed SEP-10 challenge
 redeemable once per instance — are both invisible from outside the process,
 which is why the guard is loud instead of a log line.
 
-- **Rate limiting** — `MemoryStore` unless `REDIS_URL` is set. Already has a
-  `RedisStore`; just configure it.
-- **SEP-10 challenge nonces** — `ChallengeService` holds used challenge hashes
-  in an in-process `Map`, so a restart or a second instance makes an
-  already-redeemed challenge redeemable again inside its 15-minute window.
+- **Rate limiting** — `MemoryStore` unless `REDIS_URL` is set. When Redis is
+  configured but unreachable, throws, or exceeds `storeTimeoutMs` (default 500ms),
+  the rate limiter degrades to an in-process `MemoryStore` so service is not
+  disrupted, `/health` and `/ready` are completely exempt, degraded requests increment
+  `rate_limit_store_errors_total{limiter}`, and warnings are throttled to 1/min.
+  Already has a `RedisStore`; just configure it.
+- **SEP-10 challenge nonces** — without `REDIS_URL`, `ChallengeService` holds
+  used challenge hashes in an in-process `Map`, so a restart or a second
+  instance makes an already-redeemed challenge redeemable again inside its
+  15-minute window. With `REDIS_URL` set, the single-use claim moves to Redis
+  (`RedisUsedChallengeStore`, an atomic `SET NX`) and is shared across
+  instances.
 - **Idempotency in-flight guard** — `idempotency()` tracks concurrent requests
   in a per-process `Map`. The persisted replay table still works; only the
   concurrent-duplicate guard is lost, and it guards a money endpoint.
@@ -206,10 +215,42 @@ mainnet-only notes:
 - **`ANCHOR_URL` / `ANCHOR_HOME_DOMAIN`** only exist on mainnet
   (`OFFRAMP=anchor`). Changing anchors is not a rotation — treat it as picking
   a new anchor (`docs/MAINNET.md` Phase 1) and re-verify its SEP-10/SEP-38/
-  SEP-6 support before pointing production traffic at it.
+  SEP-6 support before pointing production traffic at it. They only **seed**
+  the `anchors` table on the first boot; after that editing them changes
+  nothing (the API logs `anchors.env_ignored`). See "Switching anchors" below.
 - **`METRICS_TOKEN`** is `sync: false` on mainnet the same as testnet — rotate
   it the same way, but remember any external scraper reading the mainnet
   `/metrics` endpoint needs the new token too.
+
+## Switching anchors
+
+Anchors live in the `anchors` table, not in the environment. The first boot
+after upgrading inserts one row from `ANCHOR_URL` / `ANCHOR_HOME_DOMAIN` /
+`OFFRAMP_PROTOCOL` / `OFFRAMP_TYPE` / `OFFRAMP_RATE_SOURCE`, so an existing
+deployment carries on unchanged. Change it with the CLI, which uses the same
+`DATABASE_URL` / `DATABASE_AUTH_TOKEN` as the API (no redeploy; the running API
+re-reads the table every few seconds):
+
+```bash
+node scripts/anchors.mjs list
+node scripts/anchors.mjs add anchor2.example --url https://anchor2.example --corridors KES --protocol auto
+node scripts/anchors.mjs disable anchor1.example     # and `enable` to undo
+```
+
+- **Moving to a new anchor with no downtime:** `add` the new one, check it with
+  `pnpm preflight:mainnet`, then `disable` the old one. A disabled anchor takes
+  no new cash-outs but its withdrawals in flight keep polling on it, so nothing
+  is stranded; sellers sign in to the new anchor with their own wallet (it is a
+  new SEP-10 session per anchor).
+- **Corridors:** `--corridors NGN,KES` limits an anchor to those payout
+  currencies; none listed means any. A cash-out in a currency no enabled anchor
+  serves is `422 corridor_unavailable`.
+- **A bad row** (for example a rate source that cannot be configured) is logged
+  as `anchor.build_failed` and that anchor is skipped; at boot it stops the
+  process, as before.
+- **Not yet per anchor:** the dashboard's identity panel and `/seller/kyc` act on
+  the default anchor only. The cash-out KYC gate does use the anchor that serves
+  the currency.
 
 ## Uptime monitoring
 
@@ -231,7 +272,7 @@ variables → Actions → Variables — they're plain hostnames, not secrets):
 |---|---|---|
 | `UPTIME_MAINNET_API_URL` | **set this once `quay-api-mainnet` exists** | e.g. `https://quay-api-mainnet.onrender.com` (`render.mainnet.yaml`'s `quay-api-mainnet`). Unset means mainnet is skipped entirely, not silently checked against the testnet URL. |
 | `UPTIME_MAINNET_WEB_URL` | optional | Only set this if a dedicated mainnet web deployment exists. `render.mainnet.yaml` declares no web service today, so leave unset until one does. |
-| `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run, and unlike testnet, `POST /links` there has no scoped-credential story yet — see issue #163 (least-privilege API key for this check) before turning it on. |
+| `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run. It authenticates with the repository secret `UPTIME_MAINNET_API_KEY` (a least-privilege API key, issue 8.9 / #163, same as `UPTIME_API_KEY` on testnet), so create that key and set the secret before turning this on. |
 
 Both environments are watched at once, on the same schedule, with separate
 history series — a green testnet can never stand in for an unmonitored mainnet.
@@ -267,19 +308,73 @@ damage is that the watcher resumes from its persisted cursor: a payment is
 marked paid late, not lost. Buying `starter` is what actually removes the
 problem.
 
+### Nightly anchor probe
+
+The probe has two steps. The first runs the protocol endpoints (SEP-1, SEP-10,
+SEP-38, SEP-6 and SEP-24) and needs no setup. The second, **"Full seller-signed
+cash-out"** (`packages/offramp/test/testanchor-full-cashout.test.ts`), does what a
+real seller does against testanchor: sign in with a wallet-signed SEP-10 challenge,
+pass SEP-12 KYC, quote, start the SEP-6 withdrawal, **send the USDC to the anchor on
+Horizon testnet with the anchor's exact memo and memo type**, then poll until the
+anchor moves past `pending_user_transfer_start`. The test process signs that payment
+with the probe key, standing in for the seller's wallet; no server code holds a key.
+
+**Secret to configure.** Add the repository Actions secret
+`TEST_ANCHOR_SELLER_SECRET`: the secret seed of a **dedicated, testnet-only** key,
+used for nothing else. Without it the full cash-out step is skipped (the job
+summary says so) and the first step still runs, with a random throwaway key.
+
+**What the probe sets up itself.** On each run it creates the account through
+Friendbot if it does not exist and adds the testnet USDC trustline
+(`GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5`). It cannot mint USDC.
+
+**Topping up USDC.** Each run sends `PROBE_CASHOUT_AMOUNT` (default `1`) testnet USDC
+to the anchor, so the balance falls by about that much per night. When it runs low
+the **prepare** stage fails with "holds N testnet USDC but needs 1". Refill the key's
+account with testnet USDC from Circle's testnet faucet (<https://faucet.circle.com>,
+Stellar testnet) or through testanchor's deposit flow using the SDF demo wallet
+(<https://demo-wallet.stellar.org>), importing the probe key. Both need a browser
+and cannot be automated by the nightly job; keep 30 or more USDC on the account.
+If testanchor's minimum withdrawal exceeds 1 USDC, add `PROBE_CASHOUT_AMOUNT` (for
+example `"10"`) to that workflow step's `env`.
+
+**Reading a failure.** Tests are named `stage N/7 <stage>` and later stages are
+skipped once one fails, so the first red test is where the flow broke: `prepare`
+(account or balance), `auth` (SEP-10), `kyc` (SEP-12), `quote` (SEP-38), `withdraw`
+(SEP-6 `/withdraw`, or no transfer instructions), `transfer` (Horizon payment),
+`settlement` (the anchor never saw the payment). The job summary also lists the last
+stage completed and per-stage timings, and the auto-filed issue names the failing
+flow and stage.
+
+**Run it locally** with a funded probe key:
+`RUN_LIVE_ANCHOR_TESTS=1 SELLER_SECRET_KEY=S... OFFRAMP_TYPE=bank_account pnpm --filter @checkout/offramp exec vitest run test/testanchor-full-cashout.test.ts`.
+It is skipped, never failed, when `SELLER_SECRET_KEY` is missing. The SEP-12 test
+values the probe submits (`PROBE_KYC_VALUES` in `test/live-probe.ts`) are best
+guesses at what testanchor accepts; if the **kyc** stage fails with "no test value
+for", add that field there.
+
 **Turning the anchor probe off.** `.github/workflows/anchor-probe.yml` runs a
-nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org`
-and files an issue when it fails. That is the testnet deploy's sandbox; a
-payments-only mainnet has no anchor, so the probe would file nightly issues
-about a dependency the product no longer has. Set the repository variable
-`ANCHOR_PROBE_DISABLED=1` to skip it.
+nightly SEP-1 → SEP-10 → SEP-38 → SEP-6 flow, plus the SEP-24 interactive path
+(`/sep24/info`, then `initiate()` returning an https interactive URL on the anchor), against `testanchor.stellar.org`.
+When it fails it files (or comments on) an issue **and** fails the run, so the
+Actions list and the README badge go red. It covers the testnet cash-out path,
+which exists whatever mainnet does, and it is the only live check of that path:
+the regular CI run skips the live suite (`RUN_LIVE_ANCHOR_TESTS` is unset).
+Leave it on for as long as the testnet deploy runs `OFFRAMP=testanchor`. Setting
+the repository variable `ANCHOR_PROBE_DISABLED=1` skips it, and is only right
+when no deployment you operate cashes out through an anchor at all. A
+payments-only mainnet (`OFFRAMP=none`) does not need the probe, but it is not a
+reason to disable it while testnet still does.
 
 ## Deploy
 
-Render deploys `apps/api` as a single always-on Docker web service (starter
-plan - the free tier spins down after 15 min idle, which would stop the
-watcher loop and cash-out poller). Pushing to `main` triggers Render's
-auto-deploy (configured in the Render dashboard, not in this repo). The web
+Render deploys `apps/api` as a single Docker web service. The starter plan is
+what keeps it always on; the free tier spins down after 15 min idle, which
+stops the watcher loop and cash-out poller until the next request. Both
+blueprints (`render.yaml`, `render.mainnet.yaml`) currently declare
+`plan: free`, so check the plan in the Render dashboard rather than assuming it.
+Pushing to a service's branch (`dev` for `quay-api`, `main` for `quay-api-mainnet`)
+triggers Render's auto-deploy. The web
 app deploys separately to Vercel.
 
 1. Confirm `pnpm typecheck && pnpm test && pnpm build` is green on `main`
@@ -299,12 +394,15 @@ app deploys separately to Vercel.
 1. In the Render dashboard, redeploy the previous successful deploy (Render
    keeps prior build artifacts - this is faster and safer than reverting the
    commit and waiting for a fresh build).
-2. If the bad deploy included a schema change (`pnpm db:push`), assess
-   whether the previous code version is compatible with the *new* schema
-   before rolling back the code alone - `db:push` is additive-by-default
-   (`CREATE TABLE IF NOT EXISTS`; see `apps/api/src/db/client.ts`), so an old
-   binary talking to a newer schema is the common case and usually safe, but
-   a column removal or rename would not be.
+2. If the bad deploy included a schema change, assess whether the previous
+   code version is compatible with the *new* schema before rolling back the
+   code alone. Schema changes ship as Drizzle migration files in
+   `apps/api/drizzle/` and are applied automatically at API boot
+   (`bootstrap()` → `runMigrations()` in `apps/api/src/db/`, serialised by a
+   `_migration_lock` row); nothing is rolled back for you. An old binary
+   talking to a newer schema is the common case and usually safe when the
+   migration only added tables or columns, but a column removal or rename
+   would not be.
 3. If rollback doesn't resolve the incident, fall back to the restore
    procedure below against the most recent backup.
 
@@ -378,8 +476,16 @@ corrupted data.
   3. Redeploy the API. The service will immediately encrypt all new submissions under the new key while continuing to read older records seamlessly.
   4. Run dry-run scan to verify: `pnpm kyc:rotate-key --dry-run`
   5. Run the background re-encryption: `pnpm kyc:rotate-key`
-  6. Verify the Prometheus metric `kyc_non_primary_key_rows` drops to `0`.
-  7. Remove `KYC_ENCRYPTION_KEY_PREVIOUS` from the deployment environment.
+  6. Verify the Prometheus metric `kyc_non_primary_key_rows` drops to `0`
+     (it counts `seller_kyc` rows only and is read at API boot, so restart or
+     redeploy to refresh it).
+  7. Caveat: `pnpm kyc:rotate-key` re-encrypts `seller_kyc` only. The same key
+     also protects `seller_profile.value_encrypted` and
+     `sellers.payout_fields_encrypted`, which are re-encrypted under the new
+     key only when a seller next writes them. Keep
+     `KYC_ENCRYPTION_KEY_PREVIOUS` in place until those rows have been
+     rewritten, then remove it; removing it earlier makes the remaining rows
+     unreadable.
 - **`BACKUP_ENCRYPTION_KEY`**: generate a new key, but **keep the old key
   available** (e.g. as `BACKUP_ENCRYPTION_KEY_PREVIOUS` in your secret store)
   until every backup encrypted under it has passed its retention window -
@@ -394,11 +500,30 @@ corrupted data.
 - **`DEFAULT_SELLER_SECRET`**: not a server secret any more. The API never
   signs with it; each seller signs their own anchor login and withdrawals. If
   a deployment still has it set, unset it. Only the local demo scripts use it.
-- **Anchor sessions** (`anchor_sessions`): each seller's anchor JWT, encrypted
-  with `WEBHOOK_SECRET_ENCRYPTION_KEY`. Rotating that key makes the stored
-  tokens unreadable; sellers simply sign in to the anchor again. A seller who
-  changes wallet also has to sign in again — a session is only honoured for
-  the account it was issued to.
+- **`WEBHOOK_SECRET_ENCRYPTION_KEY`**: encrypts webhook signing secrets
+  (`webhooks.secret_encrypted`) and every seller's anchor bearer token
+  (`anchor_sessions.token_encrypted`). It has no previous-key slot, so
+  replacing it makes both unreadable (AES-GCM authentication fails). There is
+  no re-encryption tool. After redeploying with the new key:
+  - **Anchor sessions** are dropped and re-created. The first read of an
+    unreadable session deletes the row and logs `anchor_session.undecryptable`
+    (no token material); the caller then raises `anchor_auth_required` and the
+    seller signs in to the anchor again. A seller who changes wallet also has
+    to sign in again: a session is only honoured for the account it was issued
+    to.
+  - **Webhook secrets** must be re-issued. Deliveries to a webhook whose secret
+    cannot be decrypted are dead-lettered. Each seller rotates the secret with
+    `POST /webhooks/:id/rotate-secret`. That route never decrypts the old
+    value, so it works, and the unreadable old value is not used to sign during
+    the overlap window. The new secret is shown once.
+- **`KYC_ENCRYPTION_KEY`**: see the zero-downtime procedure above. Dropping the
+  old key before `pnpm kyc:rotate-key` has finished makes the stored identity
+  unreadable and sellers must resubmit it.
+- **`DEFAULT_SELLER_SECRET`** (see above) and **`SERVER_SIGNING_SECRET`**,
+  **`JWT_SECRET`**, **`METRICS_TOKEN`**, **`TELEMETRY_TOKEN`** and
+  **`REDIS_URL`**: rotate by changing the value and redeploying. The full
+  inventory, with what breaks and what survives for each, is in
+  [SECURITY.md](../SECURITY.md#secret-inventory-and-rotation).
 
 ## Anchor outage
 
@@ -411,13 +536,14 @@ external anchor. When the anchor is down or erroring:
   requests can still delay the response.
 - `pollCashOuts` (used by `startCashOutPoller` in
   `apps/api/src/worker/watcher-loop.ts`) catches each per-job status error,
-  stores the message against that link id in the in-memory
-  `lastPollErrorByLinkId` map, and logs
-  `[offramp] poll failed for link <id>: <message>`. Each failing link backs
-  off independently from 2 seconds to a 60-second cap, so one sick anchor
-  does not crash the loop or block healthy jobs. A successful poll clears
-  that link's stored error and backoff. The map is process-local, is not
-  persisted or exposed over HTTP, and is cleared by an API restart.
+  logs `[offramp] poll failed for link <id>: <message>` (the raw message stays
+  in a process-local `lastPollErrorByLinkId` map, never persisted or exposed),
+  and stores a sanitized reason and message on the job
+  (`offramp_jobs.last_poll_reason` / `last_poll_error` / `last_poll_error_at`),
+  which `GET /links/:id/detail` returns as `offrampPoll`. Each failing link
+  backs off independently from 2 seconds to a 60-second cap (the backoff is
+  in-memory and resets on restart), so one sick anchor does not crash the loop
+  or block healthy jobs. A successful poll clears the stored error and backoff.
 - Links stuck in `offramp_pending` during an outage resume polling
   automatically after their per-link backoff expires and the anchor recovers
   - no manual intervention is needed unless the outage is prolonged (see
@@ -476,9 +602,9 @@ required correction.
 **Symptom:** The link becomes `offramp_failed`. If the seller has an active
 webhook registration, their endpoint receives `offramp.failed` with the
 anchor's `reason`; otherwise check the authenticated link detail. Logs contain
-`anchor.sep6.status.ok` with `status` equal to `error`, `refunded`, or
-`expired`, followed by `link.transition` from `offramp_pending` to
-`offramp_failed`. `mapSep6Status` and `TestAnchorOffRamp.status` in
+`anchor.sep6.status.ok` with `status` equal to `error`, `refunded`,
+`expired`, `no_market`, `too_small`, or `too_large`, followed by
+`link.transition` from `offramp_pending` to `offramp_failed`. `mapSep6Status` and `TestAnchorOffRamp.status` in
 `packages/offramp/src/testanchor.ts` perform the mapping;
 `pollCashOuts` in `apps/api/src/services/link-service.ts` persists the
 transition and webhook.
@@ -488,29 +614,31 @@ transition and webhook.
 `offramp_jobs.last_error` (or a generated withdrawal-failed message), and
 moves the link to `offramp_failed`. Quay never takes custody. If the cash-out
 returned transfer instructions and the seller confirms submission, the asset
-payment went directly from the seller's wallet to the anchor. Quay does not
-persist the seller's anchor-transfer hash, and it neither refunds nor
-reverses the payment. Any refund is the anchor's process.
+payment went directly from the seller's wallet to the anchor. Quay stores only the
+hash the seller's browser reported after sending (`offramp_jobs.seller_tx_hash`,
+via `POST /links/:id/cash-out/transfer-sent`), as an unverified claim, and it
+neither refunds nor reverses the payment. Any refund is the anchor's process.
 
 **What the operator does:**
 
 1. Find the job and preserve the anchor's evidence:
    ```sql
    SELECT job_id, link_id, seller_id, account, external_status,
-          last_error, created_at, updated_at
+          last_error, seller_tx_hash, created_at, updated_at
    FROM offramp_jobs
    WHERE job_id = '<anchor job id>' OR link_id = '<link id>';
    ```
    If there is no job row, stop. Preserve `cashout.error` and
    `cashout.request.error`, determine whether quote/initiate was refused or
    job state was lost, and contact anchor support. Do not create a job row.
-2. Ask the seller for the Stellar transaction hash of their payment to the
-   anchor. If they do not have it, search `offramp_jobs.account` on the
+2. Read `seller_tx_hash` from the job row: it is the hash the seller's
+   browser reported, a claim to verify, and the reconciliation report (below)
+   checks it on Horizon. If it is empty, ask the seller for the Stellar
+   transaction hash of their payment to the anchor. If they do not have it, search `offramp_jobs.account` on the
    configured `HORIZON_URL` or a block explorer around `created_at`, and
    verify the destination, asset, amount, memo, and successful status against
-   the cash-out instructions or the anchor's transaction record. Quay does not
-   store this hash; `links.tx_hash` is the buyer's payment, not the seller's
-   transfer to the anchor. If no transfer instructions were returned or the
+   the cash-out instructions or the anchor's transaction record. `links.tx_hash` is the buyer's
+   payment, not the seller's transfer to the anchor. If no transfer instructions were returned or the
    seller cannot confirm submission, do not assume funds moved; reconcile the
    account and ask the anchor.
 3. Give the seller, transaction hash, `job_id`, `external_status`,
@@ -543,9 +671,10 @@ in `apps/api/src/routes/anchor-auth.ts`.
 **What Quay does automatically:** Quay refuses to show or relay an
 unverified challenge, so the seller is never asked to sign a transaction that
 does not match the published key. Existing anchor sessions remain usable
-until their JWTs expire. `AnchorDiscovery` currently caches the successful
-SEP-1 response for the life of the process, so it does not learn a new key
-without an API restart.
+until their JWTs expire. `AnchorDiscovery` re-reads the SEP-1 file at most every
+5 minutes and drops its cache when the health probe sees a different
+`SIGNING_KEY` (issue 3.23), so a genuine rotation normally clears by itself
+without a restart.
 
 **What the operator does:**
 
@@ -559,14 +688,14 @@ without an API restart.
    anchor using previously verified contact details.** A changed key is also
    what a compromised domain or TOML looks like; the fetched file alone is not
    proof. Do not use contact details that appear only in the new TOML.
-3. Only after the anchor confirms the change, restart every API instance so
-   `AnchorDiscovery` reloads the SEP-1 file. Confirm the service is healthy
-   and have affected sellers reconnect. Issue 3.23 will remove this restart
-   requirement when live discovery refresh lands; until then, restart is part
-   of the verified procedure.
+3. Only after the anchor confirms the change, wait for discovery to refresh
+   (a few minutes) and have affected sellers reconnect. If challenges are still
+   rejected after the refresh window, restart the API instances so
+   `AnchorDiscovery` reloads the SEP-1 file, and confirm the service is
+   healthy.
 
 **What the operator must not do:** Do not restart merely because the TOML
-changed, disable challenge verification, accept an unverified SEP-10
+changed (discovery refreshes itself), disable challenge verification, accept an unverified SEP-10
 transaction, or manually copy a new key into application state. Do not delete
 valid seller sessions as a substitute for discovery reload.
 
@@ -629,8 +758,8 @@ Symptom: payments are landing on-chain but links aren't transitioning to
    confirmed).
 4. If the whole loop appears dead (no watcher log lines at all across every
    account), the process itself may have crashed or Render may have spun the
-   free-tier instance down (see the `render.yaml` comment - starter plan is
-   mandatory for this reason) - check the Render service's process status
+   free-tier instance down (see the `plan:` comments in `render.yaml` and
+   `render.mainnet.yaml` - starter keeps it awake) - check the Render service's process status
    directly.
 
 ## Telemetry rate-unit repair (one-off, issue 5.21)
@@ -743,6 +872,34 @@ typical settlement time.
    /links/:id/cash-out`), provided the previous job is terminal (see
    `previous_withdrawal_active` in `docs/API.md`).
 
+### Alerting on stuck cash-outs by cause
+
+A growing `pending_cash_outs` has three different causes. The metrics tell them apart
+(`GET /metrics`, see `docs/API.md`; panels 13 and 14 in `docs/grafana-dashboard.json`):
+
+| Signal | Meaning | Who acts |
+| --- | --- | --- |
+| `offramp_jobs_by_external_status{external_status="pending_user_transfer_start"}` stays high | The anchor is holding the job until the seller sends the asset. Sellers are abandoning the transfer step. | Product / support: remind the seller, check the `offramp.transfer_required` webhook was delivered |
+| `offramp_jobs_by_external_status{external_status=~"pending_anchor\|pending_external\|pending_stellar"}` stays high | The anchor is processing slowly. | Anchor outage runbook above |
+| `rate(anchor_auth_required_total[15m]) > 0` | Sellers have no live anchor session. A step change right after a deploy usually means a JWT secret, `SIGNING_KEY` or anchor domain change invalidated sessions. | See "SEP-1 `SIGNING_KEY` rotated" |
+
+Suggested Prometheus alert rules:
+
+```yaml
+- alert: CashOutsAbandonedAtTransferStep
+  # Any job parked at pending_user_transfer_start for 24h straight.
+  expr: min_over_time(offramp_jobs_by_external_status{external_status="pending_user_transfer_start"}[24h]) > 0
+  labels: { severity: ticket }
+- alert: AnchorSignInRequiredSpike
+  expr: sum(increase(anchor_auth_required_total{route!="poll"}[15m])) > 20
+  labels: { severity: page }
+```
+
+`route="poll"` increments once per poll tick for each blocked job, so alert on the
+other routes for user-driven spikes and graph `poll` to see how many jobs are stuck.
+The 24h rule is a coarse "something has been waiting the whole day" signal: the
+gauge counts jobs, not their age, so use the job's `updated_at` for per-job detail.
+
 ## Reconciliation report (issue 4.32)
 
 A cash-out has three records that should agree: Quay's withdrawal
@@ -791,14 +948,28 @@ The Nigeria Data Protection Act 2023 (NDPA) requires that personal identity data
 - **Activity tracking**: A seller's `last_active_at` is updated on wallet login (`POST /auth`), link creation (`POST /links`), and KYC submissions (`PUT /seller/kyc`). Database writes are throttled to at most once per hour per seller.
 - **Retention period**: Controlled via `KYC_RETENTION_DAYS` (default `730` days / 2 years). Setting `KYC_RETENTION_DAYS=0` disables the sweep entirely.
 - **In-flight protection**: Sellers with links currently in `offramp_pending` status are excluded from purging to avoid disrupting live cash-outs.
-- **Purged data**:
+- **Purged data** (one atomic transaction per seller, `eraseSellerIdentityLocal`):
   - `seller_kyc` rows (AES-256-GCM encrypted SEP-12 PII fields and customer IDs).
+  - `seller_profile` rows (the stored SEP-9 profile).
+  - `kyc_consents` and `kyc_disclosure_fields` (consent grants and the history of which field names were sent to an anchor).
   - `anchor_sessions` rows (encrypted anchor auth tokens).
-  - `sellers.payout_fields_json` (last-used payout bank/account details are cleared to `NULL`).
+  - `sellers.payout_fields_json` and `sellers.payout_fields_encrypted` (last-used payout bank/account details are cleared to `NULL`).
   - Anchor contact is not attempted (recorded as `anchor_not_contacted`).
+- **Kept**: links, payment history and the `pii_audit` access log. The audit log has its own 2-year sweep (`runPiiAuditSweep`, daily) and holds no values, only who read which field names and when.
 - **Telemetry & Metrics**:
   - Metrics counter: `quay_kyc_retention_purged_total` tracks total purged sellers.
   - Logs structured event: `{"event": "privacy.retention.purged", "count": N}` with strictly zero PII.
+
+### Who read a seller's identity data
+
+Every read or write of a seller's KYC or profile data through the API, and the cash-out gate's status read, leaves a row in `pii_audit` (actor type `session`, `api_key` or `system`, the action, field names only, the request id; never values). Query it with the telemetry token:
+
+```bash
+curl -H "Authorization: Bearer $TELEMETRY_TOKEN" \
+  "$API/telemetry/pii-audit?sellerId=<seller id>&limit=50"
+```
+
+Pages are newest first; pass the returned `nextCursor` as `cursor` for the next page. A failed audit write never fails the request: it logs `pii_audit.write_failed` and increments `pii_audit_write_failures_total`, so alert on that counter. See docs/API.md for the response shape.
 
 ### Operator CLI Usage
 Operators can manually trigger or preview the retention sweep using the retention CLI script:
@@ -833,7 +1004,7 @@ Copy this into a new incident doc/issue when something goes wrong:
 <what fixed it>
 
 ### Data impact
-- Was any payment record, off-ramp job, or (post-3.4) KYC data lost or
+- Was any payment record, off-ramp job, or KYC data lost or
   corrupted? If a restore was performed, link to the restore-drill log entry
   above with the real incident's row counts.
 
@@ -847,11 +1018,11 @@ If personal data (KYC fields, payout fields, session tokens, seller identity) is
 
 ### 1. Detect & Contain (immediate)
 
-- **Rotate `KYC_ENCRYPTION_KEY`** (see issue 4.31):
+- **Rotate `KYC_ENCRYPTION_KEY`** (issue 4.31; the full procedure is under "Key rotation" above):
   1. Generate new key: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-  2. Add to `render.yaml` / Render dashboard as new `KYC_ENCRYPTION_KEY`
-  3. Re-encrypt all `seller_kyc.fields_encrypted` and `sellers.payout_fields_encrypted` with new key (one-off script)
-  4. Deploy with new key; old key invalidates all existing encrypted rows
+  2. Set it as `KYC_ENCRYPTION_KEY` in the Render dashboard and move the old value to `KYC_ENCRYPTION_KEY_PREVIOUS`
+  3. Deploy, then run `pnpm kyc:rotate-key` to re-encrypt `seller_kyc.fields_encrypted` (see the caveat above for `seller_profile` and `sellers.payout_fields_encrypted`)
+  4. Once nothing is left under the old key, remove `KYC_ENCRYPTION_KEY_PREVIOUS`; the compromised key then stops decrypting anything
 
 - **Revoke all anchor sessions** (issue 4.26):
   - `DELETE FROM anchor_sessions;` (or call revocation endpoint per seller)
@@ -868,7 +1039,7 @@ If personal data (KYC fields, payout fields, session tokens, seller identity) is
 - Types of data involved:
   - **High risk**: KYC fields (name, address, ID numbers, financial), payout fields (bank details)
   - **Medium risk**: Wallet addresses, payment history, API key metadata
-  - **Low risk**: Logs (already redacted per `docs/pr-27-logging.md`), analytics
+  - **Low risk**: Logs (secrets and PII are redacted by the pino config in `apps/api/src/logger.ts`, covered by `apps/api/test/logger-redaction.test.ts`), analytics
 
 ### 3. Notify (within 72 hours of awareness)
 
@@ -899,7 +1070,7 @@ Per NDPA Section 38, notify:
 - `WEBHOOK_SECRET_ENCRYPTION_KEY` (if webhook payloads exposed)
 - `JWT_SECRET` (if session tokens exposed)
 - `SERVER_SIGNING_SECRET` (if signing key exposed)
-- `WEBHOOK_SECRET_ENCRYPTION_KEY` rotation (issue 4.31) — 24h overlap window
+- `WEBHOOK_SECRET_ENCRYPTION_KEY` rotation: it has no previous-key slot, so follow the "Key rotation" section above (sellers re-issue webhook secrets and reconnect to the anchor)
 
 ### 6. Follow-up
 

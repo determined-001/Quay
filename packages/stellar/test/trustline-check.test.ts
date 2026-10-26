@@ -44,6 +44,52 @@ describe("checkBalance", () => {
     const balance: BalanceLine = { asset_type: "credit_alphanum4", balance: "999999", is_authorized: true };
     expect(checkBalance(balance, USDC)).toBeNull();
   });
+
+  it("accepts 1 stroop of headroom near max amount (float precision edge case)", () => {
+    const balance: BalanceLine = {
+      asset_type: "credit_alphanum4",
+      balance: "922337203685.4775806",
+      limit: "922337203685.4775807",
+      is_authorized: true,
+    };
+    expect(checkBalance(balance, USDC)).toBeNull();
+  });
+
+  it("rejects when balance equals limit near max amount", () => {
+    const balance: BalanceLine = {
+      asset_type: "credit_alphanum4",
+      balance: "922337203685.4775807",
+      limit: "922337203685.4775807",
+      is_authorized: true,
+    };
+    expect(checkBalance(balance, USDC)).toBe("trustline_limit_exceeded");
+  });
+
+  it("accepts an amount equal to headroom", () => {
+    const balance: BalanceLine = { asset_type: "credit_alphanum4", balance: "995", limit: "1000", is_authorized: true };
+    expect(checkBalance(balance, USDC, "5")).toBeNull();
+  });
+
+  it("rejects an amount one stroop over headroom", () => {
+    const balance: BalanceLine = { asset_type: "credit_alphanum4", balance: "995", limit: "1000", is_authorized: true };
+    expect(checkBalance(balance, USDC, "5.0000001")).toBe("trustline_limit_exceeded");
+  });
+
+  it("rejects when headroom is less than link amount (balance 995, limit 1000, amount 100)", () => {
+    const balance: BalanceLine = { asset_type: "credit_alphanum4", balance: "995", limit: "1000", is_authorized: true };
+    expect(checkBalance(balance, USDC, "100")).toBe("trustline_limit_exceeded");
+  });
+
+  it("fails open (returns null) on unparsable values", () => {
+    const invalidBal: BalanceLine = { asset_type: "credit_alphanum4", balance: "not-a-number", limit: "1000", is_authorized: true };
+    expect(checkBalance(invalidBal, USDC)).toBeNull();
+
+    const invalidLim: BalanceLine = { asset_type: "credit_alphanum4", balance: "995", limit: "invalid-limit", is_authorized: true };
+    expect(checkBalance(invalidLim, USDC, "10")).toBeNull();
+
+    const invalidAmt: BalanceLine = { asset_type: "credit_alphanum4", balance: "995", limit: "1000", is_authorized: true };
+    expect(checkBalance(invalidAmt, USDC, "invalid-amount")).toBeNull();
+  });
 });
 
 describe("messageFor", () => {
@@ -55,5 +101,25 @@ describe("messageFor", () => {
 
   it("names the account for account_not_found", () => {
     expect(messageFor("account_not_found", "GACCOUNT", USDC)).toContain("GACCOUNT");
+  });
+
+  it("mentions remaining headroom and requested amount when headroom is positive but insufficient", () => {
+    const balance: BalanceLine = { asset_type: "credit_alphanum4", balance: "995", limit: "1000" };
+    const msg = messageFor("trustline_limit_exceeded", "GACCOUNT", USDC, balance, "100");
+    expect(msg).toBe(
+      "The USDC trustline on GACCOUNT has only 5 headroom remaining, which cannot receive 100 — raise the limit to receive more.",
+    );
+  });
+
+  it("retains 'already at its limit' when headroom is zero", () => {
+    const balance: BalanceLine = { asset_type: "credit_alphanum4", balance: "1000", limit: "1000" };
+    const msg = messageFor("trustline_limit_exceeded", "GACCOUNT", USDC, balance, "100");
+    expect(msg).toBe("The USDC trustline on GACCOUNT is already at its limit (1000) — raise it to receive more.");
+  });
+
+  it("retains 'already at its limit' when amount is not provided", () => {
+    const balance: BalanceLine = { asset_type: "credit_alphanum4", balance: "1000", limit: "1000" };
+    const msg = messageFor("trustline_limit_exceeded", "GACCOUNT", USDC, balance);
+    expect(msg).toBe("The USDC trustline on GACCOUNT is already at its limit (1000) — raise it to receive more.");
   });
 });

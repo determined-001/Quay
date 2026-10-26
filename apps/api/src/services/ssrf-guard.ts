@@ -26,6 +26,12 @@ const PRIVATE_V4_RANGES: [number, number][] = [
   [0x00000000, 8],   // 0.0.0.0/8     — "this" network
   [0xe0000000, 4],   // 224.0.0.0/4   — multicast
   [0xf0000000, 4],   // 240.0.0.0/4   — reserved
+  [0x64400000, 10],  // 100.64.0.0/10 — carrier-grade NAT (RFC 6598)
+  [0xc0000000, 24],  // 192.0.0.0/24  — IETF protocol assignments (RFC 6890)
+  [0xc6120000, 15],  // 198.18.0.0/15 — benchmarking (RFC 2544)
+  [0xc0000200, 24],  // 192.0.2.0/24  — documentation (TEST-NET-1, RFC 5737)
+  [0xc6336400, 24],  // 198.51.100.0/24 — documentation (TEST-NET-2, RFC 5737)
+  [0xcb007100, 24],  // 203.0.113.0/24  — documentation (TEST-NET-3, RFC 5737)
 ];
 
 /** IPv6 address prefixes that are private/reserved (as bigint prefix + mask). */
@@ -179,8 +185,22 @@ function checkIpv4(ip: string): string | null {
 }
 
 function ipv6Expand(ip: string): bigint {
+  let normalizedIp = ip;
+  const lastColon = ip.lastIndexOf(":");
+  if (lastColon !== -1) {
+    const potentialV4 = ip.slice(lastColon + 1);
+    if (potentialV4.includes(".")) {
+      const parts = potentialV4.split(".").map(Number);
+      if (parts.length === 4 && parts.every((p) => !isNaN(p) && p >= 0 && p <= 255)) {
+        const high = ((parts[0]! << 8) | parts[1]!).toString(16);
+        const low = ((parts[2]! << 8) | parts[3]!).toString(16);
+        normalizedIp = `${ip.slice(0, lastColon)}:${high}:${low}`;
+      }
+    }
+  }
+
   // Expand :: shorthand and parse to bigint
-  const halves = ip.split("::");
+  const halves = normalizedIp.split("::");
   const left = halves[0] ? halves[0].split(":") : [];
   const right = halves[1] ? halves[1].split(":") : [];
   const missing = 8 - left.length - right.length;

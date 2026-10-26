@@ -1,6 +1,9 @@
 import type { KycFieldSpec, KycStatus, ProvidedFieldStatus } from "@checkout/core";
 import { endpointUrl } from "./sep1";
-import { anchorHttpError } from "./anchor-error";
+import { AnchorConfigError, anchorHttpError, type AnchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
+
+const FILE_UPLOAD_TIMEOUT_MS = 60_000;
 
 // SEP-12: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
 //
@@ -68,18 +71,44 @@ export function toKycStatus(status: string): KycStatus {
   return "PROCESSING";
 }
 
+/**
+ * An anchor that does not know the `type` we sent answers
+ * `400 {"error": "unrecognized 'type' value. see valid values in the /info response"}`.
+ * That is the operator's configuration, not a transient anchor failure, so it
+ * becomes an {@link AnchorConfigError}; any other failure stays as is.
+ */
+function sep12Failure(err: AnchorHttpError, type: string | undefined): AnchorHttpError | AnchorConfigError {
+  if (type && err.status === 400 && mentionsType(err.body)) return new AnchorConfigError("sep12_type", type);
+  return err;
+}
+
+function mentionsType(body: string): boolean {
+  let text = body;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed && typeof parsed === "object") {
+      const message = (parsed as { error?: unknown }).error;
+      text = typeof message === "string" ? message : "";
+    }
+  } catch {
+    // Not JSON: look at the raw text.
+  }
+  return /\btype\b/i.test(text);
+}
+
 /** Discovers required fields and current status for a customer, identified by
  *  `kycServer` is the SEP-1 `KYC_SERVER`; paths are joined onto it, not over it.
  *  If looking up by `customerId` returns 404 (stale ID), retries once by `account`. */
 export async function getSep12Customer(
   kycServer: string,
   jwt: string,
-  params: { account: string; customerId?: string | null },
+  params: { account: string; customerId?: string | null; type?: string },
 ): Promise<Sep12CustomerResult> {
   const fetchCustomer = (searchKey: "id" | "account", searchValue: string) => {
     const url = endpointUrl(kycServer, "customer");
     url.searchParams.set(searchKey, searchValue);
-    return fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
+    if (params.type) url.searchParams.set("type", params.type);
+    return anchorFetch(url, { headers: { authorization: `Bearer ${jwt}` } });
   };
 
   let res: Response;
@@ -107,7 +136,7 @@ export async function getSep12Customer(
     };
   }
   if (!res.ok) {
-    throw await anchorHttpError("12", "customer GET", res);
+    throw sep12Failure(await anchorHttpError("12", "customer GET", res), params.type);
   }
   const body = (await res.json()) as RawGetCustomerResponse;
   return {
@@ -124,18 +153,20 @@ export async function getSep12Customer(
 export async function putSep12Customer(
   kycServer: string,
   jwt: string,
-  params: { account: string; customerId?: string | null; fields: Record<string, string> },
+  params: { account: string; customerId?: string | null; fields: Record<string, string>; type?: string },
 ): Promise<{ customerId: string }> {
-  const res = await fetch(endpointUrl(kycServer, "customer"), {
+  const res = await anchorFetch(endpointUrl(kycServer, "customer"), {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({
       ...(params.customerId ? { id: params.customerId } : { account: params.account }),
       ...params.fields,
+      // After the fields: a stray "type" field must not override the configured one.
+      ...(params.type ? { type: params.type } : {}),
     }),
   });
   if (!res.ok) {
-    throw await anchorHttpError("12", "customer PUT", res);
+    throw sep12Failure(await anchorHttpError("12", "customer PUT", res), params.type);
   }
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };
@@ -150,7 +181,7 @@ export async function putSep12Callback(
   jwt: string,
   params: { customerId?: string | null; url: string },
 ): Promise<void> {
-  const res = await fetch(endpointUrl(kycServer, "customer/callback"), {
+  const res = await anchorFetch(endpointUrl(kycServer, "customer/callback"), {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({
@@ -165,7 +196,7 @@ export async function putSep12Callback(
 
 /** Ask one anchor to erase the authenticated seller's SEP-12 customer data. */
 export async function deleteSep12Customer(kycServer: string, jwt: string, account: string): Promise<"deleted" | "not_found"> {
-  const res = await fetch(endpointUrl(kycServer, `customer/${encodeURIComponent(account)}`), {
+  const res = await anchorFetch(endpointUrl(kycServer, `customer/${encodeURIComponent(account)}`), {
     method: "DELETE",
     headers: { authorization: `Bearer ${jwt}` },
   });
@@ -192,6 +223,7 @@ export async function putSep12CustomerMultipart(
     customerId?: string | null;
     fields?: Record<string, string>;
     files: Sep12FileField[];
+    type?: string;
   },
 ): Promise<{ customerId: string }> {
   const formData = new FormData();
@@ -205,17 +237,20 @@ export async function putSep12CustomerMultipart(
       formData.append(key, value);
     }
   }
+  if (params.type) formData.set("type", params.type);
   for (const file of params.files) {
     formData.append(file.name, file.blob, file.filename);
   }
 
-  const res = await fetch(endpointUrl(kycServer, "customer"), {
+  const res = await anchorFetch(endpointUrl(kycServer, "customer"), {
     method: "PUT",
     headers: { authorization: `Bearer ${jwt}` },
     body: formData,
+    // Document uploads are larger than the JSON calls, so they get a longer budget.
+    timeoutMs: FILE_UPLOAD_TIMEOUT_MS,
   });
   if (!res.ok) {
-    throw await anchorHttpError("12", "customer PUT (files)", res);
+    throw sep12Failure(await anchorHttpError("12", "customer PUT (files)", res), params.type);
   }
   const body = (await res.json()) as { id: string };
   return { customerId: body.id };

@@ -90,6 +90,10 @@ RUN pnpm install --prod --frozen-lockfile --filter @checkout/api... \
            /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 COPY --from=build /app/apps/api/dist /app/apps/api/dist
+# Migration SQL files must be present at runtime so drizzle-orm/migrator can
+# apply them. They live at apps/api/drizzle/ — one level above dist/ — which
+# is exactly where migrate.ts resolves them from the production bundle path.
+COPY --from=build /app/apps/api/drizzle /app/apps/api/drizzle
 
 WORKDIR /app/apps/api
 ENV NODE_ENV=production
@@ -103,7 +107,7 @@ EXPOSE 8787
 # securityContext on Kubernetes/ECS) - not expressible in render.yaml's
 # blueprint format today, so it isn't set there, but nothing in this image
 # depends on the root filesystem being writable.
-RUN chown -R node:node /app/apps/api
+RUN chown -R node:node /app/apps/api/dist /app/apps/api/drizzle
 USER node
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

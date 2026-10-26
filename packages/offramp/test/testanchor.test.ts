@@ -1,10 +1,17 @@
-import { Keypair, Networks, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
-import { existsSync, writeFileSync } from "node:fs";
+import { Keypair } from "@stellar/stellar-sdk";
+import { existsSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OffRampJobNotFoundError, type AnchorCustomer, type Logger } from "@checkout/core";
-import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
+import { AnchorTimeoutError } from "../src/http";
 import { SEP6_STATUS_MAP, TESTANCHOR_BASE_URL, TESTANCHOR_HOME_DOMAIN, TestAnchorOffRamp } from "../src/testanchor";
-import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
+import { FakeOffRampStateRepository } from "./fake-state";
+import {
+  USDC_TESTNET_ISSUER,
+  anchorWiring,
+  makeProbeKeypair as makeKeypair,
+  mergeProbeTelemetry,
+  signedInAs as signedIn,
+} from "./live-probe";
 
 // These hit the real https://testanchor.stellar.org sandbox. Off by default —
 // it's a shared external service, not something CI should depend on. Run with:
@@ -12,26 +19,15 @@ import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-
 //
 // In CI (or locally) you can supply a specific funded testnet keypair via
 //   SELLER_SECRET_KEY=<secret>  — otherwise a random keypair is used.
-const USDC_TESTNET_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 const ANCHOR_BASE_URL = TESTANCHOR_BASE_URL;
 
-function makeKeypair(): Keypair {
-  if (process.env.SELLER_SECRET_KEY) {
-    return Keypair.fromSecret(process.env.SELLER_SECRET_KEY);
-  }
-  return Keypair.random();
-}
-
-function anchorWiring() {
-  const discovery = new AnchorDiscovery({ homeDomain: TESTANCHOR_HOME_DOMAIN, fallbackBaseUrl: TESTANCHOR_BASE_URL });
-  const sessions = new FakeAnchorSessionRepository();
-  const auth = new SellerAnchorAuth({ discovery, sessions, networkPassphrase: Networks.TESTNET });
-  return { discovery, auth, sessions };
-}
+/** The withdraw type the live suite cashes out through. */
+export const LIVE_WITHDRAW_TYPE = process.env.OFFRAMP_TYPE ?? "bank_account";
 
 function makeOffRamp(state = new FakeOffRampStateRepository(), wiring = anchorWiring()) {
-  // testanchor offers more than one USDC withdraw type; the adapter refuses to guess.
-  return new TestAnchorOffRamp({ ...wiring, state, preferredWithdrawType: "bank_account" });
+  // testanchor offers more than one USDC withdraw type; the adapter refuses to
+  // guess. anchor-probe.yml sets OFFRAMP_TYPE, so honour it here.
+  return new TestAnchorOffRamp({ ...wiring, state, preferredWithdrawType: LIVE_WITHDRAW_TYPE });
 }
 
 const OFFLINE_CUSTOMER: AnchorCustomer = { sellerId: "sel_1", account: Keypair.random().publicKey() };
@@ -62,6 +58,7 @@ async function makeStatusFixture(logger?: Logger) {
     lastError: null,
     createdAt: now,
     updatedAt: now,
+    transferNotifiedAt: null,
   });
   const offramp = new TestAnchorOffRamp({
     ...wiring,
@@ -75,21 +72,11 @@ async function makeStatusFixture(logger?: Logger) {
 function stubTransaction(status: string, message?: string) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: string | URL | Request) => {
       if (String(input).includes(".well-known/stellar.toml")) return new Response("", { status: 500 });
       return Response.json({ transaction: { id: "t1", status, message } });
     }),
   );
-}
-
-/** Sign the live anchor's challenge with the seller's key, as their wallet would in the browser. */
-async function signedIn(wallet: Keypair, wiring = anchorWiring()) {
-  const customer: AnchorCustomer = { sellerId: "sel_live", account: wallet.publicKey() };
-  const { transaction } = await wiring.auth.challenge(customer);
-  const tx = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
-  tx.sign(wallet);
-  await wiring.auth.complete(customer, tx.toXDR());
-  return { wiring, customer };
 }
 
 describe("TestAnchorOffRamp (offline)", () => {
@@ -197,6 +184,76 @@ describe("TestAnchorOffRamp (offline)", () => {
       "unknown SEP-6 transaction status",
     );
   });
+
+  it("initiate() aborts and throws AnchorTimeoutError when anchor withdraw stalls", async () => {
+    const state = new FakeOffRampStateRepository();
+    const wiring = anchorWiring();
+    const now = Date.now();
+
+    await wiring.sessions.save({
+      sellerId: OFFLINE_CUSTOMER.sellerId,
+      anchorDomain: TESTANCHOR_HOME_DOMAIN,
+      account: OFFLINE_CUSTOMER.account,
+      token: "offline-jwt",
+      expiresAt: now + 60 * 60_000,
+      createdAt: now,
+    });
+
+    await state.saveQuote({
+      quoteId: "q1",
+      linkId: "lnk_1",
+      sellAsset: { code: "USDC", issuer: USDC_TESTNET_ISSUER },
+      sellAmount: "10",
+      buyCurrency: "USD",
+      price: "1",
+      withdrawType: "bank_account",
+      expiresAt: now + 60_000,
+      createdAt: now,
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const urlStr = String(input);
+        if (urlStr.includes(".well-known/stellar.toml")) {
+          return new Response("", { status: 500 }); // triggers fallback discovery
+        }
+        if (urlStr.includes("/info")) {
+          return new Response(
+            JSON.stringify({
+              withdraw: {
+                USDC: {
+                  enabled: true,
+                  types: { bank_account: { fields: {} } },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (urlStr.includes("/withdraw")) {
+          // Trigger the timeout error that anchorFetch produces
+          return Promise.reject(new AnchorTimeoutError(urlStr, 10_000));
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+
+    const offramp = new TestAnchorOffRamp({
+      ...wiring,
+      state,
+      preferredWithdrawType: "bank_account",
+    });
+
+    await expect(
+      offramp.initiate({
+        linkId: "lnk_1",
+        quoteId: "q1",
+        payout: { currency: "NGN", fields: { dest: "123456789" } },
+        customer: OFFLINE_CUSTOMER,
+      }),
+    ).rejects.toThrow(AnchorTimeoutError);
+  });
 });
 
 describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", () => {
@@ -266,7 +323,7 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
 
     // Sandbox settlement timing is not deterministic — only assert the shape,
     // never assert eventual "settled".
-    expect(["pending", "settled", "failed"]).toContain(polled.status);
+    expect(["awaiting_transfer", "pending", "settled", "failed"]).toContain(polled.status);
   });
 
   it("a fresh adapter instance sharing only the persisted state can still resolve status() (restart simulation)", async () => {
@@ -299,14 +356,15 @@ describe.skipIf(!process.env.RUN_LIVE_ANCHOR_TESTS)("TestAnchorOffRamp (live)", 
     // same wiring stands in for it here.
     const postRestart = makeOffRamp(state, wiring);
     const polled = await postRestart.status(job.jobId);
-    expect(["pending", "settled", "failed"]).toContain(polled.status);
+    expect(["awaiting_transfer", "pending", "settled", "failed"]).toContain(polled.status);
   });
 
   // After all live tests run, emit telemetry for the CI workflow to capture.
   it("emits probe telemetry", () => {
     expect(telemetry.rate).toBeDefined();
     expect(telemetry.quoteLatencyMs).toBeDefined();
-    writeFileSync("probe-telemetry.json", JSON.stringify(telemetry, null, 2), "utf-8");
+    // Merged, not overwritten: the SEP-24 suite and the full cash-out suite record into the same file.
+    mergeProbeTelemetry(telemetry);
     expect(existsSync("probe-telemetry.json")).toBe(true);
   });
 });

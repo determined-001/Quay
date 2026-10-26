@@ -74,10 +74,8 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
     }) as unknown as typeof fetch;
   }
 
-  function renderModal(customOnSuccess: () => void = onSuccess) {
-    if (!root) {
-      root = createRoot(container);
-    }
+  function renderModal(success: () => void = onSuccess) {
+    if (!root) root = createRoot(container);
     act(() => {
       root!.render(
         <CashOutModal
@@ -87,10 +85,16 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
           targetCurrency="NGN"
           isMock
           onClose={onClose}
-          onSuccess={customOnSuccess}
+          onSuccess={success}
         />,
       );
     });
+  }
+
+  function detailPolls(): number {
+    return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) =>
+      String(url).endsWith("/detail"),
+    ).length;
   }
 
   async function submitForm() {
@@ -226,72 +230,43 @@ describe("CashOutModal interactive step (issue 5.20)", () => {
     expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 
-  it("does not reset the poll timer when parent re-renders with a new onSuccess identity", async () => {
-    let detailPolls = 0;
-    const baseFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn(async (input: unknown) => {
-      const url = String(input);
-      if (url.endsWith("/detail")) {
-        detailPolls++;
-      }
-      return baseFetch(input as any);
-    }) as unknown as typeof fetch;
-
+  it("keeps polling on schedule while the parent re-renders with a new onSuccess every 3 s (issue 5.31)", async () => {
     renderModal();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     await submitForm();
+    const start = detailPolls();
 
-    detailPolls = 0;
-
-    // Simulate parent re-rendering every 3 seconds (less than 5s base interval)
-    // with a brand new onSuccess identity for 15 seconds.
-    // If the timer were reset on each re-render, 0 polls would fire.
-    for (let i = 0; i < 5; i++) {
+    // Dashboard re-renders far more often than the 30 s back-off delay, and its
+    // onSuccess has a new identity each time. Run past the 2-minute threshold.
+    for (let elapsed = 0; elapsed < 4 * 60_000; elapsed += 3_000) {
+      renderModal(() => onSuccess());
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_000);
       });
-      renderModal(() => {});
     }
 
-    // In 15 seconds with 5s interval, 3 polls fire (at 5s, 10s, 15s).
-    expect(detailPolls).toBe(3);
+    // 5 s polls for 2 minutes (~24) then 30 s polls for 2 minutes (~4).
+    expect(detailPolls() - start).toBeGreaterThanOrEqual(24);
   });
 
-  it("honours the 30 s backoff delay while parent re-renders repeatedly", async () => {
-    let detailPolls = 0;
-    const baseFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn(async (input: unknown) => {
-      const url = String(input);
-      if (url.endsWith("/detail")) {
-        detailPolls++;
-      }
-      return baseFetch(input as any);
-    }) as unknown as typeof fetch;
-
-    renderModal();
+  it("calls the latest onSuccess, not the one from when polling began", async () => {
+    const first = vi.fn();
+    const latest = vi.fn();
+    renderModal(first);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     await submitForm();
+    renderModal(latest);
 
-    // Advance past the 2-minute (120s) mark where backoff kicks in (125s elapsed)
+    detailStatus = { offrampStatus: "settled", offrampExternalStatus: "complete" };
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(125_000);
+      await vi.advanceTimersByTimeAsync(5_000);
     });
 
-    detailPolls = 0;
-
-    // Now parent re-renders every 5 seconds for 30 seconds (6 re-renders)
-    for (let i = 0; i < 6; i++) {
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000);
-      });
-      renderModal(() => {});
-    }
-
-    // At the 30s mark, the backed-off poll must have fired despite the 5s re-renders
-    expect(detailPolls).toBe(1);
+    expect(latest).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
   });
 });

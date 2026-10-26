@@ -8,7 +8,10 @@
     "start": "tsx src/index.ts",
     "start:prod": "node dist/index.js",
     "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --sourcemap --banner:js=\"import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\" --external:hono --external:@hono/node-server --external:drizzle-orm --external:@libsql/client --external:zod --external:@stellar/stellar-sdk",
-    "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:status": "drizzle-kit status",
+    "db:check": "node scripts/check-migrations.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "reconcile": "tsx scripts/reconcile.ts",
     "test": "vitest run",
@@ -25,7 +28,7 @@
     "hono": "4.13.0",
     "pino": "^10.3.1",
     "redis": "^6.2.0",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "drizzle-kit": "0.31.10",

@@ -2,13 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { Logger } from "@checkout/core";
-import {
-  AnchorChallengeError,
-  AnchorHttpError,
-  AnchorRejectedError,
-  anchorCallError,
-  type SellerAnchorAuth,
-} from "@checkout/offramp";
+import { AnchorCapabilityError, AnchorChallengeError, AnchorConfigError, AnchorHttpError, type SellerAnchorAuth } from "@checkout/offramp";
 import { linkRoutes } from "../src/routes/links";
 import { kycRoutes } from "../src/routes/kyc";
 import { anchorAuthRoutes } from "../src/routes/anchor-auth";
@@ -82,16 +76,16 @@ describe("link routes: anchor failures", () => {
     return { container, app, headers, linkId, lines };
   }
 
-  function expectAnchorErrorLog(lines: Record<string, unknown>[], sep = "6", op = "withdraw") {
+  function expectAnchorErrorLog(lines: Record<string, unknown>[], sep = "6", op = "withdraw", statusCode = 400) {
     const entry = lines.find((l) => l.event === "anchor.error" && l.sep === sep);
-    expect(entry).toMatchObject({ event: "anchor.error", sep, op, statusCode: 400 });
+    expect(entry).toMatchObject({ event: "anchor.error", sep, op, statusCode });
     expect(String(entry?.body)).toContain(MARKER);
   }
 
   it("cash-out: 502 anchor_error with a safe message, detail only in the log", async () => {
     const { container, app, headers, linkId, lines } = await setup();
     container.offramp.quote = async () => {
-      throw anchorError();
+      throw anchorError("6", "withdraw", 502);
     };
     const res = await app.request(`/links/${linkId}/cash-out`, {
       method: "POST",
@@ -102,84 +96,75 @@ describe("link routes: anchor failures", () => {
     await expectNoMarker(res.clone());
     expect(await res.json()).toEqual({
       error: "anchor_error",
-      message: "The anchor returned an error (SEP-6 withdraw, HTTP 400).",
+      message: "The anchor returned an error (SEP-6 withdraw, HTTP 502).",
     });
-    expectAnchorErrorLog(lines);
+    expectAnchorErrorLog(lines, "6", "withdraw", 502);
     container.client.close();
   });
 
   it("cash-out quote: 502 anchor_error", async () => {
     const { container, app, headers, linkId, lines } = await setup();
     container.offramp.quote = async () => {
-      throw anchorError("38", "quote");
+      throw anchorError("38", "quote", 503);
     };
     const res = await app.request(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`, { headers });
     expect(res.status).toBe(502);
     await expectNoMarker(res.clone());
     expect(await res.json()).toMatchObject({ error: "anchor_error" });
-    expectAnchorErrorLog(lines, "38", "quote");
+    expectAnchorErrorLog(lines, "38", "quote", 503);
     container.client.close();
   });
 
-  // Issue 3.29: the same 400 that used to look like an outage is now an
-  // answer — 422 with the anchor's structured reason, and the anchor's own
-  // prose still never on the wire (issue 4.36).
-  it("cash-out quote: an anchor 400 is 422 offramp_rejected with structured detail only", async () => {
-    const { container, app, headers, linkId, lines } = await setup();
-    container.offramp.quote = async () => {
-      // Exactly what SEP-38 throws when the anchor answers 400 — built by the
-      // real classifier, not by hand, so this is the path production runs.
-      throw await anchorCallError(
-        "38",
-        "quote",
-        new Response(
-          JSON.stringify({
-            type: "unsupported_asset_pair",
-            error: `${MARKER} first_name=Ada bank_account_number=1234567890`,
-            fields: ["sell_asset"],
-          }),
-          { status: 400 },
-        ),
-      );
-    };
-    const res = await app.request(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`, { headers });
-    expect(res.status).toBe(422);
-    await expectNoMarker(res.clone());
-    const json = (await res.json()) as Record<string, unknown>;
-    expect(json.error).toBe("offramp_rejected");
-    expect(json.message).toBe("The anchor rejected this request (SEP-38 quote, HTTP 400).");
-    expect(json.anchorRejection).toEqual({ type: "unsupported_asset_pair", fields: ["sell_asset"] });
-    // The free-text `error` is anchor body text and may echo the seller's own
-    // fields back at us — it belongs in the log, nowhere else.
-    expect(json.anchorRejection).not.toHaveProperty("error");
-    const entry = lines.find((l) => l.event === "anchor.rejected");
-    expect(entry).toMatchObject({ sep: "38", op: "quote", statusCode: 400 });
-    expect(String(entry?.body)).toContain(MARKER);
-    container.client.close();
-  });
+  describe("an anchor 400/403/422 on the seller's own request is a 422 offramp_rejected (3.29)", () => {
+    const rejection = (op: string, sep: AnchorHttpError["sep"], status: number) =>
+      new AnchorHttpError({
+        sep,
+        op,
+        status,
+        body: JSON.stringify({
+          type: "non_interactive_customer_info_needed",
+          fields: ["first_name", "bank account!"],
+          error: `${MARKER} echoes first_name=Ada`,
+        }),
+      });
 
-  it("cash-out: an anchor 403 is 422 even when the body is not structured at all", async () => {
-    const { container, app, headers, linkId, lines } = await setup();
-    container.offramp.quote = async () => {
-      throw await anchorCallError(
-        "6",
-        "withdraw",
-        new Response(`<html><pre>${MARKER}</pre></html>`, { status: 403 }),
-      );
-    };
-    const res = await app.request(`/links/${linkId}/cash-out`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }),
+    it.each([400, 403, 422])("cash-out /withdraw %i: 422 with the anchor's type and field names only", async (status) => {
+      const { container, app, headers, linkId, lines } = await setup();
+      container.offramp.quote = async () => {
+        throw rejection("withdraw", "6", status);
+      };
+      const res = await app.request(`/links/${linkId}/cash-out`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ targetCurrency: "NGN", payoutFields: {} }),
+      });
+      expect(res.status).toBe(422);
+      await expectNoMarker(res.clone());
+      expect(await res.json()).toEqual({
+        error: "offramp_rejected",
+        message: `The anchor declined this request (SEP-6 withdraw, HTTP ${status}).`,
+        limits: {},
+        availableTypes: [],
+        anchorType: "non_interactive_customer_info_needed",
+        fields: ["first_name"],
+      });
+      const entry = lines.find((l) => l.event === "anchor.rejected");
+      expect(entry).toMatchObject({ sep: "6", op: "withdraw", statusCode: status });
+      expect(String(entry?.body)).toContain(MARKER);
+      container.client.close();
     });
-    expect(res.status).toBe(422);
-    await expectNoMarker(res.clone());
-    const json = (await res.json()) as Record<string, unknown>;
-    expect(json.error).toBe("offramp_rejected");
-    expect(json.message).toBe("The anchor rejected this request (SEP-6 withdraw, HTTP 403).");
-    expect(json).not.toHaveProperty("anchorRejection");
-    expect(lines.some((l) => l.event === "anchor.rejected" && String(l.body).includes(MARKER))).toBe(true);
-    container.client.close();
+
+    it("cash-out quote 400 (unsupported pair): 422, not 502", async () => {
+      const { container, app, headers, linkId } = await setup();
+      container.offramp.quote = async () => {
+        throw rejection("quote", "38", 400);
+      };
+      const res = await app.request(`/links/${linkId}/cash-out/quote?targetCurrency=NGN`, { headers });
+      expect(res.status).toBe(422);
+      await expectNoMarker(res.clone());
+      expect(await res.json()).toMatchObject({ error: "offramp_rejected" });
+      container.client.close();
+    });
   });
 
   it("offramp-preview: 502 anchor_error", async () => {
@@ -226,28 +211,6 @@ describe("link routes: anchor failures", () => {
     expect(failure).toBeInstanceOf(HttpError);
     expect(failure.status).toBe(502);
     expect(String(lines[0]?.error).length).toBeLessThan(2100);
-  });
-
-  it("anchorFailure answers a rejection with 422, not the 502 a dead anchor gets", () => {
-    const { logger, lines } = captureLogger();
-    const err = new AnchorRejectedError({
-      sep: "6",
-      op: "withdraw",
-      status: 422,
-      body: `${MARKER} bank 1234567890`,
-      anchorType: "non_interactive_customer_info_needed",
-      anchorError: `${MARKER} complete kyc first`,
-      anchorFields: ["phone_number"],
-    });
-    const failure = anchorFailure(err, logger);
-    expect(failure.status).toBe(422);
-    expect(failure.message).toBe("offramp_rejected");
-    expect(failure.extra).toMatchObject({
-      anchorRejection: { type: "non_interactive_customer_info_needed", fields: ["phone_number"] },
-    });
-    expect(JSON.stringify(failure)).not.toContain(MARKER);
-    expect(lines[0]).toMatchObject({ event: "anchor.rejected", sep: "6", op: "withdraw", statusCode: 422 });
-    expect(String(lines[0]?.body)).toContain(MARKER);
   });
 });
 
@@ -301,6 +264,38 @@ describe("/seller/kyc: anchor failures", () => {
     expect(res.status).toBe(502);
     await expectNoMarker(res.clone());
     expect(await res.json()).toMatchObject({ error: "anchor_error" });
+    container.client.close();
+  });
+
+  it("GET and PUT map a rejected SEP-12 type to 502 anchor_config_error, logged for the operator", async () => {
+    const { container, app, headers, lines } = await setup(() => {
+      throw new AnchorConfigError("sep12_type", "bogus");
+    });
+    const expected = { error: "anchor_config_error", message: 'anchor rejected SEP-12 type "bogus"' };
+
+    const get = await app.request("/", { headers });
+    expect(get.status).toBe(502);
+    expect(await get.json()).toEqual(expected);
+
+    const put = await app.request("/", { method: "PUT", headers, body: JSON.stringify({ first_name: "Ada" }) });
+    expect(put.status).toBe(502);
+    expect(await put.json()).toEqual(expected);
+
+    expect(lines.some((l) => l.event === "anchor.config_error" && l.value === "bogus")).toBe(true);
+    container.client.close();
+  });
+
+  it("GET maps an anchor that declares no usable server to 502 anchor_config_error", async () => {
+    const { container, app, headers, lines } = await setup(() => {
+      throw new AnchorCapabilityError("a.example", "SEP-12 (KYC_SERVER)", ["sep24"]);
+    });
+    const res = await app.request("/", { headers });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: "anchor_config_error",
+      message: "Anchor a.example does not declare SEP-12 (KYC_SERVER) in its stellar.toml (declared: sep24)",
+    });
+    expect(lines.some((l) => l.event === "anchor.config_error" && l.setting === "capability")).toBe(true);
     container.client.close();
   });
 

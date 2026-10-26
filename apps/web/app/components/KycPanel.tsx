@@ -7,6 +7,7 @@ import { useAnchorConnect } from "../../lib/anchor-session";
 import { useSellerWallet } from "./SessionGate";
 import { kycPanelStage, type KycLoadState } from "../../lib/kyc-load";
 import Sep9Input from "./Sep9Input";
+import PrefillConsent from "./PrefillConsent";
 import { checkSep9Value, todayIso } from "../../lib/sep9-input";
 
 function humanize(field: { name: string; description?: string }): string {
@@ -175,7 +176,7 @@ export default function KycPanel({
         <button className="btn btn--primary" onClick={connectAnchor} disabled={connecting || !hasWallet}>
           {connecting ? "Waiting for wallet…" : `Connect to ${anchor?.anchor ?? "anchor"}`}
         </button>
-        {(anchorError || error) && <div className="err">{anchorError || error}</div>}
+        {(anchorError || error) && <div className="err" role="alert">{anchorError || error}</div>}
       </section>
     );
   }
@@ -212,6 +213,7 @@ export default function KycPanel({
       <section className="panel">
         <h2>Identity verification</h2>
         <div className="kyc-note kyc-note--ok">Verified — you can cash out to local currency.</div>
+        <PrefillConsent anchorName={anchor?.anchor ?? "the anchor"} />
         {existingConsents.length > 0 && (
           <details style={{ marginTop: 16 }}>
             <summary style={{ cursor: "pointer", color: "var(--blue)" }}>Consent history</summary>
@@ -242,7 +244,11 @@ export default function KycPanel({
         <button className="btn btn--primary" onClick={() => submit({})} disabled={submitting}>
           {submitting ? "Starting…" : "Start verification"}
         </button>
-        {error && <div className="err">{error}</div>}
+        {error && (
+          <div className="err" role="alert">
+            {error}
+          </div>
+        )}
       </section>
     );
   }
@@ -274,7 +280,11 @@ export default function KycPanel({
             Cancel
           </button>
         </div>
-        {error && <div className="err">{error}</div>}
+        {error && (
+          <div className="err" role="alert">
+            {error}
+          </div>
+        )}
       </section>
     );
   }
@@ -297,11 +307,18 @@ export default function KycPanel({
         </p>
       )}
 
-      {kyc.requiredFields.map((field) => (
+      {kyc.requiredFields.map((field) => {
+        const isMissing = missing.has(field.name);
+        const required = !field.optional;
+        // Text, not just a red border (WCAG 1.4.1), and wired to the control so
+        // a screen reader reads it with the field (WCAG 3.3.1).
+        const requiredId = `kyc-${field.name}-required`;
+        const describedBy = isMissing ? requiredId : undefined;
+        return (
         <div className="field" key={field.name}>
           <label htmlFor={`kyc-${field.name}`}>
             {humanize(field)}
-            {!field.optional && " *"}
+            {required && <span aria-hidden="true"> *</span>}
           </label>
           {field.type === "binary" ? (
             <div>
@@ -321,8 +338,11 @@ export default function KycPanel({
                     });
                   }
                 }}
-                aria-invalid={missing.has(field.name)}
-                style={missing.has(field.name) ? { borderColor: "var(--red)" } : undefined}
+                required={required}
+                aria-required={required}
+                aria-invalid={isMissing}
+                aria-describedby={describedBy}
+                style={isMissing ? { borderColor: "var(--red)" } : undefined}
               />
               <small style={{ color: "var(--muted)", fontSize: 11, display: "block", marginTop: 4 }}>
                 sent to {anchor?.anchor ?? "anchor"}, not stored by Quay
@@ -333,6 +353,11 @@ export default function KycPanel({
               id={`kyc-${field.name}`}
               value={values[field.name] ?? kyc.providedFields[field.name] ?? ""}
               onChange={(e) => setValues((v) => ({ ...v, [field.name]: e.target.value }))}
+              required={required}
+              aria-required={required}
+              aria-invalid={isMissing}
+              aria-describedby={describedBy}
+              style={isMissing ? { borderColor: "var(--red)" } : undefined}
             >
               <option value="" disabled>
                 Select…
@@ -350,11 +375,19 @@ export default function KycPanel({
               value={values[field.name] ?? kyc.providedFields[field.name] ?? ""}
               onChange={(v) => setValues((cur) => ({ ...cur, [field.name]: v }))}
               onValidity={setFieldError}
-              invalid={missing.has(field.name) || field.name in fieldErrors}
+              invalid={isMissing || field.name in fieldErrors}
+              required={required}
+              describedBy={describedBy}
             />
           )}
+          {isMissing && (
+            <div id={requiredId} className="field-required">
+              Required
+            </div>
+          )}
         </div>
-      ))}
+        );
+      })}
 
       <button
         className="btn btn--primary btn--block"
@@ -363,7 +396,12 @@ export default function KycPanel({
       >
         {submitting ? "Submitting…" : "Submit"}
       </button>
-      {error && <div className="err">{error}</div>}
+      {error && (
+        <div className="err" role="alert">
+          {error}
+        </div>
+      )}
+      <PrefillConsent anchorName={anchor?.anchor ?? "the anchor"} />
       <p style={{ marginTop: 16, fontSize: 12, color: "var(--text-2, #6b7280)", textAlign: "center" }}>
         By submitting, you consent to share the above fields with the anchor. See our
         <Link href="/privacy" style={{ color: "var(--blue)" }}>Privacy Notice</Link>

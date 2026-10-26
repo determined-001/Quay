@@ -42,7 +42,9 @@ export class FakeHorizonClient implements HorizonClient {
 
   async loadAccount(account: string): Promise<HorizonAccount> {
     if (this.notFoundAccounts.has(account)) {
-      const err = new Error("not found") as Error & { response: { status: number } };
+      const err = new Error("not found") as Error & {
+        response: { status: number };
+      };
       err.response = { status: 404 };
       throw err;
     }
@@ -99,8 +101,18 @@ export class FakeHorizonClient implements HorizonClient {
     return record;
   }
 
+  /** Pushes an arbitrary record directly to registered SSE listeners for testing. */
+  pushMessage(account: string, record: HorizonPaymentRecord): void {
+    for (const listener of this.listeners.get(account) ?? []) {
+      listener.onmessage(record);
+    }
+  }
+
   /** Simulates a dropped SSE connection for every live subscriber on `account`. */
-  killConnection(account: string, err: unknown = new Error("connection reset")): void {
+  killConnection(
+    account: string,
+    err: unknown = new Error("connection reset"),
+  ): void {
     for (const listener of this.listeners.get(account) ?? []) {
       listener.onerror(err);
     }
@@ -153,27 +165,49 @@ class FakeBuilder implements PaymentsCallBuilder {
 
   async call(): Promise<{ records: HorizonPaymentRecord[] }> {
     if (this.client.isNotFoundAccount(this.account)) {
-      const err = new Error("not found") as Error & { response: { status: number } };
+      const err = new Error("not found") as Error & {
+        response: { status: number };
+      };
       err.response = { status: 404 };
       throw err;
     }
     let records = this.client
       .recordsFor(this.account)
-      .filter((r) => !this.cursorToken || Number((r as any).paging_token) > Number(this.cursorToken));
-    records = [...records].sort((a, b) => Number((a as any).paging_token) - Number((b as any).paging_token));
+      .filter(
+        (r) =>
+          !this.cursorToken ||
+          Number((r as any).paging_token) > Number(this.cursorToken),
+      );
+    records = [...records].sort(
+      (a, b) =>
+        Number((a as any).paging_token) - Number((b as any).paging_token),
+    );
     if (this.direction === "desc") records.reverse();
     return { records: records.slice(0, this.limitN) };
   }
 
-  stream(opts: { onmessage: (record: HorizonPaymentRecord) => void; onerror: (err: unknown) => void }): () => void {
-    const listener: Listener = { onmessage: opts.onmessage, onerror: opts.onerror };
+  stream(opts: {
+    onmessage: (record: HorizonPaymentRecord) => void;
+    onerror: (err: unknown) => void;
+  }): () => void {
+    const listener: Listener = {
+      onmessage: opts.onmessage,
+      onerror: opts.onerror,
+    };
     // Register before replaying the backlog: JS is single-threaded, so nothing
     // can append between these two statements and be missed or double-delivered.
     this.client.subscribe(this.account, listener);
     const backlog = this.client
       .recordsFor(this.account)
-      .filter((r) => !this.cursorToken || Number((r as any).paging_token) > Number(this.cursorToken))
-      .sort((a, b) => Number((a as any).paging_token) - Number((b as any).paging_token));
+      .filter(
+        (r) =>
+          !this.cursorToken ||
+          Number((r as any).paging_token) > Number(this.cursorToken),
+      )
+      .sort(
+        (a, b) =>
+          Number((a as any).paging_token) - Number((b as any).paging_token),
+      );
     for (const record of backlog) opts.onmessage(record);
 
     return () => this.client.unsubscribe(this.account, listener);

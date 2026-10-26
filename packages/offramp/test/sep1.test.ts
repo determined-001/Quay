@@ -5,6 +5,11 @@ import {
   listsCurrency,
   parseStellarToml,
   Sep1NetworkMismatchError,
+  AnchorCapabilityError,
+  capabilities,
+  requireKycServer,
+  requireTransferServer,
+  requireTransferServerSep24,
 } from "../src/sep1";
 
 const TOML = `
@@ -30,6 +35,112 @@ issuer = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
 function tomlResponse(body: string, status = 200) {
   return new Response(body, { status, headers: { "content-type": "text/plain" } });
 }
+
+describe("parseStellarToml — endpoint URLs (issue 3.30)", () => {
+  const withEndpoints = (lines: string) =>
+    `SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"\n${lines}\n`;
+
+  function warnLogger() {
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn(), child: () => logger };
+    return { logger: logger as unknown as import("@checkout/core").Logger, warn };
+  }
+
+  it.each([
+    ["http://", 'WEB_AUTH_ENDPOINT = "http://a.example/auth"', "webAuthEndpoint", "https://a.example/auth"],
+    // An undeclared (here: rejected) SEP-6/SEP-24 server is null, never a guessed path (issue 3.19).
+    ["ftp://", 'TRANSFER_SERVER = "ftp://x"', "transferServer", null],
+    ["a non-URL string", 'TRANSFER_SERVER_SEP24 = "not a url"', "transferServerSep24", null],
+  ])("ignores %s and keeps the default with a warning", (_name, line, field, fallback) => {
+    const { logger, warn } = warnLogger();
+    const info = parseStellarToml(withEndpoints(line), "a.example", logger);
+    expect(info[field as "webAuthEndpoint"]).toBe(fallback);
+    expect(info.fallback).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "anchor.sep1.endpoint_rejected", key: line.split(" ")[0] }),
+      expect.any(String),
+    );
+  });
+
+  it("leaves the quote server absent when ANCHOR_QUOTE_SERVER is not https", () => {
+    const info = parseStellarToml(withEndpoints('ANCHOR_QUOTE_SERVER = "http://a.example/sep38"'), "a.example");
+    expect(info.anchorQuoteServer).toBeNull();
+  });
+
+  it("serves SEP-12 from the transfer server when KYC_SERVER is rejected", () => {
+    const info = parseStellarToml(
+      withEndpoints('TRANSFER_SERVER = "https://a.example/sep6"\nKYC_SERVER = "http://a.example/sep12"'),
+      "a.example",
+    );
+    expect(info.kycServer).toBe("https://a.example/sep6");
+  });
+
+  it("still accepts an https endpoint with a path prefix", () => {
+    const info = parseStellarToml(
+      withEndpoints('TRANSFER_SERVER = "https://api.a.example/v2/anchor/sep6"\nWEB_AUTH_ENDPOINT = "https://a.example/v2/auth"'),
+      "a.example",
+    );
+    expect(info.transferServer).toBe("https://api.a.example/v2/anchor/sep6");
+    expect(info.webAuthEndpoint).toBe("https://a.example/v2/auth");
+  });
+});
+
+describe("parseStellarToml — undeclared endpoints (issue 3.19)", () => {
+  const SIGNING = 'SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"\n';
+
+  it("a TOML declaring only TRANSFER_SERVER has no SEP-24 server and no quote server, and is not a fallback", () => {
+    const info = parseStellarToml(`${SIGNING}TRANSFER_SERVER = "https://a.example/sep6"\n`, "a.example");
+    expect(info.transferServer).toBe("https://a.example/sep6");
+    expect(info.transferServerSep24).toBeNull();
+    expect(info.anchorQuoteServer).toBeNull();
+    expect(info.fallback).toBe(false);
+    expect(capabilities(info)).toEqual({ sep6: true, sep24: false, sep38: false, sep12: true });
+  });
+
+  it("a SEP-24-only TOML has no SEP-6 server, and serves SEP-12 from the SEP-24 server", () => {
+    const info = parseStellarToml(`${SIGNING}TRANSFER_SERVER_SEP0024 = "https://a.example/sep24"\n`, "a.example");
+    expect(info.transferServer).toBeNull();
+    expect(info.transferServerSep24).toBe("https://a.example/sep24");
+    expect(info.kycServer).toBe("https://a.example/sep24");
+    expect(capabilities(info)).toEqual({ sep6: false, sep24: true, sep38: false, sep12: true });
+  });
+
+  it("a TOML declaring no transfer server and no KYC_SERVER has no SEP-12 server either", () => {
+    const info = parseStellarToml(SIGNING, "a.example");
+    expect(info.kycServer).toBeNull();
+    expect(capabilities(info)).toEqual({ sep6: false, sep24: false, sep38: false, sep12: false });
+  });
+
+  it("a declared SEP-38 server shows up as a capability", () => {
+    const info = parseStellarToml(`${SIGNING}ANCHOR_QUOTE_SERVER = "https://a.example/q"\n`, "a.example");
+    expect(capabilities(info).sep38).toBe(true);
+  });
+
+  it("the guessed layout still exists, but only for a fallback", async () => {
+    clearStellarTomlCache();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
+    try {
+      const info = await fetchStellarToml("a.example");
+      expect(info.fallback).toBe(true);
+      expect(info.transferServer).toBe("https://a.example/sep6");
+      expect(info.transferServerSep24).toBe("https://a.example/sep24");
+      expect(info.anchorQuoteServer).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("the require* helpers name the anchor, the missing endpoint and what is declared", () => {
+    const info = parseStellarToml(`${SIGNING}TRANSFER_SERVER_SEP0024 = "https://a.example/sep24"\n`, "a.example");
+    expect(requireTransferServerSep24(info)).toBe("https://a.example/sep24");
+    expect(() => requireTransferServer(info)).toThrow(AnchorCapabilityError);
+    expect(() => requireTransferServer(info)).toThrow(
+      "Anchor a.example does not declare SEP-6 (TRANSFER_SERVER) in its stellar.toml (declared: sep24, sep12)",
+    );
+    const none = parseStellarToml(SIGNING, "b.example");
+    expect(() => requireKycServer(none)).toThrow("declared: none");
+  });
+});
 
 describe("parseStellarToml", () => {
   it("reads every endpoint, the signing key, the passphrase and the currencies", () => {
@@ -78,52 +189,50 @@ describe("parseStellarToml", () => {
     expect(p.transferServerSep24).toBe("https://anchor.example/sep24");
   });
 
-  it("ignores non-https and malformed endpoints with a warning and falls back", () => {
-    const warn = vi.fn();
-    const mockLogger = {
-      child: () => mockLogger,
-      info: vi.fn(),
-      warn,
-      error: vi.fn(),
-      debug: vi.fn(),
-    };
+  it("parses CRLF line endings identically to LF", () => {
+    const lf = parseStellarToml(TOML, "anchor.example");
+    const crlf = parseStellarToml(TOML.replace(/\n/g, "\r\n"), "anchor.example");
+    expect(crlf).toEqual(lf);
+  });
 
-    const toml = `
-WEB_AUTH_ENDPOINT = "http://a.example/auth"
-TRANSFER_SERVER = "ftp://x"
-KYC_SERVER = "not a url"
-ANCHOR_QUOTE_SERVER = "https://anchor.example/api/v1/sep38"
-`;
-    const p = parseStellarToml(toml, "anchor.example", mockLogger);
+  it("recognises lower-case [[currencies]] as the currency block", () => {
+    const toml = `[[currencies]]\ncode = "USDC"\n[[currencies]]\ncode = "EURC"\n`;
+    const p = parseStellarToml(toml, "anchor.example");
+    expect(p.currencies).toEqual(["USDC", "EURC"]);
+  });
 
-    // Fallbacks applied for ignored keys
-    expect(p.webAuthEndpoint).toBe("https://anchor.example/auth");
-    expect(p.transferServer).toBe("https://anchor.example/sep6");
-    expect(p.kycServer).toBe("https://anchor.example/sep6"); // falls back to transferServer
-    // Valid https with path prefix accepted
-    expect(p.anchorQuoteServer).toBe("https://anchor.example/api/v1/sep38");
-    expect(p.fallback).toBe(false);
+  it("ends the currency block on a different table header and resumes on subsequent [[CURRENCIES]]", () => {
+    const toml = [
+      "[[CURRENCIES]]",
+      'code = "USDC"',
+      "[DOCUMENTATION]",
+      'code = "NOT_A_CURRENCY"',
+      "[[CURRENCIES]]",
+      'code = "EURC"',
+    ].join("\n");
+    const p = parseStellarToml(toml, "anchor.example");
+    expect(p.currencies).toEqual(["USDC", "EURC"]);
+  });
 
-    // Logger warnings were emitted for the rejected endpoints
-    expect(warn).toHaveBeenCalledTimes(3);
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ key: "WEB_AUTH_ENDPOINT", reason: "protocol must be https:" }),
-      expect.stringContaining("protocol must be https:"),
-    );
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ key: "TRANSFER_SERVER", reason: "protocol must be https:" }),
-      expect.stringContaining("protocol must be https:"),
-    );
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ key: "KYC_SERVER", reason: "malformed URL" }),
-      expect.stringContaining("malformed URL"),
-    );
+  it("retains an explicit KYC_SERVER that equals the guessed path rather than falling back to transfer server", () => {
+    // Guess for anchor.example is https://anchor.example/sep12. If KYC_SERVER was
+    // absent, it would fall back to TRANSFER_SERVER (https://anchor.example/sep6).
+    // An explicitly declared KYC_SERVER equal to the guess must remain set.
+    const toml = [
+      'TRANSFER_SERVER = "https://anchor.example/sep6"',
+      'KYC_SERVER = "https://anchor.example/sep12"',
+    ].join("\n");
+    const p = parseStellarToml(toml, "anchor.example");
+    expect(p.kycServer).toBe("https://anchor.example/sep12");
   });
 });
 
 describe("fetchStellarToml", () => {
   beforeEach(() => clearStellarTomlCache());
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("caches, so a second call inside the TTL does not re-fetch", async () => {
     const fetchMock = vi.fn(async () => tomlResponse(TOML));
@@ -136,12 +245,146 @@ describe("fetchStellarToml", () => {
     expect(b).toEqual(a);
   });
 
+  it("expires the cache after 5 minutes (TTL expiry)", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Just under 5 minutes: cache hit, no new fetch
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Past 5 minutes (TTL expired): re-fetches
+    await vi.advanceTimersByTimeAsync(2);
+    await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("force: true re-fetches inside the TTL and updates the cache", async () => {
+    const toml1 = `SIGNING_KEY = "GKEY1"\n`;
+    const toml2 = `SIGNING_KEY = "GKEY2"\n`;
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tomlResponse(toml1))
+      .mockResolvedValueOnce(tomlResponse(toml2));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await fetchStellarToml("anchor.example");
+    expect(first.signingKey).toBe("GKEY1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Force re-fetch inside TTL
+    const forced = await fetchStellarToml("anchor.example", { force: true });
+    expect(forced.signingKey).toBe("GKEY2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Next unforced call returns the updated cached result without fetching
+    const cached = await fetchStellarToml("anchor.example");
+    expect(cached.signingKey).toBe("GKEY2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache a response when expectedNetworkPassphrase mismatches", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchStellarToml("anchor.example", { expectedNetworkPassphrase: "Wrong Network Passphrase" }),
+    ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Subsequent call without passphrase fetches again rather than reusing mismatch
+    const ok = await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(ok.networkPassphrase).toBe("Test SDF Network ; September 2015");
+  });
+
   it("refuses an anchor whose declared network is not ours", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => tomlResponse(TOML)));
 
     await expect(
       fetchStellarToml("anchor.example", { expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015" }),
     ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
+  });
+
+  it("refuses a cached anchor when subsequent caller specifies a mismatching network passphrase without re-fetching", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Call without passphrase populates the cache
+    const first = await fetchStellarToml("anchor.example");
+    expect(first.networkPassphrase).toBe("Test SDF Network ; September 2015");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Subsequent call with mismatching passphrase throws Sep1NetworkMismatchError without hitting network
+    await expect(
+      fetchStellarToml("anchor.example", {
+        expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015",
+      }),
+    ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves from cache when subsequent caller specifies a matching network passphrase", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const second = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Test SDF Network ; September 2015",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+  });
+
+  it("accepts a document that declares no NETWORK_PASSPHRASE for any expected passphrase", async () => {
+    const tomlWithoutPassphrase = `
+ACCOUNTS = [ "GABC" ]
+VERSION = "2.0.0"
+SIGNING_KEY = "GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR"
+TRANSFER_SERVER = "https://anchor.example/sep6"
+`;
+    const fetchMock = vi.fn(async () => tomlResponse(tomlWithoutPassphrase));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const info = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015",
+    });
+    expect(info.networkPassphrase).toBeNull();
+    expect(info.transferServer).toBe("https://anchor.example/sep6");
+
+    // Also on cache hit
+    const cachedInfo = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Test SDF Network ; September 2015",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cachedInfo).toEqual(info);
+  });
+
+  it("does not cache a document when fresh fetch fails network passphrase check", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchStellarToml("anchor.example", {
+        expectedNetworkPassphrase: "Public Global Stellar Network ; September 2015",
+      }),
+    ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Second call re-fetches because mismatch was not cached
+    const second = await fetchStellarToml("anchor.example", {
+      expectedNetworkPassphrase: "Test SDF Network ; September 2015",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(second.networkPassphrase).toBe("Test SDF Network ; September 2015");
   });
 
   it("falls back to guessed paths when the TOML cannot be fetched, and does not cache that", async () => {
@@ -160,6 +403,39 @@ describe("fetchStellarToml", () => {
     const good = await fetchStellarToml("anchor.example");
     expect(good.fallback).toBe(false);
     expect(good.signingKey).toBe("GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR");
+  });
+
+  it("falls back to guessed paths when the TOML fetch times out, and does not pin the fallback", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((_url, init) => {
+          return new Promise((_resolve, reject) => {
+            if (init?.signal) {
+              init.signal.addEventListener("abort", () => {
+                reject(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            }
+          });
+        }),
+      );
+
+      const fetchPromise = fetchStellarToml("anchor.example", { timeoutMs: 1000 });
+      vi.advanceTimersByTime(1000);
+      const fallback = await fetchPromise;
+
+      expect(fallback.fallback).toBe(true);
+      expect(fallback.webAuthEndpoint).toBe("https://anchor.example/auth");
+
+      // Verify it was not cached in the discovery cache: a subsequent call re-fetches
+      vi.stubGlobal("fetch", vi.fn(async () => tomlResponse(TOML)));
+      const good = await fetchStellarToml("anchor.example");
+      expect(good.fallback).toBe(false);
+      expect(good.signingKey).toBe("GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

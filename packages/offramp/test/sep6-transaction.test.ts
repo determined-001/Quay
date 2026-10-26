@@ -3,7 +3,7 @@ import { Keypair, Networks, Transaction, TransactionBuilder, WebAuth } from "@st
 import type { AnchorCustomer } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { clearStellarTomlCache } from "../src/sep1";
-import { clearSep6InfoCache, getSep6Transaction, Sep6TransactionError } from "../src/sep6";
+import { clearSep6InfoCache, getSep6Transaction, startSep6Withdraw, Sep6ResponseError, Sep6TransactionError } from "../src/sep6";
 import { TestAnchorOffRamp } from "../src/testanchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 
@@ -309,3 +309,141 @@ describe("reconciliation fields", () => {
     expect(await state.getJob("wd_1")).toMatchObject({ amountIn: "10", stellarTransactionId: HASH });
   });
 });
+
+describe("startSep6Withdraw — response validation", () => {
+  it("rejects when the response has no id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ account_id: "GABC" })),
+    );
+    await expect(
+      startSep6Withdraw(ORIGIN + "/sep6", "jwt", {
+        assetCode: "USDC",
+        amount: "10",
+        account: SELLER.account,
+        type: "bank_account",
+      }),
+    ).rejects.toThrow(Sep6ResponseError);
+  });
+
+  it("rejects when the response has an empty id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ id: "   ", account_id: "GABC" })),
+    );
+    await expect(
+      startSep6Withdraw(ORIGIN + "/sep6", "jwt", {
+        assetCode: "USDC",
+        amount: "10",
+        account: SELLER.account,
+        type: "bank_account",
+      }),
+    ).rejects.toThrow(Sep6ResponseError);
+  });
+
+  it("ensures error message does not contain the anchor response body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ secret_leak: "should_not_appear" })),
+    );
+    let caught: unknown;
+    try {
+      await startSep6Withdraw(ORIGIN + "/sep6", "jwt", {
+        assetCode: "USDC",
+        amount: "10",
+        account: SELLER.account,
+        type: "bank_account",
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Sep6ResponseError);
+    expect((caught as Error).message).not.toContain("should_not_appear");
+  });
+});
+
+describe("getSep6Transaction — response validation", () => {
+  it("rejects with Sep6ResponseError when transaction object is missing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ status: "ok" })),
+    );
+    await expect(getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1")).rejects.toThrow(Sep6ResponseError);
+  });
+
+  it("rejects with Sep6ResponseError when transaction has no status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ transaction: { id: "wd_1" } })),
+    );
+    await expect(getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1")).rejects.toThrow(Sep6ResponseError);
+  });
+
+  it("rejects with Sep6ResponseError when transaction has an empty status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ transaction: { id: "wd_1", status: "   " } })),
+    );
+    await expect(getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1")).rejects.toThrow(Sep6ResponseError);
+  });
+
+  it("rejects with Sep6ResponseError when transaction has no id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ transaction: { status: "completed" } })),
+    );
+    await expect(getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1")).rejects.toThrow(Sep6ResponseError);
+  });
+
+  it("rejects with Sep6ResponseError when transaction has an empty id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ transaction: { id: "   ", status: "completed" } })),
+    );
+    await expect(getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1")).rejects.toThrow(Sep6ResponseError);
+  });
+});
+
+describe("TestAnchorOffRamp.initiate — response without id", () => {
+  it("rejects and saves no job in state repository when withdraw response has no id", async () => {
+    stubAnchor({ withdrawBody: { account_id: "GABC" } });
+    const state = new FakeOffRampStateRepository();
+    const { discovery, auth } = setup(state);
+    await signIn(auth);
+    const offramp = new TestAnchorOffRamp({ discovery, auth, state });
+
+    await expect(startWithdrawal(offramp)).rejects.toThrow(Sep6ResponseError);
+    expect(await state.getJob("wd_1")).toBeNull();
+  });
+});
+
+describe("getSep6Transaction error handling and pass-through", () => {
+  it("throws AnchorHttpError on non-OK response from the anchor", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("transaction not found", { status: 404 })),
+    );
+    await expect(getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_missing")).rejects.toMatchObject({
+      name: "AnchorHttpError",
+      sep: "6",
+      op: "transaction fetch",
+      status: 404,
+      body: "transaction not found",
+      message: "SEP-6 transaction fetch failed: 404",
+    });
+  });
+
+  it("passes through message and amount_out when present on transaction", async () => {
+    stubAnchor();
+    transactionBody = {
+      id: "wd_1",
+      status: "pending_anchor",
+      amount_out: "50.00",
+      message: "waiting on bank processing",
+    };
+    const tx = await getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1");
+    expect(tx.amountOut).toBe("50.00");
+    expect(tx.message).toBe("waiting on bank processing");
+  });
+});
+

@@ -117,6 +117,16 @@ export function toProfileView(res: ProfileResponse): ProfileView {
 }
 
 /** Disclosure metadata only. Field values must never appear in this response. */
+/** What the seller lets the anchor's SEP-24 form open pre-filled with (issue 3.17). Names only. */
+export interface PrefillConsentView {
+  anchorDomain: string;
+  /** Allowlisted SEP-9 names the seller has a value for. */
+  available: string[];
+  /** The names they agreed to share. */
+  fields: string[];
+  grantedAt: number | null;
+}
+
 export interface KycDisclosure {
   anchorDomain: string;
   status: KycStatus;
@@ -211,13 +221,14 @@ export type ApiErrorCode =
   | "consent_required" // per-anchor consent missing for KYC fields
   | "offramp_rejected" // anchor refused the amount/type; see `details.limits` and `details.availableTypes`
   // Operator telemetry (issue 5.21):
-  | "unauthorized" // telemetry token rejected
-  | "rate_limited" // 429: too many requests
+  | "unauthorized" // 401: the session or API key was rejected, sign in again (also: telemetry token rejected)
+  | "rate_limited" // 429: too many requests, slow down
   | "telemetry_not_enabled" // deployment has no TELEMETRY_TOKEN configured
   | "telemetry_error" // any other telemetry-route failure
   | "anchor_unavailable" // 503: the seller's anchor is down or its circuit breaker is open
   | "offramp_disabled" // 501: this deployment has no off-ramp configured
   | "quote_expired" // 409 `quote_expired: <detail>`: the anchor quote lapsed before use
+  | "quote_mismatch" // 409 `quote_mismatch`: the quote id does not match the link or amount
   | "request_in_progress" // 409: same Idempotency-Key still running, or key reused with a different body
   | "challenge_rejected"; // anchor SEP-10 challenge refused (400/502)
 
@@ -244,6 +255,7 @@ const BY_CODE: Record<string, ApiErrorCode> = {
   anchor_auth_required: "anchor_auth_required",
   destination_cannot_receive: "destination_cannot_receive",
   payment_rejected: "payment_rejected",
+  // The KYC panel branches on this to open the consent dialog (issue 5.32).
   consent_required: "consent_required",
   unauthorized: "unauthorized",
   rate_limited: "rate_limited",
@@ -260,6 +272,7 @@ export function classifyError(status: number, body: Record<string, unknown>): Ap
 
   if (Object.hasOwn(EXPLICIT, error)) return EXPLICIT[error]!;
   if (error.startsWith("quote_expired")) return "quote_expired";
+  if (error.startsWith("quote_mismatch")) return "quote_mismatch";
 
   if (status >= 500) return "server_error";
 
@@ -339,7 +352,9 @@ export function describeError(err: CheckoutError): string {
     case "offramp_disabled":
       return "Offramping is currently disabled for this anchor.";
     case "quote_expired":
-      return "The quote expired before the transaction could complete. Try refreshing.";
+      return "The quote expired before the transaction could complete. Get a new quote.";
+    case "quote_mismatch":
+      return "This quote no longer matches the link. Get a new quote.";
     case "request_in_progress":
       return "This request is already being processed. Please wait.";
     case "challenge_rejected":
@@ -347,9 +362,9 @@ export function describeError(err: CheckoutError): string {
     case "consent_required":
       return "You need to approve sharing these identity fields with the anchor before submitting.";
     case "unauthorized":
-      return "You are not authorized to perform this action. Please sign in again.";
+      return "Your session has expired or is not valid. Sign in again to continue.";
     case "rate_limited":
-      return "Too many requests. Please slow down and try again in a moment.";
+      return "Too many requests. Wait a moment and try again.";
     default:
       return "An unexpected error occurred. Please try again.";
   }
@@ -647,6 +662,10 @@ export const api = {
    */
   exportMyData: (): Promise<Blob> =>
     http<Blob>("/seller/profile/export", { raw: true, headers: { accept: "application/json" } }),
+  getPrefillConsent: () => http<PrefillConsentView>("/seller/kyc/prefill-consent"),
+  /** Replaces the shared set; `[]` withdraws it. */
+  setPrefillConsent: (fields: string[]) =>
+    http<PrefillConsentView>("/seller/kyc/prefill-consent", { method: "PUT", body: JSON.stringify({ fields }) }),
   getDisclosures: () => http<KycDisclosure[]>("/seller/kyc/disclosures"),
   deleteAnchorKyc: (anchorDomain: string) => http<{ anchorDomain: string; anchorResult: "deleted" | "not_found"; localDataErased: true }>(
     `/seller/kyc/disclosures/${encodeURIComponent(anchorDomain)}`, { method: "DELETE" },
@@ -664,6 +683,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ transaction }),
     }),
+
+  disconnectAnchorAuth: () =>
+    http<void>("/seller/anchor-auth", { method: "DELETE" }),
 
   submitKyc: (fields: Record<string, string>) =>
     http<KycView>("/seller/kyc", { method: "PUT", body: JSON.stringify(fields) }),

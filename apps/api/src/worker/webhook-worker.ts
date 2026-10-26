@@ -1,5 +1,5 @@
 import type { Webhook, WebhookQueueEntry, WebhookRepository } from "@checkout/core";
-import type { WebhookSender } from "../services/webhook-sender";
+import type { DeliveryOutcome, WebhookSender } from "../services/webhook-sender";
 
 export interface WebhookWorkerOptions {
   /**
@@ -116,7 +116,26 @@ export class WebhookWorker {
       return;
     }
 
-    const outcome = await this.sender.deliverOnce(hook, entry.event, entry.payload);
+    if (hook.deletedAt !== null) {
+      // Soft-deleted after enqueue (the merchant removed the endpoint, maybe
+      // because it was compromised): queued events must not still reach it,
+      // and a replay must not revive traffic to it.
+      this.log(`queue ${short(entry.id)}: webhook ${short(entry.webhookId)} was deleted, dead-lettering`);
+      await this.finalise(entry, attemptNumber, null, false, "webhook deleted", "dead");
+      return;
+    }
+
+    let outcome: DeliveryOutcome;
+    try {
+      outcome = await this.sender.deliverOnce(hook, entry.event, entry.payload);
+    } catch (err) {
+      outcome = {
+        ok: false,
+        statusCode: null,
+        error: err instanceof Error ? err.message : String(err),
+        permanent: false,
+      };
+    }
 
     if (outcome.ok) {
       await this.finalise(entry, attemptNumber, outcome.statusCode, true, null, "delivered");

@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Seller } from "@checkout/core";
 import type { Container } from "./container";
-import { DrizzleAnchorSessionRepository } from "../repos/index";
+import { DrizzleAnchorSessionRepository, DrizzlePrefillConsentRepository } from "../repos/index";
 import { kycDisclosureFields, links as linksTable, offrampJobs } from "../db/schema";
 
 /**
@@ -57,6 +57,8 @@ export interface SellerExport {
     revokedAt: string | null;
     noticeVersion: string;
   }[];
+  /** Fields the seller agreed to share with an anchor to pre-fill its SEP-24 form (names only). Omitted when none. */
+  prefillConsents?: { anchorDomain: string; fields: string[]; grantedAt: string }[];
   anchorConnections: { anchorDomain: string; account: string; expiresAt: string }[];
   payoutFields: Record<string, string> | null;
   links: {
@@ -97,6 +99,18 @@ export interface SellerExport {
   }[];
   webhooks: { id: string; url: string; createdAt: string }[];
   apiKeys: { id: string; name: string; scopes: string[]; createdAt: string; lastUsedAt: string | null }[];
+  /**
+   * Who read this seller's identity data and when (issue 8.15), newest first.
+   * Field names only, never values. Omitted when the audit log is not configured.
+   */
+  piiAccess?: {
+    at: string;
+    actorType: string;
+    actorId: string;
+    action: string;
+    fields: string[];
+    requestId: string | null;
+  }[];
   /** Names of list sections cut at {@link EXPORT_SECTION_LIMIT}; omitted when nothing was cut. */
   truncated?: string[];
 }
@@ -107,7 +121,8 @@ const isoOrNull = (ms: number | null | undefined): string | null => (ms == null 
 type ExportDeps = Pick<
   Container,
   "db" | "links" | "webhooks" | "apiKeys" | "kycConsents" | "sellerProfile" | "kycRepo"
->;
+> &
+  Partial<Pick<Container, "piiAudit">>;
 
 async function profileSection(c: ExportDeps, sellerId: string): Promise<SellerExport["profile"]> {
   if (!c.sellerProfile) return undefined;
@@ -217,6 +232,11 @@ async function consentsSection(c: ExportDeps, sellerId: string): Promise<SellerE
   }));
 }
 
+async function prefillConsentsSection(c: ExportDeps, sellerId: string): Promise<NonNullable<SellerExport["prefillConsents"]>> {
+  const consents = await new DrizzlePrefillConsentRepository(c.db).list(sellerId);
+  return consents.map((k) => ({ anchorDomain: k.anchorDomain, fields: k.fields, grantedAt: iso(k.grantedAt) }));
+}
+
 async function anchorConnectionsSection(
   c: ExportDeps,
   sellerId: string,
@@ -272,6 +292,19 @@ async function apiKeysSection(c: ExportDeps, sellerId: string): Promise<SellerEx
   }));
 }
 
+async function piiAccessSection(c: ExportDeps, sellerId: string): Promise<SellerExport["piiAccess"]> {
+  if (!c.piiAudit) return undefined;
+  const rows = await c.piiAudit.listForSeller(sellerId, EXPORT_SECTION_LIMIT + 1);
+  return rows.map((r) => ({
+    at: iso(r.at),
+    actorType: r.actorType,
+    actorId: r.actorId,
+    action: r.action,
+    fields: r.fields,
+    requestId: r.requestId,
+  }));
+}
+
 /** Builds the export for exactly one seller. Every read below is keyed on `seller.id`. */
 export async function buildSellerExport(
   c: ExportDeps,
@@ -279,18 +312,20 @@ export async function buildSellerExport(
   now: number = Date.now(),
 ): Promise<SellerExport> {
   const id = seller.id;
-  const [profile, kyc, disclosures, consents, anchorConnections, links, payments, jobs, webhooks, apiKeys] =
+  const [profile, kyc, disclosures, consents, prefillConsents, anchorConnections, links, payments, jobs, webhooks, apiKeys, piiAccess] =
     await Promise.all([
       profileSection(c, id),
       kycSection(c, id),
       disclosuresSection(c, id),
       consentsSection(c, id),
+      prefillConsentsSection(c, id),
       anchorConnectionsSection(c, id),
       linksSection(c, id),
       paymentsSection(c, id),
       offrampJobsSection(c, id),
       webhooksSection(c, id),
       apiKeysSection(c, id),
+      piiAccessSection(c, id),
     ]);
 
   const truncated: string[] = [];
@@ -307,6 +342,7 @@ export async function buildSellerExport(
     ...(kyc ? { kyc } : {}),
     disclosures: cap("disclosures", disclosures),
     consents,
+    ...(prefillConsents.length > 0 ? { prefillConsents } : {}),
     anchorConnections,
     payoutFields: seller.payoutFields,
     links: cap("links", links),
@@ -314,6 +350,7 @@ export async function buildSellerExport(
     offrampJobs: cap("offrampJobs", jobs),
     webhooks,
     apiKeys,
+    ...(piiAccess ? { piiAccess: cap("piiAccess", piiAccess) } : {}),
     ...(truncated.length > 0 ? { truncated } : {}),
   };
 }

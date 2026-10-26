@@ -24,3 +24,6 @@ contracts/target
 # Ignored, not just untracked, so a `git add -A` can't sweep them back in.
 ISSUES.md
 .github/create-issues.js
+
+packages/offramp/probe-telemetry.json
+packages/offramp/probe-telemetry.json.lock

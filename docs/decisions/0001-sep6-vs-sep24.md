@@ -26,15 +26,15 @@ interactive-redirect concept existed anywhere upstream of the adapter. That
 premise has since been built away:
 
 - `OffRampInitiation` has an `interactive` arm
-  (`packages/core/src/ports/index.ts:201-204`);
+  (`packages/core/src/ports/index.ts`);
 - the API forwards `interactiveUrl` to the dashboard
-  (`apps/api/src/routes/links.ts:263-267`);
+  (`apps/api/src/routes/links.ts`, the `interactiveUrl` field of the cash-out response);
 - the dashboard opens it, with https-only and popup-blocked handling
-  (`apps/web/app/components/CashOutModal.tsx:255`, `openInteractive`);
+  (`apps/web/app/components/CashOutModal.tsx`, `openInteractive`);
 - a SEP-24 adapter exists (`packages/offramp/src/anchor.ts`).
 
 Meanwhile production reality pushed the other way: real anchors publish
-SEP-6 without SEP-38 (`ROADMAP.md:22-29` — Cowrie declares `TRANSFER_SERVER`
+SEP-6 without SEP-38 (`ROADMAP.md`, "The uncomfortable premise" — Cowrie declares `TRANSFER_SERVER`
 but no `ANCHOR_QUOTE_SERVER`), and `scripts/anchor-sep-scan.mjs` measures
 exactly which anchors publish which SEPs.
 
@@ -43,16 +43,16 @@ exactly which anchors publish which SEPs.
 ### SEP-6 — Quay-hosted form, programmatic withdrawal
 
 - Quay's dashboard collects the payout fields the anchor's `/info` declares,
-  and KYC goes through SEP-12 (`packages/offramp/src/kyc.ts:36`,
+  and KYC goes through SEP-12 (`packages/offramp/src/kyc.ts`,
   `TestAnchorKyc`) — a **reusable profile**: the anchor keeps the KYC per
   SEP-10 account, so the seller enters it once, not per cash-out.
 - The anchor returns its deposit instructions at initiate time
-  (`packages/offramp/src/testanchor.ts:258` — `startSep6Withdraw`, whose
+  (`packages/offramp/src/sep6.ts` — `startSep6Withdraw`, called by `TestAnchorOffRamp.initiate`, whose
   `account_id`/`memo` come straight back as the `kind: "transfer"`
   initiation), so the seller can be shown *exactly* what to send,
   immediately.
 - The seller signs the transfer in their own wallet
-  (`apps/web/lib/wallet.ts:159`, `sendAnchorTransfer`).
+  (`apps/web/lib/wallet.ts`, `sendAnchorTransfer`).
 - Cost: Quay owns a dynamic form and the field-validation UX, and carries
   the seller's payout fields (encrypted at rest since #296).
 
@@ -65,7 +65,7 @@ exactly which anchors publish which SEPs.
 - Deposit instructions arrive **later**, when the transaction reaches
   `pending_user_transfer_start` — the poller watches for it and only then
   can hand the seller a transfer to sign
-  (`packages/offramp/src/anchor.ts:186`).
+  (`AnchorOffRamp.status` in `packages/offramp/src/anchor.ts`).
 - Cost: a popup dependency (blocked popups need the fallback link
   `CashOutModal` already renders), and the wait between initiating and
   knowing where to send funds.
@@ -84,12 +84,13 @@ instructions arrive*, not about who can move money.
 
 SEP-38 gives a firm FX quote where the anchor offers it
 (`packages/offramp/src/sep38.ts`, used by `TestAnchorOffRamp.quote`). Real
-anchors often don't (`ROADMAP.md:22-29`); there, fees come from `/info`
+anchors often don't (`ROADMAP.md`); there, fees come from `/info`
 (`fee_fixed`/`fee_percent`) and the FX rate needs another source — tracked
 as [#217 (3.20)](https://github.com/determined-001/Quay/issues/217) for
 SEP-24 `/info` fees and
 [#219 (3.22)](https://github.com/determined-001/Quay/issues/219) for the
-no-SEP-38 quote. Neither protocol solves this; neither is blocked by it.
+no-SEP-38 quote; both are now closed and the rate comes from a `RateSourcePort`.
+Neither protocol solves this; neither is blocked by it.
 
 ## Decision
 
@@ -107,8 +108,10 @@ cash-out that completes inside the dashboard the seller is already in.
   offer interactive.
 - The dashboard must keep both UX paths working: the dynamic field form and
   the popup-with-fallback-link.
-- Per-anchor selection (#216) is the remaining wiring; until it lands the
-  protocol is fixed by the `OFFRAMP` deployment setting.
+- Selection is wired (#216): `SelectingOffRamp` picks the adapter from the
+  anchor's SEP-1 declaration, `OFFRAMP_PROTOCOL` (`auto` | `sep6` | `sep24`)
+  can force one, and `status()` follows the protocol a job was started under
+  (the `#sep24` suffix on its stored `anchor`) rather than the current setting.
 
 ## Revisit when
 

@@ -23,6 +23,8 @@ export default function Sep9Input({
   onChange,
   onValidity,
   invalid = false,
+  required = false,
+  describedBy: externalDescribedBy,
 }: {
   id: string;
   name: string;
@@ -30,6 +32,10 @@ export default function Sep9Input({
   onChange: (value: string) => void;
   onValidity?: (name: string, error: string | null) => void;
   invalid?: boolean;
+  /** Marks the control required for assistive tech (aria-required + required). */
+  required?: boolean;
+  /** Extra id(s) to append to aria-describedby, e.g. the parent's "Required" message. */
+  describedBy?: string;
 }) {
   const spec = useMemo(() => sep9InputSpec(name), [name]);
   const [touched, setTouched] = useState(false);
@@ -41,7 +47,12 @@ export default function Sep9Input({
   const showError = touched && error !== null;
   const hintId = `${id}-hint`;
   const errId = `${id}-err`;
-  const describedBy = [spec.hint ? hintId : null, showError ? errId : null, check.warning ? `${id}-warn` : null]
+  const describedBy = [
+    spec.hint ? hintId : null,
+    showError ? errId : null,
+    check.warning ? `${id}-warn` : null,
+    externalDescribedBy ?? null,
+  ]
     .filter(Boolean)
     .join(" ") || undefined;
 
@@ -70,6 +81,8 @@ export default function Sep9Input({
     id,
     value,
     onBlur: blur,
+    required,
+    "aria-required": required,
     "aria-invalid": invalid || showError,
     "aria-describedby": describedBy,
     style: invalid || showError ? { borderColor: "var(--red)" } : undefined,

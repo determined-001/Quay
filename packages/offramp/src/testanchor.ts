@@ -20,9 +20,16 @@ import {
 } from "@checkout/core";
 import { NOOP_LOGGER, targetPerSourceRate } from "@checkout/core";
 import type { AnchorDiscovery, SellerAnchorAuth } from "./anchor-session";
-import { listsCurrency, type Sep1DiscoveryInfo } from "./sep1";
+import { listsCurrency, requireTransferServer, type Sep1DiscoveryInfo } from "./sep1";
 import { getSep38Prices, getSep38Quote } from "./sep38";
-import { getSep6Info, getSep6Transaction, resolveWithdrawType, startSep6Withdraw } from "./sep6";
+import {
+  Sep6ValidationError,
+  getSep6Info,
+  getSep6Transaction,
+  resolveWithdrawType,
+  selectWithdrawFields,
+  startSep6Withdraw,
+} from "./sep6";
 import { randomBytes } from "node:crypto";
 import { computeIndicativeAmounts } from "./quote-math";
 
@@ -219,15 +226,10 @@ export class TestAnchorOffRamp implements OffRampPort {
       sellAsset: input.sourceAsset,
       sellAmount: input.sourceAmount,
     });
+    // SEP-38 prices are sell-per-buy; IndicativePrice.price is target per
+    // source (issue 3.27), the same direction quote() reports as its rate.
     return entries.map((e) => ({
       targetCurrency: e.buyCurrency,
-      // SEP-38 GET /prices returns SELL units per BUY unit ("0.00065 USDC per
-      // NGN"), while IndicativePrice.price is "1 source = `price` target
-      // units" (core ports). Passing the anchor's number through unchanged —
-      // what this did until issue 3.27 — put an inverted rate on the dashboard,
-      // in the persisted offrampIndicativeRate, and in the spread computed
-      // against the firm quote sitting right next to it. Same conversion
-      // quote() uses, to the same precision, so both directions agree.
       price: targetPerSourceRate(e.price),
       deliveryMethods: e.deliveryMethods,
     }));
@@ -244,7 +246,7 @@ export class TestAnchorOffRamp implements OffRampPort {
   async offrampRequirements(assetCode: string, _customer?: AnchorCustomer): Promise<OfframpRequirementTypes> {
     const d = await this.discover();
     this.assertListed(d, assetCode);
-    const info = await getSep6Info(d.transferServer, this.logger);
+    const info = await getSep6Info(requireTransferServer(d), this.logger);
     const asset = info.withdraw[assetCode];
     if (!asset?.enabled) {
       throw new Error(`SEP-6 anchor does not support withdrawing ${assetCode}`);
@@ -295,8 +297,8 @@ export class TestAnchorOffRamp implements OffRampPort {
     // The seller's choice wins; the operator-wide OFFRAMP_TYPE is only the
     // fallback default (issue 5.24). resolveWithdrawType still rejects a type
     // the anchor does not offer, carrying availableTypes for the 400 upstream.
-    const { type: withdrawType, typeInfo, feeFixed, feePercent } = await resolveWithdrawType(
-      d.transferServer,
+    const { type: withdrawType, feeFixed, feePercent } = await resolveWithdrawType(
+      requireTransferServer(d),
       input.sourceAsset.code,
       input.sourceAmount,
       input.withdrawType ?? this.preferredWithdrawType,
@@ -505,22 +507,42 @@ export class TestAnchorOffRamp implements OffRampPort {
     // exactly what this PR exists to stop doing.
     const withdrawType =
       q.withdrawType ??
-      (await resolveWithdrawType(dsc.transferServer, q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
+      (await resolveWithdrawType(requireTransferServer(dsc), q.sellAsset.code, q.sellAmount, this.preferredWithdrawType, baseLog))
         .type;
+
+    const info = await getSep6Info(requireTransferServer(dsc), baseLog);
+    const asset = info.withdraw[q.sellAsset.code];
+    if (!asset) {
+      throw new Sep6ValidationError(
+        `Anchor does not list ${q.sellAsset.code} for withdrawal`,
+        {},
+        Object.keys(info.withdraw),
+      );
+    }
+    const typeNames = Object.keys(asset.types);
+    const typeInfo = asset.types[withdrawType];
+    if (!typeInfo) {
+      throw new Sep6ValidationError(
+        `Anchor does not offer withdraw type "${withdrawType}" for ${q.sellAsset.code}`,
+        { minAmount: asset.minAmount, maxAmount: asset.maxAmount },
+        typeNames,
+      );
+    }
+
+    const fields = selectWithdrawFields(typeInfo, input.payout.fields, baseLog);
 
     // Deliberately no quote_id here, on both paths (issue 3.22). SEP-6 has no
     // quote_id parameter, and on the no-SEP-38 path the stored quote id is one
     // WE generated — sending it to the anchor would be handing it an id it
     // never issued and never agreed to. What the anchor does quote is the
     // amount and the type, both of which are below.
-    const withdraw = await startSep6Withdraw(dsc.transferServer, jwt, {
+    const withdraw = await startSep6Withdraw(requireTransferServer(dsc), jwt, {
       assetCode: q.sellAsset.code,
       amount: q.sellAmount,
       account: input.customer.account,
       // The type discovered from /sep6/info at quote time — never assumed.
       type: withdrawType,
-      dest: input.payout.fields.dest,
-      destExtra: input.payout.fields.dest_extra,
+      fields,
     }, baseLog);
 
     const now = Date.now();
@@ -581,7 +603,7 @@ export class TestAnchorOffRamp implements OffRampPort {
     const baseLog = (opts.logger ?? this.logger);
     const child = baseLog.child({ jobId, linkId: job.linkId });
     const jwt = await this.auth.token({ sellerId: job.sellerId, account: job.account });
-    const tx = await getSep6Transaction((await this.discover()).transferServer, jwt, jobId, baseLog);
+    const tx = await getSep6Transaction(requireTransferServer(await this.discover()), jwt, jobId, baseLog);
     const mappedStatus = mapSep6Status(tx.status);
     if (!Object.hasOwn(SEP6_STATUS_MAP, tx.status) && !this.unknownStatusesLogged.has(jobId)) {
       this.unknownStatusesLogged.add(jobId);

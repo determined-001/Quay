@@ -118,11 +118,12 @@ describe("staleAllowlist", () => {
   });
 
   it("the allowlist is small and every entry carries a stated reason", () => {
-    // Two entries today (challenge.ts, seller-wallet.ts). Growth here is a
+    // Three entries today (challenge.ts, seller-wallet.ts, client-domain-signer.ts). Growth here is a
     // security review, so the count is asserted rather than assumed.
     expect([...ALLOWLIST.keys()]).toEqual([
       "apps/api/src/services/challenge.ts",
       "apps/api/src/services/seller-wallet.ts",
+      "apps/api/src/services/client-domain-signer.ts",
     ]);
     for (const [file, reason] of ALLOWLIST) {
       expect(reason.length, `allowlist reason for ${file}`).toBeGreaterThan(40);

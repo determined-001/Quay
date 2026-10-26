@@ -48,6 +48,8 @@ built on the chain whose anchor network can actually settle to local rails.
 
 ## Quickstart (5-Minute Integration)
 
+Widget API reference: [packages/widget/README.md](./packages/widget/README.md).
+
 ### 1. Install the Widget
 Embed the lightweight modal checkout script tag in your HTML and attach it to any button:
 
@@ -130,14 +132,18 @@ curl -X POST https://quay-api.onrender.com/webhooks \
   -d '{ "url": "https://your-domain.com/api/webhooks/checkout" }'
 ```
 
-Verify incoming HMAC-SHA256 signatures (`x-checkout-signature: sha256=<hex>`) in your webhook route:
+Verify incoming HMAC-SHA256 signatures (`x-checkout-signature: sha256=<hex>`) in your webhook route (supports multiple comma-separated signatures during secret rotation and prevents length mismatch errors):
 
 ```javascript
 const crypto = require("crypto");
 
 function verifyWebhookSignature(rawBody, signatureHeader, secret) {
-  const expected = "sha256=" + crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  return signatureHeader.split(",").some((part) => {
+    const a = Buffer.from(part.trim());
+    const b = Buffer.from(`sha256=${expected}`);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  });
 }
 ```
 
@@ -163,7 +169,7 @@ So two deliberate boundaries are baked into the architecture:
 
 - **Ports-and-adapters everywhere.** The domain never imports a chain SDK. `RailPort`,
   `WatcherPort`, and `OffRampPort` are the seams. Today: a Stellar (SEP-7 + Horizon) rail and
-  three off-ramp adapters — a real SEP-10/38/6 flow against the testnet reference anchor, a mock
+  four off-ramp modes — a real anchor flow (SEP-10/12/38 plus SEP-6 or SEP-24, chosen per anchor), a mock
   for offline dev, and a disabled mode for mainnet. Tomorrow: the same `PaymentIntent` spine
   behind an `adapter-gateway` (Arc/Circle) or a different chain — without touching the domain or
   the worker.
@@ -181,8 +187,8 @@ it can do — verify each row against the cited file:
 | `SERVER_SIGNING_SECRET` — signs SEP-10 *login* challenges for the dashboard | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`serverSigningSecret`), used in [`apps/api/src/services/container.ts`](apps/api/src/services/container.ts) | **No.** It is an identity key for authentication; it is not a signer on any seller account |
 | `JWT_SECRET` — signs Quay session JWTs | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`jwtSecret`) | **No** |
 | Each seller's anchor SEP-10 JWT, AES-256-GCM encrypted at rest | `anchor_sessions.token_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts); encryption in [`apps/api/src/repos/index.ts`](apps/api/src/repos/index.ts) | **No.** See the paragraph below for exactly what it can do |
-| Seller SEP-12 KYC fields, encrypted with `KYC_ENCRYPTION_KEY` | `kyc_records.fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
-| Seller payout fields (bank details) | `sellers.payout_fields_json` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) — currently plaintext, masked in the dashboard; encrypting it at rest is tracked in [#245](https://github.com/determined-001/Quay/issues/245) | **No** |
+| Seller SEP-12 KYC fields, encrypted with `KYC_ENCRYPTION_KEY` | `seller_kyc.fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
+| Seller payout fields (bank details), AES-256-GCM encrypted at rest with `KYC_ENCRYPTION_KEY` | `sellers.payout_fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) (legacy `payout_fields_json` is deprecated) | **No** |
 | Webhook signing secrets (current and previous), encrypted | `webhooks.secret_encrypted` / `previous_secret_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
 
 The rule all of this adds up to: **no key on the server can sign a payment
@@ -219,9 +225,10 @@ packages/
                the pure payment matcher, port interfaces, zod schemas.
   stellar/     Stellar adapter — SEP-7 rail + Horizon polling watcher (RailPort/WatcherPort).
   offramp/     Off-ramp adapters (OffRampPort, seller_initiated) — TestAnchorOffRamp
-               (real SEP-10 → SEP-38 → SEP-6 against testanchor.stellar.org), MockAnchorOffRamp
-               (offline dev), DisabledOffRamp (mainnet), plus TestAnchorKyc (SEP-12) and
-               SellerAnchorAuth (per-seller SEP-10 anchor sessions).
+               (real SEP-10 → SEP-38 → SEP-6, used for testanchor.stellar.org and production
+               anchors alike), AnchorOffRamp (SEP-24 interactive), SelectingOffRamp (picks SEP-6
+               or SEP-24 per anchor), MockAnchorOffRamp (offline dev), DisabledOffRamp (mainnet),
+               plus TestAnchorKyc (SEP-12) and SellerAnchorAuth (per-seller SEP-10 anchor sessions).
   widget/      Source of the embeddable checkout widget (built and served as widget.js).
 apps/
   api/         Hono API + Drizzle (libSQL) + the ledger-watching worker.
@@ -237,7 +244,7 @@ paid / overpaid / underpaid / wrong-asset / no-memo / unknown-reference.
 
 ## Run it locally
 
-Requirements: Node 20+ and pnpm 9.
+Requirements: Node 22 (what CI and the API's Docker image run) and pnpm 9.
 
 ```bash
 pnpm install
@@ -352,11 +359,8 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 - **Health**: `/health` is liveness (process is up); `/ready` is readiness
   (database is actually reachable) - the `HEALTHCHECK` and Render's
   `healthCheckPath` both use `/ready`.
-- **Size target**: under 200 MB, enforced in CI (`.github/workflows/ci.yml`'s
-  `docker` job fails the build if it isn't). Not independently measured
-  outside CI in this change - no Docker daemon was available in the
-  environment this change was authored in, so the size shown above is a
-  target the CI job checks on every push, not a number hand-verified here.
+- **Size target**: under 250 MB, enforced in CI (`.github/workflows/ci.yml`'s
+  `docker` job fails the build if it isn't, checking against `BUDGET_MB=250`).
 - **Security scanning**: the same CI job runs a Trivy scan, failing on any
   HIGH/CRITICAL finding.
 - **Read-only root filesystem**: the app writes nothing to disk in
@@ -377,16 +381,16 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 | Status lifecycle, webhooks (HMAC-SHA256 signed) | **Real**. |
 | Persistence | **Real**, libSQL/SQLite — zero-config locally (`file:./local.db`), and the same `DATABASE_URL` points at Turso in production. Note this is libSQL specifically, not "any SQL": the schema is `drizzle-orm/sqlite-core` and the client is `@libsql/client`, so a `postgres://` URL does not work without porting the schema, the bootstrap DDL and the backup scripts. Tables self-initialize on boot. Encrypted backups (`pnpm db:backup`) and a tested restore path (`pnpm db:restore`) exist — see [the runbook](docs/RUNBOOK.md) for the honest RPO/RTO (nightly backups ⇒ up to 24h RPO, not continuous protection). |
 | Account/trustline preflight | **Real.** `POST /links` checks the seller's wallet actually exists and (for USDC) has an authorized, under-limit trustline before the link goes live — `422 destination_cannot_receive` otherwise, with a SEP-7 deep link to add the trustline. Re-checked in `GET /health` so a revoked trustline shows up in ops, not as a dead checkout page. |
-| Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`). Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
+| Off-ramp (`@checkout/offramp`) | **Real, opt-in.** Set `OFFRAMP=testanchor` for a genuine SEP-10 → SEP-12 → SEP-38 → SEP-6 flow against the public Stellar testnet anchor (`https://testanchor.stellar.org`), or `OFFRAMP=anchor` for a production anchor; the withdrawal runs over SEP-6 or SEP-24 depending on what the anchor declares (`OFFRAMP_PROTOCOL`, default `auto`), and more anchors are added per corridor with `node scripts/anchors.mjs`. Defaults to `OFFRAMP=mock` (`MockAnchorOffRamp`, fake FX rate, no money moves) for offline dev — the dashboard labels the cash-out button "(simulated)" whenever mock mode is active. |
 | Metrics | **Real.** `GET /metrics` (Prometheus text format, `METRICS_TOKEN`-gated) — payment/webhook/anchor counters, watcher-lag and latency histograms, a circuit breaker around the off-ramp adapter. See [`docs/API.md`](docs/API.md#get-metrics) and [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json). |
 | Embeddable widget (`/widget.js`) | **Real**, lightweight embeddable script rendering modal checkout. |
-| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; `requireSeller` middleware gates every `/links` and `/webhooks` route (401 unauthenticated, 403 wrong seller), `POST /auth/logout` revokes a token by `jti`. Wallet-connect is wired in the dashboard and is how a seller signs in: the address they authenticate with becomes both their identity and their payout destination, so `POST /links` sets `destination` from the authenticated seller rather than from configuration. See [`docs/API.md`](docs/API.md#authentication). |
+| Auth | **Real, and enforced.** SEP-10 wallet login (`GET/POST /auth`) issues a short-lived session JWT (`sub`, `sellerId`, `jti`, `exp` ≤ 24h) and sets it as an httpOnly cookie; seller-authenticated middleware gates every `/webhooks` route and every `/links` route except the public checkout reads and submit (`GET /links/:id`, `POST /links/:id/submit`) and `GET /r/:reference` (401 unauthenticated, 404 for another seller's link, so ids are not confirmed), `POST /auth/logout` revokes a token by `jti`. Wallet-connect is wired in the dashboard and is how a seller signs in: the address they authenticate with becomes both their identity and their payout destination, so `POST /links` sets `destination` from the authenticated seller rather than from configuration. See [`docs/API.md`](docs/API.md#authentication). |
 
 ---
 
 ## Before you go live (the parts code can't do)
 
-1. **Verify the USDC issuer.** `.env.example` ships placeholder Circle issuers for testnet and
+1. **Verify the USDC issuer.** `.env.example` ships Circle issuers for testnet and
    public. Confirm the current issuer for your network before relying on it — a wrong issuer
    silently matches nothing (or the wrong asset).
 2. **Get a real anchor relationship first.** A checkout that dead-ends in USDC isn't the
@@ -395,8 +399,8 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
    for a production adapter against a licensed Nigerian anchor's SEP endpoints, and validate the
    anchor will actually onboard you and pay out **before** building further.
 3. **Don't enable `inline` off-ramp without legal review.** See the boundary note above.
-4. **Multiple sellers / scale:** the watcher polls per active destination account; for many
-   sellers you may want a streaming `WatcherPort` implementation (the interface already allows it).
+4. **Multiple sellers / scale:** the default watcher polls per active destination account; for many
+   sellers try the streaming `WatcherPort` implementation (`WATCH_MODE=stream`, opt-in until you have measured it).
 
 > This README is engineering guidance, not legal advice. Money transmission is the box you do
 > not want to back into by accident.
@@ -409,6 +413,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 - **[Architecture](docs/ARCHITECTURE.md)** — package graph, the three ports, sequence diagrams for each flow, the status machine, and how to add a new chain/anchor/rail.
 - **[Seller-signed anchor threat model](docs/THREAT-MODEL.md)** — assets, trust boundaries, implemented controls, failure paths, and open risks in anchor authentication and withdrawals.
 - **[Triage & review SLAs](docs/TRIAGE.md)** — issue taxonomy, 48h labelling SLA, and the stale-issue policy.
+- **[Cashing out: a merchant guide](docs/MERCHANT-CASH-OUT.md)** — connect to the anchor, verify identity, quote, cash out and send the transfer, step by step, with what each wallet signature can and cannot do.
 - **[HTTP API reference](docs/API.md)** — endpoints, request/response shapes, and webhook delivery.
 - **[Runbook](docs/RUNBOOK.md)** — deploy, rollback, database backup/restore, key rotation, [anchor outage](docs/RUNBOOK.md#anchor-outage), [anchor incidents](docs/RUNBOOK.md#anchor-incidents), watcher-stuck, stuck off-ramp jobs, and the incident template.
 - **[Mainnet cutover](docs/MAINNET.md)** — choosing a production anchor, generating and funding real keys, the public-network guardrails and why each refuses to boot, and the pre-announcement verification list.

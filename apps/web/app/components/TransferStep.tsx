@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { WithdrawTransfer } from "@checkout/core";
 import { api, CheckoutError, describeError } from "../../lib/api";
 import { useSellerWallet } from "./SessionGate";
@@ -44,13 +44,21 @@ export interface TransferStepProps {
   onDone?: () => void;
   /** Shown before it is sent, to leave without paying. */
   onClose?: () => void;
+  /** Reports whether a wallet send is in flight, so a host dialog can refuse Escape meanwhile. */
+  onBusyChange?: (busy: boolean) => void;
 }
 
-export default function TransferStep({ transfer, linkId, onSent, onDone, onClose }: TransferStepProps) {
+export default function TransferStep({ transfer, linkId, onSent, onDone, onClose, onBusyChange }: TransferStepProps) {
   const wallet = useSellerWallet();
   const [sending, setSending] = useState(false);
   const [sentHash, setSentHash] = useState<string | null>(() => readSentHash(linkId, transfer));
   const [transferError, setTransferError] = useState<string | null>(null);
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
+  useEffect(() => {
+    onBusyChangeRef.current?.(sending);
+    return () => onBusyChangeRef.current?.(false);
+  }, [sending]);
   const [preflight, setPreflight] = useState<PaymentPreflightResult | null>(null);
   const [checkingPreflight, setCheckingPreflight] = useState(false);
 
@@ -206,6 +214,9 @@ export default function TransferStep({ transfer, linkId, onSent, onDone, onClose
               >
                 {sending ? "Waiting for wallet…" : "Send with my wallet"}
               </button>
+              <span role="status" className="visually-hidden">
+                {sending ? "Waiting for your wallet…" : ""}
+              </span>
               {preflight && !preflight.ok && (
                 <button
                   type="button"
@@ -219,7 +230,11 @@ export default function TransferStep({ transfer, linkId, onSent, onDone, onClose
               )}
             </>
           )}
-          {transferError && <div className="err" style={{ marginTop: 12 }}>{transferError}</div>}
+          {transferError && (
+            <div className="err" role="alert" style={{ marginTop: 12 }}>
+              {transferError}
+            </div>
+          )}
           <TransferOtherDevice transfer={transfer} wallet={wallet} onSent={markSent} />
           {onClose && (
             <button
@@ -318,7 +333,7 @@ export function PendingTransferModal({
         {loading && <p className="muted">Loading transfer instructions from anchor…</p>}
         {error && (
           <div>
-            <div className="err" style={{ marginBottom: 16 }}>
+            <div className="err" role="alert" style={{ marginBottom: 16 }}>
               {error}
             </div>
             <button className="btn btn--block" onClick={onClose}>

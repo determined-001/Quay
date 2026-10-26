@@ -44,22 +44,26 @@ export class KycEvents implements KycPort {
     this.anchorDomain = opts.anchorDomain;
   }
 
+  resolveType(customer: AnchorCustomer): Promise<string | null> {
+    return this.inner.resolveType?.(customer) ?? Promise.resolve(null);
+  }
+
   async status(customer: AnchorCustomer): Promise<KycRecord> {
-    const previous = await this.repo.get(customer.sellerId, this.anchorDomain);
+    const previous = await this.repo.get(customer.sellerId, this.anchorDomain, await this.inner.resolveType?.(customer));
     const result = await this.inner.status(customer);
     await this.emitIfTransitioned(customer.sellerId, previous, result);
     return result;
   }
 
   async submit(customer: AnchorCustomer, fields: Record<string, string>): Promise<KycRecord> {
-    const previous = await this.repo.get(customer.sellerId, this.anchorDomain);
+    const previous = await this.repo.get(customer.sellerId, this.anchorDomain, await this.inner.resolveType?.(customer));
     const result = await this.inner.submit(customer, fields);
     await this.emitIfTransitioned(customer.sellerId, previous, result);
     return result;
   }
 
   async submitFiles(customer: AnchorCustomer, files: KycUploadFile[]): Promise<KycRecord> {
-    const previous = await this.repo.get(customer.sellerId, this.anchorDomain);
+    const previous = await this.repo.get(customer.sellerId, this.anchorDomain, await this.inner.resolveType?.(customer));
     const result = await this.inner.submitFiles(customer, files);
     await this.emitIfTransitioned(customer.sellerId, previous, result);
     return result;

@@ -5,7 +5,7 @@ Written 2026-09-06, the day the first real payment settled on mainnet
 memo inside the signed transaction).
 
 This file is about **direction**, not tasks. `TODO.md` holds the work queue and
-`ISSUES.md` holds the contributor backlog. What follows is the argument for
+the GitHub issue tracker holds the contributor backlog (see [CONTRIBUTING.md](CONTRIBUTING.md) for label taxonomy). What follows is the argument for
 where effort should go, including the parts that are uncomfortable.
 
 ---
@@ -15,19 +15,20 @@ where effort should go, including the parts that are uncomfortable.
 **A Nigerian merchant does not want USDC. They want naira in their bank
 account.**
 
-Quay currently stops at "USDC arrived in your wallet" and hands the hard part
+On mainnet Quay currently stops at "USDC arrived in your wallet" (`OFFRAMP=none`;
+the cash-out flow runs only against the testnet sandbox) and hands the hard part
 back to the seller. That is the gap between *technically works* and *someone
 would use this*.
 
-The blocker is already documented and it is sharper than a missing feature:
-real anchors do not implement `ANCHOR_QUOTE_SERVER`. Cowrie declares
-`TRANSFER_SERVER`, `WEB_AUTH_ENDPOINT`, `KYC_SERVER` and
-`DIRECT_PAYMENT_SERVER` — no SEP-38. `TestAnchorOffRamp` is built against a
-shape production does not have. Fees are available from `/sep6/info`
-(`feeFixed` / `feePercent`); the FX rate has no standard source.
+The blocker is already documented: real anchors often do not implement
+`ANCHOR_QUOTE_SERVER`. Cowrie declares `TRANSFER_SERVER`, `WEB_AUTH_ENDPOINT`,
+`KYC_SERVER` and `DIRECT_PAYMENT_SERVER` — no SEP-38. `TestAnchorOffRamp`
+treats SEP-38 as optional: when absent, `quoteWithoutSep38` quotes using fees
+from `/sep6/info` (`feeFixed` / `feePercent`) and a configured rate source.
 
-**That unsolved FX quote is the product.** Payment links, memo correlation, the
-watcher, the widget, the receipts — all of it is scaffolding around that hole.
+**Which production anchor to trust, and whose rate source to configure, remains
+the product problem.** Payment links, memo correlation, the watcher, the
+widget, the receipts — all of it is scaffolding around that integration.
 
 > **Partial answer landed in 3.22 (#219).** `RateSourcePort` in `@checkout/core`
 > is where an anchor's rate plugs in, with three implementations
@@ -96,9 +97,10 @@ than as a reason to choose this.
 3. **The FX quote against one real anchor.** Not SEP-38 in general. One anchor,
    one corridor, end to end. This is the difference between a demo and a
    business.
-4. **Muxed correlation** (#197). Real, and it removes the memo as a failure
-   mode — but it improves a flow that already works, and the off-ramp does not
-   exist yet.
+4. **Muxed correlation** (#197, evaluated and closed; see
+   `docs/MUXED-CORRELATION-EVALUATION.md`). Real, and it removes the memo as a
+   failure mode — but it improves a flow that already works, and the production
+   off-ramp is still not enabled.
 
 ---
 

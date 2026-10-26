@@ -51,7 +51,7 @@ function jwtFor(sub: string, claims: Record<string, unknown> = {}): string {
   return ["h", Buffer.from(JSON.stringify(payload)).toString("base64url"), "s"].join(".");
 }
 
-function subOf(req: { headers?: HeadersInit }): string {
+function subOf(req: { headers?: ConstructorParameters<typeof Headers>[0] }): string {
   const auth = new Headers(req.headers).get("authorization") ?? "";
   const claims = JSON.parse(Buffer.from(auth.replace("Bearer ", "").split(".")[1]!, "base64url").toString("utf8"));
   return claims.sub as string;
@@ -66,15 +66,22 @@ function stubAnchor(
     tokenClaims?: Record<string, unknown>;
     /** Replace the whole token (e.g. one with an unparsable payload). */
     rawToken?: string;
+    /** Domain the stub echoes as `client_domain` when the request asks for one. */
+    clientDomain?: string;
+    /** Source key of the `client_domain` op. Required with `clientDomain`. */
+    clientSigningKey?: Keypair;
   } = {},
 ) {
   const customers = new Map<string, { id: string; fields: Record<string, string> }>();
   const withdrawals: Array<{ account: string; sub: string }> = [];
+  /** Every XDR posted to /auth, so a test can inspect the signatures the anchor received. */
+  const authSubmissions: string[] = [];
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname === "/.well-known/stellar.toml") return new Response(TOML);
     if (url.pathname === "/auth" && init?.method === "POST") {
       const xdr = JSON.parse(init.body as string).transaction as string;
+      authSubmissions.push(xdr);
       const tx = TransactionBuilder.fromXDR(xdr, Networks.TESTNET) as Transaction;
       const account = tx.operations[0]!.source as string;
       return Response.json({
@@ -82,6 +89,10 @@ function stubAnchor(
       });
     }
     if (url.pathname === "/auth") {
+      // A real anchor includes the op only when the client asks; the stub echoes
+      // whatever domain the test configured, so a wrong-domain echo is provable.
+      const asked = url.searchParams.get("client_domain");
+      const clientDomain = asked && opts.clientDomain ? opts.clientDomain : null;
       const tx = WebAuth.buildChallengeTx(
         opts.signingKey ?? anchorKey,
         url.searchParams.get("account")!,
@@ -89,6 +100,9 @@ function stubAnchor(
         300,
         Networks.TESTNET,
         HOME,
+        null,
+        clientDomain,
+        clientDomain ? (opts.clientSigningKey?.publicKey() ?? null) : null,
       );
       return Response.json({ transaction: tx, network_passphrase: Networks.TESTNET });
     }
@@ -132,7 +146,7 @@ function stubAnchor(
     return new Response("unexpected", { status: 500 });
   });
   vi.stubGlobal("fetch", fetchMock);
-  return { customers, withdrawals, fetchMock };
+  return { customers, withdrawals, authSubmissions, fetchMock };
 }
 
 function setup() {
@@ -322,6 +336,107 @@ describe("SellerAnchorAuth", () => {
   });
 });
 
+describe("SellerAnchorAuth — SEP-10 client_domain (issue 3.12)", () => {
+  const QUAY_DOMAIN = "quay.example";
+  const quayServer = Keypair.random();
+
+  function authWithClientDomain() {
+    const discovery = new AnchorDiscovery({ homeDomain: HOME, fallbackBaseUrl: ORIGIN });
+    const sessions = new FakeAnchorSessionRepository();
+    const signed: string[] = [];
+    const auth = new SellerAnchorAuth({
+      discovery,
+      sessions,
+      networkPassphrase: Networks.TESTNET,
+      clientDomain: QUAY_DOMAIN,
+      signClientDomain: {
+        signingKey: quayServer.publicKey(),
+        coSign: (xdr) => {
+          signed.push(xdr);
+          const tx = TransactionBuilder.fromXDR(xdr, Networks.TESTNET) as Transaction;
+          tx.sign(quayServer);
+          return tx.toXDR();
+        },
+      },
+    });
+    return { auth, signed };
+  }
+
+  /** The URL of the GET /auth challenge request (not the TOML fetch or the POST). */
+  const challengeUrl = (anchor: ReturnType<typeof stubAnchor>) =>
+    new URL(
+      String(
+        anchor.fetchMock.mock.calls.find((c) => {
+          const u = new URL(String(c[0]));
+          return u.pathname === "/auth" && !c[1]?.method;
+        })![0],
+      ),
+    );
+
+  it("asks the anchor for the client_domain and co-signs the challenge Quay gets back", async () => {
+    const anchor = stubAnchor({ clientDomain: QUAY_DOMAIN, clientSigningKey: quayServer });
+    const { auth, signed } = authWithClientDomain();
+
+    const { transaction } = await auth.challenge(ALICE);
+    expect(challengeUrl(anchor).searchParams.get("client_domain")).toBe(QUAY_DOMAIN);
+
+    const walletSigned = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
+    walletSigned.sign(alice);
+    await auth.complete(ALICE, walletSigned.toXDR());
+
+    expect(signed).toHaveLength(1);
+    // The anchor accepted a challenge carrying the seller's wallet signature and
+    // Quay's client_domain signature; verifyChallengeTxSigners throws without both.
+    const found = WebAuth.verifyChallengeTxSigners(
+      anchor.authSubmissions.at(-1)!,
+      anchorKey.publicKey(),
+      Networks.TESTNET,
+      [alice.publicKey()],
+      HOME,
+      HOME,
+    );
+    expect(found).toContain(alice.publicKey());
+  });
+
+  it("relays the challenge unchanged when the anchor ignores the client_domain request", async () => {
+    const anchor = stubAnchor();
+    const { auth, signed } = authWithClientDomain();
+
+    const { transaction } = await auth.challenge(ALICE);
+    const walletSigned = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
+    walletSigned.sign(alice);
+    await auth.complete(ALICE, walletSigned.toXDR());
+
+    expect(signed).toHaveLength(0);
+    expect(anchor.authSubmissions.at(-1)).toBe(walletSigned.toXDR());
+  });
+
+  it("refuses a client_domain op that names another domain", async () => {
+    stubAnchor({ clientDomain: "evil.example", clientSigningKey: quayServer });
+    const { auth } = authWithClientDomain();
+    await expect(auth.challenge(ALICE)).rejects.toThrow(/names a domain that is not ours/);
+  });
+
+  it("refuses a client_domain op sourced by a key that is not Quay's SIGNING_KEY", async () => {
+    stubAnchor({ clientDomain: QUAY_DOMAIN, clientSigningKey: Keypair.random() });
+    const { auth } = authWithClientDomain();
+    await expect(auth.challenge(ALICE)).rejects.toThrow(/not sourced by Quay's signing key/);
+  });
+
+  it("sends no client_domain and does not co-sign when the feature is off", async () => {
+    const anchor = stubAnchor({ clientDomain: QUAY_DOMAIN, clientSigningKey: quayServer });
+    const { auth } = setup();
+
+    const { transaction } = await auth.challenge(ALICE);
+    expect(challengeUrl(anchor).searchParams.get("client_domain")).toBeNull();
+
+    const walletSigned = TransactionBuilder.fromXDR(transaction, Networks.TESTNET) as Transaction;
+    walletSigned.sign(alice);
+    await auth.complete(ALICE, walletSigned.toXDR());
+    expect(anchor.authSubmissions.at(-1)).toBe(walletSigned.toXDR());
+  });
+});
+
 describe("TestAnchorKyc — per seller", () => {
   it("submits each seller's identity under their own account, never overwriting another's", async () => {
     const anchor = stubAnchor();
@@ -407,7 +522,7 @@ describe("TestAnchorKyc — per seller", () => {
     const { repo, calls } = countingRepo();
     await repo.save(cachedRecord({ ageMs: 5000 }));
     calls.save = 0;
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     // Alice has NOT signed in, so querying the anchor would throw AnchorAuthRequiredError.
     const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
     expect(record.status).toBe("ACCEPTED");
@@ -423,7 +538,7 @@ describe("TestAnchorKyc — per seller", () => {
     const { repo, calls } = countingRepo();
     await repo.save(cachedRecord({ ageMs: 70_000 }));
     calls.save = 0;
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
 
     const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
@@ -439,7 +554,7 @@ describe("TestAnchorKyc — per seller", () => {
     const repo = new InMemoryKycRepo();
     // older than the 15s cap, but younger than the 60s maxAgeMs
     await repo.save(cachedRecord({ status: "PROCESSING", ageMs: 20_000 }));
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
 
     const record = await kyc.status(ALICE, { maxAgeMs: 60_000 });
@@ -452,7 +567,7 @@ describe("TestAnchorKyc — per seller", () => {
     const repo = new InMemoryKycRepo();
     // Fresh, ACCEPTED, but synced for the seller's previous wallet.
     await repo.save(cachedRecord({ account: Keypair.random().publicKey(), ageMs: 1000 }));
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
     anchor.fetchMock.mockClear();
 
@@ -469,7 +584,7 @@ describe("TestAnchorKyc — per seller", () => {
     const { discovery, auth } = setup();
     const repo = new InMemoryKycRepo();
     await repo.save(cachedRecord({ ageMs: 1000 }));
-    const kyc = new TestAnchorKyc({ discovery, auth, repo });
+    const kyc = new TestAnchorKyc({ discovery, auth, repo, profileRepo: { get: async () => null } });
     await signIn(auth, ALICE, alice);
     anchor.fetchMock.mockClear();
 
@@ -539,6 +654,7 @@ describe("TestAnchorOffRamp — per seller", () => {
       lastError: null,
       createdAt: 0,
       updatedAt: 0,
+      transferNotifiedAt: null,
     });
     const offramp = new TestAnchorOffRamp({ discovery, auth, state });
     await expect(offramp.status("wd_old")).rejects.toBeInstanceOf(OffRampJobNotFoundError);
@@ -550,7 +666,66 @@ class InMemoryKycRepo {
   async get(sellerId: string, _anchorDomain?: string) {
     return this.rows.get(sellerId) ?? null;
   }
+  async getByCallbackTokenHash(_tokenHash: string) {
+    return null;
+  }
   async save(record: import("@checkout/core").KycRecord) {
     this.rows.set(record.sellerId, record);
   }
+  async delete(sellerId: string) {
+    this.rows.delete(sellerId);
+  }
 }
+
+// ---------------------------------------------------------------------------
+//  SEP-1 discovery caching (issue 3.23).
+//
+//  An anchor that rotates its SIGNING_KEY republishes stellar.toml. Without a
+//  TTL and an explicit invalidate(), the old key stays cached for the life of
+//  the process and every seller's challenge fails verification until a restart.
+// ---------------------------------------------------------------------------
+describe("AnchorDiscovery caching", () => {
+  it("re-reads stellar.toml after invalidate(), picking up a rotated SIGNING_KEY", async () => {
+    const anchor = stubAnchor();
+    const discovery = new AnchorDiscovery({ homeDomain: HOME, fallbackBaseUrl: ORIGIN });
+    expect((await discovery.get()).signingKey).toBe(anchorKey.publicKey());
+
+    const rotated = Keypair.random();
+    anchor.fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/.well-known/stellar.toml") {
+        return new Response(TOML.replace(anchorKey.publicKey(), rotated.publicKey()));
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+
+    // Still cached: this is the behaviour that strands the process.
+    expect((await discovery.get()).signingKey).toBe(anchorKey.publicKey());
+
+    discovery.invalidate();
+    expect((await discovery.get()).signingKey).toBe(rotated.publicKey());
+  });
+
+  it("re-reads stellar.toml once the five-minute TTL elapses", async () => {
+    const anchor = stubAnchor();
+    const discovery = new AnchorDiscovery({ homeDomain: HOME, fallbackBaseUrl: ORIGIN });
+    expect((await discovery.get()).signingKey).toBe(anchorKey.publicKey());
+
+    const rotated = Keypair.random();
+    anchor.fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/.well-known/stellar.toml") {
+        return new Response(TOML.replace(anchorKey.publicKey(), rotated.publicKey()));
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+
+    const realNow = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 6 * 60_000);
+    try {
+      expect((await discovery.get()).signingKey).toBe(rotated.publicKey());
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

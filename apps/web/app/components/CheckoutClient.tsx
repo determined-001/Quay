@@ -79,6 +79,34 @@ function ExpiryCountdown({ msRemaining }: { msRemaining: number }) {
   );
 }
 
+// ── Embed postMessage Communication ─────────────────────────────────────────
+
+/**
+ * Resolves the target origin for postMessage to window.parent.
+ *
+ * When embedded in an iframe on an external merchant website, the parent origin
+ * cannot be known statically ahead of time. If `document.referrer` is present and valid,
+ * its origin is used as the specific targetOrigin. If referrer is absent (e.g. strict
+ * Referrer-Policy), we fall back to "*" because the payload contains only public payment
+ * receipt data (linkId, public link summary) and no sensitive credentials or keys.
+ */
+function resolveTargetOrigin(): string {
+  if (typeof document !== "undefined" && document.referrer) {
+    try {
+      return new URL(document.referrer).origin;
+    } catch {
+      // invalid referrer URL, fallback
+    }
+  }
+  return "*";
+}
+
+function postToParent(message: { type: string; linkId?: string; link?: unknown; error?: string }) {
+  if (typeof window === "undefined" || window.parent === window) return;
+  const targetOrigin = resolveTargetOrigin();
+  window.parent.postMessage(message, targetOrigin);
+}
+
 // ── Component ───────────────────────────────────────────────────────────────
 
 export default function CheckoutClient({
@@ -132,7 +160,72 @@ export default function CheckoutClient({
     const id = setInterval(() => forceTick((n) => n + 1), 1_000);
     return () => clearInterval(id);
   }, [expiresAt, isSettled, link.status]);
+  const consecutiveFailsRef = useRef(0);
   const connectionLost = consecutiveFails >= MAX_FAILURES_BEFORE_BACKOFF;
+
+  // ── Embed postMessage Events (quay:paid, quay:error, quay:closed) ────────
+
+  const postedPaidRef = useRef(false);
+  const postedErrorRef = useRef<string | null>(null);
+
+  // Post quay:paid to parent in embed mode (guarded to exactly once per link)
+  useEffect(() => {
+    if (!embed) return;
+    if (isSettled && !postedPaidRef.current) {
+      postedPaidRef.current = true;
+      postToParent({
+        type: "quay:paid",
+        linkId: link.id,
+        link: link as unknown as Record<string, unknown>,
+      });
+    }
+  }, [embed, isSettled, link]);
+
+  // Post quay:error to parent in embed mode for terminal errors
+  useEffect(() => {
+    if (!embed || isSettled) return;
+
+    if (link.status === "cancelled") {
+      if (postedErrorRef.current !== "cancelled") {
+        postedErrorRef.current = "cancelled";
+        postToParent({
+          type: "quay:error",
+          linkId: link.id,
+          error: "cancelled",
+        });
+      }
+    } else if (link.status === "expired" || expiredByClock) {
+      if (postedErrorRef.current !== "expired") {
+        postedErrorRef.current = "expired";
+        postToParent({
+          type: "quay:error",
+          linkId: link.id,
+          error: "expired",
+        });
+      }
+    } else if (connectionLost) {
+      if (postedErrorRef.current !== "connection_lost") {
+        postedErrorRef.current = "connection_lost";
+        postToParent({
+          type: "quay:error",
+          linkId: link.id,
+          error: "connection_lost",
+        });
+      }
+    } else if (postedErrorRef.current === "connection_lost") {
+      // Reset if connection restored on manual retry
+      postedErrorRef.current = null;
+    }
+  }, [embed, isSettled, link.id, link.status, expiredByClock, connectionLost]);
+
+  // Close action for embed mode
+  const handleClose = useCallback(() => {
+    if (!embed) return;
+    postToParent({
+      type: "quay:closed",
+      linkId: link.id,
+    });
+  }, [embed, link.id]);
 
   // ── Poll ──────────────────────────────────────────────────────────────────
 
@@ -142,13 +235,20 @@ export default function CheckoutClient({
     pollingRef.current = true;
     try {
       const next = await api.getLink(link.id);
+      consecutiveFailsRef.current = 0;
       setConsecutiveFails(0);
       setStopped(false);
       intervalMsRef.current = BASE_INTERVAL_MS;
       setLink(next.link);
       return next.link;
     } catch {
-      setConsecutiveFails((c) => c + 1);
+      consecutiveFailsRef.current += 1;
+      const fails = consecutiveFailsRef.current;
+      setConsecutiveFails(fails);
+      if (fails >= MAX_FAILURES_BEFORE_BACKOFF) {
+        intervalMsRef.current = BASE_INTERVAL_MS * BACKOFF_MULTIPLIER;
+        setStopped(true);
+      }
       return null;
     } finally {
       pollingRef.current = false;
@@ -166,6 +266,7 @@ export default function CheckoutClient({
   // ── Retry (manual, from "lost contact" screen) ────────────────────────────
 
   const retry = useCallback(() => {
+    consecutiveFailsRef.current = 0;
     setConsecutiveFails(0);
     setStopped(false);
     intervalMsRef.current = BASE_INTERVAL_MS;
@@ -176,18 +277,34 @@ export default function CheckoutClient({
 
   useEffect(() => {
     if (isTerminal || stopped) return;
+    let cancelled = false;
 
-    // Fire immediately, then schedule the next.
-    poll();
+    // Fire immediately, and if it immediately returns a terminal status, clear timers.
+    poll().then((firstLink) => {
+      if (cancelled) return;
+      if (firstLink && TERMINAL.has(firstLink.status)) {
+        if (timerRef.current) clearTimeout(timerRef.current);
+      }
+    });
 
     const scheduleNext = () => {
+      if (cancelled) return;
+      if (consecutiveFailsRef.current >= MAX_FAILURES_BEFORE_BACKOFF) return;
+
       timerRef.current = setTimeout(() => {
+        if (cancelled) return;
         poll().then((newLink) => {
-          // Use the freshly returned link for the terminal check, not the
-          // stale closure value.
-          if (newLink && !TERMINAL.has(newLink.status)) {
-            scheduleNext();
+          if (cancelled) return;
+          // Stop if the returned link reached a terminal status (settled or expired).
+          if (newLink && TERMINAL.has(newLink.status)) {
+            return;
           }
+          // Stop if consecutive failures reached the backoff/lost contact limit.
+          if (consecutiveFailsRef.current >= MAX_FAILURES_BEFORE_BACKOFF) {
+            return;
+          }
+          // Re-arm for the next poll attempt (on success, transient failure, or skipped poll).
+          scheduleNext();
         });
       }, intervalMsRef.current);
     };
@@ -195,6 +312,7 @@ export default function CheckoutClient({
     scheduleNext();
 
     return () => {
+      cancelled = true;
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [link.id, link.status, isTerminal, stopped, poll]);
@@ -215,6 +333,16 @@ export default function CheckoutClient({
           <div className="k">Transaction</div>
           <div className="v">{link.txHash ?? "confirmed on-chain"}</div>
         </div>
+        {embed && (
+          <button
+            type="button"
+            className="btn btn--ghost btn--block"
+            style={{ marginTop: 20 }}
+            onClick={handleClose}
+          >
+            Close
+          </button>
+        )}
       </div>
     );
   }
@@ -285,6 +413,16 @@ export default function CheckoutClient({
           <div className="k">Reference</div>
           <div className="v">{link.reference}</div>
         </div>
+        {embed && (
+          <button
+            type="button"
+            className="btn btn--ghost btn--block"
+            style={{ marginTop: 20 }}
+            onClick={handleClose}
+          >
+            Close
+          </button>
+        )}
       </div>
     );
   }
@@ -302,9 +440,16 @@ export default function CheckoutClient({
           Don&apos;t worry — if you already sent a payment it will still be matched. Check back in a
           moment.
         </p>
-        <button className="btn btn--primary" style={{ marginTop: 20 }} onClick={retry}>
-          Try again
-        </button>
+        <div style={{ marginTop: 20, display: "flex", gap: 12 }}>
+          <button className="btn btn--primary" onClick={retry}>
+            Try again
+          </button>
+          {embed && (
+            <button type="button" className="btn btn--ghost" onClick={handleClose}>
+              Close
+            </button>
+          )}
+        </div>
       </div>
     );
   }

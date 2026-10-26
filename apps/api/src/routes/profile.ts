@@ -5,6 +5,7 @@ import { eraseSellerIdentityLocal } from "../services/kyc-retention";
 import { customerOf } from "../services/link-service";
 import type { Container } from "../services/container";
 import { buildAuthMiddleware, type AuthVariables } from "../middleware/auth";
+import { auditActor } from "../services/pii-audit";
 
 const putProfileSchema = z.record(z.string(), z.string());
 const eraseProfileSchema = z.object({ confirm: z.string().min(1) });
@@ -14,6 +15,7 @@ export const ERASURE_RETAINED = [
   { what: "payment history", why: "public on the Stellar ledger" },
   { what: "links and payment records", why: "kept for the merchant's own accounting" },
   { what: "seller account (wallet login identity)", why: "deleting the account is a separate decision" },
+  { what: "PII access log", why: "records which of your fields were read and by whom (names only, no values); kept 2 years for breach assessment" },
   { what: "database backups", why: "expire after BACKUP_RETENTION_DAYS" },
 ] as const;
 
@@ -78,6 +80,7 @@ export function profileRoutes(c: Container): Hono<{ Variables: AuthVariables }> 
   // GET /seller/profile — every stored field with its source and last change.
   app.get("/", requireStore, async (ctx) => {
     const fields = await c.sellerProfile!.list(ctx.get("seller").id);
+    await c.piiAudit?.record({ ...auditActor(ctx), action: "profile.read", fields: fields.map((f) => f.field) });
     return ctx.json(toResponse(fields));
   });
 
@@ -106,7 +109,10 @@ export function profileRoutes(c: Container): Hono<{ Variables: AuthVariables }> 
 
     const seller = ctx.get("seller");
     await c.sellerProfile!.upsert(seller.id, parsed.data, "seller");
-    return ctx.json(toResponse(await c.sellerProfile!.list(seller.id)));
+    // The response reads the whole profile back, so the audit row lists every field it carries.
+    const stored = await c.sellerProfile!.list(seller.id);
+    await c.piiAudit?.record({ ...auditActor(ctx), action: "profile.write", fields: stored.map((f) => f.field) });
+    return ctx.json(toResponse(stored));
   });
 
   // DELETE /seller/profile — right to erasure (NDPA). Session auth only (enforced
@@ -127,23 +133,28 @@ export function profileRoutes(c: Container): Hono<{ Variables: AuthVariables }> 
     }
 
     const anchors: AnchorEraseResult[] = [];
-    if (c.anchorDomain && c.deleteAnchorCustomer) {
-      const anchorDomain = c.anchorDomain;
-      try {
-        const outcome = await c.deleteAnchorCustomer(customerOf(seller));
-        anchors.push({ anchorDomain, result: outcome === "deleted" ? "erased" : "not_held" });
-      } catch (err) {
-        if (err instanceof AnchorAuthRequiredError) {
-          anchors.push({ anchorDomain, result: "not_attempted:no_session" });
-        } else {
-          // Message carries only the HTTP status; never return anchor bodies.
-          const status = err instanceof Error ? err.message.match(/\b(\d{3})\b/)?.[1] : undefined;
-          anchors.push({ anchorDomain, result: `refused:${status ?? "error"}` });
+    // Every registered anchor, enabled or not: a disabled anchor still holds what the seller gave it.
+    const domains = c.anchorDomains ? await c.anchorDomains() : c.anchorDomain ? [c.anchorDomain] : [];
+    if (c.deleteAnchorCustomer) {
+      for (const anchorDomain of domains) {
+        try {
+          const outcome = await c.deleteAnchorCustomer(customerOf(seller), anchorDomain);
+          anchors.push({ anchorDomain, result: outcome === "deleted" ? "erased" : "not_held" });
+        } catch (err) {
+          if (err instanceof AnchorAuthRequiredError) {
+            anchors.push({ anchorDomain, result: "not_attempted:no_session" });
+          } else {
+            // Message carries only the HTTP status; never return anchor bodies.
+            const status = err instanceof Error ? err.message.match(/\b(\d{3})\b/)?.[1] : undefined;
+            anchors.push({ anchorDomain, result: `refused:${status ?? "error"}` });
+          }
         }
       }
     }
 
     await eraseSellerIdentityLocal(c.db, seller.id);
+    // The audit trail of the erased data is kept (names only, no values); see PRIVACY.md.
+    await c.piiAudit?.record({ ...auditActor(ctx), action: "profile.erase" });
 
     return ctx.json({
       erased: ["profile", "kyc", "consents", "anchor_sessions", "payout_fields"],

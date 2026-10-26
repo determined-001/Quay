@@ -103,6 +103,19 @@ if (!OFFRAMP_KINDS.includes(offramp)) {
   );
 }
 
+// Which protocol carries a withdrawal (issue 3.19): "auto" reads the anchor's
+// SEP-1 declaration (SEP-6 when both are declared, else SEP-24); "sep6" and
+// "sep24" force one and fail at first use if the anchor does not declare it.
+// Ignored for "mock" and "none".
+export type OffRampProtocol = "auto" | "sep6" | "sep24";
+const OFFRAMP_PROTOCOLS: readonly OffRampProtocol[] = ["auto", "sep6", "sep24"];
+const offrampProtocol = (process.env.OFFRAMP_PROTOCOL?.trim() || "auto") as OffRampProtocol;
+if (!OFFRAMP_PROTOCOLS.includes(offrampProtocol)) {
+  throw new Error(
+    `OFFRAMP_PROTOCOL must be one of ${OFFRAMP_PROTOCOLS.map((k) => `"${k}"`).join(", ")}, got "${offrampProtocol}"`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Mainnet guardrails.
 // ---------------------------------------------------------------------------
@@ -149,6 +162,18 @@ if (anchorUrl && !/^https:\/\//.test(anchorUrl) && network === "public") {
   throw new Error(`ANCHOR_URL must be https:// on public network, got "${anchorUrl}"`);
 }
 
+// SEP-12 customer `type` (issue 3.15). Anchors that key their KYC requirements
+// on a customer type need it on every GET/PUT /customer; unset sends none.
+function kycTypeFromEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  if (!value) return undefined;
+  if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(value)) {
+    throw new Error(`${name} must be 1-64 characters of letters, digits and _ . : - (got "${value}")`);
+  }
+  return value;
+}
+const anchorKycType = kycTypeFromEnv("ANCHOR_KYC_TYPE");
+const anchorKycTypeOrganization = kycTypeFromEnv("ANCHOR_KYC_TYPE_ORGANIZATION");
 
 /**
  * The domain this service identifies as in SEP-10 challenges and in
@@ -235,7 +260,8 @@ export const env = {
   // per-process without it — see the guard in services/container.ts.
   singleInstance: (process.env.SINGLE_INSTANCE ?? "false") === "true",
   // Seller wallet that receives funds. If unset on testnet, the app generates a
-  // throwaway keypair on first boot and prints it. Required on public network.
+  // throwaway keypair on first boot and prints it. Optional on public network:
+  // sellers sign in with their own wallet.
   defaultSellerWallet: process.env.DEFAULT_SELLER_WALLET || undefined,
   defaultSellerName: process.env.DEFAULT_SELLER_NAME || "Demo Seller",
   offramp,
@@ -247,6 +273,10 @@ export const env = {
   // Preferred SEP-6 withdrawal type (e.g. "bank_account"). Unset means "read
   // /sep6/info and use the only enabled type, or refuse if there are several".
   offrampType: process.env.OFFRAMP_TYPE || undefined,
+  offrampProtocol,
+  // SEP-12 customer type, a different concept from OFFRAMP_TYPE above.
+  anchorKycType,
+  anchorKycTypeOrganization,
   // FX rate source for anchors with no ANCHOR_QUOTE_SERVER (issue 3.22). Real
   // anchors mostly do not implement SEP-38, so this is what makes them quotable
   // at all. Unset = only SEP-38 is used, and an anchor without one refuses to
@@ -284,6 +314,11 @@ export const env = {
   // seller). Auto-generates a throwaway testnet keypair if unset. Required on
   // public network — a login server's signing key must be stable across restarts.
   serverSigningSecret: process.env.SERVER_SIGNING_SECRET || undefined,
+  // Ask the anchor for a SEP-10 `client_domain` challenge and co-sign it with
+  // the server signing key, so anchors can attribute sellers to this deployment
+  // (issue 3.12). Off by default; the anchor must support the parameter, and
+  // HOME_DOMAIN must be publicly reachable so it can read Quay's stellar.toml.
+  anchorClientDomain: (process.env.ANCHOR_CLIENT_DOMAIN ?? "false") === "true",
   // Symmetric secret for session JWTs minted after a SEP-10 login. Auto-generates
   // an ephemeral one on testnet if unset (sessions won't survive a restart);
   // required on public network.

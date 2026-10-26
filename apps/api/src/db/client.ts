@@ -2,273 +2,9 @@ import { createClient, type Client } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 import * as schema from "./schema";
 import { encryptSecret, last4 } from "../services/secret-crypto";
-import { newId } from "../services/ids";
+import { runMigrations, type RunMigrationsOptions } from "./migrate";
 
 export type DB = LibSQLDatabase<typeof schema>;
-
-// CREATE TABLE IF NOT EXISTS so a fresh clone runs with no migration step.
-// (drizzle-kit push can manage this instead; see drizzle.config.ts.)
-const BOOTSTRAP_SQL = [
-  // payout_fields_json, payout_fields_encrypted, profile_kind and last_active_at included here so
-  // fresh databases get the full schema (issue #32, issue 4.34, issue #240). Existing databases
-  // are handled by the ALTER TABLE statements in ADDITIVE_MIGRATIONS below.
-  `CREATE TABLE IF NOT EXISTS sellers (
-     id TEXT PRIMARY KEY, name TEXT NOT NULL, wallet TEXT NOT NULL UNIQUE,
-     payout_fields_json TEXT, payout_fields_encrypted TEXT, last_active_at INTEGER,
-     profile_kind TEXT NOT NULL DEFAULT 'individual', created_at INTEGER NOT NULL
-   )`,
-  // New columns (offramp_indicative_rate, offramp_rate, offramp_rate_delta) are
-  // included here so fresh databases get the full schema. Existing databases are
-  // handled by the ALTER TABLE statements in ADDITIVE_MIGRATIONS below.
-  `CREATE TABLE IF NOT EXISTS links (
-     id TEXT PRIMARY KEY, reference TEXT NOT NULL UNIQUE, seller_id TEXT NOT NULL,
-     destination TEXT NOT NULL, muxed_id TEXT, title TEXT NOT NULL, amount TEXT NOT NULL,
-     asset_code TEXT NOT NULL, asset_issuer TEXT, status TEXT NOT NULL,
-     tx_hash TEXT, payer TEXT, paid_amount TEXT, overpaid_amount TEXT,
-     offramp_job_id TEXT, offramp_target_currency TEXT, offramp_status TEXT,
-     offramp_indicative_rate TEXT, offramp_rate TEXT, offramp_rate_delta TEXT,
-     offramp_fee_amount TEXT, offramp_fee_currency TEXT, offramp_fee_source TEXT,
-     offramp_net_target_amount TEXT, is_demo INTEGER NOT NULL DEFAULT 0,
-     expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-   )`,
-  // Cumulative payment ledger (issue 1.4) — one row per payment ever recorded
-  // against a link. Unique on (tx_hash, operation_id), not tx_hash alone
-  // (issue 4.11): a transaction can carry more than one payment operation to
-  // the same link, and each must land its own row rather than being dropped
-  // as a false duplicate of the other.
-  `CREATE TABLE IF NOT EXISTS link_payments (
-     id TEXT PRIMARY KEY, link_id TEXT NOT NULL, tx_hash TEXT NOT NULL,
-     operation_id TEXT,
-     payer TEXT NOT NULL, amount TEXT NOT NULL,
-     asset_code TEXT NOT NULL, asset_issuer TEXT, ledger INTEGER,
-     created_at INTEGER NOT NULL
-   )`,
-  `CREATE INDEX IF NOT EXISTS link_payments_link_id_idx ON link_payments (link_id)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS link_payments_tx_hash_operation_id_unique
-     ON link_payments (tx_hash, operation_id)`,
-  `CREATE TABLE IF NOT EXISTS webhooks (
-     id TEXT PRIMARY KEY, seller_id TEXT NOT NULL, url TEXT NOT NULL,
-     secret_encrypted TEXT NOT NULL, secret_last4 TEXT NOT NULL,
-     previous_secret_encrypted TEXT, previous_secret_last4 TEXT,
-     previous_secret_expires_at INTEGER, deleted_at INTEGER,
-     created_at INTEGER NOT NULL
-   )`,
-  `CREATE TABLE IF NOT EXISTS webhook_deliveries (
-     id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, link_id TEXT,
-     event TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
-     queue_entry_id TEXT,
-     status_code INTEGER, ok INTEGER NOT NULL,
-     error TEXT, created_at INTEGER NOT NULL
-   )`,
-  `CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_created_at_idx
-     ON webhook_deliveries (webhook_id, created_at DESC)`,
-  `CREATE TABLE IF NOT EXISTS webhook_queue (
-     id TEXT PRIMARY KEY,
-     webhook_id TEXT NOT NULL,
-     link_id TEXT,
-     event TEXT NOT NULL,
-     payload TEXT NOT NULL,
-     attempts INTEGER NOT NULL DEFAULT 0,
-     next_attempt_at INTEGER NOT NULL,
-     status TEXT NOT NULL DEFAULT 'pending',
-     last_status_code INTEGER,
-     last_error TEXT,
-     created_at INTEGER NOT NULL,
-     updated_at INTEGER NOT NULL
-   )`,
-  // Index to make the worker's "claim due rows" query fast.
-  `CREATE INDEX IF NOT EXISTS idx_webhook_queue_due
-     ON webhook_queue (status, next_attempt_at)`,
-  `CREATE TABLE IF NOT EXISTS offramp_quotes (
-     quote_id TEXT PRIMARY KEY, link_id TEXT NOT NULL,
-     sell_asset_code TEXT NOT NULL, sell_asset_issuer TEXT, sell_amount TEXT NOT NULL,
-     buy_currency TEXT NOT NULL, price TEXT NOT NULL,
-     expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL
-   )`,
-  `CREATE TABLE IF NOT EXISTS offramp_jobs (
-     job_id TEXT PRIMARY KEY, link_id TEXT NOT NULL, anchor TEXT NOT NULL,
-     seller_id TEXT, account TEXT, target_currency TEXT NOT NULL, target_amount TEXT NOT NULL, rate TEXT NOT NULL,
-     status TEXT NOT NULL, external_status TEXT, last_error TEXT,
-     sell_asset_code TEXT, sell_asset_issuer TEXT, sell_amount TEXT, transfer_json TEXT,
-     last_poll_error TEXT, last_poll_error_at INTEGER, last_poll_reason TEXT,
-     transfer_notified_at INTEGER,
-     seller_tx_hash TEXT, amount_in TEXT, amount_fee TEXT, stellar_transaction_id TEXT,
-     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-   )`,
-  `CREATE TABLE IF NOT EXISTS seller_kyc (
-     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
-     account TEXT, customer_id TEXT, status TEXT NOT NULL,
-     required_fields TEXT NOT NULL, fields_encrypted TEXT NOT NULL,
-     callback_token_hash TEXT,
-     message TEXT, last_synced_at INTEGER, updated_at INTEGER NOT NULL,
-     provided_field_status TEXT, sent_fields TEXT,
-     PRIMARY KEY (seller_id, anchor_domain)
-   )`,
-  // Historical last-send time per field and anchor. Values are never stored.
-  `CREATE TABLE IF NOT EXISTS kyc_disclosure_fields (
-     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL,
-     field_name TEXT NOT NULL, sent_at INTEGER NOT NULL,
-     UNIQUE (seller_id, anchor_domain, field_name)
-   )`,
-  `CREATE TABLE IF NOT EXISTS anchor_sessions (
-     seller_id TEXT NOT NULL, anchor_domain TEXT NOT NULL, account TEXT NOT NULL,
-     token_encrypted TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
-     PRIMARY KEY (seller_id, anchor_domain)
-   )`,
-  `CREATE TABLE IF NOT EXISTS watcher_cursors (
-     account TEXT PRIMARY KEY, cursor TEXT NOT NULL, updated_at INTEGER NOT NULL
-   )`,
-  // Watcher dedup ledger (issue 4.11). Keyed on (tx_hash, operation_id), not
-  // tx_hash alone: a transaction can carry more than one payment operation,
-  // and each must dedupe independently. operation_id NULL (only possible via
-  // migrateLegacyProcessedTxTable, never written by new code) means "the
-  // whole transaction", preserving old behavior for pre-migration rows.
-  `CREATE TABLE IF NOT EXISTS processed_tx (
-     tx_hash TEXT NOT NULL, operation_id TEXT, link_id TEXT, created_at INTEGER NOT NULL,
-     PRIMARY KEY (tx_hash, operation_id)
-   )`,
-  `CREATE INDEX IF NOT EXISTS processed_tx_tx_hash_idx ON processed_tx (tx_hash)`,
-  `CREATE TABLE IF NOT EXISTS idempotency_keys (
-     key TEXT NOT NULL, seller_id TEXT NOT NULL, endpoint TEXT NOT NULL,
-     request_hash TEXT NOT NULL, response_status INTEGER NOT NULL,
-     response_body TEXT NOT NULL, created_at INTEGER NOT NULL,
-     PRIMARY KEY (key, seller_id)
-   )`,
-  `CREATE TABLE IF NOT EXISTS revoked_tokens (
-     jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, revoked_at INTEGER NOT NULL
-   )`,
-  `CREATE TABLE IF NOT EXISTS offramp_telemetry (
-     id TEXT PRIMARY KEY,
-     anchor_domain TEXT NOT NULL,
-     corridor TEXT NOT NULL,
-     sell_asset TEXT NOT NULL,
-     sell_amount TEXT NOT NULL,
-     indicative_rate TEXT,
-     quoted_rate TEXT NOT NULL,
-     quoted_at INTEGER NOT NULL,
-     initiated_at INTEGER,
-     settled_at INTEGER,
-     effective_rate TEXT,
-     fee_amount TEXT,
-     status TEXT NOT NULL,
-     failure_reason TEXT
-   )`,
-  // API keys for programmatic access (issue #40, 6.3).
-  // hash = scrypt digest — plaintext is NEVER persisted.
-  `CREATE TABLE IF NOT EXISTS api_keys (
-     id TEXT PRIMARY KEY,
-     seller_id TEXT NOT NULL,
-     name TEXT NOT NULL,
-     prefix TEXT NOT NULL,
-     hash TEXT NOT NULL,
-     scopes TEXT NOT NULL,
-     last_used_at INTEGER,
-     created_at INTEGER NOT NULL,
-     revoked_at INTEGER
-   )`,
-  // Per-anchor consent record for KYC field disclosure.
-  // No PII values — only field names from SEP-9 catalogue and metadata.
-  // Primary key (seller_id, anchor_domain) for one active consent per anchor.
-  `CREATE TABLE IF NOT EXISTS kyc_consents (
-     id TEXT PRIMARY KEY,
-     seller_id TEXT NOT NULL,
-     anchor_domain TEXT NOT NULL,
-     fields TEXT NOT NULL, -- JSON string[] of SEP-9 field names
-     granted_at INTEGER NOT NULL,
-     revoked_at INTEGER,
-     granted_via TEXT NOT NULL, -- 'session'
-     notice_version TEXT NOT NULL,
-     UNIQUE(seller_id, anchor_domain)
-   )`,
-  // Reusable, anchor-independent SEP-9 identity values (issue 4.23): one row
-  // per (seller, field). Field names are canonical SEP-9 names, not PII; every
-  // value is AES-256-GCM encrypted (encryptPii) and never stored in plaintext.
-  `CREATE TABLE IF NOT EXISTS seller_profile (
-     seller_id TEXT NOT NULL,
-     field TEXT NOT NULL,            -- canonical SEP-9 name
-     value_encrypted TEXT NOT NULL,  -- encryptPii(value)
-     source TEXT NOT NULL,           -- 'seller' | 'migrated_from_seller_kyc'
-     updated_at INTEGER NOT NULL,
-     PRIMARY KEY (seller_id, field)
-   )`,
-];
-
-// Additive column added after the initial release. `CREATE TABLE IF NOT EXISTS`
-// above won't touch an existing table, so add it out-of-band; ignore the
-// "duplicate column" error on databases that already have it.
-const ADDITIVE_MIGRATIONS = [
-  `ALTER TABLE offramp_quotes ADD COLUMN quoted_rate TEXT`,
-  `ALTER TABLE offramp_quotes ADD COLUMN quoted_target_amount TEXT`,
-  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_amount TEXT`,
-  `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_source TEXT`,
-  `ALTER TABLE offramp_quotes ADD COLUMN quoted_net_target_amount TEXT`,
-  `ALTER TABLE offramp_quotes ADD COLUMN quoted_kind TEXT`,
-  `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
-  `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
-  `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,
-  `ALTER TABLE links ADD COLUMN overpaid_amount TEXT`,
-  `ALTER TABLE links ADD COLUMN muxed_id TEXT`,
-  `ALTER TABLE links ADD COLUMN offramp_fee_amount TEXT`,
-  `ALTER TABLE links ADD COLUMN offramp_fee_currency TEXT`,
-  `ALTER TABLE links ADD COLUMN offramp_fee_source TEXT`,
-  `ALTER TABLE links ADD COLUMN offramp_net_target_amount TEXT`,
-  `ALTER TABLE links ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0`,
-  // #32: store the seller's last-used payout destination (e.g. bank account).
-  //      Stored as plaintext JSON — NOT encrypted at rest by libSQL/Turso by
-  //      default — so this is treated as sensitive end-to-end: masked to the
-  //      last 4 chars in every API response and never logged or webhook'd.
-  `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
-  // 4.34: encrypt seller payout fields at rest like KYC.
-  `ALTER TABLE sellers ADD COLUMN payout_fields_encrypted TEXT`,
-  `ALTER TABLE sellers ADD COLUMN profile_kind TEXT NOT NULL DEFAULT 'individual'`,
-  `ALTER TABLE link_payments ADD COLUMN ledger INTEGER`,
-  // Per-seller anchor identity: which seller/account a withdrawal and a KYC
-  // customer id belong to. Existing rows stay NULL — they were created under
-  // the old shared platform account and are treated as such.
-  `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
-  // 3.9: SEP-6 deposit instructions can arrive after the withdraw call. The job
-  // remembers what it sold and the instructions once published. Additive; old
-  // rows stay NULL.
-  `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_code TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_issuer TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN sell_amount TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN transfer_json TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error_at INTEGER`,
-  `ALTER TABLE offramp_jobs ADD COLUMN last_poll_reason TEXT`,
-  `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
-  `ALTER TABLE sellers ADD COLUMN last_active_at INTEGER`,
-  // Track whether the offramp.transfer_required webhook has been sent for a job.
-  // Null means not yet sent; epoch-ms when sent.
-  `ALTER TABLE offramp_jobs ADD COLUMN transfer_notified_at INTEGER`,
-  // Reconciliation report (4.32): the seller's claimed transfer hash and the
-  // anchor's reported amounts / Stellar transaction id.
-  `ALTER TABLE offramp_jobs ADD COLUMN seller_tx_hash TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN amount_in TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN amount_fee TEXT`,
-  `ALTER TABLE offramp_jobs ADD COLUMN stellar_transaction_id TEXT`,
-  `ALTER TABLE seller_kyc ADD COLUMN callback_token_hash TEXT`,
-  `CREATE INDEX IF NOT EXISTS seller_kyc_callback_token_hash_idx ON seller_kyc (callback_token_hash)`,
-  // BUG-4.21: a `sellers` table created before `wallet` gained UNIQUE still has
-  // a plain `wallet TEXT NOT NULL`, and CREATE TABLE IF NOT EXISTS never
-  // upgrades an existing table. `createIfAbsent` uses ON CONFLICT (wallet),
-  // which SQLite rejects outright without a matching constraint — so every
-  // wallet login failed with a 500.
-  //
-  // SQLite cannot ALTER TABLE ADD CONSTRAINT, but a unique index IS a valid
-  // ON CONFLICT target, so this is the additive equivalent. On a fresh database
-  // the constraint already comes from CREATE TABLE and this is a no-op.
-  //
-  // Deliberately not swallowed if it fails: the only way it can is duplicate
-  // wallets already present, and "logins stay broken forever" is not an
-  // acceptable answer to that.
-  `CREATE UNIQUE INDEX IF NOT EXISTS sellers_wallet_unique ON sellers (wallet)`,
-  // Per-field status from the anchor's `provided_fields` (SEP-12). JSON array.
-  `ALTER TABLE seller_kyc ADD COLUMN provided_field_status TEXT`,
-  // Field names (not values) sent to the anchor in the last submission. JSON string[].
-  `ALTER TABLE seller_kyc ADD COLUMN sent_fields TEXT`,
-];
 
 export function createDb(databaseUrl: string, authToken?: string): { db: DB; client: Client } {
   const client = createClient({ url: databaseUrl, authToken });
@@ -276,12 +12,100 @@ export function createDb(databaseUrl: string, authToken?: string): { db: DB; cli
   return { db, client };
 }
 
+// ---------------------------------------------------------------------------
+// Legacy structural migrations
+//
+// These helpers fix database shapes that predate Drizzle-managed migrations.
+// They run before `runMigrations()` so that the Drizzle journal can be applied
+// cleanly to databases created under the old bootstrap() path.
+//
+// Each helper is idempotent: it inspects the actual table shape and is a no-op
+// on a fresh database or one that has already been upgraded.
+// ---------------------------------------------------------------------------
+
+/**
+ * Additive column migrations for databases created before Drizzle took over.
+ * These are the ALTER TABLE ADD COLUMN statements that used to live in
+ * ADDITIVE_MIGRATIONS in the old bootstrap(). They are kept here so that any
+ * existing database missing these columns gets them added before the Drizzle
+ * baseline is stamped and migrate() runs. On a fresh database (no tables yet)
+ * these are all no-ops because the baseline migration creates every table with
+ * the full column set.
+ *
+ * "duplicate column" errors are swallowed — that means the column already
+ * exists, which is what we want.
+ */
+async function applyAdditiveMigrations(client: Client): Promise<void> {
+  const additive = [
+    `ALTER TABLE offramp_quotes ADD COLUMN withdraw_type TEXT`,
+    `ALTER TABLE offramp_quotes ADD COLUMN quoted_rate TEXT`,
+    `ALTER TABLE offramp_quotes ADD COLUMN quoted_target_amount TEXT`,
+    `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_amount TEXT`,
+    `ALTER TABLE offramp_quotes ADD COLUMN quoted_fee_source TEXT`,
+    `ALTER TABLE offramp_quotes ADD COLUMN quoted_net_target_amount TEXT`,
+    `ALTER TABLE offramp_quotes ADD COLUMN quoted_kind TEXT`,
+    `ALTER TABLE links ADD COLUMN offramp_indicative_rate TEXT`,
+    `ALTER TABLE links ADD COLUMN offramp_rate TEXT`,
+    `ALTER TABLE links ADD COLUMN offramp_rate_delta TEXT`,
+    `ALTER TABLE links ADD COLUMN overpaid_amount TEXT`,
+    `ALTER TABLE links ADD COLUMN muxed_id TEXT`,
+    `ALTER TABLE links ADD COLUMN offramp_fee_amount TEXT`,
+    `ALTER TABLE links ADD COLUMN offramp_fee_currency TEXT`,
+    `ALTER TABLE links ADD COLUMN offramp_fee_source TEXT`,
+    `ALTER TABLE links ADD COLUMN offramp_net_target_amount TEXT`,
+    `ALTER TABLE links ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE sellers ADD COLUMN payout_fields_json TEXT`,
+    `ALTER TABLE sellers ADD COLUMN payout_fields_encrypted TEXT`,
+    `ALTER TABLE sellers ADD COLUMN profile_kind TEXT NOT NULL DEFAULT 'individual'`,
+    `ALTER TABLE link_payments ADD COLUMN ledger INTEGER`,
+    `ALTER TABLE offramp_jobs ADD COLUMN seller_id TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN account TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_code TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN sell_asset_issuer TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN sell_amount TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN transfer_json TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN last_poll_error_at INTEGER`,
+    `ALTER TABLE offramp_jobs ADD COLUMN last_poll_reason TEXT`,
+    `ALTER TABLE seller_kyc ADD COLUMN account TEXT`,
+    `ALTER TABLE sellers ADD COLUMN last_active_at INTEGER`,
+    `ALTER TABLE offramp_jobs ADD COLUMN transfer_notified_at INTEGER`,
+    `ALTER TABLE offramp_jobs ADD COLUMN seller_tx_hash TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN amount_in TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN amount_fee TEXT`,
+    `ALTER TABLE offramp_jobs ADD COLUMN stellar_transaction_id TEXT`,
+    `ALTER TABLE seller_kyc ADD COLUMN callback_token_hash TEXT`,
+    `CREATE INDEX IF NOT EXISTS seller_kyc_callback_token_hash_idx ON seller_kyc (callback_token_hash)`,
+    // BUG-4.21: ensure sellers.wallet is unique so ON CONFLICT works.
+    `CREATE UNIQUE INDEX IF NOT EXISTS sellers_wallet_unique ON sellers (wallet)`,
+    `ALTER TABLE seller_kyc ADD COLUMN provided_field_status TEXT`,
+    `ALTER TABLE seller_kyc ADD COLUMN sent_fields TEXT`,
+  ];
+
+  for (const sql of additive) {
+    try {
+      await client.execute(sql);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // "duplicate column" / "already exists" → column already there, skip.
+      // "no such table" → fresh database, table doesn't exist yet; the
+      //   baseline migration will create it with the full column set, skip.
+      if (
+        msg.toLowerCase().includes("duplicate column") ||
+        msg.includes("already exists") ||
+        msg.toLowerCase().includes("no such table")
+      ) continue;
+      throw err;
+    }
+  }
+}
+
 /**
  * Upgrades a `webhooks` table created before the secret-rotation feature
  * (plaintext `secret` column, no lifecycle columns) in place. Only runs its
  * ALTERs if the old shape is actually detected, so it's a no-op on fresh
- * databases (which get the current shape directly from BOOTSTRAP_SQL above)
- * and on databases already upgraded.
+ * databases (which get the current shape directly from migrations) and on
+ * databases already upgraded.
  *
  * The plaintext `secret` column is intentionally left in place rather than
  * dropped — DROP COLUMN support varies across older SQLite builds, and
@@ -326,8 +150,8 @@ async function migrateLegacyWebhooksTable(client: Client): Promise<void> {
  * treats as "the whole transaction was processed", preserving exactly the
  * dedup behavior anything already settled before this migration runs had.
  *
- * No-op on a fresh database (BOOTSTRAP_SQL below creates the current shape
- * directly) and on a database already migrated.
+ * No-op on a fresh database (migrations create the current shape directly)
+ * and on a database already migrated.
  */
 async function migrateLegacyProcessedTxTable(client: Client): Promise<void> {
   const info = await client.execute("PRAGMA table_info(processed_tx)");
@@ -391,26 +215,42 @@ async function migrateLegacyLinkPaymentsTable(client: Client): Promise<void> {
  * Backfill `last_active_at` on existing sellers that do not have it populated.
  * Uses the latest activity timestamp across links, seller_kyc, anchor_sessions,
  * and api_keys, falling back to sellers.created_at.
+ *
+ * Skips any sub-query for a table that does not exist yet (possible on partial
+ * legacy test fixtures that only have a subset of tables).
  */
 async function backfillSellerLastActiveAt(client: Client): Promise<void> {
-  const info = await client.execute("PRAGMA table_info(sellers)");
-  const columns = new Set(info.rows.map((r) => String(r.name)));
-  if (!columns.has("last_active_at")) return;
+  const sellersInfo = await client.execute("PRAGMA table_info(sellers)");
+  const sellersCols = new Set(sellersInfo.rows.map((r) => String(r.name)));
+  if (!sellersCols.has("last_active_at")) return;
+
+  // Determine which auxiliary tables actually exist in this database.
+  const aux = ["links", "seller_kyc", "anchor_sessions", "api_keys"];
+  const existing = new Set<string>();
+  for (const t of aux) {
+    const r = await client.execute({
+      sql: "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+      args: [t],
+    });
+    if (r.rows.length > 0) existing.add(t);
+  }
+
+  const unions: string[] = [];
+  if (existing.has("links"))
+    unions.push("SELECT created_at AS val FROM links WHERE seller_id = sellers.id");
+  if (existing.has("seller_kyc"))
+    unions.push("SELECT updated_at AS val FROM seller_kyc WHERE seller_id = sellers.id");
+  if (existing.has("anchor_sessions"))
+    unions.push("SELECT created_at AS val FROM anchor_sessions WHERE seller_id = sellers.id");
+  if (existing.has("api_keys"))
+    unions.push("SELECT last_used_at AS val FROM api_keys WHERE seller_id = sellers.id AND last_used_at IS NOT NULL");
+
+  if (unions.length === 0) return; // nothing to backfill from
 
   await client.execute(`
     UPDATE sellers
     SET last_active_at = COALESCE(
-      (
-        SELECT MAX(val) FROM (
-          SELECT created_at AS val FROM links WHERE seller_id = sellers.id
-          UNION ALL
-          SELECT updated_at AS val FROM seller_kyc WHERE seller_id = sellers.id
-          UNION ALL
-          SELECT created_at AS val FROM anchor_sessions WHERE seller_id = sellers.id
-          UNION ALL
-          SELECT last_used_at AS val FROM api_keys WHERE seller_id = sellers.id AND last_used_at IS NOT NULL
-        )
-      ),
+      (SELECT MAX(val) FROM (${unions.join(" UNION ALL ")})),
       created_at
     )
     WHERE last_active_at IS NULL
@@ -509,37 +349,71 @@ async function migrateLegacySellerKycTable(client: Client, anchorDomain: string 
   await client.execute("ALTER TABLE seller_kyc_v2 RENAME TO seller_kyc");
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export interface BootstrapOptions {
   /** Home domain of the configured real anchor, used to attribute pre-4.24 `seller_kyc` rows. */
   kycAnchorDomain?: string | null;
+  /** Override migrations folder (tests only). */
+  migrationsDir?: RunMigrationsOptions["migrationsDir"];
 }
 
-export async function bootstrap(client: Client, opts: BootstrapOptions = {}): Promise<void> {
+/**
+ * Prepare the database for use.
+ *
+ * 1. Runs the pre-Drizzle structural migrations (idempotent, no-op on fresh
+ *    databases) to bring any legacy database up to a shape that Drizzle can
+ *    manage cleanly.
+ * 2. Runs Drizzle migrations with an advisory lock so concurrent instances
+ *    cannot race through the journal.
+ *
+ * Throws and refuses to return on any migration failure — the caller must
+ * not serve traffic with an unmigrated database.
+ *
+ * @param client  The libSQL client.
+ * @param dbOrOpts  Either a Drizzle DB instance (preferred), or the options
+ *                  object (for callers that don't have a DB at hand — a Drizzle
+ *                  DB is created internally in that case).
+ * @param opts  Options when `dbOrOpts` is a DB.
+ */
+export async function bootstrap(
+  client: Client,
+  dbOrOpts?: DB | BootstrapOptions,
+  opts?: BootstrapOptions,
+): Promise<void> {
+  let db: DB;
+  let resolvedOpts: BootstrapOptions;
+
+  // Distinguish a Drizzle DB object from a plain options bag by the presence
+  // of `query`, which every drizzle-orm/libsql database exposes and a plain
+  // options object never would.
+  const isDb = (v: unknown): v is DB =>
+    v != null && typeof v === "object" && "query" in (v as object);
+
+  if (isDb(dbOrOpts)) {
+    db = dbOrOpts;
+    resolvedOpts = opts ?? {};
+  } else {
+    db = drizzle(client, { schema });
+    resolvedOpts = (dbOrOpts as BootstrapOptions | undefined) ?? {};
+  }
+
+  // Phase 1: structural legacy migrations (must run before Drizzle sees the tables).
   await migrateLegacyWebhooksTable(client);
-  await migrateLegacySellerKycTable(client, opts.kycAnchorDomain ?? null);
+  await migrateLegacySellerKycTable(client, resolvedOpts.kycAnchorDomain ?? null);
   await migrateLegacyProcessedTxTable(client);
   await migrateLegacyLinkPaymentsTable(client);
   await migrateLegacyWebhookQueueTable(client);
   await migrateLegacyWebhookDeliveriesTable(client);
-  for (const sql of BOOTSTRAP_SQL) {
-    try {
-      await client.execute(sql);
-    } catch (err) {
-      // Tolerate "duplicate column" errors from the ALTER TABLE migration so the
-      // bootstrap is idempotent on both fresh and pre-existing databases.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("duplicate column") || msg.includes("already exists")) continue;
-      throw err;
-    }
-  }
-  for (const sql of ADDITIVE_MIGRATIONS) {
-    try {
-      await client.execute(sql);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.toLowerCase().includes("duplicate column")) throw err;
-    }
-  }
+  await applyAdditiveMigrations(client);
+
+  // Phase 2: Drizzle-managed migrations (creates tables on fresh databases,
+  // applies new migrations on existing ones).
+  await runMigrations(db, client, { migrationsDir: resolvedOpts.migrationsDir });
+
+  // Phase 3: data backfills that must run after the schema is fully up to date.
   await backfillSellerLastActiveAt(client);
 }
 

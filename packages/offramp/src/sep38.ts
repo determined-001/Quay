@@ -1,7 +1,8 @@
 import type { AssetRef, Logger } from "@checkout/core";
 import { NOOP_LOGGER } from "@checkout/core";
 import { endpointUrl } from "./sep1";
-import { anchorCallError, anchorHttpError } from "./anchor-error";
+import { anchorHttpError } from "./anchor-error";
+import { anchorFetch } from "./http";
 
 export interface Sep38QuoteResult {
   id: string;
@@ -15,7 +16,9 @@ export interface Sep38QuoteResult {
 export interface Sep38PriceEntry {
   /** ISO-4217 currency code, e.g. "NGN". */
   buyCurrency: string;
-  /** Indicative sell_amount / buy_amount exchange rate. */
+  /** Indicative sell_amount / buy_amount exchange rate: SELL asset per 1 BUY
+   *  unit (e.g. ~0.00065 USDC per NGN). Not the target-per-source direction
+   *  that core's `IndicativePrice.price` uses; convert with `targetPerSourceRate`. */
   price: string;
   /** Available delivery methods (e.g. "WIRE", "BANK_TRANSFER"). May be empty. */
   deliveryMethods: string[];
@@ -46,40 +49,33 @@ export async function getSep38Prices(
   // consistent about which corridors it surfaces.
   url.searchParams.set("context", "sep6");
 
-  const res = await fetch(url);
+  const res = await anchorFetch(url);
   if (!res.ok) {
     throw await anchorHttpError("38", "/prices", res);
   }
 
   const body = (await res.json()) as {
-    buy_assets?: Array<{
-      // Nullable on purpose. An anchor is a third party: an entry missing
-      // `asset` or `price` is malformed, and the right response to malformed
-      // data from someone else's API is to skip the entry, not to throw a
-      // TypeError that fails the whole preview for every other corridor.
-      asset?: string;
-      price?: string | number;
+    buy_assets: Array<{
+      asset: string; // e.g. "iso4217:NGN"
+      price: string;
       decimals?: number;
       buy_delivery_methods?: Array<{ name: string; description?: string }>;
     }>;
   };
 
   return (body.buy_assets ?? []).flatMap((entry) => {
+    // A malformed entry is skipped rather than failing the whole preview.
+    if (typeof entry?.asset !== "string") return [];
+    const unit = Number(entry.price);
+    if (!Number.isFinite(unit) || unit <= 0) return [];
     // Only surface fiat ISO-4217 entries ("iso4217:XXX").
-    if (typeof entry.asset !== "string") return [];
     const match = entry.asset.match(/^iso4217:([A-Z]{3})$/);
     if (!match || !match[1]) return [];
-    // A price we cannot invert is not a price: skip it rather than hand
-    // "Infinity" or "NaN" downstream as an indicative rate. Same rule
-    // `targetPerSourceRate` applies to firm quotes.
-    const price = typeof entry.price === "number" ? String(entry.price) : entry.price;
-    const numeric = Number(price);
-    if (typeof price !== "string" || !Number.isFinite(numeric) || numeric <= 0) return [];
     const buyCurrency: string = match[1];
     return [
       {
         buyCurrency,
-        price,
+        price: entry.price,
         deliveryMethods: (entry.buy_delivery_methods ?? []).map((m) => m.name),
       },
     ];
@@ -96,6 +92,12 @@ export async function getSep38Quote(
     buyCurrency: string;
     /** Delivery method for the buy asset. Discovered from /sep6/info or configured explicitly. */
     buyDeliveryMethod?: string;
+    /**
+     * SEP-38 context the quote is requested for. A quote id is only valid for
+     * the protocol that requested it, so the SEP-24 adapter passes "sep24" and
+     * the SEP-6 adapter keeps the default (issue 3.16).
+     */
+    context?: "sep6" | "sep24";
   },
   logger?: Logger,
 ): Promise<Sep38QuoteResult> {
@@ -110,7 +112,7 @@ export async function getSep38Quote(
     },
     "fetching SEP-38 quote",
   );
-  const res = await fetch(endpointUrl(baseUrl, "quote"), {
+  const res = await anchorFetch(endpointUrl(baseUrl, "quote"), {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
     body: JSON.stringify({
@@ -120,12 +122,12 @@ export async function getSep38Quote(
       ...(input.buyDeliveryMethod
         ? { buy_delivery_method: input.buyDeliveryMethod }
         : {}),
-      context: "sep6",
+      context: input.context ?? "sep6",
     }),
   });
   if (!res.ok) {
     log.warn({ event: "anchor.sep38.quote.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-38 quote failed");
-    throw await anchorCallError("38", "quote", res);
+    throw await anchorHttpError("38", "quote", res);
   }
   const body = (await res.json()) as {
     id: string;

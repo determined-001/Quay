@@ -31,7 +31,7 @@ let ready: Promise<Kit> | null = null;
 /** Loads and initialises the kit exactly once per page. */
 async function kit(): Promise<Kit> {
   if (!ready) {
-    ready = (async () => {
+    const p = (async () => {
       // v2 has no `allowAllModules()`; each wallet is its own subpath import.
       // Listed explicitly rather than pulled in wholesale — every module here
       // is browser-facing code shipped to the buyer, and the hardware-wallet
@@ -61,6 +61,12 @@ async function kit(): Promise<Kit> {
       });
       return mod.StellarWalletsKit;
     })();
+    p.catch(() => {
+      if (ready === p) {
+        ready = null;
+      }
+    });
+    ready = p;
   }
   return ready;
 }

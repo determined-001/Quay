@@ -132,6 +132,19 @@ describe("private IPv4 rejection", () => {
     ["RFC-1918 192.168/16","192.168.1.1"],
     ["link-local",         "169.254.169.254"],   // AWS/GCP metadata
     ["link-local alt",     "169.254.0.1"],
+    ["CGNAT low",          "100.64.0.0"],
+    ["CGNAT high",         "100.127.255.255"],
+    ["CGNAT metadata",     "100.100.100.200"],
+    ["IETF low",           "192.0.0.0"],
+    ["IETF high",          "192.0.0.255"],
+    ["benchmarking low",   "198.18.0.0"],
+    ["benchmarking high",  "198.19.255.255"],
+    ["TEST-NET-1 low",     "192.0.2.0"],
+    ["TEST-NET-1 high",    "192.0.2.255"],
+    ["TEST-NET-2 low",     "198.51.100.0"],
+    ["TEST-NET-2 high",    "198.51.100.255"],
+    ["TEST-NET-3 low",     "203.0.113.0"],
+    ["TEST-NET-3 high",    "203.0.113.255"],
   ];
 
   for (const [label, ip] of cases) {
@@ -166,6 +179,13 @@ describe("private IPv6 rejection", () => {
     const r = await guardWebhookUrl("https://ipv6host.example.com/hook");
     expect(r.ok).toBe(false);
   });
+
+  it("rejects IPv4-mapped CGNAT (::ffff:100.64.0.1)", async () => {
+    mockPrivateIpv6("::ffff:100.64.0.1");
+    const r = await guardWebhookUrl("https://ipv6host.example.com/hook");
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toMatch(/private|reserved/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -190,6 +210,30 @@ describe("public IP pass-through", () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.resolvedIp).toBe("93.184.216.34");
   });
+
+  const outsideCases: [string, string][] = [
+    ["outside CGNAT below", "100.63.255.255"],
+    ["outside CGNAT above", "100.128.0.0"],
+    ["outside IETF protocol below", "191.255.255.255"],
+    ["outside IETF protocol above", "192.0.1.0"],
+    ["outside benchmarking below", "198.17.255.255"],
+    ["outside benchmarking above", "198.20.0.0"],
+    ["outside TEST-NET-1 below", "192.0.1.255"],
+    ["outside TEST-NET-1 above", "192.0.3.0"],
+    ["outside TEST-NET-2 below", "198.51.99.255"],
+    ["outside TEST-NET-2 above", "198.51.101.0"],
+    ["outside TEST-NET-3 below", "203.0.112.255"],
+    ["outside TEST-NET-3 above", "203.0.114.0"],
+  ];
+
+  for (const [label, ip] of outsideCases) {
+    it(`allows ${label} (${ip})`, async () => {
+      mockPublicIp(ip);
+      const r = await guardWebhookUrl("https://example.com/hook");
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.resolvedIp).toBe(ip);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
