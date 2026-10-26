@@ -60,10 +60,6 @@ export function getLogger<E extends { Variables: RequestContextVariables }>(ctx:
   return ctx.get("logger") ?? NOOP_LOGGER;
 }
 
-export function getRequestId<E extends { Variables: RequestContextVariables }>(ctx: Context<E>): string {
-  return ctx.get("requestId");
-}
-
 /**
  * The path as it is safe to log. `/anchor-callbacks/sep12/:anchor/:token` carries a secret
  * per-seller token in the URL, so the token segment is masked.

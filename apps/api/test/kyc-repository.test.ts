@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { KycRecord, ProvidedFieldStatus } from "@checkout/core";
+import type { KycRecord } from "@checkout/core";
 import { createDb, bootstrap, type DB } from "../src/db/client";
 import { sellerKyc } from "../src/db/schema";
 import { DrizzleKycRepository } from "../src/repos/index";

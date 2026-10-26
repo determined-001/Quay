@@ -4,7 +4,6 @@ import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { bootstrap, createDb, type DB } from "../src/db/client";
 import { DrizzleOffRampStateRepository } from "../src/repos/index";
-import { getTableConfig } from "drizzle-orm/sqlite-core";
 import * as schema from "../src/db/schema";
 
 async function makeDb(): Promise<DB> {

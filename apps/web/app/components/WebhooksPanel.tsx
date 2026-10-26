@@ -40,7 +40,6 @@ function OneTimeSecret({ secret, onDismiss }: { secret: string; onDismiss: () =>
 
 function DeliveriesTable({ webhookId }: { webhookId: string }) {
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -100,10 +99,7 @@ function DeliveriesTable({ webhookId }: { webhookId: string }) {
         <button
           className="linkbtn"
           style={{ marginTop: 10 }}
-          onClick={() => {
-            setCursor(nextCursor);
-            void load(nextCursor);
-          }}
+          onClick={() => void load(nextCursor)}
           disabled={loading}
         >
           {loading ? "Loading…" : "Load more"}

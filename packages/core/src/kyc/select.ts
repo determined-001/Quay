@@ -1,5 +1,4 @@
 import type { KycFieldSpec } from "../ports/index";
-import type { Sep9Field } from "./sep9";
 import { sep9Field } from "./sep9";
 
 export interface SelectFieldsResult {

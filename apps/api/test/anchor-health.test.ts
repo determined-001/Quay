@@ -7,7 +7,6 @@ import {
   type KycRecord,
   type LinkPaymentRecord,
   type LinkRepository,
-  type NormalizedPayment,
   type OffRampInitiation,
   type OffRampJob,
   type OffRampJobStatus,
@@ -23,8 +22,7 @@ import {
   type StoredOffRampQuote,
   type Webhook,
   type WebhookDelivery,
-  type WebhookRepository,
-} from "@checkout/core";
+  type WebhookRepository } from "@checkout/core";
 import type { StellarConfig } from "@checkout/stellar";
 import { AnchorHealth, AnchorHealthRegistry, LinkService } from "../src/services/link-service";
 import { encryptSecret } from "../src/services/secret-crypto";

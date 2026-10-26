@@ -5,7 +5,6 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   AnchorAuthRequiredError,
   KycRequiredError,
-  ConsentRequiredError,
   type KycFieldSpec,
   type KycRecord,
   type KycConsent,

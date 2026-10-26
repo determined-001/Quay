@@ -79,13 +79,6 @@ describe("TestAnchorKyc.submit field mapping", () => {
     providedFieldStatus: [],
   };
 
-  const mockRemote = {
-    ...mockDiscovery,
-    customerId: "cus_1",
-    status: "NEEDS_INFO" as const,
-    message: null,
-  };
-
   const mockAfter = {
     ...mockDiscovery,
     customerId: "cus_1",
