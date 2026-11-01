@@ -3,7 +3,7 @@
     "api": {
       "consecutiveFailures": 1,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-11-01T14:58:20.911Z",
+      "lastCheckedAt": "2026-11-01T19:29:25.747Z",
       "today": {
         "date": "2026-11-01",
         "up": 0,
@@ -126,7 +126,7 @@
     "web": {
       "consecutiveFailures": 0,
       "lastStatus": "up",
-      "lastCheckedAt": "2026-11-01T14:58:21.053Z",
+      "lastCheckedAt": "2026-11-01T19:29:25.917Z",
       "today": {
         "date": "2026-11-01",
         "up": 1,
@@ -249,7 +249,7 @@
     "synthetic": {
       "consecutiveFailures": 441,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-11-01T14:58:21.167Z",
+      "lastCheckedAt": "2026-11-01T19:29:26.015Z",
       "today": {
         "date": "2026-11-01",
         "up": 0,
@@ -372,7 +372,7 @@
     "mainnet-api": {
       "consecutiveFailures": 1,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-11-01T14:58:36.168Z",
+      "lastCheckedAt": "2026-11-01T19:29:41.017Z",
       "today": {
         "date": "2026-11-01",
         "up": 0,
