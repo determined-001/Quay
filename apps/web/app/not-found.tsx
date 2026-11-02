@@ -10,7 +10,7 @@ export default function NotFoundPage() {
           address is wrong.
         </p>
         <div style={{ marginTop: 20 }}>
-          <Link className="btn btn--ghost" href="/">
+          <Link className="btn btn--ghost" href="/dashboard">
             Back to dashboard
           </Link>
         </div>

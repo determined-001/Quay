@@ -243,7 +243,7 @@ export function LinkDetailClient({ id }: { id: string }) {
         <div className="panel" style={{ textAlign: "center" }}>
           <p className="title">Link not found</p>
           <p className="muted">This link may have been removed, or the ID is wrong.</p>
-          <Link className="linkbtn" href="/">
+          <Link className="linkbtn" href="/dashboard">
             Back to dashboard
           </Link>
         </div>
@@ -272,7 +272,7 @@ export function LinkDetailClient({ id }: { id: string }) {
   return (
     <main className="shell">
       <header className="masthead">
-        <Link href="/" className="linkbtn" style={{ fontSize: 13 }}>
+        <Link href="/dashboard" className="linkbtn" style={{ fontSize: 13 }}>
           ← Back to dashboard
         </Link>
         <span className="net mono">{link.asset.code}</span>

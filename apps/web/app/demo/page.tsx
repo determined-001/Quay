@@ -36,18 +36,18 @@ export default async function DemoPage() {
           This sample storefront demonstrates integrating Quay Checkout into any third-party HTML website using a single 5KB script tag.
         </p>
 
-        <div style={{ border: "1px solid #30363d", borderRadius: 12, padding: 20, marginBottom: 24, background: "#161b22" }}>
+        <div style={{ border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 24, background: "var(--surface-2)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
               <h3 style={{ margin: "0 0 4px", fontSize: 18 }}>Handcrafted Ceramic Mug</h3>
               <p className="muted" style={{ margin: 0, fontSize: 14 }}>Limited edition matte black ceramic 12oz cup.</p>
             </div>
-            <div className="mono" style={{ fontSize: 20, fontWeight: "bold", color: "#2f81f7" }}>
+            <div className="mono" style={{ fontSize: 20, fontWeight: "bold", color: "var(--accent)" }}>
               $25.00 USDC
             </div>
           </div>
 
-          <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #30363d", display: "flex", gap: 12, alignItems: "center" }}>
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)", display: "flex", gap: 12, alignItems: "center" }}>
             {linkId ? (
               <button
                 id="demo-pay-btn"
@@ -69,21 +69,21 @@ export default async function DemoPage() {
                 </button>
                 <p className="muted" style={{ margin: 0, fontSize: 12 }}>
                   Demo not seeded.{" "}
-                  <code style={{ background: "#0d1117", padding: "1px 5px", borderRadius: 4 }}>
+                  <code style={{ background: "var(--ink)", padding: "1px 5px", borderRadius: 4 }}>
                     pnpm demo:seed
                   </code>{" "}
                   to activate.
                 </p>
               </div>
             )}
-            <Link className="linkbtn" href="/">
+            <Link className="linkbtn" href="/dashboard">
               Back to dashboard
             </Link>
           </div>
         </div>
 
         <h3>Integration Snippet</h3>
-        <pre style={{ background: "#0d1117", padding: 16, borderRadius: 8, overflowX: "auto", fontSize: 13 }} className="mono">
+        <pre style={{ background: "var(--ink)", padding: 16, borderRadius: 8, overflowX: "auto", fontSize: 13 }} className="mono">
 {`<script src="https://quay-web.vercel.app/widget.js" defer></script>
 <button data-quay-link="${linkId ?? "lnk_your_id_here"}" data-quay-label="Pay $25.00">Pay</button>`}
         </pre>

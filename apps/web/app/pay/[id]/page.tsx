@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { api, CheckoutError } from "../../../lib/api";
 import CheckoutClient from "../../components/CheckoutClient";
+import Logo from "../../components/Logo";
+import ThemeToggle from "../../components/ThemeToggle";
 
 export default async function PayPage({
   params,
@@ -42,7 +44,7 @@ export default async function PayPage({
               Refresh
             </Link>
             <Link className="btn btn--ghost" href="/">
-              Back to dashboard
+              Go to Quay
             </Link>
           </div>
         </div>
@@ -54,8 +56,11 @@ export default async function PayPage({
     <main className={isEmbed ? "shell shell--embed" : "shell shell--narrow"}>
       {!isEmbed && (
         <header className="masthead">
-          <h1>Stellar Checkout</h1>
-          <span className="net mono">{data.link.asset.code}</span>
+          <Logo />
+          <span className="masthead__right">
+            <span className="net mono">{data.link.asset.code}</span>
+            <ThemeToggle />
+          </span>
         </header>
       )}
       <div className={isEmbed ? "panel panel--embed" : "panel"}>
