@@ -65,6 +65,25 @@ behaviour belongs behind a port (`RailPort`, `WatcherPort`, `OffRampPort`), not
 in the domain. Keep that boundary intact — CI enforces it (see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)), so a violation fails the build.
 
+## Dependencies: do not guess package names
+
+Copy-paste and AI assistants both invent plausible package names, and a name
+nobody has registered can be claimed by anyone, including someone who wants to
+run code on your machine. So:
+
+- Before adding a dependency, confirm it exists, who publishes it, and that it
+  is the project you mean. State why in the PR.
+- **Stellar Intel** (anchor rates and health, used for cash-out quotes) has one
+  real client: `@stellarintel/sdk`, source at
+  [`ezedike-evan/stellar-intel`, `packages/sdk`](https://github.com/ezedike-evan/stellar-intel/tree/main/packages/sdk).
+  As of 2026-11-02 it is **not published to npm**, and look-alike names such as
+  `stellar-intel` and `stellarintel` are unregistered. Do not `npm install` any
+  of them. Until it is published, reach Intel's HTTP API through the rate source
+  in `apps/api/src/services/rate-source.ts`; do not copy or re-implement the SDK.
+  Once it is published it is added to `apps/api` at an exact version.
+- Never add a package to satisfy an import that an assistant wrote. Check the
+  import against `package.json` first.
+
 ## Prerequisites
 
 - Node 22 (what CI and the API's Docker image run)

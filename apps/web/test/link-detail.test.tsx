@@ -137,7 +137,7 @@ describe("LinkDetailClient", () => {
 
     expect(container.textContent).toContain("Link not found");
     expect(container.textContent).toContain("This link may have been removed, or the ID is wrong.");
-    const backLink = container.querySelector("a[href='/']");
+    const backLink = container.querySelector("a[href='/dashboard']");
     expect(backLink?.textContent).toContain("Back to dashboard");
   });
 

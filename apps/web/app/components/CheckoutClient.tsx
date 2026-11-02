@@ -53,6 +53,13 @@ function terminalCopy(status: string): { heading: string; detail: string } {
   }
 }
 
+/** "25" -> "25.00"; "0.4" -> "0.40"; "1.2345" is left alone. A price should
+ *  never render with a bare integer, but must never lose precision either. */
+function formatAmount(amount: string): string {
+  const [whole, fraction = ""] = amount.split(".");
+  return fraction.length >= 2 ? amount : `${whole}.${fraction.padEnd(2, "0")}`;
+}
+
 /** "9:41", or "0:07". Always mm:ss so the width does not jump every tick. */
 function formatRemaining(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000));
@@ -462,7 +469,7 @@ export default function CheckoutClient({
       <p className="title">{link.title}</p>
 
       <div className="amount-hero">
-        {link.amount}
+        {formatAmount(link.amount)}
         <span className="asset">{link.asset.code}</span>
       </div>
 

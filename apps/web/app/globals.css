@@ -1,19 +1,123 @@
+/* Quay design tokens. Two themes, one accent. Greys are tinted toward the
+   harbour green so surfaces read as one family; amber and red exist only to
+   carry status, never decoration.
+
+   Dark is the default. Light applies when the visitor picks it, or when they
+   pick nothing and their system prefers light (the block is repeated below the
+   :root rule because CSS cannot share one declaration list between an
+   attribute selector and a media query). `data-theme` is set by the inline
+   script in layout.tsx and by ThemeToggle; "system" removes the attribute. */
 :root {
-  --ink: #0b0f14;
-  --surface: #12181f;
-  --surface-2: #161d26;
-  --border: #1e2730;
-  --text: #e6edf3;
-  --muted: #8a97a6;
-  --accent: #3fd9a4; /* settled / confirm — used sparingly */
-  --amber: #e8b84b; /* pending / underpaid */
-  --red: #e8736b;
-  --radius: 8px;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+  --ink: #080c0b;
+  --surface: #0e1413;
+  --surface-2: #141c1a;
+  --border: #1d2825;
+  --hairline: rgba(255, 255, 255, 0.07);
+  --hairline-strong: rgba(255, 255, 255, 0.1);
+  --hairline-hover: rgba(255, 255, 255, 0.22);
+  --veil: rgba(255, 255, 255, 0.028); /* barely-there fill that lifts a surface */
+  --edge: rgba(255, 255, 255, 0.065); /* top highlight on a plate */
+  --shadow: rgba(0, 0, 0, 0.75);
+  --text: #e8eeeb;
+  --muted: #8b9a95;
+  --accent: #4fd8aa; /* settled / confirm / primary action */
+  --accent-hover: #63e0b6;
+  --accent-ink: #04211a; /* text and icons that sit on the accent */
+  --accent-ink-soft: rgba(4, 33, 26, 0.14);
+  --amber: #e3b25a; /* pending / underpaid */
+  --red: #e5776f;
+  --code-fg: #c8d3cf;
+  --code-c: #5d6e69;
+  --code-t: #8fb7a8;
+  --code-a: #c9b27a;
+  --grain: 0.045;
+  --radius: 14px;
+  --radius-sm: 10px;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Names components already reference but that were never defined, so they
+     silently fell back to unrelated greys and blues. Aliased here, once,
+     instead of editing every call site. */
+  --blue: var(--accent); /* inline text links */
+  --text-2: var(--muted);
+  --bg: var(--ink);
+  --surface-1: var(--surface);
+  --danger: var(--red);
+  --clr-accent: var(--accent);
+  --clr-text: var(--text);
+  --clr-muted: var(--muted);
+  --clr-border: var(--border);
+  --clr-surface-raised: var(--surface-2);
+  --clr-danger: var(--red);
+  --clr-error: var(--red);
+
+  --mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* Light. The accent is a deeper green than the dark theme's mint: mint on a pale
+   surface fails text contrast, so every accent-coloured link, pill and label
+   would be unreadable. Text on the accent flips to white to match. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ink: #f3f5f2;
+  --surface: #ffffff;
+  --surface-2: #eef1ee;
+  --border: #dce3df;
+  --hairline: rgba(12, 30, 24, 0.1);
+  --hairline-strong: rgba(12, 30, 24, 0.16);
+  --hairline-hover: rgba(12, 30, 24, 0.3);
+  --veil: rgba(12, 30, 24, 0.03);
+  --edge: rgba(255, 255, 255, 0.95);
+  --shadow: rgba(24, 48, 40, 0.2);
+  --text: #0d1512;
+  --muted: #55645e;
+  --accent: #0a7d5e;
+  --accent-hover: #0b8f6d;
+  --accent-ink: #ffffff;
+  --accent-ink-soft: rgba(255, 255, 255, 0.2);
+  --amber: #9a6208;
+  --red: #c0392f;
+  --code-fg: #2b3a35;
+  --code-c: #8a9893;
+  --code-t: #1f7a60;
+  --code-a: #9a6208;
+  --grain: 0.03;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --ink: #f3f5f2;
+    --surface: #ffffff;
+    --surface-2: #eef1ee;
+    --border: #dce3df;
+    --hairline: rgba(12, 30, 24, 0.1);
+    --hairline-strong: rgba(12, 30, 24, 0.16);
+    --hairline-hover: rgba(12, 30, 24, 0.3);
+    --veil: rgba(12, 30, 24, 0.03);
+    --edge: rgba(255, 255, 255, 0.95);
+    --shadow: rgba(24, 48, 40, 0.2);
+    --text: #0d1512;
+    --muted: #55645e;
+    --accent: #0a7d5e;
+    --accent-hover: #0b8f6d;
+    --accent-ink: #ffffff;
+    --accent-ink-soft: rgba(255, 255, 255, 0.2);
+    --amber: #9a6208;
+    --red: #c0392f;
+    --code-fg: #2b3a35;
+    --code-c: #8a9893;
+    --code-t: #1f7a60;
+    --code-a: #9a6208;
+    --grain: 0.03;
+  }
 }
 
 * { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
 
 html, body {
   margin: 0;
@@ -22,11 +126,59 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Ambient light from above plus a fixed grain layer: flat vector black reads as
+   sterile, and the grain sits on its own non-scrolling layer so it costs
+   nothing to paint. */
+body {
+  min-height: 100dvh;
+  background:
+    radial-gradient(1100px 520px at 50% -12%, rgba(79, 216, 170, 0.07), transparent 62%),
+    var(--ink);
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: var(--grain);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
 
 a { color: inherit; }
+h1, h2, h3 { text-wrap: balance; }
+p { text-wrap: pretty; }
+
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+/* ---------- theme switcher ---------- */
+.theme-toggle { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--veil); box-shadow: 0 0 0 1px var(--hairline); }
+.theme-toggle__btn {
+  appearance: none; border: 0; background: transparent; color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 50%; cursor: pointer;
+  transition: color 0.4s var(--ease), background 0.4s var(--ease), transform 0.5s var(--ease);
+}
+.theme-toggle__btn:hover { color: var(--text); }
+.theme-toggle__btn:active { transform: scale(0.94); }
+.theme-toggle__btn[aria-pressed="true"] { color: var(--text); background: var(--surface-2); box-shadow: inset 0 1px 0 var(--edge), 0 0 0 1px var(--hairline); }
+
+/* ---------- brand ---------- */
+.logo { display: inline-flex; align-items: center; gap: 9px; color: var(--text); text-decoration: none; }
+.logo-mark { flex-shrink: 0; }
+.logo-word { font-size: 19px; font-weight: 600; letter-spacing: -0.03em; }
 
 /* The signature: monetary amounts and on-chain references are always mono,
    tabular, slightly tracked — the page reads like a settlement terminal. */
@@ -39,40 +191,66 @@ a { color: inherit; }
 .shell { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
 .shell--narrow { max-width: 460px; }
 
-.masthead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
-.masthead h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.masthead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 36px; padding-bottom: 18px; border-bottom: 1px solid var(--hairline); }
+.masthead h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
 .masthead .net { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: middle; }
+.masthead__right { display: inline-flex; align-items: center; gap: 14px; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 7px; vertical-align: middle; box-shadow: 0 0 0 3px rgba(79, 216, 170, 0.14); }
 
-.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-.panel + .panel { margin-top: 20px; }
-.panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 16px; font-weight: 600; }
+/* A panel is a machined plate in a tray: the inner surface carries its own top
+   highlight, and two spread rings stand in for the outer shell, so the nested
+   double-bezel needs no extra wrapper element in any component. */
+.panel {
+  position: relative;
+  z-index: 2;
+  background: linear-gradient(180deg, var(--veil), transparent 38%), var(--surface);
+  border: 0;
+  border-radius: 18px;
+  padding: 22px;
+  box-shadow:
+    inset 0 1px 0 var(--edge),
+    0 0 0 1px var(--hairline),
+    0 0 0 7px var(--veil),
+    0 0 0 8px var(--hairline),
+    0 28px 48px -28px var(--shadow);
+}
+.panel + .panel { margin-top: 32px; }
+.panel h2 { font-size: 15px; letter-spacing: -0.01em; color: var(--text); margin: 0 0 18px; font-weight: 600; }
 
 .field { margin-bottom: 14px; }
-.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.field label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); margin-bottom: 7px; }
 .field input, .field select {
   width: 100%; background: var(--ink); border: 1px solid var(--border); color: var(--text);
-  border-radius: 6px; padding: 10px 12px; font-size: 14px; font-family: var(--sans);
+  border-radius: var(--radius-sm); padding: 11px 13px; font-size: 14px; font-family: var(--sans);
+  transition: border-color 0.4s var(--ease), box-shadow 0.4s var(--ease);
 }
+.field input:hover, .field select:hover { border-color: #2a3835; }
 .field input.mono { font-family: var(--mono); }
-.field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79, 216, 170, 0.16); }
 .row { display: grid; grid-template-columns: 1fr 120px; gap: 12px; }
 
 .btn {
   appearance: none; border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
-  border-radius: 6px; padding: 10px 14px; font-size: 14px; font-weight: 500; cursor: pointer;
-  font-family: var(--sans); transition: border-color 0.15s, background 0.15s;
+  border-radius: 999px; padding: 10px 18px; font-size: 14px; font-weight: 500; cursor: pointer;
+  font-family: var(--sans); text-decoration: none; line-height: 1.4;
+  transition: transform 0.5s var(--ease), border-color 0.4s var(--ease), background 0.4s var(--ease), box-shadow 0.4s var(--ease);
 }
-.btn:hover { border-color: var(--muted); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn--primary { background: var(--accent); color: #042018; border-color: transparent; font-weight: 600; }
-.btn--primary:hover { filter: brightness(1.06); }
+.btn:hover { border-color: var(--hairline-hover); transform: translateY(-1px); }
+.btn:active { transform: translateY(0) scale(0.98); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.btn--primary {
+  background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 10px 26px -12px rgba(79, 216, 170, 0.6);
+}
+.btn--primary:hover { border-color: transparent; background: var(--accent-hover); }
 .btn--block { width: 100%; display: block; text-align: center; }
 .btn--ghost { background: transparent; }
 
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-.table td { padding: 12px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 8px 10px; border-bottom: 1px solid var(--hairline); }
+.table td { padding: 13px 10px; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
+.table tbody tr { transition: background 0.4s var(--ease); }
+.table tbody tr:hover { background: var(--veil); }
 .table tr:last-child td { border-bottom: none; }
 .table .amt { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
@@ -169,13 +347,13 @@ a { color: inherit; }
 
 /* ---------- checkout ---------- */
 .checkout { text-align: center; }
-.checkout .merchant { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-.checkout .title { font-size: 16px; margin: 0 0 24px; font-weight: 500; }
-.amount-hero { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 52px; font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
-.amount-hero .asset { font-size: 18px; color: var(--muted); margin-left: 8px; letter-spacing: 0; font-weight: 500; }
-.qr-wrap { display: inline-flex; padding: 16px; background: #fff; border-radius: var(--radius); margin: 28px 0 8px; }
-.memo-note { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin: 20px 0; text-align: left; }
-.memo-note .k { font-size: 11px; color: var(--amber); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.checkout .merchant { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.checkout .title { font-size: 17px; margin: 0 0 26px; font-weight: 500; letter-spacing: -0.015em; }
+.amount-hero { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 58px; font-weight: 600; letter-spacing: -0.045em; line-height: 1; }
+.amount-hero .asset { font-size: 16px; color: var(--muted); margin-left: 10px; letter-spacing: 0; font-weight: 500; }
+.qr-wrap { display: inline-flex; padding: 16px; background: #f4f7f5; border-radius: 22px; margin: 30px 0 10px; box-shadow: 0 0 0 1px var(--hairline-strong), 0 24px 40px -22px rgba(79, 216, 170, 0.35); }
+.memo-note { background: rgba(227, 178, 90, 0.06); border: 1px solid rgba(227, 178, 90, 0.22); border-radius: var(--radius-sm); padding: 13px 15px; margin: 20px 0; text-align: left; }
+.memo-note .k { font-size: 12px; font-weight: 500; color: var(--amber); margin-bottom: 5px; }
 .memo-note .v { font-family: var(--mono); font-size: 14px; word-break: break-all; }
 .wallet-pay { margin: 12px 0 0; }
 .wallet-pay + .btn { margin-top: 12px; }
@@ -272,6 +450,38 @@ a { color: inherit; }
 .csv-field { flex: 1; min-width: 160px; margin-bottom: 0; }
 .csv-field input { font-family: var(--sans); }
 
+/* ---------- dashboard chrome ---------- */
+.dash-tabs { display: flex; gap: 6px; margin-bottom: 28px; padding: 5px; width: max-content; max-width: 100%; border-radius: 999px; background: var(--veil); box-shadow: 0 0 0 1px var(--hairline); }
+.dash-tab {
+  appearance: none; border: 0; background: transparent; color: var(--muted);
+  padding: 8px 18px; border-radius: 999px; font-family: var(--sans); font-size: 14px; font-weight: 500; cursor: pointer;
+  transition: color 0.4s var(--ease), background 0.4s var(--ease);
+}
+.dash-tab:hover { color: var(--text); }
+.dash-tab--on { color: var(--text); background: var(--surface-2); box-shadow: inset 0 1px 0 var(--edge), 0 0 0 1px var(--hairline); }
+
+/* Ledger strip: three figures separated by hairlines rather than three cards. */
+.stats {
+  position: relative; z-index: 2;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 32px; border-radius: 18px; overflow: hidden;
+  background: linear-gradient(180deg, var(--veil), transparent 60%), var(--surface);
+  box-shadow: inset 0 1px 0 var(--edge), 0 0 0 1px var(--hairline);
+}
+.stats > div { display: flex; flex-direction: column; gap: 8px; padding: 22px 24px; }
+.stats > div + div { border-left: 1px solid var(--hairline); }
+.stats__k { font-size: 13px; color: var(--muted); }
+.stats__v { font-size: 34px; font-weight: 600; letter-spacing: -0.04em; line-height: 1; }
+@media (max-width: 560px) {
+  .stats > div { padding: 16px 14px; }
+  .stats__v { font-size: 24px; }
+  .stats__k { font-size: 12px; }
+}
+
+.empty--rich { padding: 40px 12px; }
+.empty--rich strong { display: block; margin-bottom: 8px; color: var(--text); font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+.empty--rich p { margin: 0 auto; max-width: 46ch; }
+
 .dash-link-title { color: var(--accent); text-decoration: none; font-weight: 500; }
 .dash-link-title:hover { text-decoration: underline; }
 
@@ -298,6 +508,9 @@ a { color: inherit; }
   border: none;
   border-radius: 0;
   padding: 20px 16px;
+  /* The widget's own frame already supplies the outer shell; drop the tray. */
+  background: transparent;
+  box-shadow: none;
 }
 
 /* Tighter than the default (and the existing <=560px breakpoint) - 440px is
