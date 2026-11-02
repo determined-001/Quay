@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../app/components/SessionGate", () => ({
   useSellerWallet: () => "GSELLERWALLET",
+  useSellerSession: () => ({ address: "GSELLERWALLET", busy: false, signOut: () => {} }),
 }));
 
 vi.mock("next/link", () => ({
@@ -33,7 +34,7 @@ interface CapturedRequest {
   body?: any;
 }
 
-describe("Dashboard tab persistence and API keys retention (issue #419)", () => {
+describe("Dashboard navigation and API keys retention (issue #419)", () => {
   let container: HTMLDivElement;
   let root: Root;
   let requests: CapturedRequest[];
@@ -151,28 +152,39 @@ describe("Dashboard tab persistence and API keys retention (issue #419)", () => 
     vi.restoreAllMocks();
   });
 
-  it("does not fetch api-keys before the tab is first opened", async () => {
+  /** A page in the dashboard's sidebar (the first match: the phone tab bar repeats the main ones). */
+  const navTo = async (label: string) => {
+    const item = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
+      (b) => b.textContent?.trim() === label,
+    );
+    expect(item, `nav item "${label}"`).toBeDefined();
+    await act(async () => item!.click());
+  };
+
+  it("does not fetch api-keys before the Developers area is first opened", async () => {
     await act(async () => root.render(<Dashboard />));
 
     const keyRequests = requests.filter((r) => r.url.includes("/api-keys"));
     expect(keyRequests).toHaveLength(0);
   });
 
-  it("preserves reveal banner and key across tab switches until Done is pressed", async () => {
+  it("opens on Home, and keeps developer tools off the everyday pages", async () => {
     await act(async () => root.render(<Dashboard />));
 
-    // Initially on Payment links tab
+    expect(container.querySelector("h1")?.textContent).toBe("Home");
+    // No API keys, webhooks or exports anywhere near the page a business owner opens daily.
+    expect(container.textContent).not.toContain("Create key");
+    expect(container.textContent).not.toContain("Webhooks");
+  });
+
+  it("preserves reveal banner and key across page changes until Done is pressed", async () => {
+    await act(async () => root.render(<Dashboard />));
+
+    // Nothing is fetched until Developers is opened
     expect(requests.filter((r) => r.url.includes("/api-keys"))).toHaveLength(0);
 
-    // Switch to API keys tab
-    const keysTab = [...container.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) =>
-      b.textContent?.includes("API keys"),
-    )!;
-    expect(keysTab).toBeDefined();
-
-    await act(async () => {
-      keysTab.click();
-    });
+    // Open Developers (it lands on API keys)
+    await navTo("Developers");
 
     // Keys endpoint is requested upon opening the tab
     const keyGetRequests = requests.filter(
@@ -204,29 +216,21 @@ describe("Dashboard tab persistence and API keys retention (issue #419)", () => 
     expect(container.textContent).toContain("Copy your key now — it will not be shown again");
     expect(container.textContent).toContain(FAKE_KEY);
 
-    // Switch back to Payment links tab
-    const linksTab = [...container.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) =>
-      b.textContent?.includes("Payment links"),
-    )!;
-    expect(linksTab).toBeDefined();
+    // Go to Payments
+    await navTo("Payments");
+    expect(container.querySelector("h1")?.textContent).toBe("Payments");
 
-    await act(async () => {
-      linksTab.click();
-    });
-
-    // ApiKeys panel is hidden, not unmounted
-    const hiddenWrapper = container.querySelector("div[hidden]");
+    // The Developers area is hidden, not unmounted
+    const hiddenWrapper = container.querySelector("#devpanel-api-keys")!.closest("[hidden]") as HTMLElement | null;
     expect(hiddenWrapper).not.toBeNull();
-    expect((hiddenWrapper as HTMLElement).hidden).toBe(true);
+    expect(hiddenWrapper!.hidden).toBe(true);
 
-    // Switch back to API keys tab
-    await act(async () => {
-      keysTab.click();
-    });
+    // Come back to Developers
+    await navTo("Developers");
 
-    expect((hiddenWrapper as HTMLElement).hidden).toBe(false);
+    expect(hiddenWrapper!.hidden).toBe(false);
 
-    // Banner and key survived the tab switch round-trip!
+    // Banner and key survived the page round-trip!
     expect(container.textContent).toContain("Copy your key now — it will not be shown again");
     expect(container.textContent).toContain(FAKE_KEY);
 

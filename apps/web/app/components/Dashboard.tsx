@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   api,
@@ -15,309 +14,46 @@ import {
 import {
   calculateAnchorRecheckDelay,
   shouldShowAnchorReconnectBanner,
-  shouldShowReconnectHint,
   useAnchorConnect,
 } from "../../lib/anchor-session";
-import ApiKeys from "./ApiKeys";
+import type { PaymentFilter } from "../../lib/dashboard-metrics";
+import type { KycLoadState } from "../../lib/kyc-load";
 import KycPanel from "./KycPanel";
 import RegistrationForm from "./RegistrationForm";
-import ErasePanel from "./ErasePanel";
-import ExportPanel from "./ExportPanel";
-import type { KycLoadState } from "../../lib/kyc-load";
 import DisclosuresPanel from "./DisclosuresPanel";
 import CashOutModal from "./CashOutModal";
 import { PendingTransferModal } from "./TransferStep";
 import { useSellerWallet } from "./SessionGate";
+import Alerts from "./dashboard/Alerts";
+import CashOutView from "./dashboard/CashOutView";
+import { OFFRAMP_CURRENCY, OFFRAMP_ENABLED, OFFRAMP_IS_MOCK } from "./dashboard/config";
+import CreateLinkSheet, { type NewLink } from "./dashboard/CreateLinkSheet";
+import DevelopersView from "./dashboard/DevelopersView";
+import HomeView from "./dashboard/HomeView";
+import PaymentsView from "./dashboard/PaymentsView";
+import SettingsView from "./dashboard/SettingsView";
+import Shell, { type View } from "./dashboard/Shell";
 
-// Mirrors the API's OFFRAMP setting (see .env.example) so this button never
-// claims a real payout when the backend is still running MockAnchorOffRamp.
-const OFFRAMP_CURRENCY = process.env.NEXT_PUBLIC_OFFRAMP_CURRENCY ?? "NGN";
-// Only "mock" is simulated. Tested against the mode name rather than
-// `!== "testanchor"`, which was an allowlist of exactly one real backend: it
-// labelled OFFRAMP=anchor — a production anchor moving real money — as
-// "(simulated)", which is the one direction this label must never be wrong in.
-const OFFRAMP_IS_MOCK = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") === "mock";
-// OFFRAMP=none: the deployment takes payments and stops there. Sellers are paid
-// directly on-chain and move their own funds, so there is no cash-out button,
-// no KYC to collect, and no modal — the API answers 501 on those routes. Every
-// other surface (links, QR codes, the paid timeline) is unaffected.
-const OFFRAMP_ENABLED = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "none";
-const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
-  ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
-  : `Cash out to ${OFFRAMP_CURRENCY}`;
+const VIEWS: readonly View[] = ["home", "payments", "cashout", "settings", "developers"];
 
-// ── Small helpers ───────────────────────────────────────────────────────────
-
-function StatusPill({ status, offrampStatus }: { status: string; offrampStatus?: string | null }) {
-  if (status === "offramp_pending" && offrampStatus === "awaiting_transfer") {
-    return <span className="pill pill--offramp_awaiting_transfer">awaiting transfer</span>;
-  }
-  const label = status.replace("offramp_", "off-ramp ").replace("_", " ");
-  return <span className={`pill pill--${status}`}>{label}</span>;
-}
-
-function DemoBadge() {
-  return (
-    <span
-      className="pill"
-      style={{ background: "var(--surface-2, #f3f4f6)", color: "var(--text-2, #6b7280)", fontSize: "0.7rem" }}
-      title="Created by the demo seed script — real on-chain testnet data"
-    >
-      demo
-    </span>
-  );
-}
-
-function amountLabel(link: PaymentLink): string {
-  return `${link.amount} ${link.asset.code}`;
-}
-
-/** Statuses where the buyer has paid in full; the money is the seller's. */
-const PAID_STATUSES = new Set(["paid", "offramp_pending", "offramp_settled", "offramp_failed"]);
-
-/**
- * A three-figure ledger strip above the links: what has come in, what is still
- * waiting, and how many links have settled. Derived from the list already on
- * screen, so it can never disagree with the table below it. Only USDC is
- * summed; mixing assets into one number would be wrong.
- */
-function LinkStats({ links }: { links: PaymentLink[] }) {
-  const paid = links.filter((l) => PAID_STATUSES.has(l.status));
-  const receivedUsdc = paid
-    .filter((l) => l.asset.code === "USDC")
-    .reduce((sum, l) => sum + Number(l.amount), 0);
-  const waiting = links.filter((l) => l.status === "active").length;
-  return (
-    <section className="stats" aria-label="Summary">
-      <div>
-        <span className="stats__k">USDC received</span>
-        <span className="stats__v mono">{receivedUsdc.toFixed(2)}</span>
-      </div>
-      <div>
-        <span className="stats__k">Waiting for payment</span>
-        <span className="stats__v mono">{waiting}</span>
-      </div>
-      <div>
-        <span className="stats__k">Paid links</span>
-        <span className="stats__v mono">{paid.length}</span>
-      </div>
-    </section>
-  );
-}
-
-function SkeletonTable() {
-  return (
-    <table className="table">
-      <thead>
-        <tr>
-          <th>Title</th>
-          <th>Amount</th>
-          <th>Status</th>
-          <th className="hide-sm">Reference</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {[1, 2, 3].map((i) => (
-          <tr key={i}>
-            <td>
-              <span className="skeleton skeleton--w140" />
-            </td>
-            <td className="amt">
-              <span className="skeleton skeleton--w80" />
-            </td>
-            <td>
-              <span className="skeleton skeleton--w60" />
-            </td>
-            <td className="hide-sm">
-              <span className="skeleton skeleton--w120" />
-            </td>
-            <td style={{ textAlign: "right" }}>
-              <span className="skeleton skeleton--w90 skeleton--right" />
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-function ErrorBanner({
-  message,
-  onRetry,
-}: {
-  message: string;
-  onRetry: () => void;
-}) {
-  return (
-    <div className="error-banner">
-      <p className="error-banner__text">{message}</p>
-      <button className="btn btn--ghost" onClick={onRetry}>
-        Retry
-      </button>
-    </div>
-  );
+/** The view named by the URL fragment, so a refresh or the back button lands where you were. */
+function viewFromHash(): View {
+  if (typeof window === "undefined") return "home";
+  const h = window.location.hash.replace(/^#/, "");
+  return (VIEWS as readonly string[]).includes(h) ? (h as View) : "home";
 }
 
 /**
- * Inline indicative rate badge shown next to a paid link (issue 3.5).
- * Fetches once when the component mounts; clearly labelled "indicative" so
- * the seller understands no firm quote has been consumed.
+ * The seller's dashboard. This component owns the data and the long-running
+ * work (polling links, the KYC and anchor-session checks, the cash-out dialogs)
+ * and hands what to draw to the views under `./dashboard`.
  */
-function IndicativeRateBadge({ linkId }: { linkId: string }) {
-  const [price, setPrice] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getOfframpPreview(linkId, OFFRAMP_CURRENCY)
-      .then((preview) => {
-        if (cancelled) return;
-        const entry = preview.prices.find((p) => p.targetCurrency === OFFRAMP_CURRENCY);
-        setPrice(entry?.price ?? null);
-      })
-      .catch(() => {
-        // Non-fatal: the rate preview is best-effort.
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [linkId]);
-
-  if (loading) return <span className="muted" style={{ fontSize: "0.75rem" }}>rate…</span>;
-  if (!price) return null;
-
-  return (
-    <span
-      className="muted"
-      style={{ fontSize: "0.75rem" }}
-      title="Indicative rate from SEP-38 GET /prices — no firm quote consumed"
-    >
-      ~{Number(price).toLocaleString()} {OFFRAMP_CURRENCY}
-      <span style={{ marginLeft: 3, opacity: 0.6 }}>(indicative)</span>
-    </span>
-  );
-}
-
-interface TableProps {
-  links: PaymentLink[];
-  copied: string | null;
-  onCopy: (id: string) => void;
-  onCashOut: (id: string) => void;
-  onPendingTransfer: (id: string) => void;
-  cashOutBlocked: boolean;
-  anchorAuth: AnchorAuthView | null;
-}
-
-function LinksTable({ links, copied, onCopy, onCashOut, onPendingTransfer, cashOutBlocked, anchorAuth }: TableProps) {
-  return (
-    <table className="table">
-      <thead>
-        <tr>
-          <th>Title</th>
-          <th>Amount</th>
-          <th>Status</th>
-          <th className="hide-sm">Reference</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {links.map((link) => {
-          const showReconnect = shouldShowReconnectHint(link, anchorAuth, {
-            offrampEnabled: OFFRAMP_ENABLED,
-            isMock: OFFRAMP_IS_MOCK,
-          });
-
-          return (
-            <tr key={link.id}>
-              <td>
-                <Link href={`/links/${link.id}`} className="dash-link-title">
-                  {link.title}
-                </Link>
-                {link.isDemo && <> <DemoBadge /></>}
-              </td>
-              <td className="amt">
-                {amountLabel(link)}
-                {/* Indicative rate shown inline for paid links — no firm quote burned */}
-                {link.status === "paid" && (
-                  <div style={{ marginTop: 2 }}>
-                    <IndicativeRateBadge linkId={link.id} />
-                  </div>
-                )}
-              </td>
-              <td>
-                {showReconnect ? (
-                  <span
-                    className="pill pill--offramp_pending"
-                    title="Your session with the anchor expired. Reconnect to keep tracking."
-                  >
-                    waiting for reconnect
-                  </span>
-                ) : (
-                  <StatusPill status={link.status} offrampStatus={link.offrampStatus} />
-                )}
-              </td>
-              <td className="hide-sm">
-                <span className="mono muted">{link.reference}</span>
-              </td>
-              <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                <button className="linkbtn" onClick={() => onCopy(link.id)}>
-                  {copied === link.id ? "Copied" : "Copy link"}
-                </button>
-                {OFFRAMP_ENABLED && (link.status === "paid" || link.status === "offramp_failed") && (
-                  <>
-                    {" · "}
-                    {cashOutBlocked ? (
-                      <span className="muted" style={{ fontSize: 12 }} title="Complete identity verification above">
-                        Identity verification required
-                      </span>
-                    ) : (
-                      <button className="linkbtn" onClick={() => onCashOut(link.id)}>
-                        {link.status === "offramp_failed" ? "Retry cash-out" : CASH_OUT_LABEL}
-                      </button>
-                    )}
-                  </>
-                )}
-                {/* Resume an unsent withdrawal transfer. Fetches the instructions only on
-                    click, so the 5s refresh loop adds no anchor round trip per link. */}
-                {OFFRAMP_ENABLED &&
-                  !OFFRAMP_IS_MOCK &&
-                  link.status === "offramp_pending" &&
-                  link.offrampStatus === "awaiting_transfer" && (
-                    <>
-                      {" · "}
-                      <button className="linkbtn" onClick={() => onPendingTransfer(link.id)}>
-                        Send USDC to finish cash-out
-                      </button>
-                    </>
-                  )}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-// ── Component ───────────────────────────────────────────────────────────────
-
 export default function Dashboard() {
   const wallet = useSellerWallet();
   const [links, setLinks] = useState<PaymentLink[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // Create-link form
-  const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState("");
-  const [assetCode, setAssetCode] = useState<"USDC" | "XLM">("USDC");
-  const [creating, setCreating] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [trustline, setTrustline] = useState<UsdcTrustlineStatus | null>(null);
   const [kyc, setKyc] = useState<KycView | null>(null);
@@ -333,8 +69,52 @@ export default function Dashboard() {
   // Which pending link has the resume-transfer dialog open.
   const [pendingTransferLinkId, setPendingTransferLinkId] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<"links" | "api-keys">("links");
-  const [apiKeysOpened, setApiKeysOpened] = useState(false);
+  const [view, setView] = useState<View>("home");
+  // The Developers area is mounted the first time it is opened and kept after,
+  // so an API key shown once at creation survives a trip to another page.
+  const [developersOpened, setDevelopersOpened] = useState(false);
+  const [paymentsFilter, setPaymentsFilter] = useState<PaymentFilter>("all");
+  const [createOpen, setCreateOpen] = useState(false);
+  // Drives "5 min ago" labels; refreshed on a slow timer, not on every poll.
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const apply = () => {
+      const v = viewFromHash();
+      setView(v);
+      if (v === "developers") setDevelopersOpened(true);
+    };
+    apply();
+    window.addEventListener("hashchange", apply);
+    window.addEventListener("popstate", apply);
+    return () => {
+      window.removeEventListener("hashchange", apply);
+      window.removeEventListener("popstate", apply);
+    };
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const navigate = useCallback((next: View) => {
+    setView(next);
+    if (next === "developers") setDevelopersOpened(true);
+    if (typeof window !== "undefined") {
+      if (window.location.hash !== `#${next}`) window.history.pushState(null, "", `#${next}`);
+      window.scrollTo?.({ top: 0 });
+      document.getElementById("app-main")?.focus({ preventScroll: true });
+    }
+  }, []);
+
+  const openPayments = useCallback(
+    (filter: PaymentFilter) => {
+      setPaymentsFilter(filter);
+      navigate("payments");
+    },
+    [navigate],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -503,33 +283,18 @@ export default function Dashboard() {
     void refreshDisclosures();
   }, [refreshDisclosures]);
 
-  async function create() {
-    setActionError(null);
-    if (!title.trim() || !amount.trim()) {
-      setActionError("Add a title and an amount.");
-      return;
-    }
-    setCreating(true);
+  async function createLink(values: NewLink): Promise<PaymentLink> {
     try {
-      const { link } = await api.createLink({
-        title: title.trim(),
-        amount: amount.trim(),
-        assetCode,
-      });
-      setTitle("");
-      setAmount("");
+      const { link } = await api.createLink(values);
       setLinks((prev) => [link, ...prev]);
+      return link;
     } catch (e) {
-      setActionError(
-        e instanceof CheckoutError
-          ? describeError(e)
-          : "Failed to create the payment link. Please try again.",
-      );
       if (e instanceof CheckoutError && e.code === "destination_cannot_receive") {
         void refreshTrustline(); // don't wait up to 15s for the banner to catch up
       }
-    } finally {
-      setCreating(false);
+      throw new Error(
+        e instanceof CheckoutError ? describeError(e) : "Failed to create the payment link. Please try again.",
+      );
     }
   }
 
@@ -554,259 +319,108 @@ export default function Dashboard() {
   // The link the modal is operating on; null when closed.
   const cashOutLink = cashOutLinkId ? (links.find((l) => l.id === cashOutLinkId) ?? null) : null;
 
-  const [csvFrom, setCsvFrom] = useState("");
-  const [csvTo, setCsvTo] = useState("");
-  const [exporting, setExporting] = useState(false);
-
-  async function handleCsvExport() {
-    setExporting(true);
-    try {
-      const blob = await api.exportCsv(csvFrom || undefined, csvTo || undefined);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `quay-links-export-${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : "Export failed");
-    } finally {
-      setExporting(false);
-    }
-  }
   // Real anchor and not yet verified: never let the seller submit a cash-out
   // that can only fail (or worse, silently carry placeholder identity data).
   const cashOutBlocked = !OFFRAMP_IS_MOCK && kyc?.status !== "ACCEPTED";
 
-  // ── Render ──────────────────────────────────────────────────────────────
+  const alerts = (
+    <Alerts
+      trustline={trustline}
+      reconnect={reconnectBanner}
+      reconnectError={reconnectError}
+      reconnecting={reconnecting}
+      onReconnect={handleReconnect}
+    />
+  );
+
+  const rowActions = {
+    copied,
+    onCopy: copyCheckout,
+    onCashOut: (id: string) => setCashOutLinkId(id),
+    onPendingTransfer: (id: string) => setPendingTransferLinkId(id),
+    cashOutBlocked,
+    anchorAuth,
+    now,
+  };
+
+  // Identity and consent only matter when a real anchor is on the other end.
+  const verification =
+    OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK ? (
+      <>
+        <RegistrationForm />
+        <KycPanel
+          kyc={kyc}
+          anchor={anchorAuth}
+          loadState={kycState}
+          loadError={kycError}
+          onRetry={() => void refreshKyc()}
+          onUpdated={(updated) => {
+            setKyc(updated);
+            void refreshDisclosures();
+          }}
+          onAnchorConnected={() => void refreshKyc()}
+        />
+        <DisclosuresPanel
+          disclosures={disclosures}
+          loading={disclosuresLoading}
+          error={disclosuresError}
+          deletableAnchorDomain={anchorAuth?.connected ? anchorAuth.anchor : null}
+          onRetry={() => void refreshDisclosures()}
+          onRevoke={disclosureAction ? undefined : (domain) => void revokeDisclosure(domain)}
+          onAskDelete={disclosureAction ? undefined : (domain) => void deleteDisclosure(domain)}
+        />
+      </>
+    ) : null;
 
   return (
     <>
-      <nav aria-label="Dashboard sections" className="dash-tabs">
-        {(["links", "api-keys"] as const).map((t) => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            className={tab === t ? "dash-tab dash-tab--on" : "dash-tab"}
-            onClick={() => {
-              setTab(t);
-              if (t === "api-keys") setApiKeysOpened(true);
-            }}
-          >
-            {t === "links" ? "Payment links" : "API keys"}
-          </button>
-        ))}
-      </nav>
-
-      {tab === "links" && (
-        <>
-      {!loading && !fetchError && links.length > 0 && <LinkStats links={links} />}
-
-      {trustline && !trustline.ok && (
-        <div className="banner banner--warn">
-          <strong>Your wallet can&apos;t receive USDC right now.</strong>{" "}
-          {trustline.message}
-          {trustline.trustlineUri && (
-            <>
-              {" "}
-              <a className="linkbtn" href={trustline.trustlineUri}>
-                Add USDC trustline
-              </a>
-            </>
-          )}
-        </div>
-      )}
-
-      <section className="panel">
-        <h2>New payment link</h2>
-        <div className="field">
-          <label htmlFor="title">What is this for</label>
-          <input
-            id="title"
-            placeholder="Invoice #1024 — 2x ceramic mug"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-          />
-        </div>
-        <div className="row">
-          <div className="field">
-            <label htmlFor="amount">Amount</label>
-            <input
-              id="amount"
-              className="mono"
-              inputMode="decimal"
-              placeholder="25.00"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="asset">Asset</label>
-            <select
-              id="asset"
-              value={assetCode}
-              onChange={(e) => setAssetCode(e.target.value as "USDC" | "XLM")}
-            >
-              <option value="USDC">USDC</option>
-              <option value="XLM">XLM</option>
-            </select>
-          </div>
-        </div>
-        <button className="btn btn--primary btn--block" onClick={create} disabled={creating}>
-          {creating ? "Creating…" : "Create link"}
-        </button>
-        {actionError && <div className="err">{actionError}</div>}
-      </section>
-
-      {OFFRAMP_ENABLED && !OFFRAMP_IS_MOCK && (
-        <>
-          <RegistrationForm />
-          <KycPanel
-            kyc={kyc}
-            anchor={anchorAuth}
-            loadState={kycState}
-            loadError={kycError}
-            onRetry={() => void refreshKyc()}
-            onUpdated={(updated) => { setKyc(updated); void refreshDisclosures(); }}
-            onAnchorConnected={() => void refreshKyc()}
-          />
-          <DisclosuresPanel disclosures={disclosures} loading={disclosuresLoading} error={disclosuresError}
-            deletableAnchorDomain={anchorAuth?.connected ? anchorAuth.anchor : null}
-            onRetry={() => void refreshDisclosures()}
-            onRevoke={disclosureAction ? undefined : (domain) => void revokeDisclosure(domain)}
-            onAskDelete={disclosureAction ? undefined : (domain) => void deleteDisclosure(domain)} />
-        </>
-      )}
-
-      <section className="panel">
-        <h2>Links</h2>
-
-        {reconnectBanner.show && (
-          <div
-            className="banner banner--warn"
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              flexWrap: "wrap",
-              gap: 12,
-              marginBottom: 16,
-            }}
-          >
-            <div>
-              <strong>
-                {reconnectBanner.isExpired
-                  ? `Your session with ${reconnectBanner.anchorName} expired.`
-                  : `Your session with ${reconnectBanner.anchorName} expires soon.`}
-              </strong>{" "}
-              {reconnectBanner.isExpired
-                ? `Reconnect to keep tracking ${reconnectBanner.affectedCount} cash-out${reconnectBanner.affectedCount > 1 ? "s" : ""}.`
-                : `Renew to keep tracking ${reconnectBanner.affectedCount} cash-out${reconnectBanner.affectedCount > 1 ? "s" : ""}.`}
-              {reconnectError && (
-                <div className="err" style={{ marginTop: 4 }}>
-                  {reconnectError}
-                </div>
-              )}
-            </div>
-            <button
-              className="btn btn--primary"
-              onClick={handleReconnect}
-              disabled={reconnecting}
-              style={{ fontSize: 13, padding: "6px 12px" }}
-            >
-              {reconnecting
-                ? "Waiting for wallet…"
-                : reconnectBanner.isExpired
-                  ? `Reconnect to ${reconnectBanner.anchorName}`
-                  : "Renew now"}
-            </button>
-          </div>
-        )}
-
-        {loading && <SkeletonTable />}
-
-        {!loading && fetchError && links.length === 0 && (
-          <ErrorBanner message={fetchError} onRetry={refresh} />
-        )}
-
-        {!loading && fetchError && links.length > 0 && (
-          <>
-            <ErrorBanner message={fetchError} onRetry={refresh} />
-            <div style={{ marginTop: 16 }}>
-              <LinksTable
-                links={links}
-                copied={copied}
-                onCopy={copyCheckout}
-                onCashOut={(id) => setCashOutLinkId(id)}
-                onPendingTransfer={(id) => setPendingTransferLinkId(id)}
-                cashOutBlocked={cashOutBlocked}
-                anchorAuth={anchorAuth}
-              />
-            </div>
-          </>
-        )}
-
-        {!loading && !fetchError && links.length === 0 && (
-          <div className="empty empty--rich">
-            <strong>No payment links yet</strong>
-            <p>
-              Create one above. A title and an amount are enough, and you get a hosted checkout page, a QR code
-              and a snippet for your own site.
-            </p>
-          </div>
-        )}
-
-        {!loading && !fetchError && links.length > 0 && (
-          <LinksTable
+      <Shell view={view} onNavigate={navigate} onCreate={() => setCreateOpen(true)}>
+        {view === "home" && (
+          <HomeView
             links={links}
-            copied={copied}
-            onCopy={copyCheckout}
-            onCashOut={(id) => setCashOutLinkId(id)}
-            onPendingTransfer={(id) => setPendingTransferLinkId(id)}
-            cashOutBlocked={cashOutBlocked}
-            anchorAuth={anchorAuth}
+            loading={loading}
+            fetchError={fetchError}
+            onRetry={refresh}
+            trustline={trustline}
+            kyc={kyc}
+            now={now}
+            alerts={alerts}
+            onNavigate={navigate}
+            onOpenPayments={openPayments}
+            onCreate={() => setCreateOpen(true)}
           />
         )}
-      </section>
 
-      <section className="panel">
-        <h2>Export</h2>
-        <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-          Download all links as CSV for your accounting. Optionally filter by date range.
-        </p>
-        <div className="csv-export-row">
-          <div className="field csv-field">
-            <label htmlFor="csv-from">From</label>
-            <input
-              id="csv-from"
-              type="date"
-              value={csvFrom}
-              onChange={(e) => setCsvFrom(e.target.value)}
-            />
+        {view === "payments" && (
+          <PaymentsView
+            links={links}
+            loading={loading}
+            fetchError={fetchError}
+            onRetry={refresh}
+            filter={paymentsFilter}
+            onFilter={setPaymentsFilter}
+            alerts={alerts}
+            onCreate={() => setCreateOpen(true)}
+            {...rowActions}
+          />
+        )}
+
+        {view === "cashout" && (
+          <CashOutView links={links} loading={loading} alerts={alerts} verification={verification} {...rowActions} />
+        )}
+
+        {view === "settings" && <SettingsView onNavigate={navigate} />}
+
+        {developersOpened && (
+          <div hidden={view !== "developers"}>
+            <DevelopersView />
           </div>
-          <div className="field csv-field">
-            <label htmlFor="csv-to">To</label>
-            <input
-              id="csv-to"
-              type="date"
-              value={csvTo}
-              onChange={(e) => setCsvTo(e.target.value)}
-            />
-          </div>
-          <button className="btn" onClick={handleCsvExport} disabled={exporting}>
-            {exporting ? "Exporting…" : "Export CSV"}
-          </button>
-        </div>
-      </section>
+        )}
+      </Shell>
 
-      <ExportPanel />
+      {createOpen && <CreateLinkSheet onClose={() => setCreateOpen(false)} onSubmit={createLink} />}
 
-      <ErasePanel />
-
-      {/* Cash-out modal — rendered when a link's "Cash out" button is clicked */}
+      {/* Cash-out modal, opened from a link's "Cash out" button */}
       {OFFRAMP_ENABLED && cashOutLinkId && cashOutLink && (
         <CashOutModal
           linkId={cashOutLinkId}
@@ -829,19 +443,6 @@ export default function Dashboard() {
           }}
         />
       )}
-        </>
-      )}
-      {apiKeysOpened && (
-        <div hidden={tab !== "api-keys"}>
-          <ApiKeys />
-        </div>
-      )}
-
-      <footer style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid var(--border)", display: "flex", justifyContent: "center", gap: 16, fontSize: 13, color: "var(--text-2, #6b7280)" }}>
-        <Link href="/privacy" style={{ color: "var(--blue)" }}>Privacy Notice</Link>
-        <span aria-hidden="true">·</span>
-        <a href="https://github.com/determined-001/Quay" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue)" }}>GitHub</a>
-      </footer>
     </>
   );
 }
