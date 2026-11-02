@@ -72,6 +72,39 @@ function amountLabel(link: PaymentLink): string {
   return `${link.amount} ${link.asset.code}`;
 }
 
+/** Statuses where the buyer has paid in full; the money is the seller's. */
+const PAID_STATUSES = new Set(["paid", "offramp_pending", "offramp_settled", "offramp_failed"]);
+
+/**
+ * A three-figure ledger strip above the links: what has come in, what is still
+ * waiting, and how many links have settled. Derived from the list already on
+ * screen, so it can never disagree with the table below it. Only USDC is
+ * summed; mixing assets into one number would be wrong.
+ */
+function LinkStats({ links }: { links: PaymentLink[] }) {
+  const paid = links.filter((l) => PAID_STATUSES.has(l.status));
+  const receivedUsdc = paid
+    .filter((l) => l.asset.code === "USDC")
+    .reduce((sum, l) => sum + Number(l.amount), 0);
+  const waiting = links.filter((l) => l.status === "active").length;
+  return (
+    <section className="stats" aria-label="Summary">
+      <div>
+        <span className="stats__k">USDC received</span>
+        <span className="stats__v mono">{receivedUsdc.toFixed(2)}</span>
+      </div>
+      <div>
+        <span className="stats__k">Waiting for payment</span>
+        <span className="stats__v mono">{waiting}</span>
+      </div>
+      <div>
+        <span className="stats__k">Paid links</span>
+        <span className="stats__v mono">{paid.length}</span>
+      </div>
+    </section>
+  );
+}
+
 function SkeletonTable() {
   return (
     <table className="table">
@@ -551,35 +584,16 @@ export default function Dashboard() {
 
   return (
     <>
-      <nav
-        aria-label="Dashboard sections"
-        style={{
-          display: "flex",
-          gap: 4,
-          marginBottom: 20,
-          borderBottom: "1px solid var(--clr-border, #2a3448)",
-        }}
-      >
+      <nav aria-label="Dashboard sections" className="dash-tabs">
         {(["links", "api-keys"] as const).map((t) => (
           <button
             key={t}
             role="tab"
             aria-selected={tab === t}
+            className={tab === t ? "dash-tab dash-tab--on" : "dash-tab"}
             onClick={() => {
               setTab(t);
               if (t === "api-keys") setApiKeysOpened(true);
-            }}
-            style={{
-              background: "none",
-              border: "none",
-              borderBottom: tab === t ? "2px solid var(--clr-accent, #6c8ebf)" : "2px solid transparent",
-              color: tab === t ? "var(--clr-text, #e0e6f0)" : "var(--clr-muted, #7a8aaa)",
-              cursor: "pointer",
-              fontSize: "0.9em",
-              fontWeight: tab === t ? 600 : 400,
-              padding: "8px 14px",
-              marginBottom: -1,
-              transition: "color 0.15s",
             }}
           >
             {t === "links" ? "Payment links" : "API keys"}
@@ -589,6 +603,8 @@ export default function Dashboard() {
 
       {tab === "links" && (
         <>
+      {!loading && !fetchError && links.length > 0 && <LinkStats links={links} />}
+
       {trustline && !trustline.ok && (
         <div className="banner banner--warn">
           <strong>Your wallet can&apos;t receive USDC right now.</strong>{" "}
@@ -734,7 +750,13 @@ export default function Dashboard() {
         )}
 
         {!loading && !fetchError && links.length === 0 && (
-          <div className="empty">No links yet. Create one above to get a checkout page.</div>
+          <div className="empty empty--rich">
+            <strong>No payment links yet</strong>
+            <p>
+              Create one above. A title and an amount are enough, and you get a hosted checkout page, a QR code
+              and a snippet for your own site.
+            </p>
+          </div>
         )}
 
         {!loading && !fetchError && links.length > 0 && (
