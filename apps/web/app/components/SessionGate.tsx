@@ -31,7 +31,37 @@ export function useSellerWallet(): string | null {
   return useContext(SellerWalletContext);
 }
 
-export default function SessionGate({ children }: { children: ReactNode }) {
+/** What an app shell needs to show the signed-in account and let them leave. */
+export interface SellerSession {
+  address: string;
+  busy: boolean;
+  /** Runs the same sign-out as the default header button, including the
+   *  warning when a cash-out is still in progress. */
+  signOut: () => void;
+}
+
+const SellerSessionContext = createContext<SellerSession | null>(null);
+
+export function useSellerSession(): SellerSession | null {
+  return useContext(SellerSessionContext);
+}
+
+export default function SessionGate({
+  children,
+  chrome = "bar",
+  header,
+}: {
+  children: ReactNode;
+  /**
+   * `"bar"` (default) draws the "Signed in as" strip above the page, which is
+   * right for a single page such as a link's detail view. `"none"` draws
+   * nothing and leaves the page to render the account itself through
+   * {@link useSellerSession}, which is what a full app shell does.
+   */
+  chrome?: "bar" | "none";
+  /** Shown above the connect prompt while signed out (a masthead, say). */
+  header?: ReactNode;
+}) {
   const [address, setAddress] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,7 +149,8 @@ export default function SessionGate({ children }: { children: ReactNode }) {
 
   if (!address) {
     return (
-      <main className="shell shell--narrow" style={{ paddingTop: 64 }}>
+      <main className="shell shell--narrow" style={{ paddingTop: header ? 32 : 64 }}>
+        {header}
         <div className="panel" style={{ textAlign: "center" }}>
           <h2 style={{ fontSize: 20, marginBottom: 8, color: "var(--text)" }}>Connect your wallet</h2>
           <p className="muted" style={{ marginBottom: 20 }}>
@@ -168,34 +199,40 @@ export default function SessionGate({ children }: { children: ReactNode }) {
     );
   }
 
+  const session: SellerSession = { address, busy, signOut: () => void signOut() };
+
   return (
     <>
-      <div
-        className="panel"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
-        <div>
-          <span className="muted" style={{ fontSize: 12 }}>
-            Signed in as
-          </span>{" "}
-          <span className="mono" title={address}>
-            {shortAddress(address)}
-          </span>
-          <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
-            This session lasts until you close or refresh the tab.
+      {chrome === "bar" && (
+        <div
+          className="panel"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 16,
+          }}
+        >
+          <div>
+            <span className="muted" style={{ fontSize: 12 }}>
+              Signed in as
+            </span>{" "}
+            <span className="mono" title={address}>
+              {shortAddress(address)}
+            </span>
+            <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+              This session lasts until you close or refresh the tab.
+            </div>
           </div>
+          <button className="btn btn--ghost" onClick={signOut} disabled={busy}>
+            Sign out
+          </button>
         </div>
-        <button className="btn btn--ghost" onClick={signOut} disabled={busy}>
-          Sign out
-        </button>
-      </div>
-      <SellerWalletContext.Provider value={address}>{children}</SellerWalletContext.Provider>
+      )}
+      <SellerWalletContext.Provider value={address}>
+        <SellerSessionContext.Provider value={session}>{children}</SellerSessionContext.Provider>
+      </SellerWalletContext.Provider>
     </>
   );
 }
