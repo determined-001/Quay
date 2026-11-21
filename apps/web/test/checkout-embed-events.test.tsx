@@ -304,4 +304,140 @@ describe("CheckoutClient embed postMessage events (issue 7.22)", () => {
     });
     expect(parentPostMessageSpy).not.toHaveBeenCalled();
   });
+
+  // ---------------------------------------------------------------------------
+  // Embed asset choice & payWith option (issue 5.49)
+  // ---------------------------------------------------------------------------
+
+  describe("Asset choice in embed (issue 5.49)", () => {
+    const mockPayOptions = [
+      {
+        asset: { code: "XLM", issuer: null },
+        estimatedAmount: "24.12",
+        maxAmount: "24.36",
+        expiresAt: Date.now() + 30_000,
+      },
+    ];
+
+    it("hides the choice in embed when payWith='link-asset'", async () => {
+      const initial = makeInitial("active");
+
+      await act(async () => {
+        root!.render(
+          <CheckoutClient
+            initial={initial}
+            embed={true}
+            payWith="link-asset"
+            payOptions={mockPayOptions}
+          />,
+        );
+      });
+
+      // The choice fieldset must not be present
+      expect(container.querySelector('[data-testid="pay-choice"]')).toBeNull();
+
+      // The pay button must remain present
+      const payButton = container.querySelector("a.btn--primary");
+      expect(payButton).not.toBeNull();
+      expect(payButton?.textContent?.trim()).toBe("Open in wallet");
+    });
+
+    it("hides the choice in embed when URL query parameter pay=link-asset is present", async () => {
+      const initial = makeInitial("active");
+
+      // Simulate URL search param ?pay=link-asset
+      const origLocation = window.location;
+      Object.defineProperty(window, "location", {
+        value: {
+          ...origLocation,
+          search: "?pay=link-asset",
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      try {
+        await act(async () => {
+          root!.render(
+            <CheckoutClient
+              initial={initial}
+              embed={true}
+              payOptions={mockPayOptions}
+            />,
+          );
+        });
+
+        expect(container.querySelector('[data-testid="pay-choice"]')).toBeNull();
+        expect(container.querySelector("a.btn--primary")).not.toBeNull();
+      } finally {
+        Object.defineProperty(window, "location", {
+          value: origLocation,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+
+    it("shows the choice and keeps the pay button visible in default embed at 440x680", async () => {
+      const initial = makeInitial("active");
+
+      await act(async () => {
+        root!.render(
+          <CheckoutClient
+            initial={initial}
+            embed={true}
+            payOptions={mockPayOptions}
+          />,
+        );
+      });
+
+      // Root checkout container has the embed class
+      const checkoutEl = container.querySelector(".checkout--embed");
+      expect(checkoutEl).not.toBeNull();
+
+      // Asset choice is rendered with fieldset & legend
+      const choice = container.querySelector('[data-testid="pay-choice"]');
+      expect(choice).not.toBeNull();
+      expect(choice?.querySelector("legend")?.textContent).toBe("Pay with");
+
+      // Radio inputs for both the link asset (USDC) and the alternative option (XLM)
+      const radioInputs = choice?.querySelectorAll('input[type="radio"]') as NodeListOf<HTMLInputElement>;
+      expect(radioInputs.length).toBe(2);
+      expect(radioInputs[0]?.value).toBe("USDC");
+      expect(radioInputs[1]?.value).toBe("XLM");
+      expect(radioInputs[0]?.checked).toBe(true);
+
+      // Compact countdown with no wrap
+      const countdown = choice?.querySelector(".pay-choice__countdown");
+      expect(countdown).not.toBeNull();
+      expect(countdown?.textContent).toContain("s left");
+
+      // Pay button stays visible and rendered in DOM after choice
+      const payButton = container.querySelector("a.btn--primary");
+      expect(payButton).not.toBeNull();
+      expect(payButton?.textContent?.trim()).toBe("Open in wallet");
+
+      // DOM check: pay button is a child of the checkout--embed element and follows the choice
+      expect(checkoutEl?.contains(payButton!)).toBe(true);
+      expect(choice?.compareDocumentPosition(payButton!)! & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it("shows the choice when payWith is explicitly 'any'", async () => {
+      const initial = makeInitial("active");
+
+      await act(async () => {
+        root!.render(
+          <CheckoutClient
+            initial={initial}
+            embed={true}
+            payWith="any"
+            payOptions={mockPayOptions}
+          />,
+        );
+      });
+
+      expect(container.querySelector('[data-testid="pay-choice"]')).not.toBeNull();
+      expect(container.querySelector("a.btn--primary")).not.toBeNull();
+    });
+  });
 });

@@ -119,7 +119,7 @@ export function openModal(linkIdOrOpts: string | QuayOpenOptions, opts?: Partial
     options = { linkId, ...opts };
   } else {
     linkId = linkIdOrOpts.linkId;
-    options = linkIdOrOpts;
+    options = { ...linkIdOrOpts, ...opts };
   }
 
   // Resolved (and allowed to throw) before any state changes - a failed
@@ -211,7 +211,10 @@ export function openModal(linkIdOrOpts: string | QuayOpenOptions, opts?: Partial
   iframe.setAttribute("title", "Stellar Checkout Interface");
   iframe.style.cssText = "width: 100%; height: 100%; border: none; background: #0d1117;";
 
-  const iframeUrl = `${activeHost}/pay/${encodeURIComponent(linkId)}?embed=true`;
+  let iframeUrl = `${activeHost}/pay/${encodeURIComponent(linkId)}?embed=true`;
+  if (options.payWith === "link-asset") {
+    iframeUrl += "&pay=link-asset";
+  }
   iframe.src = iframeUrl;
 
   container.appendChild(closeBtn);
@@ -297,6 +300,8 @@ export function bindButtons(): void {
 
     const linkId = btn.getAttribute("data-quay-link") || btn.getAttribute("data-stellar-checkout");
     const label = btn.getAttribute("data-quay-label");
+    const payWithAttr = btn.getAttribute("data-quay-pay-with") || btn.getAttribute("data-pay-with");
+    const payWith = payWithAttr === "link-asset" ? "link-asset" : payWithAttr === "any" ? "any" : undefined;
 
     if (label) {
       btn.textContent = label;
@@ -305,7 +310,7 @@ export function bindButtons(): void {
     btn.addEventListener("click", (e) => {
       e.preventDefault();
       if (linkId) {
-        openModal(linkId);
+        openModal(payWith ? { linkId, payWith } : linkId);
       }
     });
   });
