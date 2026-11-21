@@ -272,5 +272,46 @@ describe("Quay Widget SDK", () => {
       unsub2();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // payWith option (issue 5.49) - let merchants restrict embed to link asset
+  // ---------------------------------------------------------------------------
+
+  describe("payWith option (issue 5.49)", () => {
+    it("does not append pay query parameter when payWith is omitted or set to 'any'", () => {
+      Quay.open({ linkId: "lnk_default", host: TEST_HOST });
+      let iframe = document.getElementById("quay-checkout-iframe") as HTMLIFrameElement;
+      expect(iframe.src).toBe(`${TEST_HOST}/pay/lnk_default?embed=true`);
+      expect(iframe.src).not.toContain("&pay=");
+
+      Quay.close();
+
+      Quay.open({ linkId: "lnk_any", host: TEST_HOST, payWith: "any" });
+      iframe = document.getElementById("quay-checkout-iframe") as HTMLIFrameElement;
+      expect(iframe.src).toBe(`${TEST_HOST}/pay/lnk_any?embed=true`);
+      expect(iframe.src).not.toContain("&pay=");
+    });
+
+    it("appends &pay=link-asset only when payWith: 'link-asset' is requested", () => {
+      Quay.open({ linkId: "lnk_restricted", host: TEST_HOST, payWith: "link-asset" });
+      const iframe = document.getElementById("quay-checkout-iframe") as HTMLIFrameElement;
+      expect(iframe.src).toBe(`${TEST_HOST}/pay/lnk_restricted?embed=true&pay=link-asset`);
+    });
+
+    it("binds data-quay-pay-with='link-asset' attribute on button and appends query parameter", () => {
+      document.body.innerHTML = `
+        <script src="${TEST_HOST}/widget.js"></script>
+        <button id="pay-asset-btn" data-quay-link="lnk_attr_test" data-quay-pay-with="link-asset">Pay USDC</button>
+      `;
+
+      Quay.init();
+
+      const btn = document.getElementById("pay-asset-btn")!;
+      btn.click();
+
+      const iframe = document.getElementById("quay-checkout-iframe") as HTMLIFrameElement;
+      expect(iframe.src).toBe(`${TEST_HOST}/pay/lnk_attr_test?embed=true&pay=link-asset`);
+    });
+  });
 });
 

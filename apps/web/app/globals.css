@@ -518,10 +518,10 @@ p { text-wrap: pretty; }
    to fit a 680px-tall frame with no page chrome to spare. Sized/checked
    against the "active - waiting for payment" render, the tallest state
    (title + amount + QR + memo note + status rail). */
-.checkout--embed .title { font-size: 14px; margin-bottom: 16px; }
-.checkout--embed .amount-hero { font-size: 34px; }
-.checkout--embed .qr-wrap { margin: 16px 0 6px; padding: 12px; }
-.checkout--embed .memo-note { margin: 14px 0; padding: 10px 12px; }
+.checkout--embed .title { font-size: 14px; margin-bottom: 12px; }
+.checkout--embed .amount-hero { font-size: 32px; }
+.checkout--embed .qr-wrap { margin: 12px 0 4px; padding: 10px; }
+.checkout--embed .memo-note { margin: 10px 0; padding: 8px 10px; }
 .checkout--embed .status-rail { margin-top: 14px; }
 .checkout--embed .settled-check,
 .checkout--embed .status-icon,
@@ -530,6 +530,98 @@ p { text-wrap: pretty; }
   height: 40px;
   font-size: 20px;
   margin-bottom: 8px;
+}
+
+/* Compact asset choice in 440x680 embed (issue 5.49) */
+.checkout--embed .pay-choice {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.checkout--embed .pay-choice legend {
+  font-size: 11px;
+}
+.checkout--embed .pay-choice__options {
+  gap: 4px;
+  margin-top: 2px;
+}
+.checkout--embed .pay-choice__row {
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.checkout--embed .pay-choice__label {
+  font-size: 12px;
+  gap: 6px;
+}
+.checkout--embed .pay-choice__countdown {
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.checkout--embed .pay-choice__hint {
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+/* ---------- Pay with asset choice (issues 5.47 & 5.49) ---------- */
+.pay-choice {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 14px 0;
+  background: var(--bg-subtle, rgba(255, 255, 255, 0.02));
+  text-align: left;
+}
+
+.pay-choice legend {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+
+.pay-choice__options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.pay-choice__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+
+.pay-choice__row:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+
+.pay-choice__label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pay-choice__countdown {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.pay-choice__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 8px 0 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
