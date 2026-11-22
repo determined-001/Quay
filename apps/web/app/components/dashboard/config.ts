@@ -27,3 +27,6 @@ export const OFFRAMP_ENABLED = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") 
 export const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
   ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
   : `Cash out to ${OFFRAMP_CURRENCY}`;
+
+export const INVOICES_ENABLED = process.env.NEXT_PUBLIC_INVOICES_ENABLED === "true";
+

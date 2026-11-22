@@ -432,17 +432,40 @@ p { text-wrap: pretty; }
 
 .receipt-actions { display: flex; justify-content: center; gap: 12px; margin-top: 24px; }
 
+/* ---------- invoice page ---------- */
+.shell--invoice { max-width: 600px; padding-top: 48px; }
+.invoice { padding: 32px; }
+.invoice-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; gap: 16px; flex-wrap: wrap; }
+.invoice-number { font-size: 20px; font-weight: 600; margin: 0; }
+.invoice-parties { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+.invoice-party-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 4px; }
+.invoice-party-name { font-size: 15px; font-weight: 500; }
+.invoice-dates { display: flex; gap: 24px; margin-bottom: 24px; font-size: 13px; color: var(--muted); }
+.invoice-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; }
+.invoice-table th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 500; }
+.invoice-table td { padding: 10px 12px; border-bottom: 1px solid var(--hairline); }
+.invoice-total-row { display: flex; justify-content: space-between; align-items: center; padding: 16px 12px; border-top: 2px solid var(--border); font-size: 16px; font-weight: 600; }
+.invoice-notes { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; }
+.invoice-notes-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 4px; }
+.invoice-actions { display: flex; justify-content: center; gap: 12px; margin-top: 24px; }
+.invoice-pay { margin-top: 24px; }
+.pill--open { color: var(--muted); }
+.pill--overdue { color: var(--amber); }
+.pill--void { color: var(--red); }
+
 @media print {
   html, body { background: #fff !important; color: #000 !important; }
-  .receipt-actions { display: none !important; }
-  .receipt { border: 1px solid #ddd !important; box-shadow: none !important; }
-  .receipt-footer { display: none !important; }
-  .receipt-print-header { display: block !important; }
+  .receipt-actions, .invoice-actions { display: none !important; }
+  .receipt, .invoice { border: 1px solid #ddd !important; box-shadow: none !important; }
+  .receipt-footer, .invoice-footer { display: none !important; }
+  .receipt-print-header, .invoice-print-header { display: block !important; }
   .explorer-link { color: #000 !important; text-decoration: underline !important; }
   .muted { color: #666 !important; }
   .pill { border: 1px solid #ccc !important; }
   .pill--paid { color: #0a5 !important; }
-  .shell--receipt { padding-top: 24px !important; }
+  .pill--open, .pill--overdue, .pill--void { color: #666 !important; }
+  .shell--receipt, .shell--invoice { padding-top: 24px !important; }
+  .invoice-pay, .checkout { display: none !important; }
 }
 
 /* ---------- csv export ---------- */

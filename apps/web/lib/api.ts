@@ -80,6 +80,36 @@ export interface PublicReceipt {
   updatedAt: number;
 }
 
+export interface InvoiceLineItem {
+  description: string;
+  quantity: number;
+  unitPrice: string;
+}
+
+export type InvoiceStatus = "draft" | "open" | "paid" | "overdue" | "void";
+
+/** Whitelist view returned by GET /invoices/:id/public — never includes client email or address. */
+export interface PublicInvoice {
+  id: string;
+  number: string;
+  sellerName?: string;
+  sellerDisplayName?: string;
+  seller?: string;
+  clientName: string;
+  lineItems: InvoiceLineItem[];
+  total: string;
+  asset?: string | { code: string; issuer?: string | null };
+  assetCode?: string;
+  issuedAt: number | null;
+  dueAt: number;
+  status: InvoiceStatus;
+  linkId: string | null;
+  notes?: string | null;
+  reference?: string | null;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
 export interface AnchorAuthView {
   /** False when the deployment has no real anchor (mock / none). */
   required: boolean;
@@ -554,6 +584,8 @@ export const api = {
   getDetail: (id: string) => http<LinkDetail>(`/links/${id}/detail`),
 
   getReceipt: (reference: string) => http<PublicReceipt>(`/r/${reference}`),
+
+  getPublicInvoice: (id: string) => http<PublicInvoice>(`/invoices/${id}/public`),
 
   /** Indicative SEP-38 prices for a paid link — no firm quote is consumed. */
   getOfframpPreview: (id: string, currency?: string) =>
