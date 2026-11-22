@@ -4,6 +4,8 @@ import {
   toStroops,
   assetEquals,
   CannotReceiveError,
+  isPositiveAmount,
+  type CannotReceiveReason,
   canTransition,
   isQuoteExpired,
   QuoteExpiredError,
@@ -61,6 +63,54 @@ import type { PiiAuditRecorder } from "./pii-audit";
 // (issue 3.23 moved the implementation into ./anchor-health).
 export { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
 export type { AnchorHealthSnapshot, CircuitState, Sep10Probe, AnchorProbeConfig } from "./anchor-health";
+
+type RefundDestinationResolution =
+  | { kind: "ready" | "needs_memo"; destination: string }
+  | { kind: "account_gone" };
+
+type RefundPreflightReason = CannotReceiveReason | "memo_required";
+
+export type RefundPreflightResult =
+  | { ok: true; destination: string; memoRequired: boolean }
+  | { ok: false; reason: RefundPreflightReason; message: string };
+
+const refundPreflightMessages: Record<RefundPreflightReason, string> = {
+  account_not_found: "The buyer's Stellar account no longer exists. Ask them for a valid refund address.",
+  no_trustline: "The buyer's account can't hold this asset. Ask them to add the required trustline or provide another address.",
+  trustline_not_authorized: "The buyer's trustline is not authorized. Ask them to resolve this with the asset issuer.",
+  trustline_limit_exceeded: "The buyer's trustline lacks capacity for this refund. Ask them to increase the limit or provide another address.",
+  memo_required: "The buyer's account requires a memo. Ask them for the correct deposit memo before sending the refund.",
+};
+
+function refundPreflightFailure(reason: RefundPreflightReason): RefundPreflightResult {
+  return { ok: false, reason, message: refundPreflightMessages[reason] };
+}
+
+/** Check a resolved destination after the caller verifies the payment and refund eligibility.
+ * The payment's recorded payer is the base G-address, even for a muxed destination.
+ */
+export async function checkRefundReceivingCapability(
+  rail: Pick<RailPort, "assertCanReceive">,
+  payment: { payer: string },
+  asset: AssetRef,
+  amount: string,
+  resolution: RefundDestinationResolution,
+): Promise<RefundPreflightResult> {
+  if (amount !== amount.trim() || !isPositiveAmount(amount)) {
+    throw new HttpError(400, "invalid_refund_amount");
+  }
+  if (resolution.kind === "account_gone") return refundPreflightFailure("account_not_found");
+
+  try {
+    await rail.assertCanReceive(payment.payer, asset, amount);
+  } catch (error) {
+    if (error instanceof CannotReceiveError) return refundPreflightFailure(error.reason);
+    throw error;
+  }
+
+  if (resolution.kind === "needs_memo") return refundPreflightFailure("memo_required");
+  return { ok: true, destination: resolution.destination, memoRequired: false };
+}
 
 export interface LinkWithRequest {
   link: PaymentLink;
