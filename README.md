@@ -19,9 +19,9 @@ are real. To try the full cash-out flow with no real money (SEP-10 → SEP-38 �
 against `testanchor.stellar.org`), [run Quay locally](#run-it-locally) on testnet
 with `OFFRAMP=testanchor`.
 
-[![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-api.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
-[![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-web.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
-[![Synthetic check](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-synthetic.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
+[![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-mainnet-api.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
+[![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-mainnet-web.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
+[![Synthetic check](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-mainnet-synthetic.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
 Checked by [`.github/workflows/uptime.yml`](.github/workflows/uptime.yml) — which
 asks for every 5 minutes and, being a scheduled workflow on a free public repo,
 actually gets somewhere between 30 minutes and 3 hours. It

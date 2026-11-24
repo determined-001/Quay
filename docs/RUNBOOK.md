@@ -259,13 +259,22 @@ configured environment on one schedule, each with its own history series and
 its own section in `docs/STATUS.md` — a healthy testnet can never stand in
 for an unmonitored mainnet (issue 8.8).
 
-**Testnet is always checked** by default with the unprefixed target ids
-(`api` / `web` / `synthetic`). However, the default testnet API service
-(`https://quay-api.onrender.com`) is retired (HTTP 503, suspended), so default
-checks against it will fail unless overridden with a live endpoint via
-`UPTIME_API_URL` / `UPTIME_TESTNET_API_URL`. The web target defaults to
-`https://quay-web.vercel.app` (overridable via `UPTIME_WEB_URL` /
-`UPTIME_TESTNET_WEB_URL`).
+**Testnet is opt-in** with no hardcoded fallback URLs (issue 8.26). It is checked
+only when configured via `UPTIME_TESTNET_API_URL` (or the legacy `UPTIME_API_URL`)
+and `UPTIME_TESTNET_WEB_URL` (or legacy `UPTIME_WEB_URL`). When unset, the testnet
+environment is skipped rather than checked against retired endpoints.
+
+**README status badges track mainnet production** (`uptime-badge-mainnet-api.json`,
+`uptime-badge-mainnet-web.json`, `uptime-badge-mainnet-synthetic.json`).
+
+**History persistence**: `.github/workflows/uptime.yml` restores `docs/uptime-state.json`
+from `origin/status` before running checks, ensuring historical data accumulates across
+consecutive workflow runs.
+
+**Cold start tolerance**: To prevent false alerts when free hosting instances (such as Render)
+spin up from idle (~30-40s), the API check allows a 15s initial timeout, followed by a
+single retry with a 60s timeout before declaring an outage. The check is only recorded as
+up if the retry returns HTTP 200.
 
 **Mainnet is checked only once you configure it — there is no default of any
 kind.** Set these as repository **Variables** (Settings → Secrets and

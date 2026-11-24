@@ -42,7 +42,7 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm --filter @checkout/web exec playwright install --with-deps chromium
 
-      # Defaults target the testnet demo (quay-api.onrender.com /
+      # Defaults target the mainnet deployment (quay-api-mainnet.onrender.com /
       # quay-web.vercel.app). Override with repo Actions variables to point a
       # fork's run at its own deployment.
       - name: E2E — deployed stranger flow + placeholder scan

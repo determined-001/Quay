@@ -8,9 +8,8 @@
  * ports (8788/3100), deliberately NOT 8787/3000, so a `pnpm dev` session and
  * the e2e suite never fight over a port.
  *
- * Live: the deployed testnet demo, overridable for a fork or a staging
- * deployment. NEVER point these at a mainnet deployment — the live suite is
- * read-only, but the pre-entry ritual is about the demo surface.
+ * Live: the deployed demo (defaults to mainnet deployment). The live suite is
+ * strictly read-only and safe to run against production.
  */
 export const LOCAL_API_URL = "http://localhost:8788";
 export const LOCAL_WEB_URL = "http://localhost:3100";
@@ -24,7 +23,7 @@ function envOr(name: string, fallback: string): string {
 }
 
 export function liveApiUrl(): string {
-  return envOr("E2E_LIVE_API_URL", "https://quay-api.onrender.com");
+  return envOr("E2E_LIVE_API_URL", "https://quay-api-mainnet.onrender.com");
 }
 
 export function liveWebUrl(): string {

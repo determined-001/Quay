@@ -3,6 +3,7 @@ import {
   activeEnvironments,
   buildEnvironments,
   buildTargets,
+  checkApiHealth,
   checkAuthProbe,
   checkSyntheticLink,
   evaluateTarget,
@@ -12,14 +13,19 @@ import {
 } from "./uptime-check.mjs";
 
 describe("buildEnvironments", () => {
-  it("testnet always defaults to the public testnet deploy, unprefixed", () => {
+  it("testnet is opt-in and has no default URL — unset means unconfigured, not guessed", () => {
     const [testnet] = buildEnvironments({});
     expect(testnet.id).toBe("testnet");
-    expect(testnet.apiUrl).toBe("https://quay-api.onrender.com");
-    expect(testnet.webUrl).toBe("https://quay-web.vercel.app");
+    expect(testnet.apiUrl).toBeNull();
+    expect(testnet.webUrl).toBeNull();
     expect(testnet.syntheticLink).toBe(true);
     expect(testnet.readProbe).toBe(false);
     expect(testnet.prefixIds).toBe(false);
+  });
+
+  it("testnet is skipped when unconfigured", () => {
+    const active = activeEnvironments(buildEnvironments({}));
+    expect(active.find((env) => env.id === "testnet")).toBeUndefined();
   });
 
   it("testnet honors the original UPTIME_API_URL / UPTIME_WEB_URL var names", () => {
@@ -29,6 +35,15 @@ describe("buildEnvironments", () => {
     });
     expect(testnet.apiUrl).toBe("https://custom-api.example");
     expect(testnet.webUrl).toBe("https://custom-web.example");
+  });
+
+  it("testnet honors the UPTIME_TESTNET_API_URL / UPTIME_TESTNET_WEB_URL var names", () => {
+    const [testnet] = buildEnvironments({
+      UPTIME_TESTNET_API_URL: "https://custom-testnet-api.example",
+      UPTIME_TESTNET_WEB_URL: "https://custom-testnet-web.example",
+    });
+    expect(testnet.apiUrl).toBe("https://custom-testnet-api.example");
+    expect(testnet.webUrl).toBe("https://custom-testnet-web.example");
   });
 
   it("mainnet has no URL default of any kind — unset means unconfigured, not guessed", () => {
@@ -68,24 +83,37 @@ describe("buildEnvironments", () => {
 describe("activeEnvironments", () => {
   it("drops any environment with no API URL configured", () => {
     const environments = buildEnvironments({});
-    expect(activeEnvironments(environments).map((e) => e.id)).toEqual(["testnet"]);
+    expect(activeEnvironments(environments).map((e) => e.id)).toEqual([]);
   });
 
   it("includes mainnet once its API URL is set", () => {
     const environments = buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" });
+    expect(activeEnvironments(environments).map((e) => e.id)).toEqual(["mainnet"]);
+  });
+
+  it("includes both when both API URLs are configured", () => {
+    const environments = buildEnvironments({
+      UPTIME_TESTNET_API_URL: "https://testnet.example",
+      UPTIME_MAINNET_API_URL: "https://mainnet.example",
+    });
     expect(activeEnvironments(environments).map((e) => e.id)).toEqual(["testnet", "mainnet"]);
   });
 });
 
 describe("buildTargets", () => {
   it("testnet keeps its original, unprefixed target ids (back-compat with existing history/badges)", () => {
-    const environments = buildEnvironments({});
+    const environments = buildEnvironments({
+      UPTIME_TESTNET_API_URL: "https://testnet.example",
+      UPTIME_TESTNET_WEB_URL: "https://testnet-web.example",
+    });
     const ids = buildTargets(environments).map((t) => t.id);
     expect(ids).toEqual(["api", "web", "synthetic"]);
   });
 
   it("mainnet's target ids are prefixed and never collide with testnet's", () => {
     const environments = buildEnvironments({
+      UPTIME_TESTNET_API_URL: "https://testnet.example",
+      UPTIME_TESTNET_WEB_URL: "https://testnet-web.example",
       UPTIME_MAINNET_API_URL: "https://mainnet.example",
       UPTIME_MAINNET_WEB_URL: "https://mainnet-web.example",
       UPTIME_MAINNET_SYNTHETIC_CHECK: "1",
@@ -116,7 +144,10 @@ describe("buildTargets", () => {
   });
 
   it("labels every target with its environment, so an issue title can never be ambiguous about which one", () => {
-    const environments = buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" });
+    const environments = buildEnvironments({
+      UPTIME_TESTNET_API_URL: "https://testnet.example",
+      UPTIME_MAINNET_API_URL: "https://mainnet.example",
+    });
     const targets = buildTargets(environments);
     expect(targets.find((t) => t.id === "api")?.label).toBe("Testnet — API");
     expect(targets.find((t) => t.id === "mainnet-api")?.label).toBe("Mainnet — API");
@@ -141,7 +172,10 @@ describe("recordResult / uptimePct", () => {
 
 describe("renderStatusMd", () => {
   it("only reports environments that have actually been checked", () => {
-    const environments = buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" });
+    const environments = buildEnvironments({
+      UPTIME_TESTNET_API_URL: "https://testnet.example",
+      UPTIME_MAINNET_API_URL: "https://mainnet.example",
+    });
     const state = { targets: {} };
     recordResult(state, "api", true, null);
 
@@ -151,7 +185,10 @@ describe("renderStatusMd", () => {
   });
 
   it("gives each environment its own section, with per-kind subsections underneath", () => {
-    const environments = buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" });
+    const environments = buildEnvironments({
+      UPTIME_TESTNET_API_URL: "https://testnet.example",
+      UPTIME_MAINNET_API_URL: "https://mainnet.example",
+    });
     const state = { targets: {} };
     recordResult(state, "api", true, null);
     recordResult(state, "mainnet-api", false, "connection refused");
@@ -369,5 +406,62 @@ describe("renderStatusMd staleness", () => {
   it("stamps when it was last regenerated, so a stale page reads as stale", () => {
     const md = renderStatusMd({ targets: {} }, buildEnvironments({}));
     expect(md).toMatch(/> \*\*Last regenerated:\*\* \d{4}-\d{2}-\d{2}T[\d:.]+Z/);
+  });
+});
+
+describe("checkApiHealth cold start tolerance (issue 8.26)", () => {
+  it("records up when initial request times out but retry gets HTTP 200", async () => {
+    let callCount = 0;
+    const fakeFetch = async (_url: string, _opts: any, timeoutMs?: number) => {
+      callCount++;
+      if (callCount === 1) {
+        expect(timeoutMs).toBe(15000);
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      expect(timeoutMs).toBe(60000);
+      return { ok: true, status: 200 } as any;
+    };
+
+    await expect(checkApiHealth("https://api.example/health", fakeFetch)).resolves.toBeUndefined();
+    expect(callCount).toBe(2);
+  });
+
+  it("fails when both initial request and cold-start retry time out", async () => {
+    let callCount = 0;
+    const fakeFetch = async () => {
+      callCount++;
+      const err = new Error("This operation was aborted");
+      err.name = "AbortError";
+      throw err;
+    };
+
+    await expect(checkApiHealth("https://api.example/health", fakeFetch)).rejects.toThrow(/cold-start retry|aborted/i);
+    expect(callCount).toBe(2);
+  });
+
+  it("fails immediately on non-timeout error (e.g. 503) without retrying", async () => {
+    let callCount = 0;
+    const fakeFetch = async () => {
+      callCount++;
+      return { ok: false, status: 503 } as any;
+    };
+
+    await expect(checkApiHealth("https://api.example/health", fakeFetch)).rejects.toThrow(/HTTP 503/);
+    expect(callCount).toBe(1);
+  });
+});
+
+describe("history persistence across runs (issue 8.26)", () => {
+  it("accumulates checks across consecutive runs on the same day", () => {
+    const state = { targets: {} };
+    recordResult(state, "api", true, null);
+    expect(state.targets["api"].today.up).toBe(1);
+
+    // Consecutive run restores previous state and records another success
+    recordResult(state, "api", true, null);
+    expect(state.targets["api"].today.up).toBe(2);
+    expect(state.targets["api"].today.down).toBe(0);
   });
 });
