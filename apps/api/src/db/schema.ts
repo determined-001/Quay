@@ -492,3 +492,13 @@ export const piiAudit = sqliteTable("pii_audit", {
   index("pii_audit_seller_at_idx").on(table.sellerId, table.at),
   index("pii_audit_at_idx").on(table.at),
 ]);
+
+/**
+ * Per-seller counter for sequential invoice numbers (issue 4.68).
+ * Incremented atomically via INSERT ... ON CONFLICT DO UPDATE ... RETURNING.
+ */
+export const invoiceCounters = sqliteTable("invoice_counters", {
+  sellerId: text("seller_id").primaryKey(),
+  lastNumber: integer("last_number").notNull(),
+});
+

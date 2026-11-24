@@ -25,7 +25,11 @@ const apiRoot = resolve(__dirname, "..");
 const drizzleDir = resolve(apiRoot, "drizzle");
 const metaDir = resolve(drizzleDir, "meta");
 const journalPath = resolve(metaDir, "_journal.json");
-const drizzleKit = resolve(apiRoot, "node_modules/.bin/drizzle-kit");
+const drizzleKit = resolve(
+  apiRoot,
+  "node_modules/.bin",
+  process.platform === "win32" ? "drizzle-kit.cmd" : "drizzle-kit",
+);
 
 // Snapshot current journal and the set of SQL files before generating.
 const journalBefore = existsSync(journalPath)
@@ -43,6 +47,7 @@ try {
   execFileSync(drizzleKit, ["generate"], {
     cwd: apiRoot,
     stdio: "pipe",
+    shell: process.platform === "win32",
     env: { ...process.env, DATABASE_URL: "file::memory:" },
   });
 

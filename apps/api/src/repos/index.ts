@@ -67,6 +67,7 @@ import {
   prefillConsents,
   sellerProfile,
   refunds,
+  invoiceCounters,
 } from "../db/schema";
 import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
@@ -1984,3 +1985,27 @@ export class DrizzleApiKeyRepository {
       .where(eq(apiKeys.id, id));
   }
 }
+
+export interface InvoiceCounterRepository {
+  next(sellerId: string): Promise<number>;
+}
+
+export class DrizzleInvoiceCounterRepository implements InvoiceCounterRepository {
+  constructor(private readonly db: DB) {}
+
+  async next(sellerId: string): Promise<number> {
+    const [row] = await this.db
+      .insert(invoiceCounters)
+      .values({ sellerId, lastNumber: 1 })
+      .onConflictDoUpdate({
+        target: invoiceCounters.sellerId,
+        set: { lastNumber: sql`${invoiceCounters.lastNumber} + 1` },
+      })
+      .returning({ lastNumber: invoiceCounters.lastNumber });
+    if (!row) {
+      throw new Error(`Failed to allocate invoice number for seller ${sellerId}`);
+    }
+    return row.lastNumber;
+  }
+}
+
