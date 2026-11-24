@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { NOOP_LOGGER, OffRampDisabledError, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
@@ -62,6 +62,7 @@ function fakeContainer(): Container {
       createLink: async () => ({ link: ownedLink, request: {} as any }),
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
+      refundPreflight: async () => ({ ok: true as const, destination: "GBUYER", memoRequired: false }),
       getCashOutTransfer: async (id: string) =>
         id === ownedLink.id
           ? {
@@ -157,6 +158,91 @@ describe("GET /links/:id — public checkout read", () => {
     const body = (await res.json()) as { pay?: { pathPayments: boolean; maxSlippageBps: number } };
     // The API test env leaves PATH_PAYMENTS_* unset: off, 100 bps.
     expect(body.pay).toEqual({ pathPayments: false, maxSlippageBps: 100 });
+  });
+});
+
+describe("GET /links/:id/refunds/preflight", () => {
+  const previous = process.env.REFUNDS_ENABLED;
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.REFUNDS_ENABLED;
+    else process.env.REFUNDS_ENABLED = previous;
+  });
+
+  function appFor(container = fakeContainer()) {
+    return { container, app: linkRoutes(container, async (_c, next) => next()) };
+  }
+
+  const query = `/${ownedLink.id}/refunds/preflight?payment=abc:1&amount=4.5`;
+
+  it.each([undefined, "0", "yes"])("returns 501 refunds_disabled when REFUNDS_ENABLED is %j", async (value) => {
+    if (value === undefined) delete process.env.REFUNDS_ENABLED;
+    else process.env.REFUNDS_ENABLED = value;
+    const { app } = appFor();
+    const res = await app.request(query);
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({ error: "refunds_disabled" });
+  });
+
+  it("returns 401 when the caller is unauthenticated", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const { app } = appFor();
+    const res = await app.request(query);
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for an unknown link", async () => {
+    process.env.REFUNDS_ENABLED = "true";
+    const { container, app } = appFor();
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(`/lnk_does_not_exist/refunds/preflight?payment=abc:1&amount=1`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found" });
+  });
+
+  it("returns 404 for another seller's link", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const { container, app } = appFor();
+    const token = await tokenFor(container.auth.session, other.id);
+    const res = await app.request(query, { headers: { authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found" });
+  });
+
+  function stubPreflight(container: ReturnType<typeof fakeContainer>, impl: Container["service"]["refundPreflight"]) {
+    (container.service as { refundPreflight: Container["service"]["refundPreflight"] }).refundPreflight = impl;
+  }
+
+  it("returns the destination and the computed memo flag", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    stubPreflight(container, async () => ({ ok: true, destination: "GBUYER", memoRequired: true }));
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(query, { headers: { authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, destination: "GBUYER", memoRequired: true });
+  });
+
+  it("returns 422 refund_destination_cannot_receive when the buyer cannot receive", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    stubPreflight(container, async () => ({
+      ok: false,
+      reason: "no_trustline",
+      message: "The buyer's account can't hold this asset. Ask them to add the required trustline or provide another address.",
+    }));
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(query, { headers: { authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({
+      error: "refund_destination_cannot_receive",
+      reason: "no_trustline",
+      message: "The buyer's account can't hold this asset. Ask them to add the required trustline or provide another address.",
+    });
   });
 });
 

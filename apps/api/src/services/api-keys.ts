@@ -8,8 +8,10 @@
  * • Verification uses `crypto.timingSafeEqual` so the comparison is always
  *   constant-time regardless of whether the hash matches.
  * • `offramp:initiate` is not included in the default scope set because it
- *   moves money; the caller must opt-in explicitly. `api-keys:manage` is also
- *   opt-in so a key can't mint further keys unless explicitly allowed.
+ *   moves money; the caller must opt-in explicitly. `refunds:initiate` is the
+ *   same kind of opt-in (a refund pays the buyer from the seller's wallet).
+ *   `api-keys:manage` is also opt-in so a key can't mint further keys unless
+ *   explicitly allowed.
  */
 
 import { randomBytes, scrypt as _scrypt, timingSafeEqual } from "node:crypto";
@@ -39,13 +41,20 @@ export const ALL_SCOPES = [
   "webhooks:manage",
   "api-keys:manage",
   "offramp:initiate",
+  // TODO(4.59): issue #535 (https://github.com/determined-001/Quay/issues/535)
+  // owns this scope — the docs/API.md row, and keeping it out of
+  // DEFAULT_SCOPES. It is listed here so the refund preflight route can
+  // requireScope("refunds:initiate") before that issue lands. Sessions are
+  // granted every scope; an API key must opt in.
+  "refunds:initiate",
 ] as const;
 
 export type ApiKeyScope = (typeof ALL_SCOPES)[number];
 
 /**
  * Default scopes when the caller does not specify any. offramp:initiate
- * (moves money) and api-keys:manage (mints more keys) are both opt-in.
+ * and refunds:initiate (both move money) and api-keys:manage (mints more
+ * keys) are opt-in.
  */
 export const DEFAULT_SCOPES: ApiKeyScope[] = ["links:read", "links:write", "webhooks:manage"];
 

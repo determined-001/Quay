@@ -51,7 +51,7 @@ import {
   isAnchorRejection,
   truncateAnchorBody,
 } from "@checkout/offramp";
-import { resolveAsset, type StellarConfig } from "@checkout/stellar";
+import { isNotFound, resolveAsset, type StellarConfig } from "@checkout/stellar";
 import { Horizon, Operation, Transaction, type Memo } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
@@ -86,8 +86,66 @@ function refundPreflightFailure(reason: RefundPreflightReason): RefundPreflightR
   return { ok: false, reason, message: refundPreflightMessages[reason] };
 }
 
+/** Horizon account slice refund preflight needs. `dataAttr` is `data_attr` (base64 values). */
+export interface RefundAccountSnapshot {
+  exists: boolean;
+  dataAttr: Record<string, string>;
+}
+
+/**
+ * SEP-29: `config.memo_required` = `"1"` means a payment to this account is
+ * lost without a memo. Horizon stores the value base64-encoded; `"1"` and
+ * `"0"` are also accepted already decoded.
+ */
+export function accountRequiresMemo(dataAttr: Record<string, string> | null | undefined): boolean {
+  if (!dataAttr) return false;
+  const raw = dataAttr["config.memo_required"];
+  if (typeof raw !== "string" || raw.length === 0) return false;
+  return decodeAccountDataValue(raw) === "1";
+}
+
+function decodeAccountDataValue(raw: string): string {
+  if (raw === "1" || raw === "0") return raw;
+  const decoded = Buffer.from(raw, "base64").toString("utf8");
+  if (decoded === "1" || decoded === "0") return decoded;
+  return raw;
+}
+
+/**
+ * TODO(2.14): replace with `resolveRefundDestination` from `@checkout/stellar`
+ * (issue #533, https://github.com/determined-001/Quay/issues/533). That
+ * version also keeps the payer's M-address. `link_payments` has no
+ * `payer_muxed` column yet, so the destination here is the recorded G-address.
+ * The memo flag still comes from the account's SEP-29 entry, not a constant.
+ */
+export function resolveRefundDestination(
+  payment: { payer: string },
+  account: RefundAccountSnapshot,
+): RefundDestinationResolution {
+  if (!account.exists) return { kind: "account_gone" };
+  if (accountRequiresMemo(account.dataAttr)) return { kind: "needs_memo", destination: payment.payer };
+  return { kind: "ready", destination: payment.payer };
+}
+
+/** `<txHash>:<operationId>` as the preflight query names a recorded payment. */
+export function parseRefundPaymentKey(paymentKey: string): { txHash: string; operationId: string } | null {
+  const colon = paymentKey.indexOf(":");
+  if (colon <= 0 || colon === paymentKey.length - 1) return null;
+  const txHash = paymentKey.slice(0, colon);
+  const operationId = paymentKey.slice(colon + 1);
+  if (!txHash || !operationId || txHash !== txHash.trim() || operationId !== operationId.trim()) return null;
+  return { txHash, operationId };
+}
+
 /** Check a resolved destination after the caller verifies the payment and refund eligibility.
  * The payment's recorded payer is the base G-address, even for a muxed destination.
+ *
+ * `accountData` is the destination account's Horizon `data_attr`. `memoRequired`
+ * is computed from that entry (and from a `needs_memo` resolution), not hardcoded.
+ * A `needs_memo` resolution with no confirming entry is still the typed
+ * `memo_required` failure: the seller has to supply a memo before anything is built.
+ * When the entry itself is `"1"`, the destination can receive and the success
+ * result carries `memoRequired: true`.
  */
 export async function checkRefundReceivingCapability(
   rail: Pick<RailPort, "assertCanReceive">,
@@ -95,6 +153,7 @@ export async function checkRefundReceivingCapability(
   asset: AssetRef,
   amount: string,
   resolution: RefundDestinationResolution,
+  accountData?: Record<string, string> | null,
 ): Promise<RefundPreflightResult> {
   if (amount !== amount.trim() || !isPositiveAmount(amount)) {
     throw new HttpError(400, "invalid_refund_amount");
@@ -108,8 +167,10 @@ export async function checkRefundReceivingCapability(
     throw error;
   }
 
-  if (resolution.kind === "needs_memo") return refundPreflightFailure("memo_required");
-  return { ok: true, destination: resolution.destination, memoRequired: false };
+  const fromAccount = accountRequiresMemo(accountData);
+  const memoRequired = resolution.kind === "needs_memo" || fromAccount;
+  if (resolution.kind === "needs_memo" && !fromAccount) return refundPreflightFailure("memo_required");
+  return { ok: true, destination: resolution.destination, memoRequired };
 }
 
 export interface LinkWithRequest {
@@ -254,6 +315,12 @@ export class LinkService {
       logger?: Logger;
       /** Audit log for system reads of seller identity (the cash-out KYC gate). Omitted = not audited. */
       piiAudit?: PiiAuditRecorder;
+      /**
+       * Buyer's Horizon account for refund preflight. Tests inject this.
+       * Omitted, the service loads it from Horizon. TODO(2.14): drop this once
+       * `resolveRefundDestination` takes the account itself.
+       */
+      loadRefundAccount?: (accountId: string) => Promise<RefundAccountSnapshot>;
     },
   ) {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
@@ -1637,6 +1704,42 @@ export class LinkService {
     link.offrampStatus = "failed";
     await this.deps.links.save(link);
     await this.fireWebhook(link, "offramp.failed", { reason });
+  }
+
+  /**
+   * Whether `amount` of the link asset can land on the buyer who paid
+   * `paymentKey` (`<txHash>:<operationId>`). Runs `assertCanReceive` against
+   * the recorded G-address and `resolveRefundDestination` (stubbed until 2.14).
+   */
+  async refundPreflight(linkId: string, paymentKey: string, amount: string): Promise<RefundPreflightResult> {
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "not_found");
+
+    const paymentId = parseRefundPaymentKey(paymentKey);
+    if (!paymentId) throw new HttpError(400, "invalid_payment");
+
+    const payments = await this.deps.links.listPaymentsForLink(linkId);
+    const payment = payments.find(
+      (row) => row.txHash === paymentId.txHash && row.operationId === paymentId.operationId,
+    );
+    if (!payment) throw new HttpError(404, "not_found");
+
+    const account = await this.loadRefundAccount(payment.payer);
+    const resolution = resolveRefundDestination(payment, account);
+    return checkRefundReceivingCapability(this.deps.rail, payment, link.asset, amount, resolution, account.dataAttr);
+  }
+
+  private async loadRefundAccount(accountId: string): Promise<RefundAccountSnapshot> {
+    if (this.deps.loadRefundAccount) return this.deps.loadRefundAccount(accountId);
+    const server = new Horizon.Server(this.deps.stellar.horizonUrl);
+    try {
+      const loaded = await server.loadAccount(accountId);
+      const dataAttr = (loaded as { data_attr?: Record<string, string> }).data_attr ?? {};
+      return { exists: true, dataAttr };
+    } catch (err) {
+      if (isNotFound(err)) return { exists: false, dataAttr: {} };
+      throw err;
+    }
   }
 
   private async fireWebhook(
