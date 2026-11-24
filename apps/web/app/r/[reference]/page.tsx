@@ -51,6 +51,13 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
           <span className="receipt-value mono">{receipt.paidAmount ?? receipt.amount} {receipt.asset.code}</span>
         </div>
 
+        {receipt.paidWith && receipt.paidWith.length > 0 && receipt.paidWith.map((item, index) => (
+          <div className="receipt-row" key={index}>
+            <span className="receipt-label">Paid with</span>
+            <span className="receipt-value mono">{item.amount} {item.asset.code}</span>
+          </div>
+        ))}
+
         <div className="receipt-row">
           <span className="receipt-label">Status</span>
           <span className={`pill pill--${receipt.status}`}>
