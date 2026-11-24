@@ -9,6 +9,7 @@ import {
 } from "@checkout/core";
 import type { AnchorHealthRegistry } from "../services/anchor-health";
 import { type LinkService } from "../services/link-service";
+import type { InvoiceService } from "../services/invoice-service";
 import { env } from "../env";
 import { metrics } from "../metrics";
 
@@ -115,6 +116,8 @@ export class WatcherLoop {
       links: LinkRepository;
       state: WatcherStateRepository;
       service: LinkService;
+      invoiceService?: InvoiceService;
+      invoicesEnabled?: boolean;
       pollMs: number;
       logger?: Logger;
       pageLimit?: number;
@@ -227,6 +230,19 @@ export class WatcherLoop {
       if (moved > 0) this.deps.log?.(`expiry sweep moved ${moved} link(s) to expired`);
     } catch (err) {
       this.deps.log?.(`expiry sweep error: ${stringifyErr(err)}`);
+    }
+
+    // Overdue invoices sweep (issue 4.70): runs at the end of the tick,
+    // right next to sweepExpired and AFTER payment matching, so a payment
+    // matched in the same tick prevents the notification.
+    const invoicesEnabled = this.deps.invoicesEnabled ?? env.invoicesEnabled;
+    if (invoicesEnabled && this.deps.invoiceService) {
+      try {
+        const notified = await this.deps.invoiceService.sweepOverdue(Date.now());
+        if (notified > 0) this.deps.log?.(`overdue sweep notified ${notified} invoice(s)`);
+      } catch (err) {
+        this.deps.log?.(`overdue sweep error: ${stringifyErr(err)}`);
+      }
     }
   }
 

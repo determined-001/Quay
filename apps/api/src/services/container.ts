@@ -62,8 +62,10 @@ import {
   DrizzlePrefillConsentRepository,
   DrizzleSellerProfileRepository,
   DrizzleRefundRepository,
+  DrizzleInvoiceRepository,
 } from "../repos/index";
 import { LinkService } from "./link-service";
+import { InvoiceService } from "./invoice-service";
 import { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
 import {
   WatcherLoop,
@@ -376,11 +378,22 @@ export async function createContainer(): Promise<Container> {
     console.log(`[offramp] backfilled ${backfilled} link(s) stuck with lost job state -> offramp_failed`);
   }
 
+  const invoiceRepo = new DrizzleInvoiceRepository(db);
+  const invoiceService = new InvoiceService({
+    invoices: invoiceRepo,
+    links: linksRepo,
+    webhooks: webhooksRepo,
+    webhookSender,
+    logger,
+  });
+
   const loop = new WatcherLoop({
     watcher,
     links: linksRepo,
     state: stateRepo,
     service,
+    invoiceService,
+    invoicesEnabled: env.invoicesEnabled,
     pollMs: env.pollMs,
     logger,
     pageLimit: env.watchPageLimit,

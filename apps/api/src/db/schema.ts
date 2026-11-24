@@ -492,3 +492,30 @@ export const piiAudit = sqliteTable("pii_audit", {
   index("pii_audit_seller_at_idx").on(table.sellerId, table.at),
   index("pii_audit_at_idx").on(table.at),
 ]);
+
+/**
+ * Invoices (issues 4.67, 4.70).
+ * Status lifecycle: draft -> open -> paid | void
+ * Note: `overdue` is derived (open, unpaid, now > due_at) and never stored directly.
+ */
+export const invoices = sqliteTable("invoices", {
+  id: text("id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  linkId: text("link_id").notNull(),
+  number: text("number").notNull(),
+  clientName: text("client_name"),
+  clientEmail: text("client_email"),
+  total: text("total").notNull(),
+  assetCode: text("asset_code").notNull(),
+  assetIssuer: text("asset_issuer"),
+  status: text("status", { enum: ["draft", "open", "paid", "void"] }).notNull().default("open"),
+  dueAt: integer("due_at").notNull(),
+  overdueNotifiedAt: integer("overdue_notified_at"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  index("invoices_seller_id_idx").on(table.sellerId),
+  index("invoices_link_id_idx").on(table.linkId),
+  index("invoices_status_due_at_notified_idx").on(table.status, table.dueAt, table.overdueNotifiedAt),
+]);
+

@@ -46,6 +46,7 @@ import type {
 } from "@checkout/core";
 import { InvalidCursorError } from "@checkout/core";
 import type { DB } from "../db/client";
+import type { Invoice, InvoiceRepository, StoredInvoiceStatus } from "../services/invoice-service";
 import {
   links,
   linkPayments,
@@ -67,6 +68,7 @@ import {
   prefillConsents,
   sellerProfile,
   refunds,
+  invoices,
 } from "../db/schema";
 import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
@@ -1819,7 +1821,7 @@ export class DrizzleOfframpTelemetryRepository implements OffRampTelemetryReposi
     const rows = await this.all();
     const groups = new Map<string, OffRampTelemetryRow[]>();
     for (const r of rows) {
-      const key = `${r.anchorDomain} ${r.corridor}`;
+      const key = `${r.anchorDomain}\0${r.corridor}`;
       const list = groups.get(key);
       if (list) list.push(r);
       else groups.set(key, [r]);
@@ -1827,7 +1829,7 @@ export class DrizzleOfframpTelemetryRepository implements OffRampTelemetryReposi
 
     const out: OffRampTelemetrySummary[] = [];
     for (const [key, list] of groups) {
-      const [anchorDomain, corridor] = key.split(" ") as [string, string];
+      const [anchorDomain, corridor] = key.split("\0") as [string, string];
       const settled = list.filter((r) => r.status === "settled");
       const failed = list.filter((r) => r.status === "failed");
       const latencies = settled
@@ -1984,3 +1986,84 @@ export class DrizzleApiKeyRepository {
       .where(eq(apiKeys.id, id));
   }
 }
+
+export class DrizzleInvoiceRepository implements InvoiceRepository {
+  constructor(private readonly db: DB) {}
+
+  async create(input: {
+    id: string;
+    sellerId: string;
+    linkId: string;
+    number: string;
+    clientName?: string | null;
+    clientEmail?: string | null;
+    total: string;
+    assetCode: string;
+    assetIssuer?: string | null;
+    status?: StoredInvoiceStatus;
+    dueAt: number;
+    overdueNotifiedAt?: number | null;
+  }): Promise<Invoice> {
+    const now = Date.now();
+    const row = {
+      id: input.id,
+      sellerId: input.sellerId,
+      linkId: input.linkId,
+      number: input.number,
+      clientName: input.clientName ?? null,
+      clientEmail: input.clientEmail ?? null,
+      total: input.total,
+      assetCode: input.assetCode,
+      assetIssuer: input.assetIssuer ?? null,
+      status: input.status ?? "open",
+      dueAt: input.dueAt,
+      overdueNotifiedAt: input.overdueNotifiedAt ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.db.insert(invoices).values(row);
+    return row;
+  }
+
+  async findById(id: string): Promise<Invoice | null> {
+    const rows = await this.db.select().from(invoices).where(eq(invoices.id, id)).limit(1);
+    return rows[0] ? (rows[0] as unknown as Invoice) : null;
+  }
+
+  async listCandidatesForOverdue(now: number): Promise<Invoice[]> {
+    const rows = await this.db
+      .select()
+      .from(invoices)
+      .where(
+        and(
+          eq(invoices.status, "open"),
+          lt(invoices.dueAt, now),
+          isNull(invoices.overdueNotifiedAt),
+        ),
+      );
+    return rows as unknown as Invoice[];
+  }
+
+  async claimForOverdue(id: string, now: number): Promise<boolean> {
+    const updated = await this.db
+      .update(invoices)
+      .set({
+        overdueNotifiedAt: now,
+        updatedAt: now,
+      })
+      .where(and(eq(invoices.id, id), isNull(invoices.overdueNotifiedAt)))
+      .returning({ id: invoices.id });
+    return updated.length > 0;
+  }
+
+  async releaseOverdueClaim(id: string): Promise<void> {
+    await this.db
+      .update(invoices)
+      .set({
+        overdueNotifiedAt: null,
+        updatedAt: Date.now(),
+      })
+      .where(eq(invoices.id, id));
+  }
+}
+
