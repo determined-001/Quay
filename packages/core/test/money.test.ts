@@ -7,6 +7,9 @@ import {
   isValidAmount,
   isPositiveAmount,
   MAX_AMOUNT,
+  MAX_STROOPS,
+  mulStroops,
+  sumStroops,
 } from "../src/domain/money";
 import { createLinkSchema } from "../src/schemas";
 
@@ -258,5 +261,37 @@ describe("schemas: createLinkSchema amount validation", () => {
   it("accepts the boundary amounts", () => {
     expect(createLinkSchema.safeParse({ title: "Min", amount: "0.0000001" }).success).toBe(true);
     expect(createLinkSchema.safeParse({ title: "Max", amount: "922337203685.4775807" }).success).toBe(true);
+  });
+});
+
+describe("money: mulStroops", () => {
+  it("multiplies stroops by positive integers without float drift", () => {
+    expect(mulStroops(1_000_001n, 3)).toBe(3_000_003n);
+    expect(mulStroops(1n, 100_000)).toBe(100_000n);
+    expect(mulStroops(0n, 5)).toBe(0n);
+  });
+
+  it("throws on negative inputs", () => {
+    expect(() => mulStroops(-1n, 5)).toThrow();
+    expect(() => mulStroops(100n, -2)).toThrow();
+  });
+
+  it("throws when result exceeds MAX_STROOPS", () => {
+    expect(() => mulStroops(MAX_STROOPS, 2)).toThrow(/exceeds maximum Stellar stroops/);
+  });
+});
+
+describe("money: sumStroops", () => {
+  it("sums list of stroops accurately", () => {
+    expect(sumStroops([100n, 200n, 300n])).toBe(600n);
+    expect(sumStroops([])).toBe(0n);
+  });
+
+  it("throws on negative elements", () => {
+    expect(() => sumStroops([100n, -50n])).toThrow(/Cannot sum negative stroops/);
+  });
+
+  it("throws when total exceeds MAX_STROOPS", () => {
+    expect(() => sumStroops([MAX_STROOPS, 1n])).toThrow(/Total exceeds maximum Stellar stroops/);
   });
 });

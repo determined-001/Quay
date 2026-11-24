@@ -64,3 +64,31 @@ export function compareAmount(
   if (r === e) return "exact";
   return r > e ? "over" : "under";
 }
+
+/** Multiply integer stroops by an integer quantity. Throws if negative or exceeds MAX_STROOPS. */
+export function mulStroops(stroops: bigint, quantity: number | bigint): bigint {
+  const q = typeof quantity === "bigint" ? quantity : BigInt(quantity);
+  if (q < 0n || stroops < 0n) {
+    throw new Error("Cannot multiply negative stroops or quantity");
+  }
+  const result = stroops * q;
+  if (result > MAX_STROOPS) {
+    throw new Error(`Amount exceeds maximum Stellar stroops: ${result} > ${MAX_STROOPS}`);
+  }
+  return result;
+}
+
+/** Sum an array of integer stroops. Throws if any negative or sum exceeds MAX_STROOPS. */
+export function sumStroops(stroopsList: bigint[]): bigint {
+  let sum = 0n;
+  for (const s of stroopsList) {
+    if (s < 0n) {
+      throw new Error("Cannot sum negative stroops");
+    }
+    sum += s;
+    if (sum > MAX_STROOPS) {
+      throw new Error(`Total exceeds maximum Stellar stroops: ${sum} > ${MAX_STROOPS}`);
+    }
+  }
+  return sum;
+}

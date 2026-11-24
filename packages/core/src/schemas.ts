@@ -74,3 +74,47 @@ export const transferSentSchema = z.object({
     .transform((h) => h.toLowerCase()),
 });
 export type TransferSentBody = z.infer<typeof transferSentSchema>;
+
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+
+export const invoiceLineItemSchema = z.object({
+  description: z.string().trim().min(1).max(200),
+  quantity: z.number().int().min(1).max(100_000),
+  unitPrice: z
+    .string()
+    .trim()
+    .refine(isPositiveAmount, "unitPrice must be a positive amount with at most 7 decimals"),
+});
+export type InvoiceLineItemBody = z.infer<typeof invoiceLineItemSchema>;
+
+export const dueAtSchema = z
+  .number()
+  .int()
+  .refine((ts) => ts > Date.now(), {
+    message: "dueAt must be in the future",
+  })
+  .refine((ts) => ts <= Date.now() + ONE_YEAR_MS + 60_000, {
+    message: "dueAt must be at most 365 days out",
+  });
+
+export const createInvoiceSchema = z.object({
+  clientName: z.string().trim().min(1).max(120),
+  clientEmail: z.string().trim().email().max(254).nullable().optional(),
+  clientAddress: z.string().trim().max(500).nullable().optional(),
+  notes: z.string().trim().max(1000).nullable().optional(),
+  assetCode: assetCodeSchema.default("USDC"),
+  lineItems: z.array(invoiceLineItemSchema).min(1).max(50),
+  dueAt: dueAtSchema,
+});
+export type CreateInvoiceBody = z.infer<typeof createInvoiceSchema>;
+
+export const updateInvoiceSchema = z.object({
+  clientName: z.string().trim().min(1).max(120).optional(),
+  clientEmail: z.string().trim().email().max(254).nullable().optional(),
+  clientAddress: z.string().trim().max(500).nullable().optional(),
+  notes: z.string().trim().max(1000).nullable().optional(),
+  assetCode: assetCodeSchema.optional(),
+  lineItems: z.array(invoiceLineItemSchema).min(1).max(50).optional(),
+  dueAt: dueAtSchema.optional(),
+});
+export type UpdateInvoiceBody = z.infer<typeof updateInvoiceSchema>;
