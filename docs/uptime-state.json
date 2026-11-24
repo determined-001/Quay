@@ -3,7 +3,7 @@
     "api": {
       "consecutiveFailures": 1,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-11-24T06:47:46.889Z",
+      "lastCheckedAt": "2026-11-24T18:23:41.343Z",
       "today": {
         "date": "2026-11-24",
         "up": 0,
@@ -126,7 +126,7 @@
     "web": {
       "consecutiveFailures": 0,
       "lastStatus": "up",
-      "lastCheckedAt": "2026-11-24T06:47:47.123Z",
+      "lastCheckedAt": "2026-11-24T18:23:41.585Z",
       "today": {
         "date": "2026-11-24",
         "up": 1,
@@ -247,13 +247,13 @@
       "lastError": null
     },
     "synthetic": {
-      "consecutiveFailures": 441,
+      "consecutiveFailures": 440,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-11-24T06:47:47.232Z",
+      "lastCheckedAt": "2026-08-18T06:18:10.349Z",
       "today": {
-        "date": "2026-11-24",
+        "date": "2026-08-18",
         "up": 0,
-        "down": 1
+        "down": 8
       },
       "history": [
         {
@@ -360,19 +360,14 @@
           "date": "2026-08-17",
           "up": 0,
           "down": 40
-        },
-        {
-          "date": "2026-08-18",
-          "up": 0,
-          "down": 8
         }
       ],
-      "lastError": "POST https://quay-api.onrender.com/links -> HTTP 503 (expected 201)"
+      "lastError": "POST https://quay-api.onrender.com/links -> HTTP 401 (expected 201)"
     },
     "mainnet-api": {
       "consecutiveFailures": 1,
       "lastStatus": "down",
-      "lastCheckedAt": "2026-11-24T06:48:02.234Z",
+      "lastCheckedAt": "2026-11-24T18:23:56.587Z",
       "today": {
         "date": "2026-11-24",
         "up": 0,
