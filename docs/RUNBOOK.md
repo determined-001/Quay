@@ -393,6 +393,35 @@ when no deployment you operate cashes out through an anchor at all. A
 payments-only mainnet (`OFFRAMP=none`) does not need the probe, but it is not a
 reason to disable it while testnet still does.
 
+### Nightly path payment probe
+
+`.github/workflows/anchor-probe.yml` runs `apps/api/test/live/path-payment.live.test.ts`
+nightly with `RUN_LIVE_PATH_TESTS=1`. It verifies the end-to-end "pay with any asset"
+loop on live Stellar testnet:
+1. **Self-seeded SDEX liquidity:** It creates a throwaway issuer, mints USDC,
+   funds a market maker via Friendbot, and places a `manageSellOffer` selling USDC
+   for XLM at a fixed price. The test never depends on public testnet liquidity,
+   and testnet resets do not break it.
+2. **Participant setup:** Funds a seller with a USDC trustline and a buyer holding
+   XLM only (no USDC trustline).
+3. **Quoting & Link creation:** Creates a 10 USDC link under test, quotes
+   strict-receive payment paths from Horizon for XLM to deliver 10 USDC.
+4. **Negative case:** Shrinking `sendMax` below the quote fails submission with
+   reason `price_moved` (`op_over_source_max`).
+5. **Positive case:** Builds and signs the `path_payment_strict_receive` transaction,
+   submits it, runs the ledger watcher (`fetchSince` + `matchPayment` + `applyMatch`),
+   and asserts the link is marked `paid`, the delivered amount is exactly 10 USDC,
+   and `paidWith` records XLM.
+
+**Production go-live requirement:** Turning `PATH_PAYMENTS_ENABLED=true` on in
+production (issue 8.30) strictly requires this nightly job to be green. Path
+payments stay disabled on mainnet until this live testnet suite has passed.
+
+**Run it locally:**
+`RUN_LIVE_PATH_TESTS=1 pnpm --filter @checkout/api exec vitest run test/live/path-payment.live.test.ts`
+Without `RUN_LIVE_PATH_TESTS=1`, the test is skipped cleanly and normal test suites
+stay offline with zero network calls.
+
 ## Deploy
 
 Render deploys `apps/api` as a single Docker web service. The starter plan is

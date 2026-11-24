@@ -83,9 +83,24 @@ jobs:
           echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
           exit ${EXIT_CODE}
 
+      # Pays a USDC link with XLM through a strict-receive path payment on testnet,
+      # self-seeding its own SDEX market so it never depends on external liquidity
+      # and survives testnet resets. This test is the gate for turning
+      # PATH_PAYMENTS_ENABLED on in production (issue 8.30 / 5.51).
+      - name: Path payment testnet live probe (pay USDC link with XLM)
+        id: path_payment
+        continue-on-error: true
+        env:
+          RUN_LIVE_PATH_TESTS: "1"
+        run: |
+          pnpm --filter @checkout/api exec vitest run test/live/path-payment.live.test.ts --reporter=verbose 2>&1 | tee probe-path-payment-output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          exit ${EXIT_CODE}
+
       - name: Name the failing suites
-        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0'
-        run: node scripts/anchor-probe-report.mjs failing-suites.md probe-output.txt probe-full-cashout-output.txt
+        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0' || steps.path_payment.outputs.exit_code != '0'
+        run: node scripts/anchor-probe-report.mjs failing-suites.md probe-output.txt probe-full-cashout-output.txt probe-path-payment-output.txt
 
       - name: Publish telemetry summary
         if: always()
@@ -135,17 +150,18 @@ jobs:
           path: |
             probe-output.txt
             probe-full-cashout-output.txt
+            probe-path-payment-output.txt
             failing-suites.md
             packages/offramp/probe-telemetry.json
           retention-days: 7
 
       - name: Report success
-        if: steps.probe.outputs.exit_code == '0' && steps.full.outputs.exit_code == '0'
+        if: steps.probe.outputs.exit_code == '0' && steps.full.outputs.exit_code == '0' && steps.path_payment.outputs.exit_code == '0'
         run: |
-          echo "✅ Anchor probe passed — all SEP flows operational against testanchor.stellar.org" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Live probes passed — all SEP flows and path payment end-to-end test passed on testnet" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open or update failure issue
-        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0'
+        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0' || steps.path_payment.outputs.exit_code != '0'
         uses: actions/github-script@v9
         with:
           script: |
@@ -208,7 +224,7 @@ jobs:
       # above still run, which also means the job would otherwise finish green.
       # Fail the run here so the Actions list and the README badge go red too.
       - name: Fail the run if the probe failed
-        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0'
+        if: steps.probe.outputs.exit_code != '0' || steps.full.outputs.exit_code != '0' || steps.path_payment.outputs.exit_code != '0'
         run: |
-          echo "::error::Anchor probe failed (SEP flows exit ${{ steps.probe.outputs.exit_code }}, full cash-out exit ${{ steps.full.outputs.exit_code }}). See the filed issue and the probe-results artifact."
+          echo "::error::Live probe failed (SEP flows exit ${{ steps.probe.outputs.exit_code }}, full cash-out exit ${{ steps.full.outputs.exit_code }}, path payment exit ${{ steps.path_payment.outputs.exit_code }}). See the filed issue and the probe-results artifact."
           exit 1
