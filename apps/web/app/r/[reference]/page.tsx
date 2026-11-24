@@ -13,9 +13,9 @@ function formatDate(ts: number): string {
 }
 
 /** Render the "Paid with" line for a receipt, showing each paid-with asset. */
-export function paidWithLine(paidWith: PublicReceipt["paidWith"]): string {
-  if (!paidWith || paidWith.length === 0) return "";
-  return paidWith.map((a) => (a.amount ? `${a.amount} ${a.code}` : a.code)).join(", ");
+export function paidWithLine(paidWith: PublicReceipt["paidWith"]): string[] {
+  if (!paidWith || paidWith.length === 0) return [];
+  return paidWith.map((a) => (a.amount ? `${a.amount} ${a.code}` : a.code));
 }
 
 export default async function ReceiptPage({ params }: { params: Promise<{ reference: string }> }) {
@@ -60,7 +60,11 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
         {receipt.paidWith && receipt.paidWith.length > 0 && (
           <div className="receipt-row">
             <span className="receipt-label">Paid with</span>
-            <span className="receipt-value mono">{paidWithLine(receipt.paidWith)}</span>
+            <div className="receipt-value mono">
+              {receipt.paidWith.map((a) => (
+                <div key={a.code}>{a.amount ? `${a.amount} ${a.code}` : a.code}</div>
+              ))}
+            </div>
           </div>
         )}
 

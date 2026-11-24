@@ -7,30 +7,28 @@ function makePaidWith(amount: string | null, code: string): { amount: string | n
 }
 
 describe("paidWithLine", () => {
-  it("returns empty string when paidWith is null", () => {
-    expect(paidWithLine(null)).toBe("");
+  it("returns empty array when paidWith is null", () => {
+    expect(paidWithLine(null)).toEqual([]);
   });
 
-  it("returns empty string when paidWith is empty", () => {
-    expect(paidWithLine([])).toBe("");
+  it("returns empty array when paidWith is empty", () => {
+    expect(paidWithLine([])).toEqual([]);
   });
 
   it("renders a single paid-with entry", () => {
-    expect(
-      paidWithLine([makePaidWith("24.1234567", "XLM")]),
-    ).toBe("24.1234567 XLM");
+    expect(paidWithLine([makePaidWith("24.1234567", "XLM")])).toEqual(["24.1234567 XLM"]);
   });
 
-  it("renders multiple paid-with entries separated by commas", () => {
+  it("renders multiple paid-with entries as separate entries", () => {
     expect(
       paidWithLine([
         makePaidWith("10.00", "USDC"),
         makePaidWith("5.00", "XLM"),
-      ] as PublicReceipt["paidWith"]),
-    ).toBe("10.00 USDC, 5.00 XLM");
+      ]),
+    ).toEqual(["10.00 USDC", "5.00 XLM"]);
   });
 
   it("omits amount when amount is null", () => {
-    expect(paidWithLine([makePaidWith(null, "XLM")])).toBe("XLM");
+    expect(paidWithLine([makePaidWith(null, "XLM")])).toEqual(["XLM"]);
   });
 });
