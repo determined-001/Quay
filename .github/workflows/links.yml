@@ -1,0 +1,84 @@
+name: links
+
+on:
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'SECURITY.md'
+      - 'MAINTAINER.md'
+      - 'ROADMAP.md'
+      - 'docs/**/*.md'
+      - 'lychee.toml'
+      - '.github/workflows/links.yml'
+  schedule:
+    # Run weekly on Monday at 00:00 UTC
+    - cron: "0 0 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: links-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Link Checker
+        id: lychee
+        uses: lycheeverse/lychee-action@v2.9.0
+        with:
+          args: --config lychee.toml README.md CONTRIBUTING.md SECURITY.md MAINTAINER.md ROADMAP.md "docs/**/*.md"
+          fail: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Check project host availability and suspended services
+        id: hosts
+        continue-on-error: true
+        run: node scripts/check-project-hosts.mjs
+
+      - name: Alert on dead links on weekly schedule
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (steps.lychee.outputs.exit_code != '0' || steps.hosts.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Docs: dead or suspended links detected"
+          body="## Dead or Suspended Links Report
+
+The scheduled link check found broken links or suspended project hosts.
+
+### Lychee Link Checker Output
+$([ -f lychee/out.md ] && cat lychee/out.md || echo "No lychee report file found.")
+
+### Project Hosts Status
+$([ "${{ steps.hosts.outcome }}" = "failure" ] && echo "One or more project hosts (*.onrender.com, *.vercel.app) returned HTTP 5xx or a 'Service Suspended' body." || echo "All project hosts are healthy.")
+
+Please review these links and either fix them or add an exclusion to \`lychee.toml\`."
+
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label "area:ops,type:ops"
+          fi
+
+      - name: Fail on broken links or suspended hosts
+        if: steps.lychee.outputs.exit_code != '0' || steps.hosts.outcome == 'failure'
+        run: |
+          echo "Documentation link validation failed!"
+          if [ "${{ steps.lychee.outputs.exit_code }}" != "0" ]; then
+            echo "- Lychee found broken links (exit code ${{ steps.lychee.outputs.exit_code }})."
+          fi
+          if [ "${{ steps.hosts.outcome }}" = "failure" ]; then
+            echo "- One or more project hosts are suspended or returning 5xx."
+          fi
+          exit 1

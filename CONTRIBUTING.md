@@ -273,6 +273,24 @@ worker, or adapters should come with tests where practical. If you change
 `pnpm docs:status-diagram` and update the pasted copy in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) to match.
 
+### Documentation & Link Checking
+
+Link integrity in documentation (`README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `MAINTAINER.md`, `ROADMAP.md`, and `docs/**/*.md`) is verified in CI via [`.github/workflows/links.yml`](.github/workflows/links.yml) on pull requests that touch Markdown files and on a weekly schedule.
+
+To run the link check locally:
+```bash
+# Using Docker with Lychee:
+docker run --rm -v "$PWD:/input" -w /input lycheeverse/lychee --config lychee.toml README.md docs
+
+# Or using locally installed lychee:
+lychee --config lychee.toml README.md CONTRIBUTING.md SECURITY.md MAINTAINER.md ROADMAP.md "docs/**/*.md"
+
+# To verify deployed project hosts (*.onrender.com, *.vercel.app) for HTTP 5xx or "Service Suspended":
+node scripts/check-project-hosts.mjs
+```
+
+**Adding an exclusion**: If a URL is a placeholder (such as an example domain or environment variable), returns non-200 by design when queried without parameters (like friendbot), or blocks automated bots/rate-limits CI, add a regex pattern to the `exclude` list in [`lychee.toml`](lychee.toml) along with a comment explaining why.
+
 ---
 
 ## Pull Request Guidelines

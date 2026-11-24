@@ -1,0 +1,42 @@
+# lychee configuration file
+# https://lychee.cli.rs/configuration/
+
+# Cache successful link checks
+cache = false
+
+# Maximum number of allowed retries before reporting failure
+max_retries = 3
+
+# Timeout per request (in seconds)
+timeout = 20
+
+# Accepted HTTP status codes (200 OK, 204 No Content, 206 Partial Content, 429 Rate Limit)
+accept = [200, 204, 206, 429]
+
+# Excluded URL patterns with explanatory comments
+exclude = [
+  # Localhost and loopback IPs used in dev setup examples and documentation
+  '^https?://localhost(:[0-9]+)?(/.*)?$',
+  '^https?://127\.0\.0\.1(:[0-9]+)?(/.*)?$',
+
+  # RFC 2606 example domain placeholders in sample configurations and webhook guides
+  '^https?://([a-zA-Z0-9-]+\.)*example(\.com)?(/.*)?$',
+  '^https://checkout\.your-domain\.com(/.*)?$',
+  '^https://your-domain\.com(/.*)?$',
+
+  # Shell environment variable placeholders in documentation URLs
+  '^https://\$ANCHOR_HOME_DOMAIN(/.*)?$',
+  '^https://\.\.\.(/.*)?$',
+
+  # Friendbot returns HTTP 400 Bad Request when requested without an address query parameter
+  '^https://friendbot\.stellar\.org/\?addr=',
+
+  # Shields.io badges hit rate limits or 404 in CI before branches/commits are published
+  '^https://img\.shields\.io(/.*)?$',
+
+  # Raw GitHub user content for branch-dependent status badges may rate-limit CI
+  '^https://raw\.githubusercontent\.com(/.*)?$',
+
+  # Regulatory and external portals that block automated CI bots or headless user agents with 403
+  '^https://ndpc\.gov\.ng(/.*)?$',
+]
