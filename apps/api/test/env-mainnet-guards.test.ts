@@ -209,4 +209,55 @@ describe("mainnet guardrails in env.ts", () => {
     const err = await loadEnv();
     expect(err?.message).toMatch(/ANCHOR_KYC_TYPE must be 1-64 characters/);
   });
+
+  describe("INVOICES_ENABLED feature flag (issue 8.31)", () => {
+    it("defaults to false on public network when unset", async () => {
+      setPublicBase({ INVOICES_ENABLED: "" });
+      vi.resetModules();
+      const { env } = await import("../src/env");
+      expect(env.invoicesEnabled).toBe(false);
+    });
+
+    it("defaults to true on testnet when unset", async () => {
+      setPublicBase({ STELLAR_NETWORK: "testnet", INVOICES_ENABLED: "" });
+      vi.resetModules();
+      const { env } = await import("../src/env");
+      expect(env.invoicesEnabled).toBe(true);
+    });
+
+    it("throws at boot on invalid INVOICES_ENABLED string", async () => {
+      setPublicBase({ INVOICES_ENABLED: "yes" });
+      const err = await loadEnv();
+      expect(err?.message).toMatch(/INVOICES_ENABLED must be "true" or "false", got "yes"/);
+    });
+
+    it("accepts explicit boolean strings", async () => {
+      setPublicBase({ INVOICES_ENABLED: "true" });
+      vi.resetModules();
+      expect((await import("../src/env")).env.invoicesEnabled).toBe(true);
+
+      setPublicBase({ STELLAR_NETWORK: "testnet", INVOICES_ENABLED: "false" });
+      vi.resetModules();
+      expect((await import("../src/env")).env.invoicesEnabled).toBe(false);
+    });
+
+    it("requireInvoices answers 501 invoices_disabled when off and calls next() when on", async () => {
+      const { requireInvoices, INVOICES_DISABLED_BODY } = await import("../src/routes/invoices");
+      const disabledMw = requireInvoices({ invoicesEnabled: false });
+      const jsonMock = vi.fn((body, status) => ({ body, status }));
+      const nextMock = vi.fn();
+      const ctx = { json: jsonMock } as any;
+
+      await disabledMw(ctx, nextMock);
+      expect(jsonMock).toHaveBeenCalledWith(INVOICES_DISABLED_BODY, 501);
+      expect(nextMock).not.toHaveBeenCalled();
+
+      const enabledMw = requireInvoices({ invoicesEnabled: true });
+      jsonMock.mockClear();
+      nextMock.mockClear();
+      await enabledMw(ctx, nextMock);
+      expect(nextMock).toHaveBeenCalled();
+      expect(jsonMock).not.toHaveBeenCalled();
+    });
+  });
 });

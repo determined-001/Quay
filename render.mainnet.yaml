@@ -38,6 +38,7 @@
 #                                        error naming the cause
 #   NEXT_PUBLIC_OFFRAMP_MODE=none        or the dashboard offers a cash-out the
 #                                        API answers 501 to
+#   NEXT_PUBLIC_INVOICES_ENABLED=false   keep false until 5.55 passes on testnet
 #
 # Before the first real payment, run the preflight — it checks the things a
 # boot guard cannot see (does the seller account exist, is it funded, does it
@@ -108,6 +109,10 @@ services:
       # cash-out on later is config rather than a migration.
       - key: OFFRAMP
         value: none
+
+      # Invoices feature flag (issue 8.31). Keep false on mainnet until end-to-end tests (issue 5.55) pass on testnet.
+      - key: INVOICES_ENABLED
+        value: "false"
 
       # Cash-out to fiat. Uncomment ALL FOUR together, set OFFRAMP=anchor
       # above, set NEXT_PUBLIC_OFFRAMP_MODE=anchor on the web deployment, and

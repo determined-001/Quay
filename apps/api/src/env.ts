@@ -129,6 +129,18 @@ if (!OFFRAMP_PROTOCOLS.includes(offrampProtocol)) {
   );
 }
 
+function parseInvoicesEnabled(net: StellarNetwork): boolean {
+  const raw = process.env.INVOICES_ENABLED;
+  if (raw === undefined || raw === "") {
+    return net !== "public";
+  }
+  if (raw !== "true" && raw !== "false") {
+    throw new Error(`INVOICES_ENABLED must be "true" or "false", got "${raw}"`);
+  }
+  return raw === "true";
+}
+const invoicesEnabled = parseInvoicesEnabled(network);
+
 // ---------------------------------------------------------------------------
 // Mainnet guardrails.
 // ---------------------------------------------------------------------------
@@ -382,6 +394,9 @@ export const env = {
   // Pay options whose full-amount price is more than this many basis points
   // worse than a 1% quote are hidden as too thin (issue #547). Default 300.
   pathPaymentsMaxPriceImpactBps: num("PATH_PAYMENTS_MAX_PRICE_IMPACT_BPS", 300),
+  // Invoices capability flag (issue 8.31). Defaults to false on public, true
+  // on testnet / local dev. Set explicitly via INVOICES_ENABLED="true"|"false".
+  invoicesEnabled,
 } as const;
 
 // A production process with the e2e backdoors mounted would accept
