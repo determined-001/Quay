@@ -18,6 +18,7 @@ import {
 } from "../../lib/anchor-session";
 import type { PaymentFilter } from "../../lib/dashboard-metrics";
 import type { KycLoadState } from "../../lib/kyc-load";
+import WakingNotice from "./WakingNotice";
 import KycPanel from "./KycPanel";
 import RegistrationForm from "./RegistrationForm";
 import DisclosuresPanel from "./DisclosuresPanel";
@@ -375,6 +376,8 @@ export default function Dashboard() {
   return (
     <>
       <Shell view={view} onNavigate={navigate} onCreate={() => setCreateOpen(true)}>
+        {/* First load only: say the service is waking if the links take a while (issue 5.42). */}
+        <WakingNotice pending={loading} />
         {view === "home" && (
           <HomeView
             links={links}

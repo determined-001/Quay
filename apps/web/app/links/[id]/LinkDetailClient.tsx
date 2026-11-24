@@ -11,6 +11,7 @@ import {
 } from "../../../lib/api";
 import { TimelineClient, PendingTransferAction } from "./TimelineClient";
 import SessionGate from "../../components/SessionGate";
+import NetworkChip from "../../components/NetworkChip";
 import { addressUrl, explorerUrl } from "../../../lib/explorer";
 
 export interface TimelineEvent {
@@ -275,7 +276,11 @@ export function LinkDetailClient({ id }: { id: string }) {
         <Link href="/dashboard" className="linkbtn" style={{ fontSize: 13 }}>
           ← Back to dashboard
         </Link>
-        <span className="net mono">{link.asset.code}</span>
+        <span className="masthead__right">
+          {/* Which chain this link settles on (issue 5.43). */}
+          <NetworkChip />
+          <span className="net mono">{link.asset.code}</span>
+        </span>
       </header>
 
       {/* Header card */}

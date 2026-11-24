@@ -216,7 +216,7 @@ There is no friendbot on pubnet. Both accounts must be funded with real XLM.
 `USDC_ISSUER_PUBLIC` defaults to
 `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` in the templates.
 **Check it against Circle's own published address** before taking a payment:
-<https://developers.circle.com/stablecoins/stellar-usdc>
+<https://developers.circle.com/stablecoins/usdc-contract-addresses>
 
 Minting an asset with the code `USDC` from a different issuer is trivial and it
 is worth nothing. The issuer is the only thing that distinguishes real USDC.

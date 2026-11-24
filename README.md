@@ -13,12 +13,11 @@ carried in the transaction memo. Nothing was custodied in between, which is
 checkable from that link without asking this service anything.
 
 Cash-out to local currency is **not** enabled on mainnet (`OFFRAMP=none`) —
-sellers move their own funds. The off-ramp exists and runs a real
-SEP-10 → SEP-38 → SEP-6 flow against `testanchor.stellar.org` on the **testnet**
-deployment ([dashboard](https://quay-web.vercel.app) ·
-[API](https://quay-api.onrender.com/health)), which is where to try it: create a
-link, pay it from any testnet wallet with the shown memo, watch it flip to
-**paid**. No real money moves there.
+sellers move their own funds. The public [dashboard](https://quay-web.vercel.app)
+is the mainnet deployment: signing in and creating links works there, and payments
+are real. To try the full cash-out flow with no real money (SEP-10 → SEP-38 → SEP-6
+against `testanchor.stellar.org`), [run Quay locally](#run-it-locally) on testnet
+with `OFFRAMP=testanchor`.
 
 [![API uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-api.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
 [![Web uptime](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/determined-001/Quay/status/docs/uptime-badge-web.json)](https://github.com/determined-001/Quay/blob/status/docs/STATUS.md)
@@ -91,8 +90,10 @@ moves money and must be requested explicitly.
 
 Generate a payment link from your backend server:
 
+Use `http://localhost:8787` locally, or your own deployment's API URL for `$QUAY_API_URL`.
+
 ```bash
-curl -X POST https://quay-api.onrender.com/links \
+curl -X POST $QUAY_API_URL/links \
   -H "Authorization: Bearer ak_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
@@ -126,7 +127,7 @@ curl -X POST https://quay-api.onrender.com/links \
 Register your endpoint to receive real-time JSON notifications when payments land on-chain:
 
 ```bash
-curl -X POST https://quay-api.onrender.com/webhooks \
+curl -X POST $QUAY_API_URL/webhooks \
   -H "Authorization: Bearer ak_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{ "url": "https://your-domain.com/api/webhooks/checkout" }'
@@ -284,7 +285,7 @@ pnpm typecheck      # all packages
 pnpm test           # every package's test suite, via turbo
 pnpm test:coverage  # the same tests, with the CI coverage gate applied
 pnpm build          # builds the web app
-pnpm sweep          # pre-entry ritual: uptime + synthetic checks against the live demo
+pnpm sweep          # pre-release check: uptime + synthetic checks against the live deployment
 ```
 
 **Coverage gating.** `pnpm test:coverage` fails if any package drops below the

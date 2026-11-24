@@ -58,6 +58,24 @@ async function seedSeller(
     ledger: 77,
     createdAt: 1_700_000_000_000,
   });
+  await container.refunds.create({
+    id: `rfd_${tag}`,
+    linkId: `lnk_${tag}`,
+    sellerId: seller.id,
+    paymentTxHash: `tx_${tag}`,
+    paymentOperationId: `op_${tag}`,
+    destination: `GPAYER${tag.toUpperCase()}`,
+    destinationMuxedId: null,
+    memo: `rfdnote_${tag}`,
+    memoType: "text",
+    amount: "2.5",
+    asset: { code: "USDC", issuer: ISSUER },
+    status: "confirmed",
+    txHash: `refundtx_${tag}`,
+    failureReason: null,
+    createdAt: 1_700_000_000_500,
+    updatedAt: 1_700_000_000_600,
+  });
   await container.webhooks.create({
     sellerId: seller.id,
     url: `https://hooks.example/${tag}`,
@@ -201,6 +219,7 @@ describe("GET /seller/profile/export (issue 4.27)", () => {
         "payments",
         "payoutFields",
         "profile",
+        "refunds",
         "seller",
         "webhooks",
       ].sort(),
@@ -313,6 +332,36 @@ describe("GET /seller/profile/export (issue 4.27)", () => {
     expect(text).not.toContain("job_bravo");
     expect(body.truncated).toBeUndefined();
     h.container.client.close();
+  });
+
+  it("includes the seller's refunds, with the buyer's destination and memo (issue 4.58)", async () => {
+    const h = await harness();
+    await h.seedA();
+    await h.seedB();
+
+    const res = await h.app.request("/seller/profile/export", { headers: h.headersA });
+    const body = (await res.json()) as Record<string, any>;
+
+    expect(body.refunds).toEqual([
+      {
+        id: "rfd_alpha",
+        linkId: "lnk_alpha",
+        paymentTxHash: "tx_alpha",
+        paymentOperationId: "op_alpha",
+        destination: "GPAYERALPHA",
+        destinationMuxedId: null,
+        memo: "rfdnote_alpha",
+        memoType: "text",
+        amount: "2.5",
+        asset: "USDC",
+        assetIssuer: ISSUER,
+        status: "confirmed",
+        txHash: "refundtx_alpha",
+        failureReason: null,
+        createdAt: new Date(1_700_000_000_500).toISOString(),
+        updatedAt: new Date(1_700_000_000_600).toISOString(),
+      },
+    ]);
   });
 
   it("includes none of another seller's rows", async () => {

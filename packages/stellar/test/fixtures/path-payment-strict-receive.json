@@ -1,0 +1,37 @@
+{
+  "id": "25203134380912641",
+  "paging_token": "25203134380912641",
+  "transaction_successful": true,
+  "source_account": "GC6VE2YE5FIGNDLGVFHSNZFINUH7FIRS5L5N4HORYKOP6XMONBXSIBKA",
+  "type": "path_payment_strict_receive",
+  "type_i": 2,
+  "created_at": "2026-11-22T16:12:31Z",
+  "transaction_hash": "15ec20bb28ba5fe841cfd4c2541b9fd0aac5d235fe1dac0bd0839dadf6709587",
+  "transaction": {
+    "memo_type": "none",
+    "ledger": 5868062,
+    "hash": "15ec20bb28ba5fe841cfd4c2541b9fd0aac5d235fe1dac0bd0839dadf6709587",
+    "successful": true,
+    "source_account": "GC6VE2YE5FIGNDLGVFHSNZFINUH7FIRS5L5N4HORYKOP6XMONBXSIBKA",
+    "created_at": "2026-11-22T16:12:31Z",
+    "operation_count": 5,
+    "fee_charged": "500",
+    "max_fee": "500"
+  },
+  "asset_type": "native",
+  "from": "GC6VE2YE5FIGNDLGVFHSNZFINUH7FIRS5L5N4HORYKOP6XMONBXSIBKA",
+  "to": "GC6VE2YE5FIGNDLGVFHSNZFINUH7FIRS5L5N4HORYKOP6XMONBXSIBKA",
+  "amount": "0.0000900",
+  "path": [
+    {
+      "asset_type": "credit_alphanum4",
+      "asset_code": "USDC",
+      "asset_issuer": "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56"
+    }
+  ],
+  "source_amount": "0.0000007",
+  "source_max": "0.0000008",
+  "source_asset_type": "credit_alphanum4",
+  "source_asset_code": "USDC",
+  "source_asset_issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+}

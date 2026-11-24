@@ -59,6 +59,19 @@ function num(name: string, fallback: number): number {
   return n;
 }
 
+// PATH_PAYMENTS_MAX_SLIPPAGE_BPS (issue 8.30): an integer 0-1000, default 100.
+// Anything else refuses to boot, like OFFRAMP, rather than silently quoting
+// buyers a sendMax nobody chose.
+function pathPaymentsMaxSlippageBps(): number {
+  const raw = process.env.PATH_PAYMENTS_MAX_SLIPPAGE_BPS;
+  if (raw === undefined || raw.trim() === "") return 100;
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw.trim()) || !Number.isInteger(n) || n < 0 || n > 1000) {
+    throw new Error(`PATH_PAYMENTS_MAX_SLIPPAGE_BPS must be an integer from 0 to 1000, got "${raw}"`);
+  }
+  return n;
+}
+
 function req(name: string, fallback?: string): string {
   const v = process.env[name] ?? fallback;
   if (v === undefined || v === "") throw new Error(`Missing required env var: ${name}`);
@@ -360,6 +373,15 @@ export const env = {
   kycEncryptionKeyPrevious: process.env.KYC_ENCRYPTION_KEY_PREVIOUS || undefined,
   // Maximum allowed size (bytes) for multipart KYC file uploads (default 10 MiB).
   kycMaxUploadBytes: num("KYC_MAX_UPLOAD_BYTES", 10 * 1024 * 1024),
+  // Paying a link in any asset through a strict-receive path payment (issue
+  // 8.30). Only the exact string "true" turns it on; it is off on every
+  // network until the live testnet test (issue 5.51) passes.
+  pathPaymentsEnabled: process.env.PATH_PAYMENTS_ENABLED === "true",
+  // Slippage allowed on a path payment's sendMax, in basis points (100 = 1%).
+  pathPaymentsMaxSlippageBps: pathPaymentsMaxSlippageBps(),
+  // Pay options whose full-amount price is more than this many basis points
+  // worse than a 1% quote are hidden as too thin (issue #547). Default 300.
+  pathPaymentsMaxPriceImpactBps: num("PATH_PAYMENTS_MAX_PRICE_IMPACT_BPS", 300),
 } as const;
 
 // A production process with the e2e backdoors mounted would accept
@@ -372,5 +394,13 @@ if (env.e2eTestMode && (process.env.NODE_ENV === "production" || network === "pu
       "The e2e test mode mounts routes that mint sessions and mark links paid " +
       "without authentication or a ledger; it exists for the local Playwright " +
       "suite only and must never reach a production deployment.",
+  );
+}
+
+// Path payments on mainnet move real buyer funds through the SDEX; say so
+// once at boot so the setting can never be on by accident (issue 8.30).
+if (network === "public" && env.pathPaymentsEnabled) {
+  console.warn(
+    "[env] PATH_PAYMENTS_ENABLED=true on STELLAR_NETWORK=public: buyers can pay mainnet links in any asset through path payments.",
   );
 }

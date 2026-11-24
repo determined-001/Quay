@@ -32,6 +32,7 @@ function fakeContainer(
     webhooks: {} as Container["webhooks"],
     apiKeys: {} as Container["apiKeys"],
     telemetry: {} as Container["telemetry"],
+    refunds: {} as Container["refunds"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: seller.wallet },
     kyc: {} as Container["kyc"],
     kycConsents: {

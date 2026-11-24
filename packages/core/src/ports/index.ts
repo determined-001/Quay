@@ -1,4 +1,5 @@
 import type { AssetRef, PaymentLink } from "../domain/payment-link";
+import type { Refund, RefundStatus } from "../domain/refund";
 import type { NormalizedPayment } from "../matching/match-payment";
 import type { Logger } from "./logger";
 
@@ -845,6 +846,28 @@ export interface LinkRepository {
    * `restoreStatus`, only if the status is still `offramp_pending`.
    */
   releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void>;
+  /**
+   * Every payment recorded against the link, oldest first (issue 4.58): a
+   * split-payment link has one row per payer, and each is refunded on its own.
+   */
+  listPaymentsForLink(linkId: string): Promise<LinkPaymentRecord[]>;
+}
+
+/** The fields of a refund that change after it is created (issue 4.58). */
+export type RefundPatch = Partial<Pick<Refund, "status" | "txHash" | "failureReason">>;
+
+/**
+ * Persistence for refunds (issue 4.58). Lists are newest first. The atomic
+ * "claim a payment's refundable amount" step is issue 4.62, not here.
+ */
+export interface RefundRepository {
+  create(refund: Refund): Promise<void>;
+  findById(id: string): Promise<Refund | null>;
+  listByLink(linkId: string): Promise<Refund[]>;
+  listByPayment(paymentTxHash: string, paymentOperationId: string): Promise<Refund[]>;
+  listByStatus(status: RefundStatus): Promise<Refund[]>;
+  /** Applies the patch and bumps `updatedAt`; returns the updated refund, or null if unknown. */
+  update(id: string, patch: RefundPatch): Promise<Refund | null>;
 }
 
 /**

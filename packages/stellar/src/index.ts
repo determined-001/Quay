@@ -2,6 +2,7 @@ export * from "./asset";
 export * from "./normalize";
 export * from "./horizon-client";
 export * from "./horizon-retry";
+export * from "./path-quote";
 export * from "./horizon-watcher";
 export * from "./streaming-horizon-watcher";
 export * from "./stellar-rail";

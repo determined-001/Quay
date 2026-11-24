@@ -616,7 +616,7 @@ other than exactly one payment operation.
 
 **409** — the link is unavailable, or the transaction does not match the link.
 A Horizon rejection returns `{ "error": "payment_rejected", "reason": "...", "detail": "..." }`,
-where `reason` can distinguish `insufficient_balance`, `missing_trustline`, or a
+where `reason` can distinguish `insufficient_balance`, `missing_trustline`, `price_moved`, `no_path`, or a
 generic `payment_rejected`.
 
 ---

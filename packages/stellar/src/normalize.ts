@@ -8,6 +8,14 @@ const VALUE_TYPES = new Set([
   "path_payment_strict_send",
 ]);
 
+// Path payments convert an asset on the way, so Horizon reports two sides:
+// `amount`/`asset_*` is what the destination received, `source_amount`/
+// `source_asset_*` is what the payer spent. Only path payments have the latter.
+const PATH_PAYMENT_TYPES = new Set([
+  "path_payment_strict_receive",
+  "path_payment_strict_send",
+]);
+
 type AnyRecord = Horizon.ServerApi.PaymentOperationRecord | Horizon.ServerApi.OperationRecord;
 
 interface ValueFields {
@@ -17,6 +25,10 @@ interface ValueFields {
   asset_type?: string;
   asset_code?: string;
   asset_issuer?: string;
+  source_amount?: string;
+  source_asset_type?: string;
+  source_asset_code?: string;
+  source_asset_issuer?: string;
   // Present when the operation's destination was specified as an SEP-23
   // M-address; Horizon still normalizes `to` to the underlying G-address.
   to_muxed_id?: string;
@@ -40,6 +52,15 @@ function assetOf(r: ValueFields): AssetRef {
     return { code: "XLM", issuer: null };
   }
   return { code: r.asset_code ?? "", issuer: r.asset_issuer ?? null };
+}
+
+/** The paid side of a path payment, from Horizon's `source_asset_*` fields. */
+function sourceAssetOf(r: ValueFields): AssetRef {
+  return assetOf({
+    asset_type: r.source_asset_type,
+    asset_code: r.source_asset_code,
+    asset_issuer: r.source_asset_issuer,
+  });
 }
 
 /**
@@ -67,6 +88,7 @@ export async function normalizePayment(
   const tx = await fetchTransaction(r);
   const memoType = tx.memo_type ?? null;
   const memo = memoType && memoType !== "none" ? (tx.memo ?? null) : null;
+  const isPathPayment = PATH_PAYMENT_TYPES.has(record.type);
 
   return {
     txHash: r.transaction_hash,
@@ -75,6 +97,10 @@ export async function normalizePayment(
     to: r.to ?? "",
     amount: r.amount ?? "0",
     asset: assetOf(r),
+    // For a path payment Horizon's `amount`/`asset_*` are the delivered side;
+    // the paid side rides along for the receipt/CSV but never decides a match.
+    sourceAsset: isPathPayment ? sourceAssetOf(r) : null,
+    sourceAmount: isPathPayment ? (r.source_amount ?? null) : null,
     memo,
     memoType,
     toMuxedId: r.to_muxed_id ?? null,

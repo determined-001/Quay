@@ -86,6 +86,43 @@ export const linkPayments = sqliteTable("link_payments", {
   uniqueIndex("link_payments_tx_hash_operation_id_unique").on(table.txHash, table.operationId),
 ]);
 
+/**
+ * Refunds a seller sends back against one payment (issue 4.58). One column per
+ * field of the `Refund` type in @checkout/core (issue 1.13). A refund names
+ * the `link_payments` row it returns by (payment_tx_hash, payment_operation_id);
+ * SQLite has no composite FK here, so the repository's callers enforce it.
+ */
+export const refunds = sqliteTable("refunds", {
+  id: text("id").primaryKey(),
+  linkId: text("link_id").notNull(),
+  sellerId: text("seller_id").notNull(),
+  paymentTxHash: text("payment_tx_hash").notNull(),
+  paymentOperationId: text("payment_operation_id").notNull(),
+  /** The buyer's G-address the refund goes to. */
+  destination: text("destination").notNull(),
+  /** M-address id when the buyer paid from a muxed account. */
+  destinationMuxedId: text("destination_muxed_id"),
+  memo: text("memo"),
+  /** text | id | hash, when `memo` is set. */
+  memoType: text("memo_type"),
+  amount: text("amount").notNull(),
+  assetCode: text("asset_code").notNull(),
+  assetIssuer: text("asset_issuer"), // null = native XLM
+  /** prepared | submitted | confirmed | failed (REFUND_STATUSES). */
+  status: text("status").notNull(),
+  /** The refund transaction's hash; null until submitted. Unique when set. */
+  txHash: text("tx_hash"),
+  failureReason: text("failure_reason"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  index("refunds_link_id_idx").on(table.linkId),
+  index("refunds_payment_idx").on(table.paymentTxHash, table.paymentOperationId),
+  index("refunds_status_idx").on(table.status),
+  // SQLite treats NULLs as distinct, so only refunds with a hash collide.
+  uniqueIndex("refunds_tx_hash_unique").on(table.txHash),
+]);
+
 export const webhooks = sqliteTable("webhooks", {
   id: text("id").primaryKey(),
   sellerId: text("seller_id").notNull(),

@@ -1,4 +1,4 @@
-import { Horizon } from "@stellar/stellar-sdk";
+import { Asset, Horizon } from "@stellar/stellar-sdk";
 
 /**
  * Slice of the Horizon SDK's payments call-builder that both watcher
@@ -37,6 +37,23 @@ export interface HorizonAccount {
 export interface HorizonClient {
   payments(): PaymentsCallBuilder;
   loadAccount(account: string): Promise<HorizonAccount>;
+  /** `GET /paths/strict-receive` — how much of each source asset is needed to
+   *  deliver a fixed destination amount (issue #545). Same shape as the SDK
+   *  call: `source` is a buyer account id or a list of assets. */
+  strictReceivePaths(
+    source: string | Asset[],
+    destinationAsset: Asset,
+    destinationAmount: string,
+  ): StrictReceivePathsCallBuilder;
+}
+
+/**
+ * Slice of the Horizon SDK's strict-receive path call-builder. Mirrors the
+ * shape of `Horizon.Server.strictReceivePaths(...)` so `realHorizonClient`
+ * keeps satisfying `HorizonClient` structurally.
+ */
+export interface StrictReceivePathsCallBuilder {
+  call(): Promise<{ records: Horizon.ServerApi.PaymentPathRecord[] }>;
 }
 
 export type HorizonPaymentRecord =

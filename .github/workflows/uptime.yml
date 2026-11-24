@@ -35,8 +35,14 @@ jobs:
       - name: Run checks
         id: uptime
         env:
-          # Least-privilege API keys for the synthetic write check (issue
-          # 8.9). Secrets, not vars — these authenticate a write.
+          # Least-privilege API keys. Secrets, not vars — both authenticate.
+          #
+          # UPTIME_API_KEY: testnet's synthetic write check (links:read +
+          # links:write), issue 8.9.
+          # UPTIME_MAINNET_API_KEY: mainnet's read-only probe (links:read
+          # only), issue 8.27. The probe is on whenever the mainnet API URL is
+          # set; with no key it logs "NOT CONFIGURED" and records nothing, so
+          # a missing secret is never reported as an outage.
           UPTIME_API_KEY: ${{ secrets.UPTIME_API_KEY }}
           UPTIME_MAINNET_API_KEY: ${{ secrets.UPTIME_MAINNET_API_KEY }}
           # Mainnet is only checked once this is actually set — see

@@ -130,12 +130,12 @@ Everything below this point was originally written against the single testnet
 Render service (`quay-api`). After the mainnet cutover (`docs/MAINNET.md`)
 there are **two independent services with two independent sets of secrets**:
 
-| | Testnet (default below) | Mainnet |
+| | Testnet (retired 2026-11-23) | Mainnet |
 |---|---|---|
-| Render service name | `quay-api` | `quay-api-mainnet` |
-| Blueprint | `render.yaml` | `render.mainnet.yaml` |
+| Render service name | `quay-api` (retired) | `quay-api-mainnet` |
+| Blueprint | `render.yaml` (blueprint preserved) | `render.mainnet.yaml` |
 | `STELLAR_NETWORK` | `testnet` | `public` |
-| API URL | `https://quay-api.onrender.com` | the host Render assigns `quay-api-mainnet`, or your custom domain if `HOME_DOMAIN` is set — check the Render dashboard, do not assume it |
+| API URL | `https://quay-api.onrender.com` (retired; service suspended) | the host Render assigns `quay-api-mainnet`, or your custom domain if `HOME_DOMAIN` is set — check the Render dashboard, do not assume it |
 | Database | testnet Turso DB | a **separate** Turso DB — never point both services at the same one |
 | Off-ramp | `testanchor` (SDF sandbox) | `anchor` (a real production anchor) or `none` |
 
@@ -259,10 +259,13 @@ configured environment on one schedule, each with its own history series and
 its own section in `docs/STATUS.md` — a healthy testnet can never stand in
 for an unmonitored mainnet (issue 8.8).
 
-**Testnet is always checked**, with the same defaults and unprefixed target
-ids (`api` / `web` / `synthetic`) this script has always used —
-`https://quay-api.onrender.com` / `https://quay-web.vercel.app`, overridable
-via `UPTIME_API_URL` / `UPTIME_WEB_URL`.
+**Testnet is always checked** by default with the unprefixed target ids
+(`api` / `web` / `synthetic`). However, the default testnet API service
+(`https://quay-api.onrender.com`) is retired (HTTP 503, suspended), so default
+checks against it will fail unless overridden with a live endpoint via
+`UPTIME_API_URL` / `UPTIME_TESTNET_API_URL`. The web target defaults to
+`https://quay-web.vercel.app` (overridable via `UPTIME_WEB_URL` /
+`UPTIME_TESTNET_WEB_URL`).
 
 **Mainnet is checked only once you configure it — there is no default of any
 kind.** Set these as repository **Variables** (Settings → Secrets and
@@ -272,12 +275,39 @@ variables → Actions → Variables — they're plain hostnames, not secrets):
 |---|---|---|
 | `UPTIME_MAINNET_API_URL` | **set this once `quay-api-mainnet` exists** | e.g. `https://quay-api-mainnet.onrender.com` (`render.mainnet.yaml`'s `quay-api-mainnet`). Unset means mainnet is skipped entirely, not silently checked against the testnet URL. |
 | `UPTIME_MAINNET_WEB_URL` | optional | Only set this if a dedicated mainnet web deployment exists. `render.mainnet.yaml` declares no web service today, so leave unset until one does. |
-| `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run. It authenticates with the repository secret `UPTIME_MAINNET_API_KEY` (a least-privilege API key, issue 8.9 / #163, same as `UPTIME_API_KEY` on testnet), so create that key and set the secret before turning this on. |
+| `UPTIME_MAINNET_SYNTHETIC_CHECK` | optional, default off | Set to `1` to also POST a throwaway `/links` synthetic **write** check against mainnet, same as testnet already does. Left off by default: it would write a real row into the production database on every successful run. When on, it reports under `mainnet-synthetic-write` so its history never mixes with the read probe's. It reuses `UPTIME_MAINNET_API_KEY`, which then needs `links:read` **and** `links:write` (plus the ability to cancel) — see the key procedure below. |
+
+`UPTIME_MAINNET_API_KEY` is a repository **secret**, not a variable. Create it
+as follows (issue 8.27 / #526 — the contributor who wrote the probe cannot do
+this, only the repo owner can):
+
+1. Sign in to the mainnet dashboard and open **API keys → Create**.
+2. Name it `uptime-read` and grant exactly the `links:read` scope. Nothing
+   else: this key is only ever used for `GET /links?limit=1`.
+3. Copy the key — it is shown once — and add it under **Settings → Secrets and
+   variables → Actions → Secrets** as `UPTIME_MAINNET_API_KEY`.
+
+**The read-only probe (`mainnet-synthetic`) is on by default** once
+`UPTIME_MAINNET_API_URL` is set, and it is the one check that proves the
+production authenticated path without touching data: it sends
+`GET /links?limit=1` with the key above and expects `200`. `GET /links` accepts
+any authenticated seller, so `links:read` alone is enough. Nothing is created,
+cancelled or written.
+
+**A missing or rejected key.** If `UPTIME_MAINNET_API_KEY` is unset, the probe
+reports **`NOT CONFIGURED`** in the workflow log and records nothing — no failure,
+no dropped uptime percentage, no incident issue. That is deliberate: a missing
+secret is a configuration gap, not an outage, and reporting it as downtime
+(the old behaviour, when the check merely 401'd) produced a permanently red
+badge for a credential nobody had created. A key that *is* configured but
+rejected with `401` is a real failure: the key was revoked, lost its
+`links:read` scope, or belongs to another environment.
 
 Both environments are watched at once, on the same schedule, with separate
 history series — a green testnet can never stand in for an unmonitored mainnet.
 Testnet keeps the unprefixed target ids (`api` / `web` / `synthetic`); mainnet's
-are prefixed (`mainnet-api` / `mainnet-web` / `mainnet-synthetic`).
+are prefixed (`mainnet-api` / `mainnet-web` / `mainnet-synthetic` /
+`mainnet-synthetic-write`).
 
 Once `UPTIME_MAINNET_API_URL` is set, the next run adds a `## Mainnet`
 section to `docs/STATUS.md` and starts filing incidents titled

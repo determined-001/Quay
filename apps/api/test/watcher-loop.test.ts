@@ -134,6 +134,9 @@ function makeFakeLinkRepo(initial: PaymentLink[]): LinkRepository {
       link.updatedAt = Date.now();
       return true;
     },
+    async listPaymentsForLink(): Promise<never[]> {
+      return [];
+    },
     async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
       const link = byId.get(id);
       if (link && link.status === "offramp_pending") {

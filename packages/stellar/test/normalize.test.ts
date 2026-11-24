@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { normalizePayment } from "../src/normalize";
+import {
+  asHorizonRecord,
+  strictReceiveFixture,
+  strictSendFixture,
+} from "./path-payment-fixtures";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 
@@ -34,5 +39,51 @@ describe("normalizePayment", () => {
   it("returns null for non-value operations regardless of muxing", async () => {
     const payment = await normalizePayment(record({ type: "create_account", to_muxed_id: "1" }) as any);
     expect(payment).toBeNull();
+  });
+});
+
+// Path payments (issue 2.17). Horizon puts the delivered (destination) amount
+// and asset in `amount`/`asset_*` and the paid side in `source_amount`/
+// `source_asset_*`. The matcher settles on the delivered side, so normalization
+// must keep exactly that; the paid side is carried for receipts and CSVs only.
+// Fixtures are real testnet operations — see fixtures/README.md.
+describe("normalizePayment: path payments settle on the delivered side", () => {
+  it("path_payment_strict_receive takes amount/asset from the destination side", async () => {
+    const payment = await normalizePayment(asHorizonRecord(strictReceiveFixture) as any);
+
+    // Delivered: 0.0000900 XLM. Paid: 0.0000007 USDC — deliberately different.
+    expect(payment?.amount).toBe("0.0000900");
+    expect(payment?.asset).toEqual({ code: "XLM", issuer: null });
+    expect(payment?.amount).not.toBe(strictReceiveFixture.source_amount);
+
+    expect(payment?.sourceAmount).toBe("0.0000007");
+    expect(payment?.sourceAsset).toEqual({
+      code: "USDC",
+      issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    });
+  });
+
+  it("path_payment_strict_send takes amount/asset from the destination side", async () => {
+    const payment = await normalizePayment(asHorizonRecord(strictSendFixture) as any);
+
+    // Delivered: 40 MOON. Paid: 10 IOM — deliberately different.
+    expect(payment?.amount).toBe("40.0000000");
+    expect(payment?.asset).toEqual({
+      code: "MOON",
+      issuer: "GBHQNYHTJGLEJ5JRKGVY3P52FK2MQ4YXAI4CNIMWV5YQTHV6ZDBCWSQ7",
+    });
+    expect(payment?.amount).not.toBe(strictSendFixture.source_amount);
+
+    expect(payment?.sourceAmount).toBe("10.0000000");
+    expect(payment?.sourceAsset).toEqual({
+      code: "IOM",
+      issuer: "GBHQNYHTJGLEJ5JRKGVY3P52FK2MQ4YXAI4CNIMWV5YQTHV6ZDBCWSQ7",
+    });
+  });
+
+  it("plain payments have no paid side", async () => {
+    const payment = await normalizePayment(record() as any);
+    expect(payment?.sourceAsset).toBeNull();
+    expect(payment?.sourceAmount).toBeNull();
   });
 });

@@ -109,3 +109,48 @@ describe("DrizzleLinkRepository claimForCashOut / releaseCashOutClaim", () => {
     expect((await links.findById(link.id))?.status).toBe("paid");
   });
 });
+
+describe("DrizzleLinkRepository listPaymentsForLink (issue 4.58)", () => {
+  const USDC = { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" };
+
+  it("returns one row per payer of a split-payment link, oldest first, and nothing from other links", async () => {
+    const { links, seller } = await freshRepo();
+    const base = {
+      sellerId: seller.id,
+      destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      muxedId: null,
+      title: "Split dinner",
+      amount: "10.00",
+      asset: USDC,
+      expiresAt: null,
+    };
+    await links.create({ ...base, id: "lnk_split", reference: "ref_split" });
+    await links.create({ ...base, id: "lnk_other", reference: "ref_other" });
+
+    const alice = {
+      linkId: "lnk_split",
+      txHash: "a".repeat(64),
+      operationId: "2001",
+      payer: "GALICEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      amount: "6",
+      asset: USDC,
+      ledger: 100,
+      createdAt: 2_000,
+    };
+    const bob = {
+      ...alice,
+      txHash: "b".repeat(64),
+      operationId: "2002",
+      payer: "GBOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      amount: "4",
+      ledger: 101,
+      createdAt: 1_000,
+    };
+    await links.recordPayment(alice);
+    await links.recordPayment(bob);
+    await links.recordPayment({ ...alice, linkId: "lnk_other", txHash: "c".repeat(64) });
+
+    expect(await links.listPaymentsForLink("lnk_split")).toEqual([bob, alice]);
+    expect(await links.listPaymentsForLink("lnk_none")).toEqual([]);
+  });
+});

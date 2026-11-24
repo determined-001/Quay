@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { api, CheckoutError, describeError } from "../../lib/api";
 import { connectWallet, detectWallet, disconnectWallet, shortAddress, signChallenge } from "../../lib/wallet";
+import WakingNotice from "./WakingNotice";
 
 /**
  * Wallet-native login for the dashboard (issue 5.1 / 6.1).
@@ -67,6 +68,7 @@ export default function SessionGate({
   const [error, setError] = useState<string | null>(null);
   const [walletFound, setWalletFound] = useState<boolean | null>(null);
   const [detectTrigger, setDetectTrigger] = useState(0);
+  const [apiPending, setApiPending] = useState(false);
 
   // Warm the kit on mount rather than on click. Two things come free: the
   // dynamic import happens while the user is reading the page instead of after
@@ -94,9 +96,13 @@ export default function SessionGate({
       const account = await connectWallet();
       if (!account) return; // modal dismissed — not a failure
 
-      const challenge = await api.getAuthChallenge(account);
+      // Only the API legs count as "waiting on the service" (issue 5.42); the
+      // wallet prompt in between is the person reading and signing.
+      setApiPending(true);
+      const challenge = await api.getAuthChallenge(account).finally(() => setApiPending(false));
       const signed = await signChallenge(challenge.transaction, account);
-      await api.submitAuthChallenge(signed);
+      setApiPending(true);
+      await api.submitAuthChallenge(signed).finally(() => setApiPending(false));
       setAddress(account);
     } catch (err) {
       // A wallet rejection reads as an error object with no HTTP shape; treat
@@ -166,6 +172,8 @@ export default function SessionGate({
                 ? "Looking for wallets…"
                 : "Connect wallet"}
           </button>
+
+          <WakingNotice pending={apiPending} />
 
           {walletFound === false && (
             <p className="muted" style={{ marginTop: 14, fontSize: 13 }}>

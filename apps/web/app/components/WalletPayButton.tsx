@@ -22,6 +22,8 @@ type WalletPaymentErrorCode =
   | "user_rejected"
   | "insufficient_balance"
   | "missing_trustline"
+  | "price_moved"
+  | "no_path"
   | "wrong_network"
   | "unavailable";
 
@@ -96,7 +98,7 @@ export default function WalletPayButton({ initial, disabled = false, onSubmitted
       </button>
       {error && (
         <p className="err" role="alert">
-          {walletErrorCopy(error)}
+          {walletErrorCopy(error, initial.request.asset.code)}
         </p>
       )}
     </div>
@@ -168,6 +170,10 @@ function apiErrorCode(error: CheckoutError): WalletPaymentErrorCode {
       return "insufficient_balance";
     case "missing_trustline":
       return "missing_trustline";
+    case "price_moved":
+      return "price_moved";
+    case "no_path":
+      return "no_path";
     case "wrong_network":
       return "wrong_network";
     case "wallet_rejected":
@@ -177,7 +183,7 @@ function apiErrorCode(error: CheckoutError): WalletPaymentErrorCode {
   }
 }
 
-function walletErrorCopy(code: WalletPaymentErrorCode): string {
+function walletErrorCopy(code: WalletPaymentErrorCode, linkAssetCode?: string): string {
   switch (code) {
     case "user_rejected":
       return "The wallet request was cancelled.";
@@ -185,6 +191,12 @@ function walletErrorCopy(code: WalletPaymentErrorCode): string {
       return "Your wallet does not have enough balance to pay this invoice.";
     case "missing_trustline":
       return "Your wallet needs a trustline for this asset before it can pay.";
+    case "price_moved":
+      return "The price changed while you were signing. Get a new price and try again.";
+    case "no_path":
+      return linkAssetCode
+        ? `There is not enough market depth to pay this in the selected asset right now. Pay in ${linkAssetCode} instead.`
+        : "There is not enough market depth to pay this in the selected asset right now.";
     case "wrong_network":
       return "Your wallet is connected to the wrong Stellar network. Switch networks and try again.";
     default:

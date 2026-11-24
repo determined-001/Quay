@@ -2,6 +2,7 @@
 export * from "./domain/money";
 export * from "./domain/status";
 export * from "./domain/payment-link";
+export * from "./domain/refund";
 
 // SEP-7
 export * from "./sep7/build-uri";

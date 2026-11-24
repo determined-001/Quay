@@ -20,6 +20,10 @@ import {
   type OffRampTelemetrySummary,
   type PaymentLink,
   type OfframpRequirementTypes,
+  type Refund,
+  type RefundPatch,
+  type RefundRepository,
+  type RefundStatus,
   type SellerPayoutRef,
   type StoredOffRampJob,
   type StoredOffRampQuote,
@@ -157,6 +161,12 @@ export class FakeLinkRepository implements LinkRepository {
     link.status = "offramp_pending";
     link.updatedAt = Date.now();
     return true;
+  }
+
+  async listPaymentsForLink(linkId: string): Promise<LinkPaymentRecord[]> {
+    return this.payments
+      .filter((p) => p.linkId === linkId)
+      .sort((a, b) => a.createdAt - b.createdAt);
   }
 
   async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
@@ -451,5 +461,57 @@ export class FakeTelemetryRepository implements OffRampTelemetryRepository {
 
   async all(): Promise<OffRampTelemetryRow[]> {
     return [...this.rows];
+  }
+}
+
+/** In-memory RefundRepository (issue 4.58), with the same unique tx_hash rule as the table. */
+export class FakeRefundRepository implements RefundRepository {
+  private readonly byId = new Map<string, Refund>();
+
+  private newestFirst(rows: Refund[]): Refund[] {
+    return rows.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+  }
+
+  private assertTxHashFree(id: string, txHash: string | null): void {
+    if (txHash === null) return;
+    for (const r of this.byId.values()) {
+      if (r.id !== id && r.txHash === txHash) throw new Error(`UNIQUE constraint failed: refunds.tx_hash`);
+    }
+  }
+
+  async create(refund: Refund): Promise<void> {
+    if (this.byId.has(refund.id)) throw new Error(`UNIQUE constraint failed: refunds.id`);
+    this.assertTxHashFree(refund.id, refund.txHash);
+    this.byId.set(refund.id, { ...refund, asset: { ...refund.asset } });
+  }
+
+  async findById(id: string): Promise<Refund | null> {
+    const r = this.byId.get(id);
+    return r ? { ...r, asset: { ...r.asset } } : null;
+  }
+
+  async listByLink(linkId: string): Promise<Refund[]> {
+    return this.newestFirst([...this.byId.values()].filter((r) => r.linkId === linkId));
+  }
+
+  async listByPayment(paymentTxHash: string, paymentOperationId: string): Promise<Refund[]> {
+    return this.newestFirst(
+      [...this.byId.values()].filter(
+        (r) => r.paymentTxHash === paymentTxHash && r.paymentOperationId === paymentOperationId,
+      ),
+    );
+  }
+
+  async listByStatus(status: RefundStatus): Promise<Refund[]> {
+    return this.newestFirst([...this.byId.values()].filter((r) => r.status === status));
+  }
+
+  async update(id: string, patch: RefundPatch): Promise<Refund | null> {
+    const r = this.byId.get(id);
+    if (!r) return null;
+    if (patch.txHash !== undefined) this.assertTxHashFree(id, patch.txHash);
+    const next: Refund = { ...r, ...patch, updatedAt: Date.now() };
+    this.byId.set(id, next);
+    return { ...next, asset: { ...next.asset } };
   }
 }

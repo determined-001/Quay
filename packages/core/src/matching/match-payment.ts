@@ -11,6 +11,14 @@ export interface NormalizedPayment {
   to: string; // destination account the value landed in
   amount: string; // delivered amount, decimal string
   asset: AssetRef;
+  // Path payments only (null for a plain `payment`): the asset the payer
+  // actually spent and how much of it. Horizon reports the delivered side in
+  // `amount`/`asset_*` and the paid side in `source_amount`/`source_asset_*`;
+  // these carry the latter so receipts and CSVs can name the buyer's outlay.
+  // matchPayment deliberately ignores them — settlement is judged on the
+  // delivered side.
+  sourceAsset?: AssetRef | null;
+  sourceAmount?: string | null;
   memo: string | null; // transaction memo (correlation id), if any
   memoType: string | null; // "text" | "id" | "hash" | "none" | ...
   // SEP-23 muxed id decoded from the operation's `to_muxed_id`, when the payer

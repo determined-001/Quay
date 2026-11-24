@@ -416,6 +416,8 @@ const EVERY_ERROR_CODE: Record<ApiErrorCode, true> = {
   wallet_rejected: true,
   insufficient_balance: true,
   missing_trustline: true,
+  price_moved: true,
+  no_path: true,
   wrong_network: true,
   unreachable: true,
   server_error: true,

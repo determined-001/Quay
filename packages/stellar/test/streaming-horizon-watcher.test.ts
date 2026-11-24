@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { StreamingHorizonWatcher } from "../src/streaming-horizon-watcher";
 import type { HorizonPaymentRecord } from "../src/horizon-client";
 import { FakeHorizonClient } from "./fake-horizon";
+import {
+  asHorizonRecord,
+  strictReceiveFixture,
+  strictSendFixture,
+} from "./path-payment-fixtures";
 import { runWatcherContract } from "./watcher-contract";
 
 const FAST_BACKOFF = { initialBackoffMs: 5, maxBackoffMs: 20 };
@@ -198,6 +203,38 @@ describe("StreamingHorizonWatcher extras", () => {
     expect(elapsed).toBeLessThan(1000);
     expect(payments.find((p) => p.pagingToken === "2")).toBeUndefined();
     expect(payments).toEqual([]);
+
+    watcher.stop();
+  });
+
+  it("passes path payment records through unchanged", async () => {
+    const fake = new FakeHorizonClient();
+    const watcher = new StreamingHorizonWatcher(fake, FAST_BACKOFF);
+
+    fake.addRecord(strictReceiveFixture.to, asHorizonRecord(strictReceiveFixture));
+    fake.addRecord(strictSendFixture.to, asHorizonRecord(strictSendFixture));
+
+    const received = await watcher.fetchSince(strictReceiveFixture.to, "");
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      txHash: strictReceiveFixture.transaction_hash,
+      to: strictReceiveFixture.to,
+      amount: "0.0000900",
+      asset: { code: "XLM", issuer: null },
+      sourceAmount: "0.0000007",
+      sourceAsset: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+    });
+
+    const sent = await watcher.fetchSince(strictSendFixture.to, "");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      txHash: strictSendFixture.transaction_hash,
+      to: strictSendFixture.to,
+      amount: "40.0000000",
+      asset: { code: "MOON", issuer: "GBHQNYHTJGLEJ5JRKGVY3P52FK2MQ4YXAI4CNIMWV5YQTHV6ZDBCWSQ7" },
+      sourceAmount: "10.0000000",
+      sourceAsset: { code: "IOM", issuer: "GBHQNYHTJGLEJ5JRKGVY3P52FK2MQ4YXAI4CNIMWV5YQTHV6ZDBCWSQ7" },
+    });
 
     watcher.stop();
   });

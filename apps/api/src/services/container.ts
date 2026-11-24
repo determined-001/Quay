@@ -29,6 +29,7 @@ import type {
   OffRampPort,
   OffRampStateRepository,
   OffRampTelemetryRepository,
+  RefundRepository,
   RailPort,
   RateSourcePort,
   PrefillConsentRepository,
@@ -60,6 +61,7 @@ import {
   DrizzleKycConsentRepository,
   DrizzlePrefillConsentRepository,
   DrizzleSellerProfileRepository,
+  DrizzleRefundRepository,
 } from "../repos/index";
 import { LinkService } from "./link-service";
 import { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
@@ -121,6 +123,8 @@ export interface Container {
   /** Asks one anchor (the default when `anchorDomain` is omitted) to erase the seller's SEP-12 customer. */
   deleteAnchorCustomer?: ((customer: AnchorCustomer, anchorDomain?: string) => Promise<"deleted" | "not_found">) | null;
   telemetry: OffRampTelemetryRepository;
+  /** Refunds against a link's payments (issue 4.58). */
+  refunds: RefundRepository;
   config: { network: string; horizonUrl: string; sellerWallet: string | null; kycStatusCacheMs?: number };
   horizonStatus(): HorizonStatus;
   /** Optional SSRF guard override for webhook URLs. Tests inject a permissive
@@ -204,6 +208,7 @@ export async function createContainer(): Promise<Container> {
   const anchorSessionsRepo = new DrizzleAnchorSessionRepository(db, logger);
   const kycConsentsRepo = new DrizzleKycConsentRepository(db);
   const prefillConsentsRepo = new DrizzlePrefillConsentRepository(db);
+  const refundsRepo = new DrizzleRefundRepository(db);
   const kycKeyring = env.kycEncryptionKey
     ? parsePiiKeyring(env.kycEncryptionKey, env.kycEncryptionKeyPrevious)
     : null;
@@ -444,6 +449,7 @@ export async function createContainer(): Promise<Container> {
         }
       : null,
     telemetry: telemetryRepo,
+    refunds: refundsRepo,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet, kycStatusCacheMs: env.kycStatusCacheMs },
     horizonStatus: () => pollingWatcher.getStatus(),
     metricsToken,

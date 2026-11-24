@@ -1673,7 +1673,14 @@ function memoText(memo: Memo): string | null {
   return typeof v === "string" ? v : Buffer.from(v).toString("utf8");
 }
 
-function horizonPaymentReason(err: unknown): "insufficient_balance" | "missing_trustline" | "payment_rejected" {
+export type HorizonPaymentReason =
+  | "insufficient_balance"
+  | "missing_trustline"
+  | "price_moved"
+  | "no_path"
+  | "payment_rejected";
+
+export function horizonPaymentReason(err: unknown): HorizonPaymentReason {
   const response = err as { response?: { data?: unknown } };
   const data = response.response?.data;
   const resultCodes =
@@ -1686,10 +1693,17 @@ function horizonPaymentReason(err: unknown): "insufficient_balance" | "missing_t
           typeof value === "string" ? [value] : [],
       )
     : [];
-  if (codes.some((code) => code.includes("UNDERFUNDED") || code.includes("LINE_FULL"))) {
+  const upperCodes = codes.map((c) => c.toUpperCase());
+  if (upperCodes.some((code) => code.includes("OVER_SOURCE_MAX"))) {
+    return "price_moved";
+  }
+  if (upperCodes.some((code) => code.includes("TOO_FEW_OFFERS"))) {
+    return "no_path";
+  }
+  if (upperCodes.some((code) => code.includes("UNDERFUNDED") || code.includes("LINE_FULL"))) {
     return "insufficient_balance";
   }
-  if (codes.some((code) => code.includes("NO_TRUST") || code.includes("NOT_AUTHORIZED"))) {
+  if (upperCodes.some((code) => code.includes("NO_TRUST") || code.includes("NOT_AUTHORIZED"))) {
     return "missing_trustline";
   }
   return "payment_rejected";

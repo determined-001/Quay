@@ -40,6 +40,7 @@ const mockLinks: LinkRepository = {
   paymentLedger: vi.fn(),
   claimForCashOut: vi.fn(),
   releaseCashOutClaim: vi.fn(),
+  listPaymentsForLink: vi.fn(),
 };
 
 const mockState: WatcherStateRepository = {

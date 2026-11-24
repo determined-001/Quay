@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { activeEnvironments, buildEnvironments, buildTargets, checkSyntheticLink, recordResult, renderStatusMd, uptimePct } from "./uptime-check.mjs";
+import {
+  activeEnvironments,
+  buildEnvironments,
+  buildTargets,
+  checkAuthProbe,
+  checkSyntheticLink,
+  evaluateTarget,
+  recordResult,
+  renderStatusMd,
+  uptimePct,
+} from "./uptime-check.mjs";
 
 describe("buildEnvironments", () => {
   it("testnet always defaults to the public testnet deploy, unprefixed", () => {
@@ -8,6 +18,7 @@ describe("buildEnvironments", () => {
     expect(testnet.apiUrl).toBe("https://quay-api.onrender.com");
     expect(testnet.webUrl).toBe("https://quay-web.vercel.app");
     expect(testnet.syntheticLink).toBe(true);
+    expect(testnet.readProbe).toBe(false);
     expect(testnet.prefixIds).toBe(false);
   });
 
@@ -25,6 +36,11 @@ describe("buildEnvironments", () => {
     expect(mainnet.id).toBe("mainnet");
     expect(mainnet.apiUrl).toBeNull();
     expect(mainnet.webUrl).toBeNull();
+  });
+
+  it("mainnet's read-only probe is on as soon as mainnet is monitored — it writes nothing to opt into", () => {
+    const [, mainnet] = buildEnvironments({});
+    expect(mainnet.readProbe).toBe(true);
   });
 
   it("mainnet picks up its URLs once configured, and prefixes its target ids", () => {
@@ -75,15 +91,28 @@ describe("buildTargets", () => {
       UPTIME_MAINNET_SYNTHETIC_CHECK: "1",
     });
     const ids = buildTargets(environments).map((t) => t.id);
-    expect(ids).toEqual(["api", "web", "synthetic", "mainnet-api", "mainnet-web", "mainnet-synthetic"]);
+    expect(ids).toEqual([
+      "api",
+      "web",
+      "synthetic",
+      "mainnet-api",
+      "mainnet-web",
+      "mainnet-synthetic",
+      "mainnet-synthetic-write",
+    ]);
   });
 
-  it("omits the web target for an environment with no web URL, and the synthetic target when disabled", () => {
-    const environments = buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" });
-    const mainnetIds = buildTargets(environments)
+  it("always gives a configured mainnet a read-only synthetic probe, and adds the write check only when enabled", () => {
+    const withoutWrite = buildTargets(buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" }))
       .filter((t) => t.env.id === "mainnet")
       .map((t) => t.id);
-    expect(mainnetIds).toEqual(["mainnet-api"]);
+    // No web URL, no write check — but the read probe is not optional.
+    expect(withoutWrite).toEqual(["mainnet-api", "mainnet-synthetic"]);
+  });
+
+  it("names the read probe as an authenticated read, so a status page cannot confuse it with the write check", () => {
+    const targets = buildTargets(buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" }));
+    expect(targets.find((t) => t.id === "mainnet-synthetic")?.kind).toBe("Authenticated read (synthetic)");
   });
 
   it("labels every target with its environment, so an issue title can never be ambiguous about which one", () => {
@@ -191,20 +220,17 @@ describe("checkSyntheticLink", () => {
     expect(cancelOpts.headers.authorization).toBe(`Bearer ${FAKE_KEY}`);
   });
 
-  it("sends no Authorization header when no key is configured", async () => {
-    const calls: Array<[string, any]> = [];
-    const fakeFetch = async (url: string, opts: any) => {
-      calls.push([url, opts]);
+  it("does not POST at all when no key is configured, and names the missing secret", async () => {
+    let called = false;
+    const fakeFetch = async () => {
+      called = true;
       return jsonResponse(401);
     };
 
-    await expect(checkSyntheticLink(API, null, fakeFetch)).rejects.toThrow(/no API key is configured/);
-    expect(calls[0]![1].headers.authorization).toBeUndefined();
-  });
-
-  it("names the missing secret on a 401, instead of reporting a bare HTTP 401", async () => {
-    const fakeFetch = async () => jsonResponse(401);
+    await expect(checkSyntheticLink(API, null, fakeFetch)).rejects.toThrow(/needs an API key and none is configured/);
     await expect(checkSyntheticLink(API, null, fakeFetch)).rejects.toThrow(/UPTIME_API_KEY/);
+    // A missing secret is a configuration gap, not a request worth sending.
+    expect(called).toBe(false);
   });
 
   it("still reports a genuine 401 as a failure when a key IS configured", async () => {
@@ -238,6 +264,89 @@ describe("checkSyntheticLink", () => {
     };
     await expect(checkSyntheticLink(API, FAKE_KEY, fakeFetch)).resolves.toBeUndefined();
     expect(n).toBe(1); // no cancel attempted
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Read-only authenticated probe (issue 8.27 / #526)
+//
+//  Mainnet's only write-path check is opt-in because it writes a real row, so
+//  nothing proved the production API accepted a key. This probe reads one link
+//  with a links:read key and writes nothing.
+// ---------------------------------------------------------------------------
+
+describe("checkAuthProbe", () => {
+  const API = "https://api.example.com";
+
+  it("reads one link with the key and sends no write", async () => {
+    const calls: Array<[string, any]> = [];
+    const fakeFetch = async (url: string, opts: any) => {
+      calls.push([url, opts]);
+      return jsonResponse(200, { links: [] });
+    };
+
+    await checkAuthProbe(API, FAKE_MAINNET_KEY, fakeFetch);
+
+    expect(calls).toHaveLength(1);
+    const [url, opts] = calls[0]!;
+    expect(url).toBe(`${API}/links?limit=1`);
+    expect(opts.method).toBe("GET");
+    expect(opts.body).toBeUndefined();
+    expect(opts.headers.authorization).toBe(`Bearer ${FAKE_MAINNET_KEY}`);
+  });
+
+  it("treats a 401 with a configured key as down — revoked, wrong scope or wrong environment", async () => {
+    const fakeFetch = async () => jsonResponse(401);
+    await expect(checkAuthProbe(API, FAKE_REVOKED_KEY, fakeFetch)).rejects.toThrow(/HTTP 401 \(expected 200\)/);
+  });
+
+  it("fails on any other non-200, without pretending it is an auth problem", async () => {
+    const fakeFetch = async () => jsonResponse(503);
+    await expect(checkAuthProbe(API, FAKE_MAINNET_KEY, fakeFetch)).rejects.toThrow(/HTTP 503 \(expected 200\)/);
+  });
+
+  it("sends nothing when no key is configured, and names the mainnet secret", async () => {
+    let called = false;
+    const fakeFetch = async () => {
+      called = true;
+      return jsonResponse(200);
+    };
+    await expect(checkAuthProbe(API, null, fakeFetch)).rejects.toThrow(/UPTIME_MAINNET_API_KEY/);
+    expect(called).toBe(false);
+  });
+});
+
+describe("a missing key is 'not configured', not an outage", () => {
+  const environments = buildEnvironments({ UPTIME_MAINNET_API_URL: "https://mainnet.example" });
+
+  it("records no result and leaves the uptime figure untouched", async () => {
+    const target = buildTargets(environments).find((t) => t.id === "mainnet-synthetic")!;
+    const state: { targets: Record<string, any> } = { targets: {} };
+
+    const result = await evaluateTarget(target);
+
+    expect(result.outcome).toBe("not-configured");
+    expect(result.message).toMatch(/UPTIME_MAINNET_API_KEY/);
+    // Nothing recorded: no up, no down, no consecutive-failure counter, no badge.
+    expect(state.targets["mainnet-synthetic"]).toBeUndefined();
+    expect(uptimePct([], null)).toBe(100);
+    expect(renderStatusMd(state, environments)).not.toContain("## Mainnet");
+  });
+
+  it("keeps a configured-but-rejected key as a real failure", async () => {
+    const target = {
+      id: "mainnet-synthetic",
+      label: "Mainnet — Authenticated read (synthetic)",
+      env: { id: "mainnet" },
+      check: async () => {
+        throw new Error("GET https://mainnet.example/links?limit=1 -> HTTP 401 (expected 200)");
+      },
+    };
+
+    const result = await evaluateTarget(target as any);
+
+    expect(result.outcome).toBe("down");
+    expect(result.message).toMatch(/HTTP 401/);
   });
 });
 

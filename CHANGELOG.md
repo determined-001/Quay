@@ -81,6 +81,13 @@ docs:check-env-docs` keeps it in step with the code.
 
 ### Added
 
+- The network a deployment settles on is now stated on the checkout masthead,
+  the dashboard, the link detail header and the demo page: `Mainnet`, or
+  `Testnet: no real money`. On mainnet the demo storefront keeps the product
+  and the integration snippet but explains that the live widget needs a real
+  payment link (with a link to the dashboard) instead of showing a dead button
+  and a `pnpm demo:seed` hint. The landing links now say what `/demo` is.
+
 - Seller anchor session routes under `/seller/anchor-auth`, and SEP-10
   `client_domain` co-signing (`b1fa907`).
 - Seller-signed cash-out transfer step in the dashboard, a SEP-7 pay URI and QR
@@ -125,6 +132,20 @@ docs:check-env-docs` keeps it in step with the code.
 
 ### Changed
 
+- **Documentation updated for mainnet dashboard and retired testnet API**:
+  updated `docs/PROPOSAL.md` to point the live demo at the mainnet dashboard
+  with payments marked real and cash-out directed to local testnet, updated
+  `docs/RUNBOOK.md` to mark the testnet `quay-api` service as retired (and noted
+  that default uptime checks against it will fail), and updated `docs/MAINNET.md`
+  with Circle's active USDC contract addresses link.
+- **README updated for mainnet dashboard and retired testnet API**: removed
+  references and links to the retired testnet API (`quay-api.onrender.com`),
+  clarified that the public dashboard ([quay-web.vercel.app](https://quay-web.vercel.app))
+  runs on mainnet with real payments, directed users to run Quay locally on
+  testnet with `OFFRAMP=testanchor` to test cash-out without real funds, and
+  updated quickstart `curl` examples to use `$QUAY_API_URL` with
+  `http://localhost:8787` as the local default.
+
 - **Database schema is now managed by Drizzle migrations** instead of boot-time
   DDL. Existing databases are stamped with a baseline on first boot. New
   scripts: `pnpm db:generate`, `db:migrate`, `db:status`, `db:check`.
@@ -145,6 +166,13 @@ docs:check-env-docs` keeps it in step with the code.
 
 ### Fixed
 
+- Uptime checks no longer report a missing API key as downtime. Mainnet gets a
+  read-only authenticated probe (`mainnet-synthetic`: `GET /links?limit=1` with
+  a `links:read` key), and a probe whose key is not configured reports
+  `NOT CONFIGURED` and leaves its uptime figure and badges untouched. The
+  synthetic write check stays opt-in on mainnet, under
+  `mainnet-synthetic-write`. See `docs/RUNBOOK.md` "Uptime monitoring" for the
+  owner procedure to create `UPTIME_MAINNET_API_KEY`.
 - Cash-out is claimed atomically so concurrent requests cannot start two
   withdrawals, and overlapping poll ticks no longer fire duplicate webhooks.
 - Link amounts of zero or out of range are rejected; trustline limits are

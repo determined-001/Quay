@@ -26,7 +26,9 @@ export type PaymentPreflightStatus =
   | "wrong_wallet"
   | "missing_trustline"
   | "insufficient_balance"
-  | "insufficient_fee";
+  | "insufficient_fee"
+  | "price_moved"
+  | "no_path";
 
 export interface PaymentPreflightOk {
   ok: true;
@@ -204,7 +206,7 @@ export function checkPaymentPreflight(
  */
 export function horizonPaymentReason(
   err: unknown,
-): "insufficient_balance" | "missing_trustline" | "payment_rejected" {
+): "insufficient_balance" | "missing_trustline" | "price_moved" | "no_path" | "payment_rejected" {
   const e = err as {
     response?: { data?: unknown };
     data?: unknown;
@@ -225,6 +227,12 @@ export function horizonPaymentReason(
       )
     : [];
   const upperCodes = codes.map((c) => c.toUpperCase());
+  if (upperCodes.some((code) => code.includes("OVER_SOURCE_MAX"))) {
+    return "price_moved";
+  }
+  if (upperCodes.some((code) => code.includes("TOO_FEW_OFFERS"))) {
+    return "no_path";
+  }
   if (
     upperCodes.some(
       (code) =>

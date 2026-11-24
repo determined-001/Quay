@@ -17,6 +17,7 @@ function fakeContainer(): Container {
     anchorAuth: null,
     db: {} as Container["db"],
     telemetry: new FakeTelemetryRepository(),
+    refunds: {} as Container["refunds"],
     auth: {} as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     metricsToken: "test-metrics-token",

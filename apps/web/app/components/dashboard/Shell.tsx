@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { shortAddress } from "../../../lib/wallet";
 import Logo from "../Logo";
+import NetworkChip from "../NetworkChip";
 import { useSellerSession } from "../SessionGate";
 import ThemeToggle from "../ThemeToggle";
 import { OFFRAMP_ENABLED } from "./config";
@@ -79,6 +80,9 @@ export default function Shell({
       <aside className="app__side" aria-label="Quay">
         <div className="app__brand">
           <Logo href="/" size={26} />
+          {/* The dashboard takes real money on mainnet; say which chain it is
+              (issue 5.43), since the brand area is the one thing on every view. */}
+          <NetworkChip />
         </div>
 
         <nav className="nav" aria-label="Dashboard">

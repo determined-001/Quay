@@ -148,6 +148,8 @@ describe("WalletPayButton", () => {
     const cases: Array<[ConstructorParameters<typeof CheckoutError>[0], string]> = [
       ["insufficient_balance", "does not have enough balance"],
       ["missing_trustline", "needs a trustline"],
+      ["price_moved", "The price changed while you were signing. Get a new price and try again."],
+      ["no_path", "not enough market depth to pay this in the selected asset right now. Pay in USDC instead."],
       ["wrong_network", "wrong Stellar network"],
       ["wallet_rejected", "The wallet request was cancelled."],
       // Not specially handled, so it falls to the default copy.

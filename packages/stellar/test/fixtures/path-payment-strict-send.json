@@ -1,0 +1,39 @@
+{
+  "id": "25201502293344257",
+  "paging_token": "25201502293344257",
+  "transaction_successful": true,
+  "source_account": "GDWJ7YFRWMMH7AXTZLNKBN4TWRIU3CN67SIXI544MCWXHK66OWGJNLUV",
+  "type": "path_payment_strict_send",
+  "type_i": 13,
+  "created_at": "2026-11-22T15:40:51Z",
+  "transaction_hash": "9aa9b52f7f3b1190e69b91f3f0870463720b12f8cee4b45a3ba66f19cb3c8ffe",
+  "transaction": {
+    "memo_type": "none",
+    "ledger": 5867682,
+    "hash": "9aa9b52f7f3b1190e69b91f3f0870463720b12f8cee4b45a3ba66f19cb3c8ffe",
+    "successful": true,
+    "source_account": "GDWJ7YFRWMMH7AXTZLNKBN4TWRIU3CN67SIXI544MCWXHK66OWGJNLUV",
+    "created_at": "2026-11-22T15:40:51Z",
+    "operation_count": 1,
+    "fee_charged": "100",
+    "max_fee": "100"
+  },
+  "asset_type": "credit_alphanum4",
+  "asset_code": "MOON",
+  "asset_issuer": "GBHQNYHTJGLEJ5JRKGVY3P52FK2MQ4YXAI4CNIMWV5YQTHV6ZDBCWSQ7",
+  "from": "GDWJ7YFRWMMH7AXTZLNKBN4TWRIU3CN67SIXI544MCWXHK66OWGJNLUV",
+  "to": "GCFKLRNYP7PBN3BEQ7UC3YJZZ7TS4ATJAVTBASFS7CJZL3SNPLIS47IJ",
+  "amount": "40.0000000",
+  "path": [
+    {
+      "asset_type": "credit_alphanum4",
+      "asset_code": "ECO",
+      "asset_issuer": "GBHQNYHTJGLEJ5JRKGVY3P52FK2MQ4YXAI4CNIMWV5YQTHV6ZDBCWSQ7"
+    }
+  ],
+  "source_amount": "10.0000000",
+  "destination_min": "38.0000000",
+  "source_asset_type": "credit_alphanum4",
+  "source_asset_code": "IOM",
+  "source_asset_issuer": "GBHQNYHTJGLEJ5JRKGVY3P52FK2MQ4YXAI4CNIMWV5YQTHV6ZDBCWSQ7"
+}

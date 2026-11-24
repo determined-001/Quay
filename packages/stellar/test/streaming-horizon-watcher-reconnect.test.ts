@@ -5,6 +5,7 @@ import type {
   HorizonClient,
   HorizonPaymentRecord,
   PaymentsCallBuilder,
+  StrictReceivePathsCallBuilder,
 } from "../src/horizon-client";
 import { FakeHorizonClient } from "./fake-horizon";
 
@@ -47,6 +48,11 @@ class ControlledClient implements HorizonClient {
 
   async loadAccount(): Promise<HorizonAccount> {
     return { balances: [] };
+  }
+
+  strictReceivePaths(): StrictReceivePathsCallBuilder {
+    // The watcher never calls this; it exists only to satisfy HorizonClient.
+    throw new Error("strictReceivePaths not implemented on ControlledClient");
   }
 
   get live(): number {

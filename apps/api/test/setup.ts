@@ -10,6 +10,7 @@ import {
   DrizzleOffRampStateRepository,
   DrizzleTokenRevocationRepository,
   DrizzleApiKeyRepository,
+  DrizzleRefundRepository,
 } from "../src/repos/index";
 import { SessionIssuer } from "../src/services/session";
 import type { Container } from "../src/services/container";
@@ -349,6 +350,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     anchorAuth: null,
     deleteAnchorCustomer: null,
     telemetry,
+    refunds: new DrizzleRefundRepository(repos.db),
     auth: { session, revocations, stellarToml: {}, challenge: {}, secureCookie: false } as unknown as Container["auth"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     webhookGuard: async () => ({ ok: true }) as const,

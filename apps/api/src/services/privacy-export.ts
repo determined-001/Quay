@@ -2,7 +2,7 @@ import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Seller } from "@checkout/core";
 import type { Container } from "./container";
 import { DrizzleAnchorSessionRepository, DrizzlePrefillConsentRepository } from "../repos/index";
-import { kycDisclosureFields, links as linksTable, offrampJobs } from "../db/schema";
+import { kycDisclosureFields, links as linksTable, offrampJobs, refunds as refundsTable } from "../db/schema";
 
 /**
  * Hard ceiling per list section, so one request cannot read an unbounded table
@@ -94,6 +94,25 @@ export interface SellerExport {
     sellerTxHash: string | null;
     amountIn: string | null;
     amountFee: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }[];
+  /** Refunds the seller sent back to payers (issue 4.58), newest first. */
+  refunds: {
+    id: string;
+    linkId: string;
+    paymentTxHash: string;
+    paymentOperationId: string;
+    destination: string;
+    destinationMuxedId: string | null;
+    memo: string | null;
+    memoType: string | null;
+    amount: string;
+    asset: string;
+    assetIssuer: string | null;
+    status: string;
+    txHash: string | null;
+    failureReason: string | null;
     createdAt: string;
     updatedAt: string;
   }[];
@@ -276,6 +295,33 @@ async function paymentsSection(c: ExportDeps, sellerId: string): Promise<SellerE
   }));
 }
 
+async function refundsSection(c: ExportDeps, sellerId: string): Promise<SellerExport["refunds"]> {
+  const rows = await c.db
+    .select()
+    .from(refundsTable)
+    .where(eq(refundsTable.sellerId, sellerId))
+    .orderBy(desc(refundsTable.createdAt), desc(refundsTable.id))
+    .limit(EXPORT_SECTION_LIMIT + 1);
+  return rows.map((r) => ({
+    id: r.id,
+    linkId: r.linkId,
+    paymentTxHash: r.paymentTxHash,
+    paymentOperationId: r.paymentOperationId,
+    destination: r.destination,
+    destinationMuxedId: r.destinationMuxedId ?? null,
+    memo: r.memo ?? null,
+    memoType: r.memoType ?? null,
+    amount: r.amount,
+    asset: r.assetCode,
+    assetIssuer: r.assetIssuer ?? null,
+    status: r.status,
+    txHash: r.txHash ?? null,
+    failureReason: r.failureReason ?? null,
+    createdAt: iso(r.createdAt),
+    updatedAt: iso(r.updatedAt),
+  }));
+}
+
 async function webhooksSection(c: ExportDeps, sellerId: string): Promise<SellerExport["webhooks"]> {
   const hooks = await c.webhooks.listBySeller(sellerId);
   return hooks.map((w) => ({ id: w.id, url: w.url, createdAt: iso(w.createdAt) }));
@@ -312,7 +358,7 @@ export async function buildSellerExport(
   now: number = Date.now(),
 ): Promise<SellerExport> {
   const id = seller.id;
-  const [profile, kyc, disclosures, consents, prefillConsents, anchorConnections, links, payments, jobs, webhooks, apiKeys, piiAccess] =
+  const [profile, kyc, disclosures, consents, prefillConsents, anchorConnections, links, payments, jobs, refunds, webhooks, apiKeys, piiAccess] =
     await Promise.all([
       profileSection(c, id),
       kycSection(c, id),
@@ -323,6 +369,7 @@ export async function buildSellerExport(
       linksSection(c, id),
       paymentsSection(c, id),
       offrampJobsSection(c, id),
+      refundsSection(c, id),
       webhooksSection(c, id),
       apiKeysSection(c, id),
       piiAccessSection(c, id),
@@ -348,6 +395,7 @@ export async function buildSellerExport(
     links: cap("links", links),
     payments: cap("payments", payments),
     offrampJobs: cap("offrampJobs", jobs),
+    refunds: cap("refunds", refunds),
     webhooks,
     apiKeys,
     ...(piiAccess ? { piiAccess: cap("piiAccess", piiAccess) } : {}),

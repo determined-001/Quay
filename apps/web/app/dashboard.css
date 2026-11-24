@@ -10,7 +10,7 @@
   border-right: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--surface) 55%, transparent);
 }
-.app__brand { padding: 2px 10px 26px; }
+.app__brand { display: flex; align-items: center; gap: 10px; padding: 2px 10px 26px; }
 .app__body { min-width: 0; }
 .app__main { max-width: 1080px; margin: 0 auto; padding: 38px 44px 90px; outline: none; }
 .app__top, .tabbar { display: none; }

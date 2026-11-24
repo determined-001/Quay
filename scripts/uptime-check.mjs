@@ -17,6 +17,15 @@
 // than one that's honestly unconfigured. Mainnet's targets are prefixed
 // (`mainnet-api` / `mainnet-web` / `mainnet-synthetic`) so they get their own
 // history series and never collide with testnet's.
+//
+// `mainnet-synthetic` is a READ-ONLY authenticated probe (issue 8.27 / #526):
+// `GET /links?limit=1` with a key scoped to `links:read` only, so every run
+// proves the production API accepts a key and reads from the real database
+// without writing a row. The old write check (POST + cancel) stays available
+// behind UPTIME_MAINNET_SYNTHETIC_CHECK, off by default on mainnet, and takes
+// the `mainnet-synthetic-write` id when enabled so the two never share a
+// history series. A probe whose key is not configured is reported as
+// "not configured" and records nothing: a missing secret is not an outage.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -53,6 +62,10 @@ export function buildEnvironments(vars = process.env) {
       // Dedicated least-privilege key (links:read + links:write) for the
       // synthetic write check — POST /links has required auth since 6.x.
       apiKey: envUrl(vars, "UPTIME_API_KEY"),
+      // The read-only probe is a mainnet protection (issue 8.27): testnet's
+      // synthetic write check is its authenticated probe, and testnet keeps
+      // the `synthetic` id it has always had.
+      readProbe: false,
       syntheticLink: true,
       prefixIds: false,
     },
@@ -61,9 +74,15 @@ export function buildEnvironments(vars = process.env) {
       label: "Mainnet",
       apiUrl: envUrl(vars, "UPTIME_MAINNET_API_URL"),
       webUrl: envUrl(vars, "UPTIME_MAINNET_WEB_URL"),
-      // Its own key, never testnet's — a testnet key cannot create links on
-      // mainnet, and sharing one would defeat the least-privilege point.
+      // Its own key, never testnet's — a testnet key cannot read mainnet's
+      // links, and sharing one would defeat the least-privilege point. This is
+      // the READ-ONLY key: scope `links:read` alone (issue 8.27).
       apiKey: envUrl(vars, "UPTIME_MAINNET_API_KEY"),
+      // Always on once mainnet is configured: `GET /links?limit=1` writes
+      // nothing, so there is no production side effect to opt into. It proves
+      // the write-free half of the authenticated path (a key is accepted and
+      // reads real data) that a missing secret used to hide.
+      readProbe: true,
       // Off unless explicitly opted into: this writes a throwaway row into the
       // REAL production database on every successful run. Issue 8.9 gave the
       // check a scoped key and cleanup, so it is now safe to enable — but it
@@ -101,9 +120,21 @@ export function buildTargets(environments) {
         check: () => checkGet(env.webUrl),
       });
     }
-    if (env.syntheticLink) {
+    if (env.readProbe) {
       targets.push({
         id: `${prefix}synthetic`,
+        kind: "Authenticated read (synthetic)",
+        label: `${env.label} — Authenticated read (synthetic)`,
+        env,
+        check: () => checkAuthProbe(env.apiUrl, env.apiKey),
+      });
+    }
+    if (env.syntheticLink) {
+      targets.push({
+        // Testnet keeps `synthetic` for its write check (back-compat). On
+        // mainnet the read probe above owns that id, so the opt-in write check
+        // gets its own — two checks sharing an id would merge their histories.
+        id: `${prefix}synthetic${env.readProbe ? "-write" : ""}`,
         kind: "Create-link (synthetic)",
         label: `${env.label} — Create-link (synthetic)`,
         env,
@@ -117,6 +148,51 @@ export function buildTargets(environments) {
 async function checkGet(url) {
   const res = await fetchWithTimeout(url, { method: "GET" });
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+}
+
+/**
+ * A check that cannot run because its credential is missing. Distinct from a
+ * failure on purpose: an unset secret is a configuration gap, not an outage,
+ * so it must not be recorded as downtime or drag the uptime figure down
+ * (issue 8.27). `main()` logs it and leaves the target's history untouched.
+ */
+export class NotConfiguredError extends Error {}
+
+/**
+ * Read-only authenticated probe (issue 8.27 / #526): proves mainnet's API
+ * accepts a seller key and reads from the real database, without writing a
+ * single row.
+ *
+ * `GET /links` accepts any authenticated seller (session or scoped key), so a
+ * key with `links:read` alone is enough — the least privilege that answers the
+ * only question worth asking in production: is the authenticated read path
+ * alive? `limit=1` keeps the response tiny; the API may ignore it.
+ *
+ * A key that IS configured but rejected (401) is a real failure — revoked,
+ * wrong scope, or the testnet key pasted into the mainnet secret.
+ */
+export async function checkAuthProbe(apiUrl, apiKey, fetchImpl = fetchWithTimeout) {
+  if (!apiKey) {
+    throw new NotConfiguredError(
+      `GET ${apiUrl}/links needs an API key and none is configured. ` +
+        "Create a least-privilege key (scope links:read only) in the dashboard and store it as the " +
+        "UPTIME_MAINNET_API_KEY repository secret.",
+    );
+  }
+
+  const url = `${apiUrl}/links?limit=1`;
+  const res = await fetchImpl(url, {
+    method: "GET",
+    headers: { authorization: `Bearer ${apiKey}` },
+  });
+
+  if (res.status === 401) {
+    throw new Error(
+      `GET ${url} -> HTTP 401 (expected 200): the configured key was rejected — ` +
+        "it may be revoked, lack links:read, or belong to another environment",
+    );
+  }
+  if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status} (expected 200)`);
 }
 
 /**
@@ -134,22 +210,24 @@ async function checkGet(url) {
  * probe over cleanup would report an outage that isn't one.
  */
 export async function checkSyntheticLink(apiUrl, apiKey, fetchImpl = fetchWithTimeout) {
-  const headers = { "content-type": "application/json" };
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  // No key at all is a missing secret, not a broken write path. Report it as
+  // "not configured" instead of POSTing an unauthenticated request just to
+  // watch it 401 and record an outage (issue 8.27).
+  if (!apiKey) {
+    throw new NotConfiguredError(
+      `POST ${apiUrl}/links needs an API key and none is configured. ` +
+        "Add a least-privilege API key (links:read + links:write) as the UPTIME_API_KEY repo secret " +
+        "(UPTIME_MAINNET_API_KEY for mainnet).",
+    );
+  }
+
+  const headers = { "content-type": "application/json", authorization: `Bearer ${apiKey}` };
 
   const createRes = await fetchImpl(`${apiUrl}/links`, {
     method: "POST",
     headers,
     body: JSON.stringify({ title: "uptime-check", amount: "0.0000001", assetCode: "XLM" }),
   });
-
-  if (createRes.status === 401 && !apiKey) {
-    throw new Error(
-      `POST ${apiUrl}/links -> HTTP 401 and no API key is configured. ` +
-        "Add a least-privilege API key (links:read + links:write) as the UPTIME_API_KEY repo secret " +
-        "(UPTIME_MAINNET_API_KEY for mainnet).",
-    );
-  }
 
   if (createRes.status !== 201) {
     throw new Error(`POST ${apiUrl}/links -> HTTP ${createRes.status} (expected 201)`);
@@ -283,6 +361,23 @@ export function renderStatusMd(state, environments) {
   return lines.join("\n");
 }
 
+/**
+ * Runs one target's check and classifies the result. Exported so the three
+ * outcomes (up / down / not configured) are tested against the same code the
+ * CLI runs, rather than a copy that could drift.
+ */
+export async function evaluateTarget(target) {
+  try {
+    await target.check();
+    return { outcome: "up", message: null };
+  } catch (err) {
+    if (err instanceof NotConfiguredError) {
+      return { outcome: "not-configured", message: err.message };
+    }
+    return { outcome: "down", message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function main() {
   const environments = buildEnvironments(process.env);
   const targets = buildTargets(environments);
@@ -290,14 +385,14 @@ async function main() {
   const events = [];
 
   for (const target of targets) {
-    let ok = true;
-    let message = null;
-    try {
-      await target.check();
-    } catch (err) {
-      ok = false;
-      message = err instanceof Error ? err.message : String(err);
+    const { outcome, message } = await evaluateTarget(target);
+    if (outcome === "not-configured") {
+      // Leave the tree alone: no up, no down, no bad badge. The last real
+      // result stands until the operator supplies the key.
+      console.log(`[uptime] ${target.label}: NOT CONFIGURED — ${message}`);
+      continue;
     }
+    const ok = outcome === "up";
     const { justFailed, justRecovered } = recordResult(state, target.id, ok, message);
     console.log(`[uptime] ${target.label}: ${ok ? "OK" : `FAIL — ${message}`}`);
     if (justFailed) events.push({ type: "failed", target });
@@ -309,8 +404,12 @@ async function main() {
   await writeFile(statusPath, renderStatusMd(state, environments) + "\n");
 
   for (const target of targets) {
+    const targetState = state.targets[target.id];
+    // Never checked (e.g. "not configured"): no data to put on a badge, and a
+    // 100% badge for a probe that never ran would be a lie.
+    if (!targetState) continue;
     const badgePath = resolve(root, `docs/uptime-badge-${target.id}.json`);
-    await writeFile(badgePath, JSON.stringify(renderBadge(state.targets[target.id], target.id), null, 2) + "\n");
+    await writeFile(badgePath, JSON.stringify(renderBadge(targetState, target.id), null, 2) + "\n");
   }
 
   if (events.length > 0) {

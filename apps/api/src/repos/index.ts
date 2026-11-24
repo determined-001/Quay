@@ -13,6 +13,11 @@ import type {
   KycStatus,
   LinkPaymentRecord,
   LinkRepository,
+  Refund,
+  RefundMemoType,
+  RefundPatch,
+  RefundRepository,
+  RefundStatus,
   OffRampStateRepository,
   PaymentLink,
   PrefillConsent,
@@ -61,6 +66,7 @@ import {
   anchors,
   prefillConsents,
   sellerProfile,
+  refunds,
 } from "../db/schema";
 import { ProfileFieldRejectedError, fromStroops, sep9Field, toStroops } from "@checkout/core";
 import { newId } from "../services/ids";
@@ -343,6 +349,117 @@ export class DrizzleLinkRepository implements LinkRepository {
       .orderBy(desc(linkPayments.createdAt))
       .limit(limit);
     return rows.map((r) => ({ ...r, ledger: r.ledger ?? null }));
+  }
+
+  /**
+   * Every payment recorded against one link, oldest first (issue 4.58). Rows
+   * written before `operation_id`/`ledger` existed read back as "" and 0.
+   */
+  async listPaymentsForLink(linkId: string): Promise<LinkPaymentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(linkPayments)
+      .where(eq(linkPayments.linkId, linkId))
+      .orderBy(asc(linkPayments.createdAt), asc(linkPayments.txHash), asc(linkPayments.operationId));
+    return rows.map((r) => ({
+      linkId: r.linkId,
+      txHash: r.txHash,
+      operationId: r.operationId ?? "",
+      payer: r.payer,
+      amount: r.amount,
+      asset: { code: r.assetCode, issuer: r.assetIssuer ?? null },
+      ledger: r.ledger ?? 0,
+      createdAt: r.createdAt,
+    }));
+  }
+}
+
+function rowToRefund(row: typeof refunds.$inferSelect): Refund {
+  return {
+    id: row.id,
+    linkId: row.linkId,
+    sellerId: row.sellerId,
+    paymentTxHash: row.paymentTxHash,
+    paymentOperationId: row.paymentOperationId,
+    destination: row.destination,
+    destinationMuxedId: row.destinationMuxedId ?? null,
+    memo: row.memo ?? null,
+    memoType: (row.memoType as RefundMemoType | null) ?? null,
+    amount: row.amount,
+    asset: { code: row.assetCode, issuer: row.assetIssuer ?? null },
+    status: row.status as RefundStatus,
+    txHash: row.txHash ?? null,
+    failureReason: row.failureReason ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/** Refunds in libSQL (issue 4.58). Lists are newest first. */
+export class DrizzleRefundRepository implements RefundRepository {
+  constructor(private readonly db: DB) {}
+
+  async create(refund: Refund): Promise<void> {
+    await this.db.insert(refunds).values({
+      id: refund.id,
+      linkId: refund.linkId,
+      sellerId: refund.sellerId,
+      paymentTxHash: refund.paymentTxHash,
+      paymentOperationId: refund.paymentOperationId,
+      destination: refund.destination,
+      destinationMuxedId: refund.destinationMuxedId,
+      memo: refund.memo,
+      memoType: refund.memoType,
+      amount: refund.amount,
+      assetCode: refund.asset.code,
+      assetIssuer: refund.asset.issuer,
+      status: refund.status,
+      txHash: refund.txHash,
+      failureReason: refund.failureReason,
+      createdAt: refund.createdAt,
+      updatedAt: refund.updatedAt,
+    });
+  }
+
+  async findById(id: string): Promise<Refund | null> {
+    const rows = await this.db.select().from(refunds).where(eq(refunds.id, id)).limit(1);
+    return rows[0] ? rowToRefund(rows[0]) : null;
+  }
+
+  async listByLink(linkId: string): Promise<Refund[]> {
+    const rows = await this.db
+      .select()
+      .from(refunds)
+      .where(eq(refunds.linkId, linkId))
+      .orderBy(desc(refunds.createdAt), desc(refunds.id));
+    return rows.map(rowToRefund);
+  }
+
+  async listByPayment(paymentTxHash: string, paymentOperationId: string): Promise<Refund[]> {
+    const rows = await this.db
+      .select()
+      .from(refunds)
+      .where(and(eq(refunds.paymentTxHash, paymentTxHash), eq(refunds.paymentOperationId, paymentOperationId)))
+      .orderBy(desc(refunds.createdAt), desc(refunds.id));
+    return rows.map(rowToRefund);
+  }
+
+  async listByStatus(status: RefundStatus): Promise<Refund[]> {
+    const rows = await this.db
+      .select()
+      .from(refunds)
+      .where(eq(refunds.status, status))
+      .orderBy(desc(refunds.createdAt), desc(refunds.id));
+    return rows.map(rowToRefund);
+  }
+
+  async update(id: string, patch: RefundPatch): Promise<Refund | null> {
+    const set: Partial<typeof refunds.$inferInsert> = { updatedAt: Date.now() };
+    if (patch.status !== undefined) set.status = patch.status;
+    if (patch.txHash !== undefined) set.txHash = patch.txHash;
+    if (patch.failureReason !== undefined) set.failureReason = patch.failureReason;
+    await this.db.update(refunds).set(set).where(eq(refunds.id, id));
+    return this.findById(id);
   }
 }
 

@@ -149,6 +149,9 @@ class FakeLinkRepo implements LinkRepository {
     link.updatedAt = Date.now();
     return true;
   }
+  async listPaymentsForLink(linkId: string): Promise<LinkPaymentRecord[]> {
+    return this.payments.filter((p) => p.linkId === linkId);
+  }
   async releaseCashOutClaim(id: string, restoreStatus: PaymentLink["status"]): Promise<void> {
     const link = this.byId.get(id);
     if (!link) return;

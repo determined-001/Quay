@@ -28,6 +28,7 @@ function fakeContainer(pending: Array<{ externalStatus: string | null; count: nu
     apiKeys: {} as Container["apiKeys"],
     db: {} as Container["db"],
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
+    refunds: {} as Container["refunds"],
     auth: {} as Container["auth"],
     kycConsents: {
       async list(sellerId: string) { return []; },

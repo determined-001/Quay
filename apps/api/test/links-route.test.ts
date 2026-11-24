@@ -91,6 +91,7 @@ function fakeContainer(): Container {
     anchorAuth: null,
     db: {} as Container["db"],
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
+    refunds: {} as Container["refunds"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     metricsToken: "test-metrics-token",
     ready: async () => true,
@@ -147,6 +148,15 @@ describe("GET /links/:id — public checkout read", () => {
     const app = linkRoutes(container, async (_c, next) => next());
     const res = await app.request(`/lnk_does_not_exist`);
     expect(res.status).toBe(404);
+  });
+
+  it("tells the checkout whether path payments are on (issue 8.30)", async () => {
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { pay?: { pathPayments: boolean; maxSlippageBps: number } };
+    // The API test env leaves PATH_PAYMENTS_* unset: off, 100 bps.
+    expect(body.pay).toEqual({ pathPayments: false, maxSlippageBps: 100 });
   });
 });
 

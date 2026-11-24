@@ -1,7 +1,8 @@
-import Link from "next/link";
 import { api, CheckoutError } from "../../../lib/api";
 import CheckoutClient from "../../components/CheckoutClient";
 import Logo from "../../components/Logo";
+import NetworkChip from "../../components/NetworkChip";
+import { PublicErrorPanel } from "../../components/PublicErrorPanel";
 import ThemeToggle from "../../components/ThemeToggle";
 
 export default async function PayPage({
@@ -19,36 +20,18 @@ export default async function PayPage({
   try {
     data = await api.getLink(id);
   } catch (err) {
-    const isUnreachable = err instanceof CheckoutError && err.code === "unreachable";
+    // Only a real 404 means the link doesn't exist (issue 5.42). A sleeping
+    // API answers 502/503 or nothing at all while it boots; telling a buyer
+    // their valid link "was removed" would be false.
+    const isNotFound = err instanceof CheckoutError && (err.code === "not_found" || err.status === 404);
+    const isUnreachable = !isNotFound;
 
     return (
-      <main className={isEmbed ? "shell shell--embed" : "shell shell--narrow"}>
-        <div className="panel checkout">
-          {isUnreachable ? (
-            <>
-              <div className="error-icon" aria-hidden>⚡</div>
-              <p className="title">Unable to load this payment link</p>
-              <p className="muted">
-                We can&apos;t reach the payment service right now. Please refresh the page or try
-                again in a moment.
-              </p>
-            </>
-          ) : (
-            <>
-              <p className="title">Payment link not found</p>
-              <p className="muted">This link may have been removed, or the id is wrong.</p>
-            </>
-          )}
-          <div style={{ marginTop: 20, display: "flex", gap: 12, justifyContent: "center" }}>
-            <Link className="btn btn--ghost" href={`/pay/${id}`}>
-              Refresh
-            </Link>
-            <Link className="btn btn--ghost" href="/">
-              Go to Quay
-            </Link>
-          </div>
-        </div>
-      </main>
+      <PublicErrorPanel
+        isUnreachable={isUnreachable}
+        isEmbed={isEmbed}
+        refreshHref={`/pay/${id}`}
+      />
     );
   }
 
@@ -58,6 +41,9 @@ export default async function PayPage({
         <header className="masthead">
           <Logo />
           <span className="masthead__right">
+            {/* Which chain this payment settles on (issue 5.43): the checkout
+                takes real money on mainnet and must say so. */}
+            <NetworkChip />
             <span className="net mono">{data.link.asset.code}</span>
             <ThemeToggle />
           </span>

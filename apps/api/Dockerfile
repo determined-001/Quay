@@ -59,7 +59,8 @@ FROM ${BASE_IMAGE} AS runtime
 # does not carry yet (CVE-2026-14456 was exactly that). Pinning keeps the
 # build reproducible; the upgrade keeps the Trivy gate honest. Named packages
 # only — a blanket `apk upgrade` costs ~2 MB and blows the image-size budget.
-RUN apk upgrade --no-cache libcrypto3 libssl3 && apk add --no-cache tini && corepack enable
+# musl/zlib added 2026-11-24 for CVE-2026-107891 (musl) and CVE-2026-85091 (zlib).
+RUN apk upgrade --no-cache libcrypto3 libssl3 musl musl-utils zlib && apk add --no-cache tini && corepack enable
 WORKDIR /app
 
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./

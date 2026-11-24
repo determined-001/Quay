@@ -109,6 +109,61 @@ describe("matchPayment", () => {
     expect(r.kind).toBe("unknown_reference");
   });
 
+  // Path payments (issue 2.17): the matcher settles on what the destination
+  // received — `amount`/`asset` — and never on the paid side carried in
+  // `sourceAmount`/`sourceAsset`.
+  describe("path payments settle on the delivered side", () => {
+    const delivered = { code: "USDC", issuer: ISSUER };
+
+    it("a strict-receive delivering the exact link asset and amount is paid", () => {
+      const l = link();
+      const r = matchPayment(
+        payment({
+          amount: "10",
+          asset: delivered,
+          sourceAmount: "97.3",
+          sourceAsset: { code: "XLM", issuer: null },
+        }),
+        byRef(l),
+      );
+      expect(r.kind).toBe("paid");
+      if (r.kind === "paid") expect(r.overpaid).toBe(false);
+    });
+
+    it("a strict-receive delivering a different asset is asset_mismatch, even when the paid asset is the link's", () => {
+      const l = link();
+      const r = matchPayment(
+        payment({
+          amount: "10",
+          asset: { code: "XLM", issuer: null },
+          sourceAmount: "10",
+          sourceAsset: delivered,
+        }),
+        byRef(l),
+      );
+      expect(r.kind).toBe("asset_mismatch");
+    });
+
+    it("a strict-send that delivers less than requested is underpaid with the right outstanding", () => {
+      const l = link({ amount: "40" });
+      const r = matchPayment(
+        payment({
+          amount: "38",
+          asset: delivered,
+          sourceAmount: "10",
+          sourceAsset: { code: "IOM", issuer: ISSUER },
+        }),
+        byRef(l),
+      );
+      expect(r.kind).toBe("underpaid");
+      if (r.kind === "underpaid") {
+        // 2 outstanding, not 30: the 10-unit paid side is irrelevant.
+        expect(r.receivedTotal).toBe("38");
+        expect(r.outstanding).toBe("2");
+      }
+    });
+  });
+
   describe("muxed correlation (SEP-23)", () => {
     it("matches by muxed id with no memo at all", () => {
       const l = link({ muxedId: "123456789" });

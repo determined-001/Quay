@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { api, serverNow, type LinkWithRequest, type PaymentLink } from "../../lib/api";
+import WakingNotice from "./WakingNotice";
 
 const WalletPayButton = dynamic(() => import("./WalletPayButton"), {
   ssr: false,
@@ -139,6 +140,8 @@ export default function CheckoutClient({
   const intervalMsRef = useRef(BASE_INTERVAL_MS);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const pollingRef = useRef(false);
+  // A status request is out right now (issue 5.42): drives the waking notice.
+  const [requestPending, setRequestPending] = useState(false);
 
   // ── Expiry countdown ─────────────────────────────────────────────────────
 
@@ -240,6 +243,7 @@ export default function CheckoutClient({
   const poll = useCallback(async (): Promise<PaymentLink | null> => {
     if (pollingRef.current) return null; // prevent concurrent calls
     pollingRef.current = true;
+    setRequestPending(true);
     try {
       const next = await api.getLink(link.id);
       consecutiveFailsRef.current = 0;
@@ -259,6 +263,7 @@ export default function CheckoutClient({
       return null;
     } finally {
       pollingRef.current = false;
+      setRequestPending(false);
     }
   }, [link.id]);
 
@@ -509,6 +514,8 @@ export default function CheckoutClient({
         <span className="spinner" aria-hidden />
         Waiting for payment…
       </div>
+
+      <WakingNotice pending={requestPending} />
 
       {consecutiveFails > 0 && (
         <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>

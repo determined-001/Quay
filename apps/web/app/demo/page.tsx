@@ -1,6 +1,8 @@
 import Script from "next/script";
 import Link from "next/link";
 import { apiBase } from "../../lib/api";
+import { stellarNetwork } from "../../lib/explorer";
+import NetworkChip from "../components/NetworkChip";
 
 /**
  * The seeded demo link's id, or null when `pnpm demo:seed` hasn't been run.
@@ -22,12 +24,21 @@ async function getDemoLinkId(): Promise<string | null> {
 
 export default async function DemoPage() {
   const linkId = await getDemoLinkId();
+  // The demo routes are testnet-only (apps/api/src/routes/demo.ts answers 403
+  // "demo endpoints are only available on testnet"), so on mainnet this page
+  // can never produce a working demo button. Show the storefront and the
+  // snippet, and say what a real integration needs — never a dead button with
+  // a developer command on it (issue 5.43).
+  const isMainnet = stellarNetwork() === "public";
 
   return (
     <main className="shell shell--narrow">
       <header className="masthead">
         <h1>Storefront Demo</h1>
-        <span className="net mono">Quay Widget Integration</span>
+        <span className="masthead__right">
+          <NetworkChip />
+          <span className="net mono">Quay Widget Integration</span>
+        </span>
       </header>
 
       <div className="panel">
@@ -57,6 +68,14 @@ export default async function DemoPage() {
               >
                 Pay $25.00 with Quay
               </button>
+            ) : isMainnet ? (
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                The live widget needs a real payment link.{" "}
+                <Link className="linkbtn" href="/dashboard">
+                  Create one in the dashboard
+                </Link>{" "}
+                and paste it into the snippet below.
+              </p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <button
