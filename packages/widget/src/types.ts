@@ -12,6 +12,7 @@ export type QuayEventHandler = (data: QuayEventData) => void;
 export interface QuayOpenOptions {
   linkId: string;
   host?: string;
+  payWith?: "any" | "link-asset";
   onPaid?: QuayEventHandler;
   onClosed?: QuayEventHandler;
   onError?: QuayEventHandler;

@@ -10,10 +10,10 @@ export default async function PayPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ embed?: string }>;
+  searchParams: Promise<{ embed?: string; pay?: string }>;
 }) {
   const { id } = await params;
-  const { embed } = await searchParams;
+  const { embed, pay } = await searchParams;
   const isEmbed = embed === "true";
 
   let data;
@@ -50,7 +50,7 @@ export default async function PayPage({
         </header>
       )}
       <div className={isEmbed ? "panel panel--embed" : "panel"}>
-        <CheckoutClient initial={data} embed={isEmbed} />
+        <CheckoutClient initial={data} embed={isEmbed} payWith={pay} />
       </div>
     </main>
   );

@@ -45,6 +45,7 @@ when the DOM is ready. `data-quay-label` sets the button text.
 | --- | --- | --- | --- |
 | `linkId` | `string` | yes | Checkout link ID. |
 | `host` | `string` | no | Checkout host. If omitted, the widget infers it from its own `<script src="...widget.js">` tag. |
+| `payWith` | `"any" \| "link-asset"` | no | Asset selection in embed mode. Defaults to `"any"`. Set to `"link-asset"` to restrict the checkout embed to the link asset only and hide alternative asset options. |
 | `onPaid` | `QuayEventHandler` | no | Called when a `quay:paid` message is received. |
 | `onClosed` | `QuayEventHandler` | no | Called when the modal is closed. |
 | `onError` | `QuayEventHandler` | no | Called when a `quay:error` message is received. |
@@ -54,7 +55,10 @@ when the DOM is ready. `data-quay-label` sets the button text.
 ```js
 Quay.open("lnk_123");
 Quay.open({ linkId: "lnk_123", host: "https://checkout.example.com" });
+Quay.open({ linkId: "lnk_123", payWith: "link-asset" });
 ```
+
+Buttons can also set `data-quay-pay-with="link-asset"` to restrict the checkout embed to the link asset.
 
 If the host cannot be determined, `Quay.open` throws instead of guessing.
 

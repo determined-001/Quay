@@ -117,13 +117,27 @@ function postToParent(message: { type: string; linkId?: string; link?: unknown; 
 
 // ── Component ───────────────────────────────────────────────────────────────
 
+export interface PayOption {
+  asset: { code: string; issuer?: string | null };
+  amount?: string;
+  estimatedAmount?: string;
+  maxAmount?: string;
+  expiresAt?: number;
+}
+
 export default function CheckoutClient({
   initial,
   embed = false,
+  payWith,
+  payOptions,
 }: {
-  initial: LinkWithRequest;
+  initial: LinkWithRequest & { payOptions?: PayOption[] };
   /** Rendered inside the widget's 440x680 iframe (issue 5.10) - drives tighter spacing/QR sizing via `.checkout--embed` (globals.css) and a smaller QR that CSS alone can't produce (the `size` prop is a real pixel value, not stylable). */
   embed?: boolean;
+  /** When "link-asset", hides the asset choice (issue 5.49) */
+  payWith?: "any" | "link-asset" | string;
+  /** Explicit pay options passed from parent / tests */
+  payOptions?: PayOption[];
 }) {
   const { request } = initial;
   const [link, setLink] = useState(initial.link);
@@ -133,6 +147,18 @@ export default function CheckoutClient({
     setSubmittedTxHash(txHash);
   }, []);
   const walletPayment = { link, request };
+
+  const isLinkAssetOnly =
+    payWith === "link-asset" ||
+    (typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("pay") === "link-asset");
+
+  const availableOptions: PayOption[] =
+    payOptions ??
+    (initial as { payOptions?: PayOption[] }).payOptions ??
+    ((initial as { pay?: { payOptions?: PayOption[] } }).pay?.payOptions ?? []);
+
+  const [selectedAsset, setSelectedAsset] = useState<string>(link.asset.code);
 
   // Polling state
   const [consecutiveFails, setConsecutiveFails] = useState(0);
@@ -486,6 +512,55 @@ export default function CheckoutClient({
       <p className="muted" style={{ fontSize: 13 }}>
         Scan with a Stellar wallet, or
       </p>
+
+      {!isLinkAssetOnly && availableOptions.length > 0 && (
+        <fieldset className="pay-choice" data-testid="pay-choice">
+          <legend>Pay with</legend>
+          <div className="pay-choice__options" role="radiogroup" aria-label="Choose asset to pay with">
+            <label className="pay-choice__row">
+              <span className="pay-choice__label">
+                <input
+                  type="radio"
+                  name="pay-asset"
+                  value={link.asset.code}
+                  checked={selectedAsset === link.asset.code}
+                  onChange={() => setSelectedAsset(link.asset.code)}
+                />
+                {formatAmount(link.amount)} {link.asset.code}
+              </span>
+            </label>
+            {availableOptions.map((opt) => {
+              const code = opt.asset.code;
+              const approx = opt.estimatedAmount ?? opt.amount ?? "";
+              const max = opt.maxAmount ? `, at most ${opt.maxAmount} ${code}` : "";
+              const optRemaining = opt.expiresAt ? Math.max(0, opt.expiresAt - serverNow()) : null;
+              const optSeconds = optRemaining !== null ? Math.ceil(optRemaining / 1000) : null;
+              return (
+                <label key={code} className="pay-choice__row">
+                  <span className="pay-choice__label">
+                    <input
+                      type="radio"
+                      name="pay-asset"
+                      value={code}
+                      checked={selectedAsset === code}
+                      onChange={() => setSelectedAsset(code)}
+                    />
+                    about {approx} {code}{max}
+                  </span>
+                  {optSeconds !== null && (
+                    <span className="pay-choice__countdown" aria-live="polite">
+                      {optSeconds}s left
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+          <p className="pay-choice__hint">
+            QR code always requests {link.asset.code}.
+          </p>
+        </fieldset>
+      )}
 
       {WALLET_PAY_ENABLED && (
         <WalletPayButton initial={walletPayment} disabled={Boolean(submittedTxHash)} onSubmitted={markSubmitted} />
