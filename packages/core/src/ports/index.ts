@@ -857,11 +857,19 @@ export interface LinkRepository {
 export type RefundPatch = Partial<Pick<Refund, "status" | "txHash" | "failureReason">>;
 
 /**
- * Persistence for refunds (issue 4.58). Lists are newest first. The atomic
- * "claim a payment's refundable amount" step is issue 4.62, not here.
+ * Persistence for refunds (issue 4.58). Lists are newest first.
  */
 export interface RefundRepository {
   create(refund: Refund): Promise<void>;
+  /**
+   * Stores `refund` only if its payment still has that much left to refund
+   * (issue 4.62): `paymentAmount` minus every refund of the same payment that
+   * has not failed must be at least `refund.amount`, compared in stroops.
+   * The check and the insert are one atomic step, so of two claims that
+   * together exceed the payment exactly one is stored. Returns false, and
+   * stores nothing, when the claim loses.
+   */
+  claim(refund: Refund, paymentAmount: string): Promise<boolean>;
   findById(id: string): Promise<Refund | null>;
   listByLink(linkId: string): Promise<Refund[]>;
   listByPayment(paymentTxHash: string, paymentOperationId: string): Promise<Refund[]>;

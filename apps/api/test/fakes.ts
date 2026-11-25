@@ -485,6 +485,21 @@ export class FakeRefundRepository implements RefundRepository {
     this.byId.set(refund.id, { ...refund, asset: { ...refund.asset } });
   }
 
+  /** The same rule as the table's claim (issue 4.62). Nothing is awaited
+   *  between the check and the write, so two claims cannot interleave. */
+  async claim(refund: Refund, paymentAmount: string): Promise<boolean> {
+    let left = toStroops(paymentAmount);
+    for (const r of this.byId.values()) {
+      if (r.paymentTxHash !== refund.paymentTxHash || r.paymentOperationId !== refund.paymentOperationId) continue;
+      if (r.status !== "failed") left -= toStroops(r.amount);
+    }
+    if (toStroops(refund.amount) > left) return false;
+    if (this.byId.has(refund.id)) throw new Error(`UNIQUE constraint failed: refunds.id`);
+    this.assertTxHashFree(refund.id, refund.txHash);
+    this.byId.set(refund.id, { ...refund, asset: { ...refund.asset } });
+    return true;
+  }
+
   async findById(id: string): Promise<Refund | null> {
     const r = this.byId.get(id);
     return r ? { ...r, asset: { ...r.asset } } : null;

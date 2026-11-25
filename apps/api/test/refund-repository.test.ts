@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Refund } from "@checkout/core";
 import { bootstrap, createDb } from "../src/db/client";
 import { DrizzleRefundRepository } from "../src/repos/index";
+import { FakeRefundRepository } from "./fakes";
 
 const USDC = { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" };
 
@@ -119,5 +120,103 @@ describe("DrizzleRefundRepository (issue 4.58)", () => {
     await repo.create(refund({ id: "rfd_2", txHash: null }));
     await repo.create(refund({ id: "rfd_3", txHash: null }));
     expect(await repo.listByStatus("prepared")).toHaveLength(3);
+  });
+});
+
+// The claim is tested against the real table and against the fake the service
+// tests use, so the two cannot drift apart.
+describe.each([
+  ["DrizzleRefundRepository", freshRepo],
+  ["FakeRefundRepository", async () => new FakeRefundRepository()],
+])("%s.claim (issue 4.62)", (_name, makeRepo) => {
+  const PAYMENT = "10";
+
+  it("stores the refund as given when the payment has that much left", async () => {
+    const repo = await makeRepo();
+    const wanted = refund({ id: "rfd_a", amount: "4", memo: "deposit 7781", memoType: "text" });
+
+    expect(await repo.claim(wanted, PAYMENT)).toBe(true);
+    expect(await repo.findById("rfd_a")).toEqual(wanted);
+  });
+
+  it("lets a claim for exactly what is left win, and one stroop more lose", async () => {
+    const repo = await makeRepo();
+    expect(await repo.claim(refund({ id: "rfd_a", amount: "4" }), PAYMENT)).toBe(true);
+
+    expect(await repo.claim(refund({ id: "rfd_b", amount: "6.0000001" }), PAYMENT)).toBe(false);
+    expect(await repo.findById("rfd_b")).toBeNull();
+    expect(await repo.claim(refund({ id: "rfd_c", amount: "6" }), PAYMENT)).toBe(true);
+    expect(await repo.claim(refund({ id: "rfd_d", amount: "0.0000001" }), PAYMENT)).toBe(false);
+  });
+
+  it("lets exactly one of two concurrent claims win when together they exceed the payment", async () => {
+    const repo = await makeRepo();
+
+    const results = await Promise.all([
+      repo.claim(refund({ id: "rfd_a", amount: "6" }), PAYMENT),
+      repo.claim(refund({ id: "rfd_b", amount: "6" }), PAYMENT),
+    ]);
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await repo.listByPayment("a".repeat(64), "1001")).toHaveLength(1);
+  });
+
+  it("lets both concurrent claims win when together they fit", async () => {
+    const repo = await makeRepo();
+
+    const results = await Promise.all([
+      repo.claim(refund({ id: "rfd_a", amount: "5" }), PAYMENT),
+      repo.claim(refund({ id: "rfd_b", amount: "5" }), PAYMENT),
+    ]);
+
+    expect(results).toEqual([true, true]);
+  });
+
+  it("counts prepared, submitted and confirmed refunds, and frees the amount of a failed one", async () => {
+    const repo = await makeRepo();
+    expect(await repo.claim(refund({ id: "rfd_a", amount: "10" }), PAYMENT)).toBe(true);
+    expect(await repo.claim(refund({ id: "rfd_b", amount: "1" }), PAYMENT)).toBe(false);
+
+    await repo.update("rfd_a", { status: "submitted", txHash: "b".repeat(64) });
+    expect(await repo.claim(refund({ id: "rfd_b", amount: "1" }), PAYMENT)).toBe(false);
+    await repo.update("rfd_a", { status: "confirmed" });
+    expect(await repo.claim(refund({ id: "rfd_b", amount: "1" }), PAYMENT)).toBe(false);
+
+    await repo.update("rfd_a", { status: "failed", failureReason: "tx_too_late" });
+    expect(await repo.claim(refund({ id: "rfd_b", amount: "10" }), PAYMENT)).toBe(true);
+  });
+
+  it("counts only refunds of the same payment, by tx hash and by operation id", async () => {
+    const repo = await makeRepo();
+    await repo.create(refund({ id: "rfd_other_tx", amount: "10", paymentTxHash: "c".repeat(64) }));
+    await repo.create(refund({ id: "rfd_other_op", amount: "10", paymentOperationId: "1002" }));
+
+    expect(await repo.claim(refund({ id: "rfd_a", amount: "10" }), PAYMENT)).toBe(true);
+  });
+
+  it("adds amounts up in stroops, not as floating point numbers", async () => {
+    const repo = await makeRepo();
+    // 0.1 + 0.2 is not 0.3 in floating point.
+    expect(await repo.claim(refund({ id: "rfd_a", amount: "0.1" }), "0.3")).toBe(true);
+    expect(await repo.claim(refund({ id: "rfd_b", amount: "0.2" }), "0.3")).toBe(true);
+    expect(await repo.claim(refund({ id: "rfd_c", amount: "0.0000001" }), "0.3")).toBe(false);
+
+    // Beyond what a double holds exactly: 900 billion and one stroop.
+    const big = refund({ id: "rfd_big", amount: "900000000000", paymentOperationId: "2001" });
+    expect(await repo.claim(big, "900000000000.0000001")).toBe(true);
+    const two = refund({ id: "rfd_two", amount: "0.0000002", paymentOperationId: "2001" });
+    expect(await repo.claim(two, "900000000000.0000001")).toBe(false);
+    const one = refund({ id: "rfd_one", amount: "0.0000001", paymentOperationId: "2001" });
+    expect(await repo.claim(one, "900000000000.0000001")).toBe(true);
+  });
+
+  it("reads stored amounts written with and without decimals", async () => {
+    const repo = await makeRepo();
+    await repo.create(refund({ id: "rfd_int", amount: "3" }));
+    await repo.create(refund({ id: "rfd_dec", amount: "2.5" }));
+    await repo.create(refund({ id: "rfd_seven", amount: "0.0000001" }));
+
+    expect(await repo.claim(refund({ id: "rfd_a", amount: "4.5" }), PAYMENT)).toBe(false);
+    expect(await repo.claim(refund({ id: "rfd_b", amount: "4.4999999" }), PAYMENT)).toBe(true);
   });
 });

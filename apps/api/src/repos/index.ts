@@ -395,6 +395,15 @@ function rowToRefund(row: typeof refunds.$inferSelect): Refund {
   };
 }
 
+// A stored decimal amount as a whole number of stroops, in SQLite integer
+// arithmetic. Amounts are canonical decimal strings with at most seven
+// decimals, and the largest Stellar amount is below 2^63 stroops, so this
+// is exact where a cast to REAL would not be.
+const REFUND_AMOUNT_STROOPS = sql.raw(
+  "(CAST(CASE WHEN instr(amount, '.') = 0 THEN amount ELSE substr(amount, 1, instr(amount, '.') - 1) END AS INTEGER) * 10000000" +
+    " + CAST(substr((CASE WHEN instr(amount, '.') = 0 THEN '' ELSE substr(amount, instr(amount, '.') + 1) END) || '0000000', 1, 7) AS INTEGER))",
+);
+
 /** Refunds in libSQL (issue 4.58). Lists are newest first. */
 export class DrizzleRefundRepository implements RefundRepository {
   constructor(private readonly db: DB) {}
@@ -419,6 +428,36 @@ export class DrizzleRefundRepository implements RefundRepository {
       createdAt: refund.createdAt,
       updatedAt: refund.updatedAt,
     });
+  }
+
+  /**
+   * One INSERT ... SELECT ... WHERE, like claimForCashOut's single UPDATE:
+   * SQLite runs a statement atomically, so the sum this reads cannot change
+   * before the row is written. "No row inserted" means the payment does not
+   * have that much left.
+   */
+  async claim(refund: Refund, paymentAmount: string): Promise<boolean> {
+    const result = await this.db.run(sql`
+      INSERT INTO refunds (
+        id, link_id, seller_id, payment_tx_hash, payment_operation_id, destination,
+        destination_muxed_id, memo, memo_type, amount, asset_code, asset_issuer,
+        status, tx_hash, failure_reason, created_at, updated_at
+      )
+      SELECT
+        ${refund.id}, ${refund.linkId}, ${refund.sellerId}, ${refund.paymentTxHash},
+        ${refund.paymentOperationId}, ${refund.destination}, ${refund.destinationMuxedId},
+        ${refund.memo}, ${refund.memoType}, ${refund.amount}, ${refund.asset.code},
+        ${refund.asset.issuer}, ${refund.status}, ${refund.txHash}, ${refund.failureReason},
+        ${refund.createdAt}, ${refund.updatedAt}
+      WHERE (
+        SELECT COALESCE(SUM(${REFUND_AMOUNT_STROOPS}), 0)
+        FROM refunds
+        WHERE payment_tx_hash = ${refund.paymentTxHash}
+          AND payment_operation_id = ${refund.paymentOperationId}
+          AND status <> 'failed'
+      ) + ${toStroops(refund.amount)} <= ${toStroops(paymentAmount)}
+    `);
+    return result.rowsAffected === 1;
   }
 
   async findById(id: string): Promise<Refund | null> {
