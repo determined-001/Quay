@@ -27,3 +27,5 @@ ISSUES.md
 
 packages/offramp/probe-telemetry.json
 packages/offramp/probe-telemetry.json.lock
+apps/api/refund-probe-telemetry.json
+apps/api/refund-probe-telemetry.json.lock

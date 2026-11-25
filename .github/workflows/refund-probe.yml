@@ -1,0 +1,164 @@
+name: refund-probe
+
+on:
+  schedule:
+    # Nightly at 04:30 UTC — half an hour after the anchor probe, so the two
+    # live probes do not hit Horizon testnet at the same moment.
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    # The pay half waits up to ~5 minutes for the watcher to mark the link
+    # paid and the refund half up to ~5 more for the ledger confirmation.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Pays a 2 USDC link on testnet, refunds 0.5 USDC of it through the API
+      # with the seller's key, and checks the refund lands on the ledger. This
+      # test is the gate for enabling REFUNDS_ENABLED on mainnet (issue 8.29).
+      # Without TEST_REFUND_FUNDER_SECRET the prepare stage is skipped, not
+      # failed — see docs/RUNBOOK.md, "Nightly refund probe".
+      - name: Refund end-to-end probe (pay → refund → confirm)
+        id: refund
+        continue-on-error: true
+        env:
+          RUN_LIVE_REFUND_TESTS: "1"
+          REFUNDS_ENABLED: "1"
+          REFUND_PROBE_FUNDER_SECRET: ${{ secrets.TEST_REFUND_FUNDER_SECRET }}
+        run: |
+          pnpm --filter @checkout/api exec vitest run test/live/refund.live.test.ts --reporter=verbose 2>&1 | tee refund-output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          exit ${EXIT_CODE}
+
+      - name: Name the failing suites
+        if: steps.refund.outputs.exit_code != '0'
+        run: node scripts/anchor-probe-report.mjs failing-suites.md refund-output.txt
+
+      - name: Publish telemetry summary
+        if: always()
+        run: |
+          TELEMETRY="apps/api/refund-probe-telemetry.json"
+          {
+            echo "## Refund Probe Telemetry"
+            echo ""
+            if [ -f "${TELEMETRY}" ]; then
+              echo "| Last stage completed | $(jq -r '.refundLastStage // "none"' "${TELEMETRY}") |"
+              echo "| Failed stage | $(jq -r '.refundFailedStage // "none"' "${TELEMETRY}") |"
+              echo "| Payment tx hash | $(jq -r '.payTxHash // "N/A"' "${TELEMETRY}") |"
+              echo "| Refund tx hash | $(jq -r '.refundTxHash // "N/A"' "${TELEMETRY}") |"
+              if [ "$(jq -r '.refundWebhookPending // ""' "${TELEMETRY}")" != "" ]; then
+                echo "| Note | $(jq -r '.refundWebhookPending' "${TELEMETRY}") |"
+              fi
+            else
+              echo "| Status | No telemetry emitted (probe may have failed before measurement) |"
+            fi
+            echo ""
+            echo "**Probe exit code:** ${{ steps.refund.outputs.exit_code }}"
+            echo ""
+            echo "Refund test: https://github.com/${{ github.repository }}/blob/dev/apps/api/test/live/refund.live.test.ts"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: refund-probe-results
+          path: |
+            refund-output.txt
+            failing-suites.md
+            apps/api/refund-probe-telemetry.json
+          retention-days: 7
+
+      - name: Report success
+        if: steps.refund.outputs.exit_code == '0'
+        run: |
+          echo "✅ Refund probe passed — a seller-signed refund was prepared, submitted and confirmed on testnet" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update failure issue
+        if: steps.refund.outputs.exit_code != '0'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require("fs");
+            let whatBroke = "See the failed run for details.";
+            try { whatBroke = fs.readFileSync("failing-suites.md", "utf8").trim(); } catch {}
+            const label = "refund-probe";
+            const issueTitle = "⚠️ Nightly refund probe failed";
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+
+            const body = `The nightly [refund probe](${runUrl}) against Horizon testnet failed.
+
+            ### What broke
+            ${whatBroke}
+
+            The probe pays a 2 USDC link, asks the API for a 0.5 USDC refund, signs it with the seller's key, submits it through the API and checks the refund lands on the ledger with memo \`refund <reference>\`. It is the gate for enabling \`REFUNDS_ENABLED\` on mainnet (issue 8.29): refunds stay off until it passes.
+
+            ### Impact
+            - The refund flow is **unverified** until the probe passes again.
+            - \`REFUNDS_ENABLED\` must stay off on mainnet.
+
+            ### Next steps
+            1. Review the [workflow run logs](${runUrl}).
+            2. Check whether Horizon testnet is reachable and the refund endpoints are up.
+            3. Check the funder key's testnet USDC balance (\`TEST_REFUND_FUNDER_SECRET\`) — the probe spends about 2.5 USDC per run.
+
+            _This issue was auto-filed by the [refund-probe workflow](https://github.com/${process.env.GITHUB_REPOSITORY}/actions/workflows/refund-probe.yml)._`;
+
+            // Find an existing open issue with the refund-probe label.
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: label,
+              state: "open",
+              per_page: 5,
+            });
+
+            const existing = issues.find(i => i.title === issueTitle);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Probe failed again on ${new Date().toISOString()}. [View run](${runUrl}).`,
+              });
+              core.info(`Added failure comment to existing issue #${existing.number}`);
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body,
+                labels: [label],
+              });
+              core.info("Created new failure issue");
+            }
+
+      # The probe step is continue-on-error so the telemetry and issue steps
+      # above still run, which also means the job would otherwise finish green.
+      # Fail the run here so the Actions list goes red too.
+      - name: Fail the run if the probe failed
+        if: steps.refund.outputs.exit_code != '0'
+        run: |
+          echo "::error::Refund probe failed (exit ${{ steps.refund.outputs.exit_code }}). See the filed issue and the refund-probe-results artifact."
+          exit 1

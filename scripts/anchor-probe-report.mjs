@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Turns the nightly anchor probe's vitest output into the text of the
-// auto-filed failure issue (.github/workflows/anchor-probe.yml), so the issue
-// names the flow that broke instead of always blaming "SEP-1 -> ... -> SEP-6".
+// Turns a nightly probe's vitest output into the text of the auto-filed
+// failure issue (.github/workflows/anchor-probe.yml,
+// .github/workflows/refund-probe.yml), so the issue names the flow that broke
+// instead of always blaming "SEP-1 -> ... -> SEP-6".
 //
 //   node scripts/anchor-probe-report.mjs <out.md> <vitest-output.txt>...
 //
@@ -32,6 +33,10 @@ export function parseFailures(output) {
 /** Which probe flow a failing test belongs to. */
 export function flowOf(failure) {
   const full = failure.path.join(" > ");
+  if (/refund end-to-end/i.test(full) || /refund\.live\.test\.ts$/.test(failure.file)) {
+    const stage = full.match(/stage \d+\/\d+ ([a-z-]+)/i)?.[1];
+    return { id: "refund", label: `Refund end-to-end probe${stage ? `, stage "${stage}"` : ""}` };
+  }
   if (/full seller-signed cash-out/i.test(full)) {
     const stage = full.match(/stage \d+\/\d+ ([a-z]+)/i)?.[1];
     return { id: "full-cashout", label: `Full seller-signed cash-out${stage ? `, stage "${stage}"` : ""}` };

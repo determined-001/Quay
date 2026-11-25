@@ -396,6 +396,43 @@ when no deployment you operate cashes out through an anchor at all. A
 payments-only mainnet (`OFFRAMP=none`) does not need the probe, but it is not a
 reason to disable it while testnet still does.
 
+### Nightly refund probe
+
+`.github/workflows/refund-probe.yml` runs `apps/api/test/live/refund.live.test.ts`
+nightly at 04:30 UTC: it pays a 2 USDC link on testnet, asks the API for a
+0.5 USDC refund, signs the returned XDR with the seller's key, submits it
+through the API, and checks the refund lands on the ledger with memo
+`refund <reference>` — then checks a second refund of 1.6 USDC is refused
+with `409 refund_exceeds_refundable`. This test is the gate for enabling
+`REFUNDS_ENABLED` on mainnet (issue 8.29): refunds stay off until it passes.
+When it fails it files (or comments on) an issue with the `refund-probe` label
+**and** fails the run.
+
+**Secret to configure.** Add the repository Actions secret
+`TEST_REFUND_FUNDER_SECRET`: the secret seed of a **dedicated, testnet-only**
+key, used for nothing else, holding testnet USDC. Each run transfers 2.5 USDC
+from it to the buyer's probe account, so the balance falls by about that much
+per night; keep 30 or more USDC on the account and refill it from Circle's
+testnet faucet (<https://faucet.circle.com>, Stellar testnet) when it runs low.
+Without the secret the prepare stage is skipped, not failed, and the run
+passes vacuously — the job summary says so.
+
+**Reading a failure.** Tests are named `stage N/6 <stage>` and later stages are
+skipped once one fails, so the first red test is where the flow broke:
+`prepare` (account or balance), `boot` (API boot, webhook or link creation),
+`pay` (the buyer payment or the watcher marking the link paid),
+`prepare-refund` (the unsigned refund XDR), `submit-refund` (signing,
+submission or ledger confirmation), `over-refund` (the 1.6 USDC refusal). The
+job summary also lists the last stage completed and both transaction hashes.
+
+**Run it locally** with a funded key:
+`RUN_LIVE_REFUND_TESTS=1 REFUND_PROBE_FUNDER_SECRET=S... pnpm --filter @checkout/api exec vitest run test/live/refund.live.test.ts`.
+It is skipped, never failed, without `RUN_LIVE_REFUND_TESTS`. Until the refund
+endpoints land (issues #535, #537), the refund stages skip on the missing
+route — the pay half still runs live. For a manual run with accounts you
+already funded, pass `REFUND_PROBE_BUYER_SECRET` and
+`REFUND_PROBE_SELLER_SECRET` instead of the funder secret.
+
 ## Deploy
 
 Render deploys `apps/api` as a single Docker web service. The starter plan is

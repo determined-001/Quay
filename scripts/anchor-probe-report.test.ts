@@ -49,6 +49,13 @@ describe("flowOf", () => {
   it("names the full cash-out and the stage that failed", () => {
     expect(flowOf(full!)).toEqual({ id: "full-cashout", label: 'Full seller-signed cash-out, stage "transfer"' });
   });
+
+  it("names the refund probe and the stage that failed", () => {
+    const [refund] = parseFailures(
+      " FAIL  test/live/refund.live.test.ts > Refund end-to-end (live) > stage 5/6 submit-refund: the seller-signed refund lands on the ledger and is confirmed\nError: boom\n",
+    );
+    expect(flowOf(refund!)).toEqual({ id: "refund", label: 'Refund end-to-end probe, stage "submit-refund"' });
+  });
 });
 
 describe("renderWhatBroke", () => {
