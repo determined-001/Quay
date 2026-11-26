@@ -8,11 +8,14 @@ import {
   type WebhookDelivery,
   type PaymentLink,
   type OfframpPollStatus,
+  type LinkRefundSummary,
+  type Refund,
 } from "../../../lib/api";
 import { TimelineClient, PendingTransferAction } from "./TimelineClient";
 import SessionGate from "../../components/SessionGate";
 import NetworkChip from "../../components/NetworkChip";
 import { addressUrl, explorerUrl } from "../../../lib/explorer";
+import { RefundBadge } from "../../components/dashboard/PaymentsView";
 
 export interface TimelineEvent {
   id: string;
@@ -26,6 +29,9 @@ export interface TimelineEvent {
     | "offramp_pending"
     | "offramp_settled"
     | "offramp_failed"
+    | "refund_sent"
+    | "refund_confirmed"
+    | "refund_failed"
     | "webhook_attempt";
   label: string;
   detail?: string;
@@ -37,6 +43,7 @@ export function buildTimeline(
   link: PaymentLink,
   deliveries: WebhookDelivery[],
   offrampPoll?: OfframpPollStatus | null,
+  refunds: Refund[] = [],
 ): TimelineEvent[] {
   const events: TimelineEvent[] = [];
 
@@ -104,6 +111,27 @@ export function buildTimeline(
     }
   }
 
+  // Refunds (issue 5.45). One event per refund, for the state it is in now: a
+  // refund records when it last changed, not a time for each step. A
+  // `prepared` refund was never sent, so it has no event.
+  for (const refund of refunds) {
+    if (refund.status === "prepared") continue;
+    const [type, label] =
+      refund.status === "submitted"
+        ? (["refund_sent", "Refund sent"] as const)
+        : refund.status === "confirmed"
+          ? (["refund_confirmed", "Refund confirmed"] as const)
+          : (["refund_failed", "Refund failed"] as const);
+    events.push({
+      id: `refund_${refund.id}`,
+      time: refund.updatedAt,
+      type,
+      label,
+      detail: refund.txHash ?? undefined,
+      meta: { amount: `${refund.amount} ${refund.asset.code}` },
+    });
+  }
+
   // Webhook delivery attempts
   for (const d of deliveries) {
     events.push({
@@ -157,9 +185,9 @@ function EventDot({ type }: { type: TimelineEvent["type"] }) {
           ? "dot--underpaid"
           : type === "webhook_attempt"
             ? "dot--webhook"
-            : type === "offramp_settled"
+            : type === "offramp_settled" || type === "refund_confirmed"
               ? "dot--settled"
-              : type === "offramp_failed" || type === "expired" || type === "cancelled"
+              : type === "offramp_failed" || type === "refund_failed" || type === "expired" || type === "cancelled"
                 ? "dot--failed"
                 : "dot--pending";
   return <span className={`tl-dot ${cls}`} />;
@@ -189,6 +217,8 @@ type DetailState =
       link: PaymentLink;
       deliveries: WebhookDelivery[];
       offrampPoll?: OfframpPollStatus | null;
+      refunds?: Refund[];
+      refundSummary?: LinkRefundSummary;
     };
 
 export function LinkDetailClient({ id }: { id: string }) {
@@ -203,6 +233,8 @@ export function LinkDetailClient({ id }: { id: string }) {
         link: detail.link,
         deliveries: detail.deliveries,
         offrampPoll: detail.offrampPoll,
+        refunds: detail.refunds,
+        refundSummary: detail.refundSummary,
       });
     } catch (err) {
       if (err instanceof CheckoutError && err.status === 401) {
@@ -266,9 +298,9 @@ export function LinkDetailClient({ id }: { id: string }) {
     );
   }
 
-  const { link, deliveries, offrampPoll } = state;
+  const { link, deliveries, offrampPoll, refunds, refundSummary } = state;
 
-  const events = buildTimeline(link, deliveries, offrampPoll);
+  const events = buildTimeline(link, deliveries, offrampPoll, refunds);
 
   return (
     <main className="shell">
@@ -294,6 +326,7 @@ export function LinkDetailClient({ id }: { id: string }) {
             <span className={`pill pill--${link.status}`}>
               {link.status.replace("offramp_", "off-ramp ").replace("_", " ")}
             </span>
+            <RefundBadge summary={refundSummary} />
             <div className="tl-amount mono">
               {link.amount} {link.asset.code}
             </div>
@@ -338,7 +371,11 @@ export function LinkDetailClient({ id }: { id: string }) {
                 <div className="tl-event-time">{formatTime(ev.time)}</div>
                 {ev.detail && (
                   <div className="tl-event-detail">
-                    {ev.type === "paid" || ev.type === "underpaid" ? (
+                    {ev.type === "paid" ||
+                    ev.type === "underpaid" ||
+                    ev.type === "refund_sent" ||
+                    ev.type === "refund_confirmed" ||
+                    ev.type === "refund_failed" ? (
                       <a
                         href={explorerUrl(ev.detail)}
                         target="_blank"

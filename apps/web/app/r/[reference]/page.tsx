@@ -58,6 +58,35 @@ export default async function ReceiptPage({ params }: { params: Promise<{ refere
           </div>
         ))}
 
+        {/* What the buyer got back (issue 5.45): confirmed refunds only. */}
+        {receipt.refunds?.map((refund, index) => (
+          <div className="receipt-row" key={`refund-${index}`}>
+            <span className="receipt-label">
+              Refunded {refund.amount} {receipt.asset.code}
+            </span>
+            {refund.txHash && (
+              <a
+                href={explorerUrl(refund.txHash)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mono explorer-link"
+                aria-label={`Refund transaction ${refund.txHash}`}
+              >
+                {refund.txHash.slice(0, 12)}…{refund.txHash.slice(-8)}
+              </a>
+            )}
+          </div>
+        ))}
+
+        {receipt.refunds && receipt.refunds.length > 1 && receipt.refundedAmount && (
+          <div className="receipt-row">
+            <span className="receipt-label">Total refunded</span>
+            <span className="receipt-value mono">
+              {receipt.refundedAmount} {receipt.asset.code}
+            </span>
+          </div>
+        )}
+
         <div className="receipt-row">
           <span className="receipt-label">Status</span>
           <span className={`pill pill--${receipt.status}`}>

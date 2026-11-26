@@ -2,14 +2,16 @@ import type {
   AssetRef,
   KycFieldSpec,
   KycStatus,
+  LinkRefundSummary,
   OffRampQuote,
   PaymentLink,
   PaymentRequest,
   PayoutFieldDescriptor,
+  Refund,
   WithdrawTransfer,
 } from "@checkout/core";
 
-export type { OffRampQuote, PaymentLink, PaymentRequest, PayoutFieldDescriptor };
+export type { LinkRefundSummary, OffRampQuote, PaymentLink, PaymentRequest, PayoutFieldDescriptor, Refund };
 
 export interface LinkWithRequest {
   link: PaymentLink;
@@ -89,6 +91,16 @@ export interface LinkDetail {
   offrampPoll?: OfframpPollStatus | null;
   /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
   offrampExternalStatus: string | null;
+  /** Every refund of the link's payments, oldest first (issue 5.45). Absent while refunds are off. */
+  refunds?: Refund[];
+  /** Totals of those refunds. Absent while refunds are off. */
+  refundSummary?: LinkRefundSummary;
+}
+
+/** One refund on the buyer's receipt: confirmed on the ledger, and never where it was sent. */
+export interface ReceiptRefund {
+  amount: string;
+  txHash: string | null;
 }
 
 export interface PaidWithItem {
@@ -108,6 +120,10 @@ export interface PublicReceipt {
   paidAmount: string | null;
   /** What the buyer paid with for path payments (issue 5.50 / 4.66). Null for plain payments. */
   paidWith?: PaidWithItem[] | null;
+  /** Total of the confirmed refunds (issue 5.45). Absent while refunds are off. */
+  refundedAmount?: string;
+  /** The confirmed refunds, oldest first. Absent while refunds are off. */
+  refunds?: ReceiptRefund[];
   createdAt: number;
   updatedAt: number;
 }

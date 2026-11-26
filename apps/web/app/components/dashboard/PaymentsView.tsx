@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
-import { api, type AnchorAuthView, type PaymentLink } from "../../../lib/api";
+import { isPositiveAmount } from "@checkout/core";
+import { api, type AnchorAuthView, type LinkRefundSummary, type PaymentLink } from "../../../lib/api";
 import { shouldShowReconnectHint } from "../../../lib/anchor-session";
 import {
   FILTER_LABEL,
@@ -77,7 +78,26 @@ export function StatusBadge({ link, reconnect }: { link: PaymentLink; reconnect?
   return <span className={`badge badge--${st.tone}`}>{st.label}</span>;
 }
 
-export function PaymentRow({ link, actions }: { link: PaymentLink; actions: RowActions }) {
+/**
+ * The second, small badge next to the status badge: "Refunded" once every
+ * payment is refunded in full, "Part refunded" when some of the money went
+ * back (issue 5.45). Only confirmed refunds count, so nothing shows while a
+ * refund is still on its way. `humanStatus` is untouched: a refunded link is
+ * still "Paid" or "Cashed out", and says so.
+ */
+export function RefundBadge({ summary }: { summary?: LinkRefundSummary | null }) {
+  if (!summary || !isPositiveAmount(summary.refundedAmount)) return null;
+  return <span className="badge badge--idle">{summary.fullyRefunded ? "Refunded" : "Part refunded"}</span>;
+}
+
+export function PaymentRow({
+  link,
+  actions,
+}: {
+  /** `refundSummary` is shown as a badge when the caller has it; the link list does not carry it yet. */
+  link: PaymentLink & { refundSummary?: LinkRefundSummary | null };
+  actions: RowActions;
+}) {
   const { copied, onCopy, onCashOut, onPendingTransfer, cashOutBlocked, anchorAuth, now } = actions;
   const reconnect = shouldShowReconnectHint(link, anchorAuth, {
     offrampEnabled: OFFRAMP_ENABLED,
@@ -108,6 +128,7 @@ export function PaymentRow({ link, actions }: { link: PaymentLink; actions: RowA
 
       <div className="prow__status">
         <StatusBadge link={link} reconnect={reconnect} />
+        <RefundBadge summary={link.refundSummary} />
       </div>
 
       <div className="prow__actions">

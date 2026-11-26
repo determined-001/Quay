@@ -6,6 +6,7 @@ import {
   transferSentSchema,
   submitPaymentSchema,
   OffRampDisabledError,
+  linkRefundSummary,
   type PaymentLink,
 } from "@checkout/core";
 import type { Container } from "../services/container";
@@ -399,12 +400,16 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     // SEP-24 `incomplete` reads as "waiting on you" in the UI, while the
     // mapped offrampStatus stays `pending`.
     const offrampExternalStatus = await c.service.getOffRampExternalStatus(result.link);
+    // Refunds of this link's payments and their totals (issue 5.45). Left out
+    // entirely while refunds are off, so the response is what it was before.
+    const refundFields = refundsEnabled() ? await refundDetail(c, result.link.id) : {};
     return ctx.json({
       link: result.link,
       request: result.request,
       deliveries,
       offrampExternalStatus,
       offrampPoll,
+      ...refundFields,
     });
   });
 
@@ -484,10 +489,25 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
  */
 function refundsDisabledGate(): MiddlewareHandler {
   return async (ctx, next) => {
-    const raw = process.env.REFUNDS_ENABLED;
-    if (raw !== "1" && raw !== "true") return ctx.json({ error: "refunds_disabled" }, 501);
+    if (!refundsEnabled()) return ctx.json({ error: "refunds_disabled" }, 501);
     await next();
   };
+}
+
+/**
+ * Whether refunds are on. The same stand-in reading of `REFUNDS_ENABLED` the
+ * gate above uses; it goes away with the gate when PR #579 lands the flag.
+ */
+export function refundsEnabled(): boolean {
+  const raw = process.env.REFUNDS_ENABLED;
+  return raw === "1" || raw === "true";
+}
+
+/** The seller's view of a link's refunds: every refund, oldest first, and the totals (issue 5.45). */
+async function refundDetail(c: Container, linkId: string) {
+  const [payments, refunds] = await Promise.all([c.links.listPaymentsForLink(linkId), c.refunds.listByLink(linkId)]);
+  refunds.sort((a, b) => a.createdAt - b.createdAt);
+  return { refunds, refundSummary: linkRefundSummary(payments, refunds) };
 }
 
 /**
