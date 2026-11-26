@@ -47,6 +47,9 @@ export const ALL_SCOPES = [
   // requireScope("refunds:initiate") before that issue lands. Sessions are
   // granted every scope; an API key must opt in.
   "refunds:initiate",
+  // Invoices (issue 4.67). Reading and writing them moves no money, so both are defaults.
+  "invoices:read",
+  "invoices:write",
 ] as const;
 
 export type ApiKeyScope = (typeof ALL_SCOPES)[number];
@@ -56,7 +59,13 @@ export type ApiKeyScope = (typeof ALL_SCOPES)[number];
  * and refunds:initiate (both move money) and api-keys:manage (mints more
  * keys) are opt-in.
  */
-export const DEFAULT_SCOPES: ApiKeyScope[] = ["links:read", "links:write", "webhooks:manage"];
+export const DEFAULT_SCOPES: ApiKeyScope[] = [
+  "links:read",
+  "links:write",
+  "webhooks:manage",
+  "invoices:read",
+  "invoices:write",
+];
 
 export function isValidScope(s: string): s is ApiKeyScope {
   return (ALL_SCOPES as readonly string[]).includes(s);

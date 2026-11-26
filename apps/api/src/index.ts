@@ -5,6 +5,7 @@ import { bodyLimit } from "hono/body-limit";
 import { env } from "./env";
 import { createContainer } from "./services/container";
 import { linkRoutes } from "./routes/links";
+import { invoiceRoutes } from "./routes/invoices";
 import { webhookRoutes } from "./routes/webhooks";
 import { apiKeyRoutes } from "./routes/api-keys";
 import { publicRoutes } from "./routes/public";
@@ -90,6 +91,17 @@ async function main(): Promise<void> {
   // Anchor SEP-10 requests trigger outbound calls to the anchor. Keep their
   // strict budget per authenticated seller so one credential cannot amplify
   // traffic at the anchor, regardless of which IP or API key it uses.
+  // The public invoice view takes no credentials, so it gets its own bucket
+  // per client address: reading invoices cannot use up the strict limit that
+  // protects sign-in and link creation, and the reverse.
+  const invoicePublicLimit = rateLimit({
+    windowMs: env.rateLimitWindowMs,
+    max: env.rateLimitMax,
+    store: rateLimitStore,
+    trustProxyHops: env.trustProxyHops,
+    name: "invoice_public",
+  });
+
   const anchorAuthLimit = rateLimit({
     windowMs: env.rateLimitStrictWindowMs,
     max: env.rateLimitStrictMax,
@@ -169,6 +181,13 @@ async function main(): Promise<void> {
   });
 
   app.route("/links", linkRoutes(container, strictRateLimit));
+  // Invoices (issue 4.67). Dark behind INVOICES_ENABLED: every route answers 501 until it is on.
+  if (container.invoices) {
+    app.route(
+      "/invoices",
+      invoiceRoutes(container, container.invoices, { strict: strictRateLimit, publicRead: invoicePublicLimit }),
+    );
+  }
   app.route("/webhooks", webhookRoutes(container));
 
   // Receipt-specific limiter: tighter than the global cap but looser than

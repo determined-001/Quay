@@ -366,19 +366,22 @@ export class LinkService {
     });
   }
 
-  async createLink(sellerId: string, body: CreateLinkBody, opts: ServiceCallOptions = {}): Promise<LinkWithRequest> {
-    const log = opts.logger ?? this.deps.logger!;
+  /**
+   * The receive preflight of `createLink`, on its own: throws the same 422
+   * `destination_cannot_receive` when the seller's wallet cannot take `amount`
+   * of the asset, and creates nothing. Issuing an invoice (issue 4.67) calls
+   * it before it takes an invoice number, so a seller who cannot receive
+   * does not use one up.
+   */
+  async assertSellerCanReceive(sellerId: string, assetCode: CreateLinkBody["assetCode"], amount: string): Promise<void> {
     const seller = await this.deps.sellers.findById(sellerId);
     if (!seller) throw new HttpError(404, "seller_not_found");
-    const asset = resolveAsset(body.assetCode, this.deps.stellar);
-    const expiresAt = body.expiresInMinutes
-      ? Date.now() + body.expiresInMinutes * 60_000
-      : null;
+    await this.receivePreflight(seller.wallet, resolveAsset(assetCode, this.deps.stellar), amount);
+  }
 
-    // Universal receive-preflight (issue #9): every link, not just muxed ones.
-    // Runs first, verifies headroom for the link amount, and carries the richer 422 payload.
+  private async receivePreflight(wallet: string, asset: AssetRef, amount: string): Promise<void> {
     try {
-      await this.deps.rail.assertCanReceive(seller.wallet, asset, body.amount);
+      await this.deps.rail.assertCanReceive(wallet, asset, amount);
     } catch (err) {
       if (err instanceof CannotReceiveError) {
         throw new HttpError(422, "destination_cannot_receive", {
@@ -390,6 +393,20 @@ export class LinkService {
       }
       throw err;
     }
+  }
+
+  async createLink(sellerId: string, body: CreateLinkBody, opts: ServiceCallOptions = {}): Promise<LinkWithRequest> {
+    const log = opts.logger ?? this.deps.logger!;
+    const seller = await this.deps.sellers.findById(sellerId);
+    if (!seller) throw new HttpError(404, "seller_not_found");
+    const asset = resolveAsset(body.assetCode, this.deps.stellar);
+    const expiresAt = body.expiresInMinutes
+      ? Date.now() + body.expiresInMinutes * 60_000
+      : null;
+
+    // Universal receive-preflight (issue #9): every link, not just muxed ones.
+    // Runs first, verifies headroom for the link amount, and carries the richer 422 payload.
+    await this.receivePreflight(seller.wallet, asset, body.amount);
 
     let muxedId: string | null = null;
     if (this.deps.correlation === "muxed") {
