@@ -78,6 +78,8 @@ export interface PublicReceipt {
   txHash: string | null;
   payer: string | null;
   paidAmount: string | null;
+  /** The asset(s) the buyer actually paid with, if different from `asset`. */
+  paidWith: Array<{ amount: string | null; code: string; issuer: string | null }> | null;
   createdAt: number;
   updatedAt: number;
 }
