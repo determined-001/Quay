@@ -163,7 +163,10 @@ app** link that carry the same payment. It must still come from the same wallet.
   Nothing was paid. Press **Send with my wallet** again.
 - *Never send twice.* Once sent, the window says **Payment sent, waiting for the
   anchor to see it** with the transaction hash. A second payment would be paid
-  to the anchor again and would need a manual refund.
+  to the anchor again and would need a manual refund. A refund here is you
+  paying your buyer back. An anchor refund is the anchor returning a failed
+  cash-out to you (if you need to pay a buyer back, see
+  [Refunding a buyer: a guide for merchants](MERCHANT-REFUNDS.md)).
 
 ### 5. Track it
 
@@ -206,5 +209,6 @@ anchor with the memo; if it is there, wait. If a link has been
 | The link says *waiting for reconnect* | Your anchor session lapsed while a cash-out was open | Reconnect (step 1); Quay resumes tracking |
 | Link shows `offramp_failed` | The anchor could not complete the payout | Press **Retry cash-out**. If you already sent USDC to the anchor, contact the operator before retrying |
 
-Related: [HTTP API reference](API.md#cash-out-off-ramp-flow) for the same flow
+Related: [Refunding a buyer](MERCHANT-REFUNDS.md) for returning funds to
+customers, [HTTP API reference](API.md#cash-out-off-ramp-flow) for the same flow
 as API calls, and the [Runbook](RUNBOOK.md) for operators.

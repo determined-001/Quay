@@ -47,7 +47,7 @@ API keys carry granular permission scopes (`ALL_SCOPES`). Session tokens from `P
 represent the logged-in seller and implicitly hold all scopes.
 When minting an API key via `POST /api-keys`, omitting `scopes` assigns `DEFAULT_SCOPES`
 (`links:read`, `links:write`, `webhooks:manage`).
-Sensitive capabilities (`offramp:initiate`, `api-keys:manage`) are opt-in and must be explicitly requested.
+Sensitive capabilities (`offramp:initiate`, `refunds:initiate`, `api-keys:manage`) are opt-in and must be explicitly requested.
 Privilege escalation is prevented: an API key can only mint keys whose scopes are a subset of its own.
 
 | Scope | What it allows | Required by routes | Default? |
@@ -57,6 +57,7 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
 | `webhooks:manage` | Register, list, delete and rotate webhooks, and read or replay deliveries | every `/webhooks` route: `POST /webhooks`<br>`GET /webhooks`<br>`DELETE /webhooks/:id`<br>`POST /webhooks/:id/rotate-secret`<br>`GET /webhooks/:id/deliveries`<br>`POST /webhooks/deliveries/:id/replay` | Yes |
 | `api-keys:manage` | Create, list, and revoke API keys | `POST /api-keys`<br>`GET /api-keys`<br>`DELETE /api-keys/:id` | No (opt-in) |
 | `offramp:initiate` | Initiate off-ramp cash-out, submit transfers, manage KYC, and anchor sessions | `POST /links/:id/cash-out`<br>`GET /links/:id/cash-out/transfer`<br>`POST /links/:id/cash-out/transfer-sent`<br>every `/seller/kyc` route (`GET`/`PUT /seller/kyc`, `PUT /seller/kyc/files`, `/seller/kyc/disclosures`, `/seller/kyc/consent`, `/seller/kyc/prefill-consent`; the consent, prefill-consent, disclosure and file routes are additionally session-only)<br>`GET /seller/anchor-auth`<br>`POST /seller/anchor-auth/challenge`<br>`POST /seller/anchor-auth`<br>`DELETE /seller/anchor-auth` | No (opt-in) |
+| `refunds:initiate` | Preflight, prepare, and submit seller-signed refunds to buyers | `GET /links/:id/refunds/preflight`<br>`POST /links/:id/refunds`<br>`POST /links/:id/refunds/:refundId/submit`<br>`GET /links/:id/refunds` | No (opt-in) |
 
 ## Conventions
 
@@ -565,7 +566,7 @@ authenticated seller (returns 404 for links belonging to other sellers).
 created by mistake. No request body. Idempotent: cancelling a link that is
 already `cancelled` is a successful no-op and sends no second webhook. A
 cancelled link can no longer be paid; a payment that still arrives for it is
-recorded as `payment.unmatched` so the seller can refund the buyer out of band.
+recorded as `payment.unmatched` so the seller can refund the buyer (see [Refunds](#refunds)).
 Cancelling never reverses an on-chain payment.
 
 **200** — the updated link (same fields as `link` in `POST /links`, shortened here)
@@ -589,7 +590,7 @@ Fires the `link.cancelled` webhook.
 | `401` | `unauthorized` | No or invalid credential | Sign in again |
 | `403` | `missing_scope` | API key lacks `links:write` | Use a key with the scope |
 | `404` | `not_found` | Unknown link, or another seller's link | Check the id |
-| `409` | `Link cannot be cancelled (is "<status>")` | The state machine does not allow `cancelled` from the link's current status (for example `paid` or `offramp_pending`) | Refund out of band instead |
+| `409` | `Link cannot be cancelled (is "<status>")` | The state machine does not allow `cancelled` from the link's current status (for example `paid` or `offramp_pending`) | Refund the buyer instead (see [Refunds](#refunds)) |
 
 ---
 
@@ -673,6 +674,276 @@ are already the proof.)
 
 **404** — `{ "error": "not_found" }`: unknown reference, or the link is not
 settled.
+
+---
+
+## Refunds
+
+For the merchant's guide (how to refund from the dashboard, why the wallet signs,
+and troubleshooting buyer accounts), see [`MERCHANT-REFUNDS.md`](MERCHANT-REFUNDS.md).
+
+> A refund here is you paying your buyer back. An anchor refund is the anchor returning a failed cash-out to you.
+
+Seller-signed refunds allow a merchant to return funds (full or partial) to a
+buyer directly on Stellar. Quay is strictly non-custodial: the server prepares
+the exact unsigned Stellar transaction, the seller's own wallet reviews and signs
+it, and the signed envelope is submitted to Horizon. Quay never holds seller
+funds or secret keys.
+
+All refund routes below require authentication with the `refunds:initiate` scope
+(a session token implicitly holds all scopes).
+
+### Feature flag
+
+Refunds are controlled by the `REFUNDS_ENABLED` flag (environment variable).
+While the flag is off, every refund route answers **501 `refunds_disabled`**.
+Like `offramp_disabled`, this names a permanent property of the deployment:
+clients must not retry it. On mainnet, refunds remain disabled until live
+testnet end-to-end verification passes.
+
+### Refund lifecycle
+
+A refund progresses through a strict state machine:
+```
+  [prepared]  --->  [submitted]  --->  [confirmed]
+      |                  |
+      +-------------> [failed] <--------------+
+```
+
+1. **`prepared`** — The server validates the refundable amount, runs preflight
+   checks against the buyer's destination address, claims the amount atomically
+   (so concurrent requests cannot double-refund), and builds an unsigned Stellar
+   payment transaction with a 300 s timebound.
+2. **`submitted`** — The seller's wallet signs the transaction; the server checks
+   that the signed transaction matches the prepared one in every field and in
+   its unsigned transaction hash, then relays it to Horizon.
+3. **`confirmed`** — The ledger watcher detects the transaction settled on
+   Stellar and marks the refund confirmed, updating the link's cumulative
+   refunded totals and firing `link.refunded`.
+4. **`failed`** — If an unsigned transaction expires (after 300 s) or Horizon
+   rejects the submission, the refund transitions to `failed` with a `reason`
+   (e.g. `expired_unsigned`, `payment_rejected`). A failed refund immediately
+   releases its reserved amount back to the refundable pool.
+
+---
+
+## `GET /links/:id/refunds/preflight`
+
+**Requires auth** and the `refunds:initiate` scope. Checks whether the buyer's
+destination account can receive a refund for the link's asset and amount before
+the seller attempts to prepare or sign a transaction.
+
+If the original payment was sent from a muxed account (SEP-23 M-address), the
+destination is the muxed address so the buyer's deposit routing is preserved.
+The underlying G-address is verified on the ledger.
+
+**Query parameters**
+- `payment` — required, format `<txHash>:<operationId>` identifying the payment
+  record on the link.
+- `amount` — required decimal string (at most 7 decimals) representing the
+  amount to refund.
+
+```
+GET /links/lnk_ueeh4nl1m1/refunds/preflight?payment=b166269ace8a96efe8356f966141c2a11b65e9c0f997cb2ba8cf1517f6cc8ee7:1&amount=0.5
+```
+
+**200** — preflight passed
+```json
+{
+  "ok": true,
+  "destination": "GA2C5RFPE6GCKMY3US5PAB6UZLKIGAHWKXX2G65SPOD2VUQ22APC72XG",
+  "memoRequired": false
+}
+```
+- `destination` — the resolved recipient address (muxed address if payer used one, else G-address).
+- `memoRequired` — `false` when the destination does not require a memo.
+
+**422** — destination cannot receive
+```json
+{
+  "error": "refund_destination_cannot_receive",
+  "reason": "no_trustline",
+  "message": "The buyer's account can't hold this asset. Ask them to add the required trustline or provide another address."
+}
+```
+
+| Status | `error` | `reason` | When | What the client should do |
+| --- | --- | --- | --- | --- |
+| `400` | `invalid_refund_amount` | — | `amount` is not a positive decimal string or has >7 decimals | Fix the amount parameter |
+| `401` | `unauthorized` | — | Missing or invalid authentication | Sign in again |
+| `403` | `missing_scope` | — | API key lacks `refunds:initiate` | Use a key with the scope |
+| `404` | `not_found` | — | Link or payment not found, or link belongs to another seller | Check the link and payment ids |
+| `422` | `refund_destination_cannot_receive` | `account_not_found` | The buyer's Stellar account does not exist or was merged | Ask the buyer for an active Stellar address |
+| `422` | `refund_destination_cannot_receive` | `no_trustline` | The buyer lacks a trustline for the refund asset (e.g. paid with XLM via path payment) | Ask the buyer to add the trustline or provide an address that holds the asset |
+| `422` | `refund_destination_cannot_receive` | `trustline_not_authorized` | The buyer's trustline was revoked or not authorized by the asset issuer | Ask the buyer to resolve authorization with the issuer |
+| `422` | `refund_destination_cannot_receive` | `trustline_limit_exceeded` | The buyer's trustline capacity is insufficient for the refund amount | Ask the buyer to increase their trustline limit |
+| `422` | `refund_destination_cannot_receive` | `memo_required` | The destination has SEP-29 `config.memo_required` set (e.g. exchange deposit account) | Collect the buyer's deposit memo and pass it to `POST /links/:id/refunds` |
+| `501` | `refunds_disabled` | — | `REFUNDS_ENABLED` is off | Do not retry |
+
+---
+
+## `POST /links/:id/refunds`
+
+**Requires auth** and the `refunds:initiate` scope. Prepares an unsigned refund
+transaction for the seller's wallet to sign.
+
+Atomically reserves the refund amount against the payment's remaining refundable
+balance (`refundableAmount = payment.amount - sum(non-failed refunds)`). If the
+requested amount exceeds the remaining refundable balance, the request is
+rejected with `409 refund_exceeds_refundable`.
+
+The server constructs an unsigned Stellar transaction containing:
+- Source: the seller's wallet (`link.destination`).
+- Operation: exactly one `payment` operation to the buyer's destination address.
+- Asset & Amount: the link's asset and requested refund amount.
+- Memo: the buyer's memo if provided; otherwise `MEMO_TEXT` `refund <reference>`.
+  (The memo never equals the bare reference, so it cannot be confused with an incoming payment).
+- Timebound: valid for 300 seconds from creation.
+
+Supports [`Idempotency-Key`](#idempotency). Uses strict rate limiting.
+
+**Request**
+```json
+{
+  "payment": "b166269ace8a96efe8356f966141c2a11b65e9c0f997cb2ba8cf1517f6cc8ee7:1",
+  "amount": "0.5",
+  "memo": "12345678",
+  "memoType": "text"
+}
+```
+- `payment` — required, format `<txHash>:<operationId>`.
+- `amount` — required decimal string, at most 7 decimals.
+- `memo` — optional memo string. Required if preflight reported `memo_required`.
+- `memoType` — optional, `"text"` (default), `"id"`, or `"hash"`.
+
+**200**
+```json
+{
+  "refundId": "rfd_k8s2n9f01x",
+  "xdr": "AAAAAgAAAAA...",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "expiresAt": 1792939257657
+}
+```
+- `refundId` — unique identifier of the created refund record.
+- `xdr` — unsigned base64 Stellar transaction envelope for the seller's wallet to sign.
+- `networkPassphrase` — passphrase required by the wallet SDK when signing.
+- `expiresAt` — epoch milliseconds when the transaction's 300 s timebound expires.
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `400` | `invalid_body` | Request body validation failed (`issues` lists fields) | Fix the request body |
+| `400` | `invalid_refund_amount` | Amount is non-positive or exceeds 7 decimals | Fix the amount |
+| `400` | `memo_required` | Destination account requires a memo (SEP-29), but no `memo` was provided | Provide the buyer's deposit memo in the request |
+| `401` | `unauthorized` | Missing or invalid authentication | Sign in again |
+| `403` | `missing_scope` | API key lacks `refunds:initiate` | Use a key with the scope |
+| `404` | `not_found` | Link or payment not found, or link belongs to another seller | Check the link and payment ids |
+| `409` | `refund_exceeds_refundable` | Requested amount exceeds remaining refundable amount for this payment | Request an amount &le; `refundableAmount` |
+| `409` | `request_in_progress` | Concurrent request with the same `Idempotency-Key` is still executing | Wait and retry with the same key |
+| `409` | `idempotency_key_reuse` | Same `Idempotency-Key` reused with a different request body | Use a new idempotency key |
+| `422` | `refund_destination_cannot_receive` | Destination preflight failed (`reason` explains why) | Follow the recommendation for the preflight reason |
+| `501` | `refunds_disabled` | `REFUNDS_ENABLED` is off | Do not retry |
+
+---
+
+## `POST /links/:id/refunds/:refundId/submit`
+
+**Requires auth** and the `refunds:initiate` scope. Accepts the seller-signed
+refund transaction, validates that it matches the prepared transaction exactly,
+and relays it to Horizon.
+
+**Verification before submission:**
+1. Transaction envelope is valid and not a fee-bump envelope.
+2. Contains **exactly one** operation, and its type is `payment`.
+3. Source account equals the seller's wallet (`link.destination`), with no per-operation source override.
+4. Destination, asset, amount (compared in integer stroops), memo, and memoType match the stored `prepared` refund record exactly.
+5. The transaction hash (excluding signatures) matches the hash of the transaction Quay prepared.
+6. The refund is currently in `prepared` status and its `expiresAt` deadline has not passed.
+
+Upon successful Horizon submission, the refund status moves to `submitted`. If Horizon rejects
+the submission, the refund moves to `failed` and its reserved amount is released.
+Resubmitting the same signed transaction after a successful submission returns the existing
+`txHash` idempotently.
+
+Uses strict rate limiting.
+
+**Request**
+```json
+{
+  "signedXdr": "AAAAAgAAAAA..."
+}
+```
+
+**200**
+```json
+{
+  "txHash": "c458a2d169b183fe7d8e20e8b2649a3c94297a7e127395a1a1f33f81e8c159df"
+}
+```
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `400` | `invalid_body` | Request body missing `signedXdr` or malformed | Provide a valid JSON body with `signedXdr` |
+| `400` | `malformed_xdr` | `signedXdr` cannot be parsed by the Stellar SDK | Check that the wallet exported a valid base64 envelope |
+| `400` | `fee_bump_not_supported` | A fee-bump transaction envelope was submitted | Submit a standard transaction envelope |
+| `400` | `invalid_operations` | Transaction does not contain exactly one payment operation | Do not modify operations in the wallet |
+| `400` | `source_mismatch` | Operation source differs from transaction source | Do not alter transaction source |
+| `400` | `transaction_mismatch` | Transaction destination, asset, amount, memo, or unsigned hash does not match the prepared refund | Sign the exact XDR returned by `POST /links/:id/refunds` |
+| `401` | `unauthorized` | Missing or invalid authentication | Sign in again |
+| `403` | `missing_scope` | API key lacks `refunds:initiate` | Use a key with the scope |
+| `404` | `not_found` | Link or refund not found, or belongs to another seller | Check the link and refund ids |
+| `409` | `refund_not_prepared` | Refund is not in `prepared` status (e.g. already submitted or failed) | Check the refund status |
+| `409` | `refund_expired` | The 300 s validity window passed before signing; refund marked `failed` with reason `expired_unsigned` | Prepare a new refund |
+| `409` | `payment_rejected` | Horizon rejected the transaction (e.g. insufficient seller balance or bad sequence number); refund marked `failed` | Inspect `reason` and `detail`, ensure seller wallet has funds, and prepare a new refund |
+| `501` | `refunds_disabled` | `REFUNDS_ENABLED` is off | Do not retry |
+
+---
+
+## `GET /links/:id/refunds`
+
+**Requires auth** and `links:read` or `refunds:initiate` scope. Returns all
+refunds created for this payment link, with cumulative totals.
+
+**200**
+```json
+{
+  "refunds": [
+    {
+      "id": "rfd_k8s2n9f01x",
+      "linkId": "lnk_ueeh4nl1m1",
+      "paymentTxHash": "b166269ace8a96efe8356f966141c2a11b65e9c0f997cb2ba8cf1517f6cc8ee7",
+      "paymentOperationId": "1",
+      "destination": "GA2C5RFPE6GCKMY3US5PAB6UZLKIGAHWKXX2G65SPOD2VUQ22APC72XG",
+      "destinationMuxedId": null,
+      "amount": "0.50",
+      "asset": { "code": "USDC", "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+      "memo": "refund pl_m2o9yvvllj7x",
+      "memoType": "text",
+      "status": "confirmed",
+      "txHash": "c458a2d169b183fe7d8e20e8b2649a3c94297a7e127395a1a1f33f81e8c159df",
+      "failureReason": null,
+      "createdAt": 1792938957657,
+      "updatedAt": 1792938965000
+    }
+  ],
+  "summary": {
+    "refundedAmount": "0.50",
+    "pendingAmount": "0",
+    "fullyRefunded": false
+  }
+}
+```
+- `refunds` — array of refund objects for this link.
+- `summary.refundedAmount` — total amount of `confirmed` refunds.
+- `summary.pendingAmount` — total amount reserved by in-flight (`prepared` or `submitted`) refunds.
+- `summary.fullyRefunded` — `true` if cumulative confirmed refunds equal the paid amount.
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `links:read` or `refunds:initiate` | Use a key with the scope |
+| `404` | `not_found` | Unknown link, or belongs to another seller | Check the link id |
+| `501` | `refunds_disabled` | `REFUNDS_ENABLED` is off | Do not retry |
 
 ---
 
@@ -1967,6 +2238,8 @@ registered URL.
 | `link.cancelled`        | seller voided the link                              |
 | `link.expired`          | TTL elapsed before payment confirmed                |
 | `payment.unmatched`     | a payment arrived matching an expired or cancelled link |
+| `link.refunded`         | a seller-signed refund confirmed on the ledger      |
+| `refund.failed`         | a submitted refund failed on-chain                  |
 | `offramp.settled`       | a cash-out job settled                              |
 | `offramp.failed`        | a cash-out job failed                               |
 | `offramp.transfer_required` | anchor has published deposit instructions; the seller's wallet must send USDC to the anchor to fund the withdrawal |
@@ -2021,6 +2294,57 @@ The `transfer` object contains the SEP-6 deposit instructions the seller's walle
     "overpaid": false
   },
   "id": "lnk_...",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+
+#### Body for `link.refunded`
+Fired when a submitted refund is confirmed on the ledger.
+```json
+{
+  "event": "link.refunded",
+  "data": {
+    "linkId": "lnk_ueeh4nl1m1",
+    "reference": "pl_m2o9yvvllj7x",
+    "status": "paid",
+    "amount": "2.00",
+    "paidAmount": "2.00",
+    "asset": { "code": "USDC", "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+    "txHash": "b166269ace8a96efe8356f966141c2a11b65e9c0f997cb2ba8cf1517f6cc8ee7",
+    "refundId": "rfd_k8s2n9f01x",
+    "refundAmount": "0.50",
+    "refundTxHash": "c458a2d169b183fe7d8e20e8b2649a3c94297a7e127395a1a1f33f81e8c159df",
+    "refundDestination": "GA2C5RFPE6GCKMY3US5PAB6UZLKIGAHWKXX2G65SPOD2VUQ22APC72XG",
+    "paymentTxHash": "b166269ace8a96efe8356f966141c2a11b65e9c0f997cb2ba8cf1517f6cc8ee7",
+    "refundedTotal": "0.50",
+    "fullyRefunded": false
+  },
+  "id": "lnk_ueeh4nl1m1",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+`txHash` in the base payload remains the **payment** transaction hash so existing consumers
+are not misled; the refund transaction hash is provided in `refundTxHash`.
+
+#### Body for `refund.failed`
+Fired when a submitted refund fails on-chain. Unsigned `prepared` refunds that expire
+without being submitted do not fire this event.
+```json
+{
+  "event": "refund.failed",
+  "data": {
+    "linkId": "lnk_ueeh4nl1m1",
+    "reference": "pl_m2o9yvvllj7x",
+    "status": "paid",
+    "amount": "2.00",
+    "paidAmount": "2.00",
+    "asset": { "code": "USDC", "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+    "txHash": "b166269ace8a96efe8356f966141c2a11b65e9c0f997cb2ba8cf1517f6cc8ee7",
+    "refundId": "rfd_k8s2n9f01x",
+    "refundAmount": "0.50",
+    "reason": "payment_rejected"
+  },
+  "id": "lnk_ueeh4nl1m1",
   "sentAt": "2026-06-19T12:00:00.000Z"
 }
 ```
