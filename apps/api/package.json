@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "start:prod": "node dist/index.js",
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --sourcemap --banner:js=\"import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\" --external:hono --external:@hono/node-server --external:drizzle-orm --external:@libsql/client --external:zod --external:@stellar/stellar-sdk",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --sourcemap --banner:js=\"import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\" --external:hono --external:@hono/node-server --external:drizzle-orm --external:@libsql/client --external:zod --external:@stellar/stellar-sdk --external:pdfkit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:status": "drizzle-kit status",
@@ -26,15 +26,17 @@
     "@stellar/stellar-sdk": "16.2.0",
     "drizzle-orm": "0.45.2",
     "hono": "4.13.0",
+    "pdfkit": "0.20.2",
     "pino": "^10.3.1",
     "redis": "^6.2.0",
     "zod": "4.6.6"
   },
   "devDependencies": {
+    "@types/pdfkit": "0.17.7",
+    "@vitest/coverage-v8": "4.1.10",
     "drizzle-kit": "0.31.10",
     "esbuild": "0.28.1",
     "tsx": "4.23.9",
-    "vitest": "4.1.10",
-    "@vitest/coverage-v8": "4.1.10"
+    "vitest": "4.1.10"
   }
 }
