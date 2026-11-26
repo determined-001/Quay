@@ -1,0 +1,1 @@
+ALTER TABLE `link_payments` ADD `payer_muxed` text;

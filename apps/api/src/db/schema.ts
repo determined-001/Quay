@@ -74,6 +74,8 @@ export const linkPayments = sqliteTable("link_payments", {
    *  this column existed — see `migrateLegacyLinkPaymentsTable`. */
   operationId: text("operation_id"),
   payer: text("payer").notNull(),
+  /** The payer's M-address when the payment came from one (issue 2.14). */
+  payerMuxed: text("payer_muxed"),
   amount: text("amount").notNull(),
   assetCode: text("asset_code").notNull(),
   assetIssuer: text("asset_issuer"), // null = native XLM

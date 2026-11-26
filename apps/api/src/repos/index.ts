@@ -303,6 +303,7 @@ export class DrizzleLinkRepository implements LinkRepository {
         txHash: payment.txHash,
         operationId: payment.operationId,
         payer: payment.payer,
+        payerMuxed: payment.payerMuxed ?? null,
         amount: payment.amount,
         assetCode: payment.asset.code,
         assetIssuer: payment.asset.issuer,
@@ -350,6 +351,7 @@ export class DrizzleLinkRepository implements LinkRepository {
       // NULL only on rows written before the operation column existed.
       operationId: r.operationId ?? "",
       payer: r.payer,
+      payerMuxed: r.payerMuxed ?? null,
       amount: r.amount,
       asset: { code: r.assetCode, issuer: r.assetIssuer ?? null },
       ledger: r.ledger ?? 0,

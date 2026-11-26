@@ -8,6 +8,11 @@ export interface NormalizedPayment {
   txHash: string;
   pagingToken: string;
   from: string;
+  // The M-address the payer sent from (SEP-23), when Horizon reports one in
+  // `from_muxed`; `from` is still the G-address under it. Null or absent for an
+  // ordinary payment. A custodial wallet uses it to say which customer paid,
+  // so a refund has to go back to it and not to the bare G-address.
+  fromMuxed?: string | null;
   to: string; // destination account the value landed in
   amount: string; // delivered amount, decimal string
   asset: AssetRef;

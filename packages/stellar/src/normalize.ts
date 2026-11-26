@@ -32,6 +32,10 @@ interface ValueFields {
   // Present when the operation's destination was specified as an SEP-23
   // M-address; Horizon still normalizes `to` to the underlying G-address.
   to_muxed_id?: string;
+  // Present when the payer sent from an M-address. `from` is still the
+  // G-address; these two say which sub-account of it paid.
+  from_muxed?: string;
+  from_muxed_id?: string;
 }
 
 export type OperationWithTransaction = { transaction_hash: string; transaction: () => Promise<Horizon.ServerApi.TransactionRecord> };
@@ -94,6 +98,7 @@ export async function normalizePayment(
     txHash: r.transaction_hash,
     pagingToken: r.paging_token,
     from: r.from ?? "",
+    fromMuxed: r.from_muxed ?? null,
     to: r.to ?? "",
     amount: r.amount ?? "0",
     asset: assetOf(r),

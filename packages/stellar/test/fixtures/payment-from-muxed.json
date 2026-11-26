@@ -1,0 +1,26 @@
+{
+  "id": "282025647352799237",
+  "paging_token": "282025647352799237",
+  "transaction_successful": true,
+  "source_account": "GD3ZN2T6QQMKLAGKKMWHHY4FITANVJBTREEJERHTWGWF2GSBPOSHGCLU",
+  "source_account_muxed": "MD3ZN2T6QQMKLAGKKMWHHY4FITANVJBTREEJERHTWGWF2GSBPOSHGAAAAAAAAAAGMXH4A",
+  "source_account_muxed_id": "1637",
+  "type": "payment",
+  "type_i": 1,
+  "created_at": "2026-11-25T11:45:23Z",
+  "transaction_hash": "154e4ae7a997688609a728383d4639b9927d6cdf9298bb52df5ee5eb5ab7daa5",
+  "asset_type": "native",
+  "from": "GD3ZN2T6QQMKLAGKKMWHHY4FITANVJBTREEJERHTWGWF2GSBPOSHGCLU",
+  "from_muxed": "MD3ZN2T6QQMKLAGKKMWHHY4FITANVJBTREEJERHTWGWF2GSBPOSHGAAAAAAAAAAGMXH4A",
+  "from_muxed_id": "1637",
+  "to": "GBND5JSXUE6MFQ3LPVODMNRTBMBD7QFHXCQKRDJ6G4W5LOT373V6DYAQ",
+  "amount": "100.0000000",
+  "transaction": {
+    "memo_type": "text",
+    "memo": "🔁 🍯",
+    "ledger": 65664213,
+    "hash": "154e4ae7a997688609a728383d4639b9927d6cdf9298bb52df5ee5eb5ab7daa5",
+    "successful": true,
+    "created_at": "2026-11-25T11:45:23Z"
+  }
+}

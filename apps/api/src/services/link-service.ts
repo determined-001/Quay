@@ -56,8 +56,10 @@ import {
   isRetryable,
   quoteStrictReceive,
   resolveAsset,
+  resolveRefundDestination,
   sendMaxFor,
   type PathQuote,
+  type RefundDestination,
   type StellarConfig,
 } from "@checkout/stellar";
 import { Horizon, Operation, StrKey, Transaction, type Asset, type Memo } from "@stellar/stellar-sdk";
@@ -73,9 +75,7 @@ import type { PathPaymentsConfig, PayOptions } from "../path-payments";
 export { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
 export type { AnchorHealthSnapshot, CircuitState, Sep10Probe, AnchorProbeConfig } from "./anchor-health";
 
-type RefundDestinationResolution =
-  | { kind: "ready" | "needs_memo"; destination: string }
-  | { kind: "account_gone" };
+type RefundDestinationResolution = RefundDestination;
 
 type RefundPreflightReason = CannotReceiveReason | "memo_required";
 
@@ -118,22 +118,6 @@ function decodeAccountDataValue(raw: string): string {
   const decoded = Buffer.from(raw, "base64").toString("utf8");
   if (decoded === "1" || decoded === "0") return decoded;
   return raw;
-}
-
-/**
- * TODO(2.14): replace with `resolveRefundDestination` from `@checkout/stellar`
- * (issue #533, https://github.com/determined-001/Quay/issues/533). That
- * version also keeps the payer's M-address. `link_payments` has no
- * `payer_muxed` column yet, so the destination here is the recorded G-address.
- * The memo flag still comes from the account's SEP-29 entry, not a constant.
- */
-export function resolveRefundDestination(
-  payment: { payer: string },
-  account: RefundAccountSnapshot,
-): RefundDestinationResolution {
-  if (!account.exists) return { kind: "account_gone" };
-  if (accountRequiresMemo(account.dataAttr)) return { kind: "needs_memo", destination: payment.payer };
-  return { kind: "ready", destination: payment.payer };
 }
 
 /** `<txHash>:<operationId>` as the preflight query names a recorded payment. */
@@ -606,6 +590,7 @@ export class LinkService {
         txHash: payment.txHash,
         operationId: payment.pagingToken,
         payer: payment.from,
+        payerMuxed: payment.fromMuxed ?? null,
         amount: normalizeAmount(payment.amount),
         asset: payment.asset,
         ledger: payment.ledger,
@@ -647,6 +632,7 @@ export class LinkService {
         txHash: payment.txHash,
         operationId: payment.pagingToken,
         payer: payment.from,
+        payerMuxed: payment.fromMuxed ?? null,
         amount: normalizeAmount(payment.amount),
         asset: payment.asset,
         ledger: payment.ledger,
@@ -1911,7 +1897,9 @@ export class LinkService {
   /**
    * Whether `amount` of the link asset can land on the buyer who paid
    * `paymentKey` (`<txHash>:<operationId>`). Runs `assertCanReceive` against
-   * the recorded G-address and `resolveRefundDestination` (stubbed until 2.14).
+   * the recorded G-address, and resolves where the refund goes with
+   * `resolveRefundDestination` (issue 2.14): the M-address the buyer paid from
+   * when there was one, else the G-address.
    */
   async refundPreflight(linkId: string, paymentKey: string, amount: string): Promise<RefundPreflightResult> {
     const link = await this.deps.links.findById(linkId);
@@ -1927,7 +1915,10 @@ export class LinkService {
     if (!payment) throw new HttpError(404, "not_found");
 
     const account = await this.loadRefundAccount(payment.payer);
-    const resolution = resolveRefundDestination(payment, account);
+    const resolution = resolveRefundDestination(
+      { payer: payment.payer, payerMuxed: payment.payerMuxed ?? null },
+      account.exists ? { data_attr: account.dataAttr } : null,
+    );
     return checkRefundReceivingCapability(this.deps.rail, payment, link.asset, amount, resolution, account.dataAttr);
   }
 

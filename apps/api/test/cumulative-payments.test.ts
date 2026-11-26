@@ -106,6 +106,23 @@ describe("LinkService.applyMatch — cumulative payment accounting (issue 1.4)",
     expect(links.get("lnk_1")!.overpaidAmount).toBeNull();
   });
 
+  it("records the M-address a leg was paid from, and null for a leg from a G-address (issue 2.14)", async () => {
+    const links = new FakeLinkRepository([
+      makeLink({ id: "lnk_1", reference: "ref_1", amount: "25", status: "active", paidAmount: null, txHash: null, payer: null }),
+    ]);
+    const service = makeTestService(links);
+    const muxed = "MBUYERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACJUQ";
+
+    await processPayment(service, links, "lnk_1", payment({ txHash: "tx_a", amount: "10", fromMuxed: muxed }));
+    await processPayment(service, links, "lnk_1", payment({ txHash: "tx_b", pagingToken: "2", amount: "15" }));
+
+    const recorded = await links.listPaymentsForLink("lnk_1");
+    expect(recorded.map((p) => [p.payer, p.payerMuxed])).toEqual([
+      ["GBUYER", muxed],
+      ["GBUYER", null],
+    ]);
+  });
+
   it("three-way splits complete on the final leg", async () => {
     const links = new FakeLinkRepository([
       makeLink({ id: "lnk_1", reference: "ref_1", amount: "30", status: "active", paidAmount: null, txHash: null, payer: null }),

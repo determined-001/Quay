@@ -804,6 +804,9 @@ export interface LinkPaymentRecord {
   /** The chain's per-operation identifier (Horizon's `pagingToken`). */
   operationId: string;
   payer: string;
+  /** The payer's M-address when the payment was sent from one (issue 2.14);
+   *  `payer` is the G-address under it. Null or absent otherwise. */
+  payerMuxed?: string | null;
   amount: string;
   asset: AssetRef;
   /** Ledger sequence the payment settled in. */

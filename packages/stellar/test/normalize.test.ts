@@ -5,6 +5,7 @@ import {
   strictReceiveFixture,
   strictSendFixture,
 } from "./path-payment-fixtures";
+import fromMuxedFixture from "./fixtures/payment-from-muxed.json";
 
 const DEST = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 
@@ -34,6 +35,23 @@ describe("normalizePayment", () => {
     expect(payment?.toMuxedId).toBe("123456789");
     // `to` still resolves to the underlying G-address regardless of muxing.
     expect(payment?.to).toBe(DEST);
+  });
+
+  it("sets fromMuxed to null for a payment from a G-address", async () => {
+    const payment = await normalizePayment(record() as any);
+    expect(payment?.fromMuxed).toBeNull();
+  });
+
+  // A real mainnet operation; see fixtures/README.md.
+  it("keeps the M-address of a payment sent from one, and the G-address under it", async () => {
+    const fixture = { ...fromMuxedFixture, transaction: async () => fromMuxedFixture.transaction };
+    const payment = await normalizePayment(fixture as any);
+
+    expect(payment?.fromMuxed).toBe("MD3ZN2T6QQMKLAGKKMWHHY4FITANVJBTREEJERHTWGWF2GSBPOSHGAAAAAAAAAAGMXH4A");
+    expect(payment?.from).toBe("GD3ZN2T6QQMKLAGKKMWHHY4FITANVJBTREEJERHTWGWF2GSBPOSHGCLU");
+    // The sender being muxed says nothing about the destination.
+    expect(payment?.toMuxedId).toBeNull();
+    expect(payment?.amount).toBe("100.0000000");
   });
 
   it("returns null for non-value operations regardless of muxing", async () => {

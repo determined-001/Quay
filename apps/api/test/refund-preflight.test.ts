@@ -181,6 +181,30 @@ describe("LinkService.refundPreflight", () => {
     expect(assertCanReceive).toHaveBeenCalledExactlyOnceWith(payer, asset, "4.5");
   });
 
+  it("sends the refund to the M-address the buyer paid from, and checks the G-address under it (issue 2.14)", async () => {
+    const assertCanReceive = vi.fn(async () => {});
+    const { links, service } = serviceWith(present, assertCanReceive);
+    const payerMuxed = "MD3ZN2T6QQMKLAGKKMWHHY4FITANVJBTREEJERHTWGWF2GSBPOSHGAAAAAAAAAAGMXH4A";
+    await links.recordPayment({
+      linkId: "lnk_1",
+      txHash,
+      operationId,
+      payer,
+      payerMuxed,
+      amount: "10",
+      asset,
+      ledger: 1,
+      createdAt: 1,
+    });
+    await expect(service.refundPreflight("lnk_1", `${txHash}:${operationId}`, "4.5")).resolves.toEqual({
+      ok: true,
+      destination: payerMuxed,
+      memoRequired: false,
+    });
+    // The trustline belongs to the account, not to the sub-account id.
+    expect(assertCanReceive).toHaveBeenCalledExactlyOnceWith(payer, asset, "4.5");
+  });
+
   it("sets memoRequired from the buyer's SEP-29 config.memo_required entry", async () => {
     const { links, service } = serviceWith({
       exists: true,
