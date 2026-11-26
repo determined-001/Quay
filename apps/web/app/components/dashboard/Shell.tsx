@@ -7,10 +7,10 @@ import Logo from "../Logo";
 import NetworkChip from "../NetworkChip";
 import { useSellerSession } from "../SessionGate";
 import ThemeToggle from "../ThemeToggle";
-import { OFFRAMP_ENABLED } from "./config";
+import { INVOICES_ENABLED, OFFRAMP_ENABLED } from "./config";
 import { CashOutIcon, CodeIcon, HomeIcon, PaymentsIcon, PlusIcon, SettingsIcon } from "./icons";
 
-export type View = "home" | "payments" | "cashout" | "settings" | "developers";
+export type View = "home" | "payments" | "invoices" | "cashout" | "settings" | "developers";
 
 interface NavItem {
   id: View;
@@ -23,6 +23,8 @@ interface NavItem {
 const MAIN_ITEMS: NavItem[] = [
   { id: "home", label: "Home", icon: <HomeIcon /> },
   { id: "payments", label: "Payments", icon: <PaymentsIcon /> },
+  // Invoices ship dark (issue 8.31): no menu item unless the deployment turned them on.
+  ...(INVOICES_ENABLED ? [{ id: "invoices" as const, label: "Invoices", icon: <PaymentsIcon /> }] : []),
   ...(OFFRAMP_ENABLED ? [{ id: "cashout" as const, label: "Cash out", icon: <CashOutIcon /> }] : []),
   { id: "settings", label: "Settings", icon: <SettingsIcon /> },
 ];
