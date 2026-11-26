@@ -377,6 +377,15 @@ p { text-wrap: pretty; }
 .memo-note .v { font-family: var(--mono); font-size: 14px; word-break: break-all; }
 .wallet-pay { margin: 12px 0 0; }
 .wallet-pay + .btn { margin-top: 12px; }
+/* Pay-with choice (issue 5.47). Left-aligned inside the centred checkout: a
+   radio group is read line by line, and centred options are hard to scan. */
+.pay-choice { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; margin: 0 0 12px; text-align: left; min-width: 0; max-width: 100%; overflow-wrap: break-word; }
+.pay-choice legend { font-size: 12px; color: var(--muted); padding: 0 6px; }
+.pay-choice label { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; font-size: 14px; line-height: 1.4; cursor: pointer; }
+.pay-choice input[type="radio"] { margin: 3px 0 0; accent-color: var(--accent); flex: none; }
+.pay-choice__countdown { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.pay-choice__countdown--expired { color: var(--amber); }
+.pay-choice__hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
 .status-rail { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 20px; font-size: 13px; color: var(--muted); }
 /* Expiry countdown. The warning variant is deliberately amber rather than the
    error red used for terminal states: the link is still payable here, and a

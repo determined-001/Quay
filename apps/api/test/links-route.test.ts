@@ -155,9 +155,12 @@ describe("GET /links/:id — public checkout read", () => {
     const app = linkRoutes(fakeContainer(), async (_c, next) => next());
     const res = await app.request(`/${ownedLink.id}`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { pay?: { pathPayments: boolean; maxSlippageBps: number } };
-    // The API test env leaves PATH_PAYMENTS_* unset: off, 100 bps.
-    expect(body.pay).toEqual({ pathPayments: false, maxSlippageBps: 100 });
+    const body = (await res.json()) as {
+      pay?: { pathPayments: boolean; maxSlippageBps: number; maxPriceImpactBps: number };
+    };
+    // The API test env leaves PATH_PAYMENTS_* unset: off, 100 bps slippage,
+    // 300 bps of price impact (the cap the wallet builder enforces, 5.48).
+    expect(body.pay).toEqual({ pathPayments: false, maxSlippageBps: 100, maxPriceImpactBps: 300 });
   });
 });
 

@@ -139,8 +139,13 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       link: toCheckoutView(result.link),
       request: result.request,
       // The checkout reads the path-payment switch from here, never from its
-      // own env (issue 8.30).
-      pay: { pathPayments: env.pathPaymentsEnabled, maxSlippageBps: env.pathPaymentsMaxSlippageBps },
+      // own env (issue 8.30). `maxPriceImpactBps` is the cap the wallet builder
+      // enforces on its build-time re-quote (issue 5.48).
+      pay: {
+        pathPayments: env.pathPaymentsEnabled,
+        maxSlippageBps: env.pathPaymentsMaxSlippageBps,
+        maxPriceImpactBps: env.pathPaymentsMaxPriceImpactBps,
+      },
     });
   });
 

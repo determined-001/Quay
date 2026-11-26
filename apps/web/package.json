@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@checkout/core": "workspace:*",
+    "@checkout/stellar": "workspace:*",
     "@checkout/widget": "workspace:*",
     "@creit.tech/stellar-wallets-kit": "^2.5.0",
     "@stellar/stellar-sdk": "16.2.0",

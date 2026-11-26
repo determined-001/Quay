@@ -28,8 +28,9 @@ const BASE_HEADERS = [
 ];
 
 const nextConfig = {
-  // Internal packages export TS source; Next compiles them.
-  transpilePackages: ["@checkout/core"],
+  // Internal packages export TS source; Next compiles them. `@checkout/stellar`
+  // is here for the wallet builder's build-time path quote (issue 5.48).
+  transpilePackages: ["@checkout/core", "@checkout/stellar"],
 
   async headers() {
     return [
