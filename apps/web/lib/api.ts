@@ -163,6 +163,17 @@ export interface Invoice {
   updatedAt?: number;
 }
 
+/** The body of `POST /invoices` and `PATCH /invoices/:id` (issue 4.67). `dueAt` is a millisecond timestamp. */
+export interface InvoiceInput {
+  clientName: string;
+  clientEmail?: string | null;
+  clientAddress?: string | null;
+  notes?: string | null;
+  assetCode: "USDC" | "XLM";
+  lineItems: InvoiceLineItem[];
+  dueAt: number;
+}
+
 export interface AnchorAuthView {
   /** False when the deployment has no real anchor (mock / none). */
   required: boolean;
@@ -651,6 +662,20 @@ export const api = {
   getReceipt: (reference: string) => http<PublicReceipt>(`/r/${reference}`),
 
   getPublicInvoice: (id: string) => http<PublicInvoice>(`/invoices/${id}/public`),
+
+  /** Creates a draft invoice: no number and no payment link yet (issue 5.52). */
+  createInvoice: (input: InvoiceInput, idempotencyKey?: string) =>
+    http<{ invoice: Invoice }>("/invoices", { method: "POST", body: JSON.stringify(input), idempotencyKey }),
+
+  /** Edits a draft. An issued invoice answers 409 `invoice_not_draft`. */
+  updateInvoice: (id: string, input: Partial<InvoiceInput>) =>
+    http<{ invoice: Invoice }>(`/invoices/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) }),
+
+  /** Issues a draft: it gets its number and its payment link. */
+  issueInvoice: (id: string) => http<{ invoice: Invoice }>(`/invoices/${encodeURIComponent(id)}/issue`, { method: "POST" }),
+
+  /** The seller's full view of one invoice. */
+  getInvoice: (id: string) => http<{ invoice: Invoice }>(`/invoices/${encodeURIComponent(id)}`),
 
   listInvoices: (status?: InvoiceStatus | "all" | string) =>
     http<{ invoices: Invoice[] }>(

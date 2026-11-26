@@ -6,6 +6,8 @@ import {
   CheckoutError,
   describeError,
   type AnchorAuthView,
+  type Invoice,
+  type InvoiceInput,
   type KycView,
   type KycDisclosure,
   type PaymentLink,
@@ -27,15 +29,26 @@ import { PendingTransferModal } from "./TransferStep";
 import { useSellerWallet } from "./SessionGate";
 import Alerts from "./dashboard/Alerts";
 import CashOutView from "./dashboard/CashOutView";
-import { OFFRAMP_CURRENCY, OFFRAMP_ENABLED, OFFRAMP_IS_MOCK } from "./dashboard/config";
+import { INVOICES_ENABLED, OFFRAMP_CURRENCY, OFFRAMP_ENABLED, OFFRAMP_IS_MOCK } from "./dashboard/config";
 import CreateLinkSheet, { type NewLink } from "./dashboard/CreateLinkSheet";
 import DevelopersView from "./dashboard/DevelopersView";
 import HomeView from "./dashboard/HomeView";
+import InvoiceSheet, { InvoiceSheetError } from "./dashboard/InvoiceSheet";
+import InvoicesView from "./dashboard/InvoicesView";
 import PaymentsView from "./dashboard/PaymentsView";
 import SettingsView from "./dashboard/SettingsView";
 import Shell, { type View } from "./dashboard/Shell";
 
-const VIEWS: readonly View[] = ["home", "payments", "cashout", "settings", "developers"];
+// "invoices" is a view only where the deployment turned invoices on (issue 8.31);
+// elsewhere `#invoices` falls back to Home like any unknown fragment.
+const VIEWS: readonly View[] = [
+  "home",
+  "payments",
+  ...(INVOICES_ENABLED ? (["invoices"] as const) : []),
+  "cashout",
+  "settings",
+  "developers",
+];
 
 /** The view named by the URL fragment, so a refresh or the back button lands where you were. */
 function viewFromHash(): View {
@@ -76,6 +89,12 @@ export default function Dashboard() {
   const [developersOpened, setDevelopersOpened] = useState(false);
   const [paymentsFilter, setPaymentsFilter] = useState<PaymentFilter>("all");
   const [createOpen, setCreateOpen] = useState(false);
+  // Invoices (issue 5.52). Loaded when the Invoices view is opened, not on every visit.
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [invoicesLoading, setInvoicesLoading] = useState(false);
+  const [invoicesError, setInvoicesError] = useState<string | null>(null);
+  // The invoice sheet: closed, open for a new invoice, or open on a draft.
+  const [invoiceSheet, setInvoiceSheet] = useState<{ invoice?: Invoice } | null>(null);
   // Drives "5 min ago" labels; refreshed on a slow timer, not on every poll.
   const [now, setNow] = useState(() => Date.now());
 
@@ -284,6 +303,54 @@ export default function Dashboard() {
     void refreshDisclosures();
   }, [refreshDisclosures]);
 
+  const refreshInvoices = useCallback(async () => {
+    setInvoicesLoading(true);
+    try {
+      setInvoices((await api.listInvoices()).invoices);
+      setInvoicesError(null);
+    } catch (e) {
+      setInvoicesError(e instanceof CheckoutError ? describeError(e) : "Failed to load your invoices. Please try again.");
+    } finally {
+      setInvoicesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (INVOICES_ENABLED && view === "invoices") void refreshInvoices();
+  }, [view, refreshInvoices]);
+
+  /** An API refusal as the sheet shows it: the API's own message, and its trustline link when it sent one. */
+  function invoiceError(e: unknown, fallback: string): InvoiceSheetError {
+    if (!(e instanceof CheckoutError)) return new InvoiceSheetError(fallback);
+    if (e.code === "destination_cannot_receive") {
+      void refreshTrustline();
+      const message = typeof e.details.message === "string" ? e.details.message : describeError(e);
+      const uri = typeof e.details.trustlineUri === "string" ? e.details.trustlineUri : undefined;
+      return new InvoiceSheetError(message, uri);
+    }
+    return new InvoiceSheetError(describeError(e));
+  }
+
+  async function saveInvoice(values: InvoiceInput, id: string | null): Promise<Invoice> {
+    try {
+      const { invoice } = id === null ? await api.createInvoice(values) : await api.updateInvoice(id, values);
+      setInvoices((prev) => [invoice, ...prev.filter((i) => i.id !== invoice.id)]);
+      return invoice;
+    } catch (e) {
+      throw invoiceError(e, "Failed to save the invoice. Please try again.");
+    }
+  }
+
+  async function issueInvoice(id: string): Promise<Invoice> {
+    try {
+      const { invoice } = await api.issueInvoice(id);
+      setInvoices((prev) => prev.map((i) => (i.id === invoice.id ? invoice : i)));
+      return invoice;
+    } catch (e) {
+      throw invoiceError(e, "Failed to issue the invoice. It was saved as a draft.");
+    }
+  }
+
   async function createLink(values: NewLink): Promise<PaymentLink> {
     try {
       const { link } = await api.createLink(values);
@@ -408,6 +475,18 @@ export default function Dashboard() {
           />
         )}
 
+        {INVOICES_ENABLED && view === "invoices" && (
+          <InvoicesView
+            invoices={invoices}
+            loading={invoicesLoading}
+            fetchError={invoicesError}
+            onRetry={refreshInvoices}
+            onCreate={() => setInvoiceSheet({})}
+            onEdit={(invoice) => setInvoiceSheet({ invoice })}
+            now={now}
+          />
+        )}
+
         {view === "cashout" && (
           <CashOutView links={links} loading={loading} alerts={alerts} verification={verification} {...rowActions} />
         )}
@@ -422,6 +501,15 @@ export default function Dashboard() {
       </Shell>
 
       {createOpen && <CreateLinkSheet onClose={() => setCreateOpen(false)} onSubmit={createLink} />}
+
+      {invoiceSheet && (
+        <InvoiceSheet
+          invoice={invoiceSheet.invoice}
+          onClose={() => setInvoiceSheet(null)}
+          onSave={saveInvoice}
+          onIssue={issueInvoice}
+        />
+      )}
 
       {/* Cash-out modal, opened from a link's "Cash out" button */}
       {OFFRAMP_ENABLED && cashOutLinkId && cashOutLink && (
