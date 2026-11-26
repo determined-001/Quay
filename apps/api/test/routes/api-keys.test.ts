@@ -53,7 +53,7 @@ describe("POST /api-keys", () => {
     const body = await res.json() as Record<string, unknown>;
     expect(body.id).toMatch(/^ak_/);
     expect(body.key).toMatch(/^ak_live_[0-9A-Za-z]{32}$/);
-    expect(body.scopes).toEqual(["links:read", "links:write", "webhooks:manage"]);
+    expect(body.scopes).toEqual(["links:read", "links:write", "webhooks:manage", "invoices:read", "invoices:write"]);
   });
 
   it("creates a test-env key with explicit opt-in scopes", async () => {

@@ -65,6 +65,8 @@ import {
   DrizzleRefundRepository,
 } from "../repos/index";
 import { LinkService } from "./link-service";
+import { InvoiceService } from "./invoice-service";
+import { DrizzleInvoiceRepository } from "../repos/invoices";
 import { AnchorHealth, AnchorHealthRegistry } from "./anchor-health";
 import {
   WatcherLoop,
@@ -126,6 +128,8 @@ export interface Container {
   telemetry: OffRampTelemetryRepository;
   /** Refunds against a link's payments (issue 4.58). */
   refunds: RefundRepository;
+  /** Invoices (issue 4.67). Optional so a hand-built container in a test can leave it out. */
+  invoices?: InvoiceService;
   config: { network: string; horizonUrl: string; sellerWallet: string | null; kycStatusCacheMs?: number };
   horizonStatus(): HorizonStatus;
   /** Optional SSRF guard override for webhook URLs. Tests inject a permissive
@@ -387,6 +391,21 @@ export async function createContainer(): Promise<Container> {
     console.log(`[offramp] backfilled ${backfilled} link(s) stuck with lost job state -> offramp_failed`);
   }
 
+  // Invoices (issue 4.67).
+  const invoicesRepo = new DrizzleInvoiceRepository(db);
+  const invoiceService = new InvoiceService({
+    invoices: invoicesRepo,
+    links: linksRepo,
+    sellers: sellersRepo,
+    linkService: service,
+    // TODO(4.68): PR #599 (https://github.com/determined-001/Quay/pull/599) owns
+    // numbering: replace this with its DrizzleInvoiceCounterRepository, whose
+    // next(sellerId) is one atomic statement. This stand-in counts the numbers
+    // already issued, which two concurrent issues can both read; the unique
+    // index on (seller_id, number) then refuses the second, and it fails.
+    numbers: { next: async (sellerId) => (await invoicesRepo.countNumbered(sellerId)) + 1 },
+  });
+
   const loop = new WatcherLoop({
     watcher,
     links: linksRepo,
@@ -461,6 +480,7 @@ export async function createContainer(): Promise<Container> {
       : null,
     telemetry: telemetryRepo,
     refunds: refundsRepo,
+    invoices: invoiceService,
     config: { network: stellar.network, horizonUrl: stellar.horizonUrl, sellerWallet, kycStatusCacheMs: env.kycStatusCacheMs },
     horizonStatus: () => pollingWatcher.getStatus(),
     metricsToken,

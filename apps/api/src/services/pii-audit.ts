@@ -31,7 +31,9 @@ export type PiiAuditAction =
   | "profile.write"
   | "profile.export"
   | "profile.erase"
-  | "anchor_session.decrypt";
+  | "anchor_session.decrypt"
+  // An invoice's client fields were written (issue 4.67). The client is not a Quay user.
+  | "invoice.client.write";
 
 export interface PiiAuditEntry {
   sellerId: string;

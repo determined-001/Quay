@@ -2033,3 +2033,6 @@ export class DrizzleApiKeyRepository {
       .where(eq(apiKeys.id, id));
   }
 }
+
+// Invoices (issue 4.67).
+export * from "./invoices";

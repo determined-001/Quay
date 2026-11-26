@@ -498,3 +498,37 @@ export const piiAudit = sqliteTable("pii_audit", {
   index("pii_audit_seller_at_idx").on(table.sellerId, table.at),
   index("pii_audit_at_idx").on(table.at),
 ]);
+
+/**
+ * Invoices (issue 4.67). A draft has no number and no link; issuing gives it
+ * both. The client is not a Quay user, so their email and address are stored
+ * encrypted (`encryptSecret`); the client name and the line items are what
+ * the public invoice page shows.
+ */
+export const invoices = sqliteTable("invoices", {
+  id: text("id").primaryKey(),
+  sellerId: text("seller_id").notNull(),
+  /** INV-0001, per seller. Null until the invoice is issued. */
+  number: text("number"),
+  /** The payment link created when the invoice is issued. */
+  linkId: text("link_id"),
+  clientName: text("client_name").notNull(),
+  clientEmailEncrypted: text("client_email_encrypted"),
+  clientAddressEncrypted: text("client_address_encrypted"),
+  notes: text("notes"),
+  assetCode: text("asset_code").notNull(),
+  /** JSON InvoiceLineItem[]. */
+  lineItems: text("line_items").notNull(),
+  total: text("total").notNull(),
+  issuedAt: integer("issued_at"),
+  dueAt: integer("due_at").notNull(),
+  /** draft | open | void (InvoiceState). Paid and overdue are derived. */
+  state: text("state").notNull(),
+  overdueNotifiedAt: integer("overdue_notified_at"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  // SQLite treats NULLs as distinct, so drafts, which have no number, never collide.
+  uniqueIndex("invoices_seller_number_unique").on(table.sellerId, table.number),
+  index("invoices_seller_created_idx").on(table.sellerId, table.createdAt),
+]);
