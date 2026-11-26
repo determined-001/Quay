@@ -41,11 +41,9 @@ export const ALL_SCOPES = [
   "webhooks:manage",
   "api-keys:manage",
   "offramp:initiate",
-  // TODO(4.59): issue #535 (https://github.com/determined-001/Quay/issues/535)
-  // owns this scope — the docs/API.md row, and keeping it out of
-  // DEFAULT_SCOPES. It is listed here so the refund preflight route can
-  // requireScope("refunds:initiate") before that issue lands. Sessions are
-  // granted every scope; an API key must opt in.
+  // Preparing a refund (issue 4.59) and its preflight (4.63). It moves money
+  // out of the seller's wallet, so it is not in DEFAULT_SCOPES: sessions are
+  // granted every scope, an API key must opt in.
   "refunds:initiate",
 ] as const;
 

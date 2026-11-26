@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { Hono, type MiddlewareHandler } from "hono";
 import {
   createLinkSchema,
@@ -15,6 +16,17 @@ import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middle
 import { idempotency } from "../middleware/idempotency";
 import { getLogger } from "../request-context";
 import { env } from "../env";
+
+// The body of POST /links/:id/refunds (issue 4.59). The amount and the memo are
+// checked for meaning by the service; this only fixes the shape.
+const prepareRefundSchema = z
+  .object({
+    payment: z.string().min(3).max(200),
+    amount: z.string().min(1).max(40),
+    memo: z.string().min(1).max(64).optional(),
+    memoType: z.enum(["text", "id", "hash"]).optional(),
+  })
+  .strict();
 
 export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
@@ -447,6 +459,38 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       throw err;
     }
   });
+
+  // Prepare a refund (issue 4.59 / #535): the unsigned transaction for the
+  // seller's wallet to sign. Same gate, scope and ownership rule as the
+  // preflight above; idempotent, so a retried request with the same
+  // Idempotency-Key gets the same refund back and reserves nothing twice.
+  app.post(
+    "/:id/refunds",
+    refundsDisabledGate(),
+    strictRateLimit,
+    auth,
+    requireScope("refunds:initiate"),
+    idempotent,
+    async (ctx) => {
+      const linkId = ctx.req.param("id");
+      const parsed = prepareRefundSchema.safeParse(await safeJson(ctx));
+      if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+      try {
+        const existing = await c.service.getLink(linkId);
+        if (!existing) return ctx.json({ error: "not_found" }, 404);
+        if (existing.link.sellerId !== ctx.get("seller").id) {
+          // 404, not 403: see the preflight route (issue #41).
+          return ctx.json({ error: "not_found" }, 404);
+        }
+        return ctx.json(await c.service.prepareRefund(linkId, parsed.data), 201);
+      } catch (err) {
+        if (err instanceof HttpError) {
+          return ctx.json({ error: err.message, ...(err.extra ?? {}) }, err.status as 400 | 404 | 409 | 422 | 501);
+        }
+        throw err;
+      }
+    },
+  );
 
   // Seller voids a link they created by mistake. Idempotent: cancelling an
   // already-`cancelled` link is a successful no-op. Any state from which

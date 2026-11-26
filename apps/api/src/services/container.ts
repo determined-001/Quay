@@ -369,6 +369,7 @@ export async function createContainer(): Promise<Container> {
     // Paying a link with another asset (issues 8.30, 4.64). The switch and the
     // slippage are issue 8.30's settings, PATH_PAYMENTS_ENABLED and
     // PATH_PAYMENTS_MAX_SLIPPAGE_BPS.
+    refunds: refundsRepo,
     pathPayments: {
       enabled: env.pathPaymentsEnabled,
       maxSlippageBps: env.pathPaymentsMaxSlippageBps,

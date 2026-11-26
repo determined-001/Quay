@@ -63,6 +63,7 @@ function fakeContainer(): Container {
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
       refundPreflight: async () => ({ ok: true as const, destination: "GBUYER", memoRequired: false }),
+      prepareRefund: async () => PREPARED_REFUND,
       getCashOutTransfer: async (id: string) =>
         id === ownedLink.id
           ? {
@@ -158,6 +159,115 @@ describe("GET /links/:id — public checkout read", () => {
     const body = (await res.json()) as { pay?: { pathPayments: boolean; maxSlippageBps: number } };
     // The API test env leaves PATH_PAYMENTS_* unset: off, 100 bps.
     expect(body.pay).toEqual({ pathPayments: false, maxSlippageBps: 100 });
+  });
+});
+
+const PREPARED_REFUND = {
+  refundId: "rfd_1",
+  xdr: "AAAA",
+  networkPassphrase: "Test SDF Network ; September 2015",
+  expiresAt: "2026-11-26T12:05:00.000Z",
+};
+
+describe("POST /links/:id/refunds (issue 4.59)", () => {
+  const previous = process.env.REFUNDS_ENABLED;
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.REFUNDS_ENABLED;
+    else process.env.REFUNDS_ENABLED = previous;
+  });
+
+  const path = `/${ownedLink.id}/refunds`;
+  const body = { payment: `${"a".repeat(64)}:1001`, amount: "4.5" };
+  const post = (extra: Record<string, string> = {}, payload: unknown = body) => ({
+    method: "POST",
+    headers: { "content-type": "application/json", ...extra },
+    body: JSON.stringify(payload),
+  });
+
+  async function authed(container: Container, sellerId = owner.id) {
+    return { authorization: `Bearer ${await tokenFor(container.auth.session, sellerId)}` };
+  }
+
+  function spyOnPrepare(container: Container, impl: Container["service"]["prepareRefund"] = async () => PREPARED_REFUND) {
+    const calls: unknown[][] = [];
+    (container.service as { prepareRefund: Container["service"]["prepareRefund"] }).prepareRefund = async (...args) => {
+      calls.push(args);
+      return impl(...args);
+    };
+    return calls;
+  }
+
+  it.each([undefined, "0", "yes"])("returns 501 refunds_disabled when REFUNDS_ENABLED is %j, before asking who is calling", async (value) => {
+    if (value === undefined) delete process.env.REFUNDS_ENABLED;
+    else process.env.REFUNDS_ENABLED = value;
+    const container = fakeContainer();
+    const calls = spyOnPrepare(container);
+    const app = linkRoutes(container, async (_c, next) => next());
+    const res = await app.request(path, post());
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({ error: "refunds_disabled" });
+    expect(calls).toEqual([]);
+  });
+
+  it("returns 401 when the caller is unauthenticated", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    expect((await app.request(path, post())).status).toBe(401);
+  });
+
+  it("returns 404 for another seller's link and for an unknown link, and prepares nothing", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    const calls = spyOnPrepare(container);
+    const app = linkRoutes(container, async (_c, next) => next());
+
+    const stranger = await app.request(path, post(await authed(container, other.id)));
+    expect(stranger.status).toBe(404);
+    expect(await stranger.json()).toEqual({ error: "not_found" });
+    const unknown = await app.request("/lnk_does_not_exist/refunds", post(await authed(container)));
+    expect(unknown.status).toBe(404);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [{ amount: "4.5" }, "no payment"],
+    [{ payment: "abc:1" }, "no amount"],
+    [{ payment: "abc:1", amount: "1", memoType: "note" }, "an unknown memo type"],
+    [{ payment: "abc:1", amount: "1", destination: "GEVIL" }, "a destination chosen by the caller"],
+  ] as [Record<string, string>, string][])("returns 400 invalid_body for %j (%s)", async (payload) => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    const calls = spyOnPrepare(container);
+    const app = linkRoutes(container, async (_c, next) => next());
+    const res = await app.request(path, post(await authed(container), payload));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_body");
+    expect(calls).toEqual([]);
+  });
+
+  it("returns 201 with what the service prepared, and passes it the link id and the body", async () => {
+    process.env.REFUNDS_ENABLED = "true";
+    const container = fakeContainer();
+    const calls = spyOnPrepare(container);
+    const app = linkRoutes(container, async (_c, next) => next());
+    const payload = { ...body, memo: "deposit 7781", memoType: "text" };
+    const res = await app.request(path, post(await authed(container), payload));
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual(PREPARED_REFUND);
+    expect(calls).toEqual([[ownedLink.id, payload]]);
+  });
+
+  it("passes on a refusal with its status and details", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    spyOnPrepare(container, async () => {
+      throw new HttpError(409, "refund_exceeds_refundable", { refundable: "6" });
+    });
+    const app = linkRoutes(container, async (_c, next) => next());
+    const res = await app.request(path, post(await authed(container)));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "refund_exceeds_refundable", refundable: "6" });
   });
 });
 

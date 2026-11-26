@@ -47,7 +47,7 @@ API keys carry granular permission scopes (`ALL_SCOPES`). Session tokens from `P
 represent the logged-in seller and implicitly hold all scopes.
 When minting an API key via `POST /api-keys`, omitting `scopes` assigns `DEFAULT_SCOPES`
 (`links:read`, `links:write`, `webhooks:manage`).
-Sensitive capabilities (`offramp:initiate`, `api-keys:manage`) are opt-in and must be explicitly requested.
+Sensitive capabilities (`offramp:initiate`, `refunds:initiate`, `api-keys:manage`) are opt-in and must be explicitly requested.
 Privilege escalation is prevented: an API key can only mint keys whose scopes are a subset of its own.
 
 | Scope | What it allows | Required by routes | Default? |
@@ -57,6 +57,7 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
 | `webhooks:manage` | Register, list, delete and rotate webhooks, and read or replay deliveries | every `/webhooks` route: `POST /webhooks`<br>`GET /webhooks`<br>`DELETE /webhooks/:id`<br>`POST /webhooks/:id/rotate-secret`<br>`GET /webhooks/:id/deliveries`<br>`POST /webhooks/deliveries/:id/replay` | Yes |
 | `api-keys:manage` | Create, list, and revoke API keys | `POST /api-keys`<br>`GET /api-keys`<br>`DELETE /api-keys/:id` | No (opt-in) |
 | `offramp:initiate` | Initiate off-ramp cash-out, submit transfers, manage KYC, and anchor sessions | `POST /links/:id/cash-out`<br>`GET /links/:id/cash-out/transfer`<br>`POST /links/:id/cash-out/transfer-sent`<br>every `/seller/kyc` route (`GET`/`PUT /seller/kyc`, `PUT /seller/kyc/files`, `/seller/kyc/disclosures`, `/seller/kyc/consent`, `/seller/kyc/prefill-consent`; the consent, prefill-consent, disclosure and file routes are additionally session-only)<br>`GET /seller/anchor-auth`<br>`POST /seller/anchor-auth/challenge`<br>`POST /seller/anchor-auth`<br>`DELETE /seller/anchor-auth` | No (opt-in) |
+| `refunds:initiate` | Prepare a refund of a payment for the seller's wallet to sign, and check where it would go | `GET /links/:id/refunds/preflight`<br>`POST /links/:id/refunds` | No (opt-in) |
 
 ## Conventions
 

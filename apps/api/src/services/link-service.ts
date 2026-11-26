@@ -10,6 +10,8 @@ import {
   isQuoteExpired,
   QuoteExpiredError,
   normalizeAmount,
+  refundableAmount,
+  validateRefundAmount,
   OffRampJobNotFoundError,
   AnchorAuthRequiredError,
   OffRampDisabledError,
@@ -33,6 +35,9 @@ import {
   type PaymentRequest,
   type OfframpRequirementTypes,
   type RailPort,
+  type Refund,
+  type RefundMemoType,
+  type RefundRepository,
   type Seller,
   type SellerRepository,
   type WebhookRepository,
@@ -60,7 +65,7 @@ import {
   type PathQuote,
   type StellarConfig,
 } from "@checkout/stellar";
-import { Horizon, Operation, StrKey, Transaction, type Asset, type Memo } from "@stellar/stellar-sdk";
+import { Account, Asset, BASE_FEE, Horizon, Memo, Operation, StrKey, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
 import { newId, newMuxedId, newReference } from "./ids";
 import { WebhookSender } from "./webhook-sender";
 import { AnchorHealthRegistry, type AnchorHealth, type AnchorHealthSnapshot } from "./anchor-health";
@@ -134,6 +139,49 @@ export function resolveRefundDestination(
   if (!account.exists) return { kind: "account_gone" };
   if (accountRequiresMemo(account.dataAttr)) return { kind: "needs_memo", destination: payment.payer };
   return { kind: "ready", destination: payment.payer };
+}
+
+/** How long an unsigned refund transaction can still be submitted, like the web's other wallet transactions. */
+export const REFUND_TX_TIMEOUT_S = 300;
+
+export interface PrepareRefundInput {
+  /** `<txHash>:<operationId>` of the payment being refunded. */
+  payment: string;
+  amount: string;
+  /** The buyer's deposit memo, when their account needs one. */
+  memo?: string;
+  memoType?: RefundMemoType;
+}
+
+export interface PreparedRefund {
+  refundId: string;
+  /** The unsigned transaction envelope, base64. The seller's wallet signs it. */
+  xdr: string;
+  networkPassphrase: string;
+  /** ISO time after which the transaction can no longer be submitted. */
+  expiresAt: string;
+}
+
+/**
+ * The memo of a refund transaction: the buyer's own when they gave one, else
+ * `refund <reference>` as text. Never the bare reference: that is what a
+ * payment *to* the link carries, and a refund has to read as a refund in the
+ * buyer's wallet history. References are 15 bytes, so the prefix fits in 28.
+ */
+export function refundMemo(input: Pick<PrepareRefundInput, "memo" | "memoType">, reference: string): Memo {
+  if (input.memo === undefined) {
+    if (input.memoType !== undefined) throw new HttpError(400, "invalid_memo");
+    return Memo.text(`refund ${reference}`);
+  }
+  try {
+    const type = input.memoType ?? "text";
+    if (type === "id") return Memo.id(input.memo);
+    if (type === "hash") return Memo.hash(input.memo);
+    if (input.memo.length === 0) throw new Error("empty");
+    return Memo.text(input.memo);
+  } catch {
+    throw new HttpError(400, "invalid_memo");
+  }
 }
 
 /** `<txHash>:<operationId>` as the preflight query names a recorded payment. */
@@ -335,6 +383,13 @@ export class LinkService {
        * `resolveRefundDestination` takes the account itself.
        */
       loadRefundAccount?: (accountId: string) => Promise<RefundAccountSnapshot>;
+      /** Refunds against a link's payments (issues 4.58, 4.62). Without it `prepareRefund` answers 501. */
+      refunds?: RefundRepository;
+      /**
+       * The seller wallet's current sequence number, for the refund transaction
+       * (issue 4.59). Tests inject this. Omitted, the service loads it from Horizon.
+       */
+      loadAccountSequence?: (accountId: string) => Promise<string>;
     },
   ) {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
@@ -1929,6 +1984,135 @@ export class LinkService {
     const account = await this.loadRefundAccount(payment.payer);
     const resolution = resolveRefundDestination(payment, account);
     return checkRefundReceivingCapability(this.deps.rail, payment, link.asset, amount, resolution, account.dataAttr);
+  }
+
+  /**
+   * Marks every `prepared` refund of one payment whose transaction can no
+   * longer be submitted as `failed` (issue 4.59). A prepared refund reserves
+   * its amount (4.62); once its time bounds have passed nobody can sign it
+   * into the ledger, so the reservation is released. Called before anything
+   * works out what a payment has left.
+   */
+  async expireUnsignedRefunds(paymentTxHash: string, paymentOperationId: string, now = Date.now()): Promise<Refund[]> {
+    const refunds = this.deps.refunds;
+    if (!refunds) return [];
+    const rows = await refunds.listByPayment(paymentTxHash, paymentOperationId);
+    const current: Refund[] = [];
+    for (const row of rows) {
+      if (row.status === "prepared" && row.createdAt + REFUND_TX_TIMEOUT_S * 1000 <= now) {
+        const failed = await refunds.update(row.id, { status: "failed", failureReason: "expired_unsigned" });
+        current.push(failed ?? { ...row, status: "failed", failureReason: "expired_unsigned" });
+      } else {
+        current.push(row);
+      }
+    }
+    return current;
+  }
+
+  /**
+   * Builds the unsigned transaction that refunds part or all of one payment
+   * (issue 4.59). The server builds it, and not the browser, because only the
+   * server knows how much is still refundable and where it has to go. It is
+   * never signed here: the seller's wallet signs it.
+   *
+   * The caller has already checked that the link belongs to the seller.
+   */
+  async prepareRefund(linkId: string, input: PrepareRefundInput, now = Date.now()): Promise<PreparedRefund> {
+    const refunds = this.deps.refunds;
+    if (!refunds) throw new HttpError(501, "refunds_disabled");
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "not_found");
+
+    const paymentId = parseRefundPaymentKey(input.payment);
+    if (!paymentId) throw new HttpError(400, "invalid_payment");
+    const payments = await this.deps.links.listPaymentsForLink(linkId);
+    const payment = payments.find(
+      (row) => row.txHash === paymentId.txHash && row.operationId === paymentId.operationId,
+    );
+    if (!payment) throw new HttpError(404, "not_found");
+
+    const memo = refundMemo(input, link.reference);
+
+    // What the payment has left, after releasing what expired unsigned.
+    const existing = await this.expireUnsignedRefunds(payment.txHash, payment.operationId, now);
+    const refundable = refundableAmount(payment.amount, existing);
+    const amount = input.amount.trim();
+    const valid = validateRefundAmount(amount, refundable);
+    if (!valid.ok) {
+      if (valid.reason === "exceeds_refundable") throw new HttpError(409, "refund_exceeds_refundable", { refundable });
+      throw new HttpError(400, "invalid_refund_amount", { reason: valid.reason });
+    }
+    const canonical = normalizeAmount(amount);
+
+    // Can the money land there, and does the account want a memo (4.63)?
+    const preflight = await this.refundPreflight(linkId, input.payment, canonical);
+    if (!preflight.ok) {
+      throw new HttpError(422, "refund_destination_cannot_receive", { reason: preflight.reason, message: preflight.message });
+    }
+    if (preflight.memoRequired && input.memo === undefined) {
+      throw new HttpError(422, "refund_destination_cannot_receive", {
+        reason: "memo_required",
+        message: "The buyer's account requires a memo. Ask them for the correct deposit memo before sending the refund.",
+      });
+    }
+
+    // The seller's sequence is read before the amount is reserved, so an
+    // unreachable Horizon costs the payment nothing.
+    const sequence = await this.loadAccountSequence(link.destination);
+
+    const refund: Refund = {
+      id: newId("rfd"),
+      linkId: link.id,
+      sellerId: link.sellerId,
+      paymentTxHash: payment.txHash,
+      paymentOperationId: payment.operationId,
+      destination: preflight.destination,
+      destinationMuxedId: null,
+      memo: input.memo ?? null,
+      memoType: input.memo === undefined ? null : (input.memoType ?? "text"),
+      amount: canonical,
+      asset: link.asset,
+      status: "prepared",
+      txHash: null,
+      failureReason: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    // Atomic (4.62): of two requests that together exceed the payment, one loses here.
+    if (!(await refunds.claim(refund, payment.amount))) {
+      const left = refundableAmount(payment.amount, await refunds.listByPayment(payment.txHash, payment.operationId));
+      throw new HttpError(409, "refund_exceeds_refundable", { refundable: left });
+    }
+
+    try {
+      const asset = link.asset.issuer === null ? Asset.native() : new Asset(link.asset.code, link.asset.issuer);
+      const tx = new TransactionBuilder(new Account(link.destination, sequence), {
+        fee: BASE_FEE,
+        networkPassphrase: this.deps.stellar.networkPassphrase,
+        // Fixed from `now`, so the row's expiry and the transaction's agree.
+        timebounds: { minTime: 0, maxTime: Math.floor(now / 1000) + REFUND_TX_TIMEOUT_S },
+      })
+        .addOperation(Operation.payment({ destination: preflight.destination, asset, amount: canonical }))
+        .addMemo(memo)
+        .build();
+      return {
+        refundId: refund.id,
+        xdr: tx.toXDR(),
+        networkPassphrase: this.deps.stellar.networkPassphrase,
+        expiresAt: new Date((Math.floor(now / 1000) + REFUND_TX_TIMEOUT_S) * 1000).toISOString(),
+      };
+    } catch (err) {
+      // Nothing was handed out to sign, so the reservation must not stand.
+      await refunds.update(refund.id, { status: "failed", failureReason: "build_failed" });
+      throw err;
+    }
+  }
+
+  private async loadAccountSequence(accountId: string): Promise<string> {
+    if (this.deps.loadAccountSequence) return this.deps.loadAccountSequence(accountId);
+    const server = new Horizon.Server(this.deps.stellar.horizonUrl);
+    const loaded = await server.loadAccount(accountId);
+    return loaded.sequenceNumber();
   }
 
   private async loadRefundAccount(accountId: string): Promise<RefundAccountSnapshot> {
