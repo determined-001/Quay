@@ -52,7 +52,7 @@ function job(over: Partial<StoredOffRampJob> = {}): StoredOffRampJob {
 
 const link = makeLink({ offrampNetTargetAmount: "9950" });
 
-const okTx: HorizonTransaction = { successful: true, memoType: "id", memo: "4242" };
+const okTx: HorizonTransaction = { successful: true, memoType: "id", memo: "4242", resultCode: null };
 const okPayment: HorizonPayment = { from: SELLER, to: ANCHOR, amount: "10.0000000", asset: USDC };
 
 function horizon(
@@ -380,7 +380,12 @@ describe("createHorizonLookup", () => {
       return Response.json(opsBody);
     }) as unknown as typeof fetch;
     const h = createHorizonLookup("https://horizon.example/", fetchImpl);
-    expect(await h.getTransaction(HASH)).toEqual({ successful: true, memoType: "id", memo: "4242" });
+    expect(await h.getTransaction(HASH)).toEqual({
+      successful: true,
+      memoType: "id",
+      memo: "4242",
+      resultCode: null,
+    });
     expect(await h.getPayments(HASH)).toEqual([
       { from: SELLER, to: ANCHOR, amount: "10.0000000", asset: USDC },
       { from: SELLER, to: ANCHOR, amount: "1.5", asset: { code: "XLM", issuer: null } },

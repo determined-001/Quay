@@ -314,6 +314,13 @@ export const env = {
   // closed the anchor's window without finishing; without this the link would
   // stay `offramp_pending` indefinitely.
   offrampInteractiveTimeoutMs: num("OFFRAMP_INTERACTIVE_TIMEOUT_MS", 3_600_000),
+  // Seller-signed refunds (issue 4.58). Off unless exactly "1" or "true",
+  // matching the gate on the refund routes. The ledger-confirmation poller
+  // (issue #538) only starts when this is on.
+  refundsEnabled: process.env.REFUNDS_ENABLED === "1" || process.env.REFUNDS_ENABLED === "true",
+  // How often the refund confirmation poller asks Horizon about submitted
+  // refunds, in milliseconds (issue #538). Default 15000.
+  refundPollIntervalMs: num("REFUND_POLL_INTERVAL_MS", 15_000),
   // Testnet-only convenience secret for demo scripts (pnpm demo:seed / pnpm demo:reset).
   // Never set on public network.
   defaultSellerSecret: process.env.DEFAULT_SELLER_SECRET || undefined,

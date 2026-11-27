@@ -1,4 +1,5 @@
 import {
+  assertRefundTransition,
   fromStroops,
   toStroops,
   type AssetRef,
@@ -528,5 +529,26 @@ export class FakeRefundRepository implements RefundRepository {
     const next: Refund = { ...r, ...patch, updatedAt: Date.now() };
     this.byId.set(id, next);
     return { ...next, asset: { ...next.asset } };
+  }
+
+  /** The same conditional move as the table (issue #538); nothing is awaited
+   *  between the status check and the write, so two callers cannot interleave. */
+  async transition(
+    id: string,
+    from: RefundStatus,
+    to: RefundStatus,
+    patch: { failureReason?: string | null } = {},
+  ): Promise<boolean> {
+    assertRefundTransition(from, to);
+    const r = this.byId.get(id);
+    if (!r || r.status !== from) return false;
+    const next: Refund = {
+      ...r,
+      status: to,
+      failureReason: patch.failureReason ?? null,
+      updatedAt: Date.now(),
+    };
+    this.byId.set(id, next);
+    return true;
   }
 }

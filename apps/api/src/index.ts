@@ -24,6 +24,7 @@ import { RedisStore } from "./middleware/redis-store";
 import { requestContext } from "./request-context";
 import { buildAuthMiddleware, apiKeyRateLimitKey } from "./middleware/auth";
 import { installErrorHandler } from "./error-handler";
+import { startRefundPoller } from "./worker/watcher-loop";
 
 const SHUTDOWN_TIMEOUT_MS = env.shutdownTimeoutMs;
 
@@ -254,6 +255,14 @@ async function main(): Promise<void> {
 
   container.start();
 
+  // Refund confirmation (issue #538). With REFUNDS_ENABLED off nothing can be
+  // `submitted`, so startRefundPoller creates no timer at all. E2E test mode
+  // promises a process that makes no outbound calls, so it stays off there too.
+  const stopRefundPoller = startRefundPoller(container.service, env.refundPollIntervalMs, {
+    enabled: env.refundsEnabled && !env.e2eTestMode,
+    logger,
+  });
+
   let server: ReturnType<typeof serve> | undefined = serve({ fetch: app.fetch, port: env.apiPort }, (info) => {
     logger.info(
       {
@@ -287,6 +296,7 @@ async function main(): Promise<void> {
     server.close(() => {
       void (async () => {
         try {
+          stopRefundPoller();
           await container.stop();
         } catch (err) {
           logger.warn({ event: "api.shutdown.stop_failed", err }, "container stop failed during shutdown");

@@ -1,6 +1,7 @@
 export * from "./asset";
 export * from "./normalize";
 export * from "./horizon-client";
+export * from "./horizon-lookup";
 export * from "./horizon-retry";
 export * from "./path-quote";
 export * from "./horizon-watcher";

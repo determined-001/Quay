@@ -1,0 +1,68 @@
+{
+  "_links": {
+    "self": { "href": "https://horizon-testnet.stellar.org/transactions/3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c/payments?cursor=&limit=200&order=asc" },
+    "next": { "href": "" },
+    "prev": { "href": "" }
+  },
+  "_embedded": {
+    "records": [
+      {
+        "_links": {
+          "self": { "href": "https://horizon-testnet.stellar.org/operations/5152083849482241" },
+          "transaction": { "href": "https://horizon-testnet.stellar.org/transactions/3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c" }
+        },
+        "id": "5152083849482241",
+        "paging_token": "5152083849482241",
+        "transaction_successful": true,
+        "source_account": "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ",
+        "type": "create_account",
+        "type_i": 0,
+        "created_at": "2026-11-27T10:00:00Z",
+        "transaction_hash": "3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c",
+        "funder": "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ",
+        "account": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        "starting_balance": "1.0000000"
+      },
+      {
+        "_links": {
+          "self": { "href": "https://horizon-testnet.stellar.org/operations/5152083849482242" },
+          "transaction": { "href": "https://horizon-testnet.stellar.org/transactions/3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c" }
+        },
+        "id": "5152083849482242",
+        "paging_token": "5152083849482242",
+        "transaction_successful": true,
+        "source_account": "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ",
+        "type": "payment",
+        "type_i": 1,
+        "created_at": "2026-11-27T10:00:00Z",
+        "transaction_hash": "3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c",
+        "from": "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ",
+        "to": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        "amount": "5.0000000",
+        "asset_type": "credit_alphanum4",
+        "asset_code": "USDC",
+        "asset_issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+      },
+      {
+        "_links": {
+          "self": { "href": "https://horizon-testnet.stellar.org/operations/5152083849482243" },
+          "transaction": { "href": "https://horizon-testnet.stellar.org/transactions/3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c" }
+        },
+        "id": "5152083849482243",
+        "paging_token": "5152083849482243",
+        "transaction_successful": true,
+        "source_account": "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ",
+        "type": "payment",
+        "type_i": 1,
+        "created_at": "2026-11-27T10:00:00Z",
+        "transaction_hash": "3b1f0c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c",
+        "from": "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ",
+        "to": "MA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        "to_muxed": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        "to_muxed_id": "42",
+        "amount": "2.0000000",
+        "asset_type": "native"
+      }
+    ]
+  }
+}

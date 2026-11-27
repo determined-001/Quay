@@ -44,7 +44,7 @@ import type {
   AssetRef,
   WithdrawTransfer,
 } from "@checkout/core";
-import { InvalidCursorError } from "@checkout/core";
+import { assertRefundTransition, InvalidCursorError } from "@checkout/core";
 import type { DB } from "../db/client";
 import {
   links,
@@ -509,6 +509,29 @@ export class DrizzleRefundRepository implements RefundRepository {
     if (patch.failureReason !== undefined) set.failureReason = patch.failureReason;
     await this.db.update(refunds).set(set).where(eq(refunds.id, id));
     return this.findById(id);
+  }
+
+  /**
+   * One UPDATE with the old status in the WHERE clause (issue #538): the
+   * status check and the write are the same statement, so a second poller
+   * that read the row before this one settled it updates zero rows instead of
+   * settling it again.
+   */
+  async transition(
+    id: string,
+    from: RefundStatus,
+    to: RefundStatus,
+    patch: { failureReason?: string | null } = {},
+  ): Promise<boolean> {
+    assertRefundTransition(from, to);
+    const result = await this.db.run(sql`
+      UPDATE refunds
+      SET status = ${to},
+          failure_reason = ${patch.failureReason ?? null},
+          updated_at = ${Date.now()}
+      WHERE id = ${id} AND status = ${from}
+    `);
+    return result.rowsAffected === 1;
   }
 }
 

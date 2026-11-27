@@ -70,6 +70,9 @@ operator or integrator can observe are repeated here.
 - `TELEMETRY_TOKEN` now also gates `GET /telemetry/pii-audit`.
 - `OFFRAMP_INTERACTIVE_TIMEOUT_MS` (default 1 hour): how long a SEP-24 job may
   sit at `incomplete` before it is failed as abandoned.
+- `REFUND_POLL_INTERVAL_MS` (default `15000`): how often the refund
+  confirmation poller asks Horizon whether a submitted refund's transaction
+  landed. The poller only runs when `REFUNDS_ENABLED` is on.
 - `KYC_RETENTION_DAYS` (default 730) for the KYC and profile data retention
   purge; `SHUTDOWN_TIMEOUT_MS` (default 5000) now bounds graceful shutdown.
 - `pnpm secrets:mainnet` no longer generates `DEFAULT_SELLER_*` keys.
@@ -85,6 +88,13 @@ The authoritative list is [`.env.example`](./.env.example); `pnpm
 docs:check-env-docs` keeps it in step with the code.
 
 ### Added
+
+- A submitted refund is now confirmed from the ledger (issue #538): the API
+  polls Horizon for its transaction, marks it `confirmed` when the payment
+  matches the prepared destination, asset, amount and memo, and marks it
+  `failed` with Horizon's result code, `ledger_mismatch`, or
+  `not_found_on_ledger` (after ten minutes) otherwise. Sellers no longer see a
+  refund stay `submitted` forever.
 
 - The network a deployment settles on is now stated on the checkout masthead,
   the dashboard, the link detail header and the demo page: `Mainnet`, or

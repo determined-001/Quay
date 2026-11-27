@@ -1,4 +1,5 @@
 import type { AssetRef, PaymentLink, StoredOffRampJob, WithdrawTransfer } from "@checkout/core";
+import type { HorizonLookup, HorizonPayment, HorizonTransaction } from "@checkout/stellar";
 
 /**
  * Reconciliation report (issue 4.32): does every cash-out we started have
@@ -44,25 +45,10 @@ export type MismatchField =
   | "anchor_tx_id"
   | "duplicate_claim";
 
-export interface HorizonTransaction {
-  successful: boolean;
-  memoType: string | null;
-  memo: string | null;
-}
-
-export interface HorizonPayment {
-  from: string;
-  to: string;
-  amount: string;
-  asset: AssetRef;
-}
-
-/** Narrow Horizon surface the report needs; stubbed in tests. */
-export interface HorizonLookup {
-  /** null when Horizon answers 404 (no such transaction). Throws on any other failure. */
-  getTransaction(hash: string): Promise<HorizonTransaction | null>;
-  getPayments(hash: string): Promise<HorizonPayment[]>;
-}
+// The Horizon port and its real client live in @checkout/stellar (issue #538)
+// so refund confirmation can use them too; re-exported here for the report's
+// existing callers.
+export type { HorizonLookup, HorizonPayment, HorizonTransaction };
 
 export interface ReconciliationItem {
   jobId: string;
@@ -427,57 +413,7 @@ export class ReconciliationService {
 // ---------------------------------------------------------------------------
 
 /** Horizon over plain fetch. Reads only; the base URL comes from resolveStellarConfig. */
-export function createHorizonLookup(
-  horizonUrl: string,
-  fetchImpl: typeof fetch = fetch,
-  timeoutMs = 10_000,
-): HorizonLookup {
-  const base = horizonUrl.replace(/\/+$/, "");
-  async function getJson(path: string): Promise<{ status: number; body: unknown }> {
-    const res = await fetchImpl(`${base}${path}`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (res.status === 404) return { status: 404, body: null };
-    if (!res.ok) throw new Error(`Horizon answered HTTP ${res.status}`);
-    return { status: res.status, body: await res.json() };
-  }
-  return {
-    async getTransaction(hash) {
-      if (!HASH_RE.test(hash)) throw new Error("refusing to query a malformed hash");
-      const { status, body } = await getJson(`/transactions/${hash}`);
-      if (status === 404) return null;
-      const t = body as { successful?: boolean; memo_type?: string; memo?: string };
-      return {
-        successful: t.successful === true,
-        memoType: t.memo_type && t.memo_type !== "none" ? t.memo_type : null,
-        memo: typeof t.memo === "string" ? t.memo : null,
-      };
-    },
-    async getPayments(hash) {
-      if (!HASH_RE.test(hash)) throw new Error("refusing to query a malformed hash");
-      const { status, body } = await getJson(`/transactions/${hash}/operations?limit=200`);
-      if (status === 404) return [];
-      const records =
-        ((body as { _embedded?: { records?: Array<Record<string, string>> } })._embedded?.records) ?? [];
-      const out: HorizonPayment[] = [];
-      for (const r of records) {
-        if (r.type !== "payment") continue;
-        if (!r.to || !r.amount) continue;
-        out.push({
-          from: r.from ?? r.source_account ?? "",
-          to: r.to,
-          amount: r.amount,
-          asset:
-            r.asset_type === "native"
-              ? { code: "XLM", issuer: null }
-              : { code: r.asset_code ?? "", issuer: r.asset_issuer ?? null },
-        });
-      }
-      return out;
-    },
-  };
-}
+export { createHorizonLookup } from "@checkout/stellar";
 
 // ---------------------------------------------------------------------------
 // Date range

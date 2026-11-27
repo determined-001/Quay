@@ -123,6 +123,49 @@ describe("DrizzleRefundRepository (issue 4.58)", () => {
   });
 });
 
+// The conditional settlement is tested against the real table and against the
+// fake the service tests use, so the two cannot drift apart (issue #538).
+describe.each([
+  ["DrizzleRefundRepository", freshRepo],
+  ["FakeRefundRepository", async () => new FakeRefundRepository()],
+])("%s.transition (issue #538)", (_name, makeRepo) => {
+  it("moves a refund only while it is still in the expected status", async () => {
+    const repo = await makeRepo();
+    await repo.create(refund({ status: "submitted", txHash: "b".repeat(64) }));
+
+    expect(await repo.transition("rfd_1", "submitted", "confirmed")).toBe(true);
+    expect(await repo.findById("rfd_1")).toMatchObject({ status: "confirmed", failureReason: null });
+
+    // A second tick that read the row before the first settled it loses.
+    expect(
+      await repo.transition("rfd_1", "submitted", "failed", { failureReason: "ledger_mismatch" }),
+    ).toBe(false);
+    expect(await repo.findById("rfd_1")).toMatchObject({ status: "confirmed", failureReason: null });
+  });
+
+  it("records the failure reason, and refuses an illegal transition", async () => {
+    const repo = await makeRepo();
+    await repo.create(refund({ status: "submitted", txHash: "b".repeat(64) }));
+
+    expect(
+      await repo.transition("rfd_1", "submitted", "failed", { failureReason: "not_found_on_ledger" }),
+    ).toBe(true);
+    expect(await repo.findById("rfd_1")).toMatchObject({
+      status: "failed",
+      failureReason: "not_found_on_ledger",
+    });
+
+    await expect(repo.transition("rfd_1", "confirmed", "submitted")).rejects.toThrow(
+      /Illegal refund status transition/,
+    );
+  });
+
+  it("returns false for a refund that does not exist", async () => {
+    const repo = await makeRepo();
+    expect(await repo.transition("rfd_missing", "submitted", "confirmed")).toBe(false);
+  });
+});
+
 // The claim is tested against the real table and against the fake the service
 // tests use, so the two cannot drift apart.
 describe.each([

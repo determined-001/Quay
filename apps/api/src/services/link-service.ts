@@ -39,6 +39,8 @@ import {
   type IndicativePrice,
   type OffRampTelemetryRepository,
   type OffRampTelemetryRow,
+  type Refund,
+  type RefundRepository,
   type WithdrawTransfer,
 } from "@checkout/core";
 import {
@@ -57,6 +59,9 @@ import {
   quoteStrictReceive,
   resolveAsset,
   sendMaxFor,
+  type HorizonLookup,
+  type HorizonPayment,
+  type HorizonTransaction,
   type PathQuote,
   type StellarConfig,
 } from "@checkout/stellar";
@@ -182,6 +187,61 @@ export async function checkRefundReceivingCapability(
   return { ok: true, destination: resolution.destination, memoRequired };
 }
 
+/** Whether a Horizon payment went to the destination the refund names. */
+function refundPaysDestination(refund: Refund, payment: HorizonPayment): boolean {
+  if (payment.to === refund.destination) {
+    // A plain G-address is right only when the refund names no sub-account;
+    // otherwise the prepared transaction addressed a specific muxed id.
+    return refund.destinationMuxedId === null;
+  }
+  return (
+    refund.destinationMuxedId !== null &&
+    payment.toMuxed === refund.destination &&
+    payment.toMuxedId === refund.destinationMuxedId
+  );
+}
+
+type RefundPaymentMismatch = "destination" | "asset" | "amount" | "memo";
+
+/**
+ * Compares a successful refund transaction with the refund it was prepared for
+ * (issue 4.60). Returns null when the transaction pays the stored destination,
+ * asset and amount (and memo, when one was required), else the first field
+ * that differs. Amounts are compared in stroops, never as floats.
+ */
+function refundPaymentMismatch(
+  refund: Refund,
+  tx: HorizonTransaction,
+  payments: readonly HorizonPayment[],
+): RefundPaymentMismatch | null {
+  const toDestination = payments.filter((p) => refundPaysDestination(refund, p));
+  if (toDestination.length === 0) return "destination";
+
+  const rightAsset = toDestination.filter((p) => assetEquals(p.asset, refund.asset));
+  if (rightAsset.length === 0) return "asset";
+
+  let want: bigint;
+  try {
+    want = toStroops(refund.amount);
+  } catch {
+    // A stored amount that is not a Stellar amount cannot match anything.
+    return "amount";
+  }
+  const paid = rightAsset.some((p) => {
+    try {
+      return toStroops(p.amount) === want;
+    } catch {
+      return false;
+    }
+  });
+  if (!paid) return "amount";
+
+  if (refund.memo !== null && (tx.memoType !== refund.memoType || tx.memo !== refund.memo)) {
+    return "memo";
+  }
+  return null;
+}
+
 export interface LinkWithRequest {
   link: PaymentLink;
   request: PaymentRequest;
@@ -243,6 +303,15 @@ export class LinkService {
   private readonly transferRequiredLogged = new Set<string>();
   /** Links with a cash-out poll in flight; see `pollCashOuts`. */
   private readonly pollingLinkIds = new Set<string>();
+  /** Refunds with a confirmation poll in flight; see `pollRefunds`. */
+  private readonly pollingRefundIds = new Set<string>();
+  /**
+   * How long a submitted refund may stay unknown to Horizon before it is
+   * failed as `not_found_on_ledger` (issue #538). A transaction normally
+   * appears within seconds; ten minutes of 404 means it never reached a
+   * ledger, or was dropped before the ledger window closed.
+   */
+  static readonly REFUND_NOT_FOUND_TIMEOUT_MS = 10 * 60 * 1000;
   private static readonly POLL_BACKOFF_BASE_MS = 2_000;
   private static readonly POLL_BACKOFF_CAP_MS = 60_000;
   /**
@@ -335,6 +404,11 @@ export class LinkService {
        * `resolveRefundDestination` takes the account itself.
        */
       loadRefundAccount?: (accountId: string) => Promise<RefundAccountSnapshot>;
+      /** Refunds against payments (issue 4.58). The container always wires
+       *  this; fixtures that never confirm refunds may omit it. */
+      refunds?: RefundRepository;
+      /** Horizon read surface for confirming submitted refunds (issue #538). */
+      horizon?: HorizonLookup;
     },
   ) {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
@@ -1523,6 +1597,151 @@ export class LinkService {
         this.pollingLinkIds.delete(listed.id);
       }
     }
+  }
+
+  /**
+   * Confirm submitted refunds from the ledger (issue #538).
+   *
+   * `submitted` only means Horizon accepted the signed transaction into its
+   * queue, not that it succeeded. Each tick looks the stored hash up and
+   * settles the refund exactly once:
+   *
+   *  - successful, paying the stored destination, asset, amount and memo ->
+   *    `confirmed`;
+   *  - successful but different from what was prepared -> `failed` with
+   *    `ledger_mismatch`, logged at error level: 4.60 prepared the
+   *    transaction, so a mismatch means something outside Quay signed or
+   *    altered it;
+   *  - on the ledger with `successful: false` -> `failed` with Horizon's
+   *    result code;
+   *  - still unknown after REFUND_NOT_FOUND_TIMEOUT_MS -> `failed` with
+   *    `not_found_on_ledger`.
+   *
+   * A Horizon error leaves the refund `submitted` for the next tick: an
+   * outage is not evidence about the ledger. `transition` is conditional on
+   * the stored status and `pollingRefundIds` keeps overlapping ticks apart, so
+   * the same refund can never be settled twice.
+   */
+  async pollRefunds(opts: ServiceCallOptions = {}): Promise<void> {
+    const log = opts.logger ?? this.deps.logger!;
+    const refunds = this.deps.refunds;
+    const horizon = this.deps.horizon;
+    // The container wires both; a fixture without them never polls refunds.
+    if (!refunds || !horizon) return;
+
+    const submitted = await refunds.listByStatus("submitted");
+    const now = Date.now();
+    for (const listed of submitted) {
+      // One poll per refund at a time. A tick that outlives the interval, or a
+      // manual trigger beside the timer, would otherwise settle it twice.
+      if (this.pollingRefundIds.has(listed.id)) {
+        log.debug({ event: "refund.poll.skipped", refundId: listed.id }, "refund poll already in flight");
+        continue;
+      }
+      this.pollingRefundIds.add(listed.id);
+      try {
+        // The list may be stale if another tick settled it since it was read.
+        const refund = (await refunds.findById(listed.id)) ?? listed;
+        if (refund.status !== "submitted") continue;
+        if (!refund.txHash) {
+          // Submitted without a hash can never be found on the ledger.
+          await this.settleRefund(refund, "failed", "missing_tx_hash", log);
+          continue;
+        }
+        await this.pollRefund(refund, now, log);
+      } catch (err) {
+        log.warn(
+          {
+            event: "refund.poll.error",
+            refundId: listed.id,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          "refund poll failed",
+        );
+      } finally {
+        this.pollingRefundIds.delete(listed.id);
+      }
+    }
+  }
+
+  /** One refund's share of {@link pollRefunds}. */
+  private async pollRefund(refund: Refund, now: number, log: Logger): Promise<void> {
+    const horizon = this.deps.horizon!;
+    const txHash = refund.txHash!;
+
+    let tx: HorizonTransaction | null;
+    let payments: HorizonPayment[] = [];
+    try {
+      tx = await horizon.getTransaction(txHash);
+      if (tx) payments = await horizon.getPayments(txHash);
+    } catch (err) {
+      // Horizon down or erroring: say so instead of guessing either way. The
+      // refund stays `submitted` and the next tick asks again.
+      log.warn(
+        {
+          event: "refund.poll.horizon_error",
+          refundId: refund.id,
+          txHash,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        "could not check refund transaction on Horizon",
+      );
+      return;
+    }
+
+    if (!tx) {
+      // `updatedAt` is the row's last write; for a `submitted` refund that is
+      // the moment it was submitted (the submit route sets the status).
+      if (now - refund.updatedAt < LinkService.REFUND_NOT_FOUND_TIMEOUT_MS) return;
+      await this.settleRefund(refund, "failed", "not_found_on_ledger", log);
+      return;
+    }
+
+    if (!tx.successful) {
+      await this.settleRefund(refund, "failed", tx.resultCode ?? "transaction_failed", log);
+      return;
+    }
+
+    const mismatch = refundPaymentMismatch(refund, tx, payments);
+    if (mismatch !== null) {
+      log.error(
+        { event: "refund.ledger_mismatch", refundId: refund.id, linkId: refund.linkId, txHash, mismatch },
+        "refund transaction does not match the prepared refund",
+      );
+      await this.settleRefund(refund, "failed", "ledger_mismatch", log);
+      return;
+    }
+
+    await this.settleRefund(refund, "confirmed", null, log);
+  }
+
+  /** Applies one terminal settlement, only if the refund is still `submitted`. */
+  private async settleRefund(
+    refund: Refund,
+    status: "confirmed" | "failed",
+    failureReason: string | null,
+    log: Logger,
+  ): Promise<void> {
+    const moved = await this.deps.refunds!.transition(refund.id, "submitted", status, { failureReason });
+    if (!moved) {
+      log.debug(
+        { event: "refund.settle.skipped", refundId: refund.id, status },
+        "refund was already settled by another tick",
+      );
+      return;
+    }
+    log.info(
+      {
+        event: status === "confirmed" ? "refund.confirmed" : "refund.failed",
+        refundId: refund.id,
+        linkId: refund.linkId,
+        txHash: refund.txHash,
+        failureReason,
+      },
+      status === "confirmed" ? "refund confirmed on the ledger" : `refund failed: ${failureReason}`,
+    );
+    // TODO(4.61): emit the link.refunded / refund.failed webhook here once the
+    // 4.61 webhook hook lands on dev.
   }
 
   /** One link's share of {@link pollCashOuts}. Returns early rather than `continue`. */

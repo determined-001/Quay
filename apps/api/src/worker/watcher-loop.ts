@@ -499,6 +499,41 @@ export function startCashOutPoller(service: LinkService, intervalMs: number, log
 }
 
 /**
+ * Periodically confirm submitted refunds against the ledger (issue #538).
+ *
+ * `enabled` is the REFUNDS_ENABLED switch. With refunds off nothing can ever
+ * be `submitted`, so no timer is created at all rather than one that polls an
+ * always-empty set forever. The `inFlight` flag stops a tick that outlives the
+ * interval from overlapping the next; LinkService's own per-refund guard
+ * covers a manual call beside the timer.
+ */
+export function startRefundPoller(
+  service: Pick<LinkService, "pollRefunds">,
+  intervalMs: number,
+  opts: { enabled: boolean; logger?: Logger },
+): () => void {
+  if (!opts.enabled) return () => {};
+  const pollerLogger = (opts.logger ?? NOOP_LOGGER).child({ component: "refund-poller" });
+  let inFlight = false;
+  const timer = setInterval(() => {
+    if (inFlight) {
+      pollerLogger.debug({ event: "refund.tick.skipped" }, "refund tick still running; skipping this interval");
+      return;
+    }
+    inFlight = true;
+    void service
+      .pollRefunds({ logger: pollerLogger })
+      .catch((err) => {
+        pollerLogger.error({ event: "refund.tick.error", error: stringifyErr(err) }, "refund tick error");
+      })
+      .finally(() => {
+        inFlight = false;
+      });
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
+/**
  * Periodically run the anchor health probe. First probe runs immediately so
  * the breaker state is correct on first request rather than after one interval
  * has elapsed. Probe failures never throw; AnchorHealth records every outcome.

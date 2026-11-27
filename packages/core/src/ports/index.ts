@@ -883,6 +883,18 @@ export interface RefundRepository {
   listByStatus(status: RefundStatus): Promise<Refund[]>;
   /** Applies the patch and bumps `updatedAt`; returns the updated refund, or null if unknown. */
   update(id: string, patch: RefundPatch): Promise<Refund | null>;
+  /**
+   * Atomically moves a refund from `from` to `to`, recording `failureReason`,
+   * but only while its stored status is still `from` (issue #538). Returns
+   * false when it had already moved, so two overlapping confirmation ticks
+   * cannot settle the same refund twice. Throws on an illegal transition.
+   */
+  transition(
+    id: string,
+    from: RefundStatus,
+    to: RefundStatus,
+    patch?: { failureReason?: string | null },
+  ): Promise<boolean>;
 }
 
 /**
