@@ -54,6 +54,8 @@ Privilege escalation is prevented: an API key can only mint keys whose scopes ar
 | --- | --- | --- | --- |
 | `links:read` | Read payment links, details, quotes, and export CSVs | `GET /links/export/csv`<br>`GET /links/:id/detail`<br>`GET /links/:id/offramp-preview`<br>`GET /links/:id/offramp-requirements`<br>`GET /links/:id/cash-out/quote` | Yes |
 | `links:write` | Mutate and cancel payment links | `POST /links/:id/cancel` | Yes |
+| `invoices:read` | *(Planned, behind `INVOICES_ENABLED`)* Read invoices, list with status filters, view details, and download invoice PDFs | `GET /invoices`<br>`GET /invoices/:id`<br>`GET /invoices/:id/pdf` | Planned (not yet on `dev`) |
+| `invoices:write` | *(Planned, behind `INVOICES_ENABLED`)* Create drafts, update drafts, delete drafts, issue invoices, and void invoices | `POST /invoices`<br>`PATCH /invoices/:id`<br>`DELETE /invoices/:id`<br>`POST /invoices/:id/issue`<br>`POST /invoices/:id/void` | Planned (not yet on `dev`) |
 | `webhooks:manage` | Register, list, delete and rotate webhooks, and read or replay deliveries | every `/webhooks` route: `POST /webhooks`<br>`GET /webhooks`<br>`DELETE /webhooks/:id`<br>`POST /webhooks/:id/rotate-secret`<br>`GET /webhooks/:id/deliveries`<br>`POST /webhooks/deliveries/:id/replay` | Yes |
 | `api-keys:manage` | Create, list, and revoke API keys | `POST /api-keys`<br>`GET /api-keys`<br>`DELETE /api-keys/:id` | No (opt-in) |
 | `offramp:initiate` | Initiate off-ramp cash-out, submit transfers, manage KYC, and anchor sessions | `POST /links/:id/cash-out`<br>`GET /links/:id/cash-out/transfer`<br>`POST /links/:id/cash-out/transfer-sent`<br>every `/seller/kyc` route (`GET`/`PUT /seller/kyc`, `PUT /seller/kyc/files`, `/seller/kyc/disclosures`, `/seller/kyc/consent`, `/seller/kyc/prefill-consent`; the consent, prefill-consent, disclosure and file routes are additionally session-only)<br>`GET /seller/anchor-auth`<br>`POST /seller/anchor-auth/challenge`<br>`POST /seller/anchor-auth`<br>`DELETE /seller/anchor-auth` | No (opt-in) |
@@ -777,6 +779,404 @@ are already the proof.)
 
 **404** — `{ "error": "not_found" }`: unknown reference, or the link is not
 settled.
+
+---
+
+## Invoices
+
+> **Planned (behind `INVOICES_ENABLED`, not yet on `dev`):** The `/invoices` routes, `invoices:read` / `invoices:write` scopes, and `INVOICES_ENABLED` flag documented below are planned and not yet merged to `dev` or live. When implemented, they will ship behind `INVOICES_ENABLED`.
+
+Invoices allow merchants to bill clients with itemized line items, due dates, and
+sequential invoice numbers (`INV-0001`, `INV-0002`). When an invoice is issued,
+Quay creates an underlying non-expiring payment link; the client pays through the
+standard Quay checkout (`/pay/:linkId`), so settlement, matching, and receipts
+reuse the existing payment infrastructure.
+
+### Feature flag
+
+Invoices are gated by `INVOICES_ENABLED` (API) and `NEXT_PUBLIC_INVOICES_ENABLED` (web).
+While the flag is disabled, every `/invoices` route answers **501 `invoices_disabled`**:
+```json
+{
+  "error": "invoices_disabled",
+  "message": "Invoices are not enabled on this deployment."
+}
+```
+This is a deployment capability check; clients must not retry. In production/mainnet,
+invoices remain disabled until end-to-end verification passes.
+
+### Invoice lifecycle
+
+An invoice stores one of three base states:
+- **`draft`** — newly created invoice. Line items, client info, and due date can be edited;
+  drafts can be deleted. No invoice number or payment link exists yet.
+- **`open`** — issued invoice. An immutable invoice number is allocated and a payment link
+  is created. An issued invoice cannot be edited; it can only be voided.
+- **`void`** — cancelled invoice. The underlying payment link is cancelled.
+
+Invoice status reported by the API is **derived dynamically** from the stored state,
+the underlying payment link status, and the current time:
+- `draft` — stored state is `draft`.
+- `open` — stored state is `open`, link is active/unpaid, and `now <= dueAt`.
+- `paid` — stored state is `open` and the underlying link is `paid` or in an `offramp_*` state.
+- `overdue` — stored state is `open`, link is unpaid/underpaid, and `now > dueAt`. An overdue
+  invoice remains fully payable through its link.
+- `void` — stored state is `void`, or the underlying link was cancelled.
+
+### Client personal data & privacy
+
+Invoices record client details:
+- `clientName` — stored in plaintext; rendered in invoice PDFs and displayed on the public
+  invoice page (`GET /invoices/:id/public`) to anyone holding the invoice URL.
+- `clientEmail` and `clientAddress` — encrypted at rest using AES-256-GCM (`WEBHOOK_SECRET_ENCRYPTION_KEY`).
+  They are **never** returned on the public invoice endpoint. Client address is rendered only in
+  authorized PDF downloads (`GET /invoices/:id/pdf`).
+- Invoices are accounting records and are retained indefinitely; erasing a seller profile
+  (`DELETE /seller/profile`) does **not** erase invoice records or client data. See [`PRIVACY.md`](PRIVACY.md).
+
+---
+
+## `POST /invoices`
+
+**Requires auth** and the `invoices:write` scope. Creates a new invoice in `draft` status.
+Does not allocate an invoice number or create a payment link.
+Honours [`Idempotency-Key`](#idempotency). Uses strict rate limiting.
+
+**Request**
+```json
+{
+  "clientName": "Acme Corp",
+  "clientEmail": "billing@acme.com",
+  "clientAddress": "123 Market St, Suite 400, San Francisco, CA 94105",
+  "notes": "Net 30 payment terms.",
+  "assetCode": "USDC",
+  "dueAt": 1793544000000,
+  "lineItems": [
+    {
+      "description": "Backend integration consulting",
+      "quantity": 10,
+      "unitPrice": "150.00"
+    },
+    {
+      "description": "Deployment review",
+      "quantity": 1,
+      "unitPrice": "500.00"
+    }
+  ]
+}
+```
+- `clientName` — required string, 1–120 characters.
+- `clientEmail` — optional valid email string.
+- `clientAddress` — optional string, &le; 500 characters.
+- `notes` — optional string, &le; 1000 characters.
+- `assetCode` — `"USDC"` or `"XLM"`.
+- `dueAt` — required epoch milliseconds timestamp. Must be in the future and &le; 365 days out.
+- `lineItems` — array of 1 to 50 items:
+  - `description` — string, 1–200 characters.
+  - `quantity` — positive integer, 1 to 100,000.
+  - `unitPrice` — positive decimal string with at most 7 decimals.
+
+**201**
+```json
+{
+  "invoice": {
+    "id": "inv_k9x2m1p04z",
+    "sellerId": "sel_01h7x2...",
+    "number": null,
+    "linkId": null,
+    "clientName": "Acme Corp",
+    "clientEmail": "billing@acme.com",
+    "clientAddress": "123 Market St, Suite 400, San Francisco, CA 94105",
+    "notes": "Net 30 payment terms.",
+    "assetCode": "USDC",
+    "lineItems": [
+      {
+        "description": "Backend integration consulting",
+        "quantity": 10,
+        "unitPrice": "150.00"
+      },
+      {
+        "description": "Deployment review",
+        "quantity": 1,
+        "unitPrice": "500.00"
+      }
+    ],
+    "total": "2000.00",
+    "state": "draft",
+    "status": "draft",
+    "issuedAt": null,
+    "dueAt": 1793544000000,
+    "overdueNotifiedAt": null,
+    "createdAt": 1792938957657,
+    "updatedAt": 1792938957657
+  }
+}
+```
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `400` | `invalid_body` | Validation failed (missing required fields, past `dueAt`, invalid email, >50 line items, or non-positive unit price) | Fix the request body per `issues` |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:write` | Use an API key with the scope |
+| `409` | `request_in_progress` | Concurrent request with the same `Idempotency-Key` is still executing | Wait and retry with the same key |
+| `409` | `idempotency_key_reuse` | Same `Idempotency-Key` reused with a different request body | Use a new idempotency key |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off on this deployment | Do not retry |
+
+---
+
+## `PATCH /invoices/:id`
+
+**Requires auth** and the `invoices:write` scope. Updates a `draft` invoice.
+Issued (`open`, `paid`, `overdue`) or `void` invoices cannot be modified.
+
+**Request**
+Same fields as `POST /invoices`, all optional.
+
+**200** — returns the updated invoice object.
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `400` | `invalid_body` | Validation failed | Fix the request body |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:write` | Use an API key with the scope |
+| `404` | `not_found` | Invoice not found, or belongs to another seller | Check the invoice id |
+| `409` | `invoice_not_draft` | Invoice has already been issued or voided | Void and create a new invoice instead |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
+
+---
+
+## `DELETE /invoices/:id`
+
+**Requires auth** and the `invoices:write` scope. Deletes a `draft` invoice.
+Issued invoices cannot be deleted; use `POST /invoices/:id/void` instead.
+
+**200**
+```json
+{
+  "ok": true
+}
+```
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:write` | Use an API key with the scope |
+| `404` | `not_found` | Invoice not found, or belongs to another seller | Check the invoice id |
+| `409` | `invoice_not_draft` | Invoice has already been issued or voided | Void the invoice instead |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
+
+---
+
+## `POST /invoices/:id/issue`
+
+**Requires auth** and the `invoices:write` scope. Issues a `draft` invoice:
+1. Allocates the next sequential human-readable invoice number for the seller (e.g. `INV-0001`).
+2. Creates the underlying non-expiring payment link via `POST /links` with title `Invoice INV-0001` and the calculated exact total.
+3. Performs the seller wallet trustline preflight. If the seller wallet cannot receive the asset, the invoice remains a draft and returns 422.
+4. Sets `state: "open"`, `issuedAt: now`, and links `linkId`.
+
+**Request**
+No request body.
+
+**200**
+```json
+{
+  "invoice": {
+    "id": "inv_k9x2m1p04z",
+    "number": "INV-0001",
+    "linkId": "lnk_ueeh4nl1m1",
+    "clientName": "Acme Corp",
+    "clientEmail": "billing@acme.com",
+    "clientAddress": "123 Market St, Suite 400, San Francisco, CA 94105",
+    "notes": "Net 30 payment terms.",
+    "assetCode": "USDC",
+    "lineItems": [
+      {
+        "description": "Backend integration consulting",
+        "quantity": 10,
+        "unitPrice": "150.00"
+      },
+      {
+        "description": "Deployment review",
+        "quantity": 1,
+        "unitPrice": "500.00"
+      }
+    ],
+    "total": "2000.00",
+    "state": "open",
+    "status": "open",
+    "issuedAt": 1792939000000,
+    "dueAt": 1793544000000,
+    "overdueNotifiedAt": null,
+    "createdAt": 1792938957657,
+    "updatedAt": 1792939000000
+  }
+}
+```
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:write` | Use an API key with the scope |
+| `404` | `not_found` | Invoice not found, or belongs to another seller | Check the invoice id |
+| `409` | `invoice_not_draft` | Invoice is already issued or void | Do not re-issue |
+| `422` | `destination_cannot_receive` | Seller wallet trustline preflight check failed | Add the asset trustline to the seller wallet, then retry issuing |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
+
+---
+
+## `POST /invoices/:id/void`
+
+**Requires auth** and the `invoices:write` scope. Voids an `open` or `overdue` invoice.
+Cancels the underlying payment link via `cancelLink` so it can no longer be paid.
+An invoice whose payment link is already paid cannot be voided.
+
+**Request**
+No request body.
+
+**200** — returns the invoice with `state: "void"` and `status: "void"`.
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:write` | Use an API key with the scope |
+| `404` | `not_found` | Invoice not found, or belongs to another seller | Check the invoice id |
+| `409` | `invoice_already_paid` | Invoice has already been paid | Cannot void a settled invoice; issue a refund if needed |
+| `409` | `invoice_not_open` | Invoice is a draft or already void | Only open/overdue invoices can be voided |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
+
+---
+
+## `GET /invoices`
+
+**Requires auth** and the `invoices:read` scope. Lists invoices for the authenticated seller.
+
+**Query parameters**
+- `status` — optional filter: `draft`, `open`, `paid`, `overdue`, `void`.
+- `cursor` — pagination cursor.
+- `limit` — max items to return (default 20, max 100).
+
+```
+GET /invoices?status=open&limit=10
+```
+
+**200**
+```json
+{
+  "invoices": [
+    {
+      "id": "inv_k9x2m1p04z",
+      "number": "INV-0001",
+      "linkId": "lnk_ueeh4nl1m1",
+      "clientName": "Acme Corp",
+      "total": "2000.00",
+      "assetCode": "USDC",
+      "state": "open",
+      "status": "open",
+      "issuedAt": 1792939000000,
+      "dueAt": 1793544000000,
+      "createdAt": 1792938957657,
+      "updatedAt": 1792939000000
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:read` | Use an API key with the scope |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
+
+---
+
+## `GET /invoices/:id`
+
+**Requires auth** and the `invoices:read` scope. Returns the full seller view of the invoice,
+including decrypted client email and address.
+
+**200** — full invoice object.
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:read` | Use an API key with the scope |
+| `404` | `not_found` | Invoice not found, or belongs to another seller | Check the invoice id |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
+
+---
+
+## `GET /invoices/:id/public`
+
+**Public — no auth.** The buyer-facing view of an issued invoice.
+Returns a safe whitelist of fields needed to review and pay the invoice.
+Returns `404` for draft invoices (drafts are seller-private).
+
+> **Privacy guarantee:** Shows `clientName` to anyone holding the link, but **never** exposes
+> `clientEmail` or `clientAddress`.
+
+**200**
+```json
+{
+  "invoice": {
+    "id": "inv_k9x2m1p04z",
+    "number": "INV-0001",
+    "sellerDisplayName": "Creative Studio",
+    "clientName": "Acme Corp",
+    "lineItems": [
+      {
+        "description": "Backend integration consulting",
+        "quantity": 10,
+        "unitPrice": "150.00"
+      },
+      {
+        "description": "Deployment review",
+        "quantity": 1,
+        "unitPrice": "500.00"
+      }
+    ],
+    "total": "2000.00",
+    "assetCode": "USDC",
+    "issuedAt": 1792939000000,
+    "dueAt": 1793544000000,
+    "status": "open",
+    "linkId": "lnk_ueeh4nl1m1",
+    "notes": "Net 30 payment terms."
+  }
+}
+```
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `404` | `not_found` | Unknown invoice, or invoice is in `draft` state | Check the invoice id |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
+
+---
+
+## `GET /invoices/:id/pdf`
+
+**Requires auth** and the `invoices:read` scope. Downloads the issued invoice as an
+`application/pdf` document.
+
+Records `invoice.client.read` in the PII access log (`pii_audit`) because the PDF
+decrypts and prints the client's billing address.
+
+Draft invoices cannot be rendered as PDF (returns `409 invoice_not_issued`).
+
+**Headers**
+- `Content-Type: application/pdf`
+- `Content-Disposition: attachment; filename="INV-0001.pdf"`
+
+**200** — binary PDF buffer starting with `%PDF-`.
+
+| Status | `error` | When | What the client should do |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid credential | Sign in again |
+| `403` | `missing_scope` | API key lacks `invoices:read` | Use an API key with the scope |
+| `404` | `not_found` | Invoice not found, or belongs to another seller | Check the invoice id |
+| `409` | `invoice_not_issued` | Invoice is in `draft` status | Issue the invoice before downloading PDF |
+| `501` | `invoices_disabled` | `INVOICES_ENABLED` is off | Do not retry |
 
 ---
 
@@ -2071,6 +2471,7 @@ registered URL.
 | `link.cancelled`        | seller voided the link                              |
 | `link.expired`          | TTL elapsed before payment confirmed                |
 | `payment.unmatched`     | a payment arrived matching an expired or cancelled link |
+| `invoice.overdue`       | *(Planned, behind `INVOICES_ENABLED`)* an issued, unpaid invoice reaches its due date (`now > dueAt`) without payment |
 | `offramp.settled`       | a cash-out job settled                              |
 | `offramp.failed`        | a cash-out job failed                               |
 | `offramp.transfer_required` | anchor has published deposit instructions; the seller's wallet must send USDC to the anchor to fund the withdrawal |
@@ -2128,6 +2529,33 @@ The `transfer` object contains the SEP-6 deposit instructions the seller's walle
   "sentAt": "2026-06-19T12:00:00.000Z"
 }
 ```
+
+#### Invoice events (`invoice.overdue`)
+Fired once when an issued, unpaid invoice reaches its due date (`now > dueAt`).
+```json
+{
+  "event": "invoice.overdue",
+  "data": {
+    "invoiceId": "inv_k9x2m1p04z",
+    "number": "INV-0001",
+    "linkId": "lnk_ueeh4nl1m1",
+    "total": "150.00",
+    "paidAmount": "0",
+    "asset": { "code": "USDC", "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+    "dueAt": 1793544000000
+  },
+  "id": "lnk_ueeh4nl1m1",
+  "sentAt": "2026-06-19T12:00:00.000Z"
+}
+```
+
+**Note on invoice settlement:** When a buyer pays an invoice, settlement is signalled by
+the standard `link.paid` webhook for the invoice's underlying payment link (`linkId`).
+There is deliberately **no separate `invoice.paid` event**, preventing duplicate webhook
+processing by accounting integrations.
+
+The `invoice.overdue` payload contains **no client personal data** (no client name, email, or address).
+`id` in the webhook delivery record matches `linkId`, so delivery history appears on the link.
 
 #### KYC events (`kyc.*`)
 For seller-level KYC events, `id` is the seller ID and the payload contains **no PII** (only status metadata and field names). `message` is populated only on `kyc.rejected` and is `null` for all other events:
