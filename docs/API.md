@@ -2077,6 +2077,8 @@ registered URL.
 | `kyc.accepted`          | anchor accepted seller's KYC submission             |
 | `kyc.rejected`          | anchor rejected seller's KYC submission             |
 | `kyc.needs_info`        | anchor requested additional/missing fields          |
+| `link.refunded`         | a refund was confirmed on the ledger (extras: `refundId`, `refundAmount`, `refundTxHash`, `refundDestination`, `paymentTxHash`, `refundedTotal`, `fullyRefunded`) |
+| `refund.failed`         | a submitted refund failed (extras: `refundId`, `refundAmount`, `reason`) |
 
 ### Body
 

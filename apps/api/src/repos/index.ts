@@ -510,6 +510,21 @@ export class DrizzleRefundRepository implements RefundRepository {
     await this.db.update(refunds).set(set).where(eq(refunds.id, id));
     return this.findById(id);
   }
+
+  async updateIfStatus(id: string, expectedStatus: RefundStatus, patch: RefundPatch): Promise<Refund | null> {
+    const set: Partial<typeof refunds.$inferInsert> = { updatedAt: Date.now() };
+    if (patch.status !== undefined) set.status = patch.status;
+    if (patch.txHash !== undefined) set.txHash = patch.txHash;
+    if (patch.failureReason !== undefined) set.failureReason = patch.failureReason;
+    const result = await this.db
+      .update(refunds)
+      .set(set)
+      .where(and(eq(refunds.id, id), eq(refunds.status, expectedStatus)));
+    if ((result as { rowsAffected?: number }).rowsAffected !== 1) {
+      return null;
+    }
+    return this.findById(id);
+  }
 }
 
 /** A payment as the seller's data export reports it. */

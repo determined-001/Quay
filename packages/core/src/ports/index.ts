@@ -883,6 +883,13 @@ export interface RefundRepository {
   listByStatus(status: RefundStatus): Promise<Refund[]>;
   /** Applies the patch and bumps `updatedAt`; returns the updated refund, or null if unknown. */
   update(id: string, patch: RefundPatch): Promise<Refund | null>;
+  /**
+   * Applies `patch` only if the refund's current status is `expectedStatus`
+   * (issue 539). Returns the updated refund on a successful transition, or
+   * null when the row is unknown or its status no longer matches — so a
+   * concurrent/retried poll tick cannot re-fire the webhook. Atomic guard.
+   */
+  updateIfStatus(id: string, expectedStatus: RefundStatus, patch: RefundPatch): Promise<Refund | null>;
 }
 
 /**

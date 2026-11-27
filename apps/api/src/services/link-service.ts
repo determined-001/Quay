@@ -36,6 +36,10 @@ import {
   type Seller,
   type SellerRepository,
   type WebhookRepository,
+  type Refund,
+  type RefundRepository,
+  type RefundStatus,
+  linkRefundSummary,
   type IndicativePrice,
   type OffRampTelemetryRepository,
   type OffRampTelemetryRow,
@@ -335,6 +339,9 @@ export class LinkService {
        * `resolveRefundDestination` takes the account itself.
        */
       loadRefundAccount?: (accountId: string) => Promise<RefundAccountSnapshot>;
+      /** Refunds against a link's payments (issue 4.58). Omitted in tests that
+       *  do not exercise refunds; pollRefunds is a no-op without it. */
+      refunds?: RefundRepository;
     },
   ) {
     this.deps.logger = this.deps.logger ?? NOOP_LOGGER;
@@ -1941,6 +1948,96 @@ export class LinkService {
     } catch (err) {
       if (isNotFound(err)) return { exists: false, dataAttr: {} };
       throw err;
+    }
+  }
+
+  /**
+   * Reconcile refunds against the ledger and fire `link.refunded` /
+   * `refund.failed` webhooks on the persisted state transition (issue 539).
+   * At-most-once: each transition goes through `updateIfStatus`, so a second
+   * tick (or a restart) finds the row already terminal and does nothing.
+   */
+  async pollRefunds(opts: ServiceCallOptions = {}): Promise<void> {
+    const log = (opts.logger ?? this.deps.logger!);
+    const refundsRepo = this.deps.refunds;
+    if (!refundsRepo) return;
+
+    // Submitted refunds: check the ledger.
+    const submitted = await refundsRepo.listByStatus("submitted");
+    for (const refund of submitted) {
+      if (!refund.txHash) continue;
+      const link = await this.deps.links.findById(refund.linkId);
+      if (!link) continue;
+
+      let successful: boolean | null = null; // null = not found / still pending
+      let failureReason: string | null = null;
+      let notFound = false;
+      try {
+        const server = new Horizon.Server(this.deps.stellar.horizonUrl);
+        const tx = await server.transactions().transaction(refund.txHash).call();
+        successful = tx?.successful === true;
+        if (!successful) failureReason = "transaction_failed";
+      } catch (err) {
+        if (isNotFound(err)) {
+          notFound = true;
+        } else {
+          log.warn({ event: "refund.poll.error", refundId: refund.id, error: err instanceof Error ? err.message : String(err) }, "refund poll failed");
+          continue;
+        }
+      }
+
+      // Still pending on the ledger and not yet expired: leave it.
+      if (notFound && Date.now() - refund.updatedAt < 5 * 60 * 1000) continue;
+
+      if (successful) {
+        const updated = await refundsRepo.updateIfStatus(refund.id, "submitted", {
+          status: "confirmed",
+        });
+        if (!updated) continue; // lost the transition race
+        // Compute linkRefundSummary for extras.
+        const payments = await this.deps.links.listPaymentsForLink(link.id);
+        const allRefunds = await refundsRepo.listByLink(link.id);
+        const summary = linkRefundSummary(
+          payments.map((p) => ({ txHash: p.txHash, operationId: p.operationId, amount: p.amount })),
+          allRefunds.map((r) => ({
+            paymentTxHash: r.paymentTxHash,
+            paymentOperationId: r.paymentOperationId,
+            amount: r.amount,
+            status: r.status,
+          })),
+        );
+        await this.fireWebhook(link, "link.refunded", {
+          refundId: refund.id,
+          refundAmount: refund.amount,
+          refundTxHash: refund.txHash,
+          refundDestination: refund.destination,
+          paymentTxHash: refund.paymentTxHash,
+          refundedTotal: summary.refundedAmount,
+          fullyRefunded: summary.fullyRefunded,
+        });
+      } else {
+        const reason = notFound ? "expired" : (failureReason ?? "transaction_failed");
+        const updated = await refundsRepo.updateIfStatus(refund.id, "submitted", {
+          status: "failed",
+          failureReason: reason,
+        });
+        if (!updated) continue;
+        await this.fireWebhook(link, "refund.failed", {
+          refundId: refund.id,
+          refundAmount: refund.amount,
+          reason,
+        });
+      }
+    }
+
+    // Prepared (unsigned) refunds that expired: fail them, no webhook.
+    const prepared = await refundsRepo.listByStatus("prepared");
+    for (const refund of prepared) {
+      if (Date.now() - refund.createdAt < 5 * 60 * 1000) continue;
+      await refundsRepo.updateIfStatus(refund.id, "prepared", {
+        status: "failed",
+        failureReason: "expired",
+      });
     }
   }
 

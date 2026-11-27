@@ -529,4 +529,13 @@ export class FakeRefundRepository implements RefundRepository {
     this.byId.set(id, next);
     return { ...next, asset: { ...next.asset } };
   }
+
+  async updateIfStatus(id: string, expectedStatus: RefundStatus, patch: RefundPatch): Promise<Refund | null> {
+    const r = this.byId.get(id);
+    if (!r || r.status !== expectedStatus) return null;
+    if (patch.txHash !== undefined) this.assertTxHashFree(id, patch.txHash);
+    const next: Refund = { ...r, ...patch, updatedAt: Date.now() };
+    this.byId.set(id, next);
+    return { ...next, asset: { ...next.asset } };
+  }
 }
