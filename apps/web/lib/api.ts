@@ -2,10 +2,12 @@ import type {
   AssetRef,
   KycFieldSpec,
   KycStatus,
+  LinkRefundSummary,
   OffRampQuote,
   PaymentLink,
   PaymentRequest,
   PayoutFieldDescriptor,
+  Refund,
   WithdrawTransfer,
 } from "@checkout/core";
 
@@ -16,6 +18,11 @@ export interface LinkWithRequest {
   request: PaymentRequest;
   /** Paying in any asset (issue 8.30). Optional so older API responses still parse. */
   pay?: { pathPayments: boolean; maxSlippageBps: number };
+}
+
+/** A link row from `GET /links`; paid rows carry refund totals when refunds are on. */
+export interface PaymentLinkWithRefunds extends PaymentLink {
+  refundSummary?: LinkRefundSummary | null;
 }
 
 /** One way to pay a link's outstanding amount with another asset (issue 4.64). */
@@ -89,6 +96,58 @@ export interface LinkDetail {
   offrampPoll?: OfframpPollStatus | null;
   /** Raw upstream status from offramp_jobs.external_status (e.g. SEP-24 "incomplete"). Null when no job ran yet. */
   offrampExternalStatus: string | null;
+  /** Refunds of this link's payments, oldest first (issue 5.45). Absent while refunds are off. */
+  refunds?: Refund[];
+  /** Totals over `refunds` (issue 5.45). Absent while refunds are off. */
+  refundSummary?: LinkRefundSummary | null;
+  /** Individual payments recorded against the link, when the API exposes them. */
+  payments?: RefundPayment[];
+}
+
+/** One recorded payment, the unit a refund is made against (issues 4.58/4.59). */
+export interface RefundPayment {
+  linkId: string;
+  txHash: string;
+  /** Horizon's per-operation id. Null only for legacy rows that predate the column. */
+  operationId: string | null;
+  payer: string;
+  amount: string;
+  asset: AssetRef;
+  ledger: number | null;
+  createdAt: number;
+}
+
+/** `GET /links/:id/refunds/preflight` — can the buyer receive this refund? */
+export interface RefundPreflight {
+  ok: true;
+  /** The resolved recipient: the buyer's M-address when they paid from one, else their G-address. */
+  destination: string;
+  /** SEP-29 `config.memo_required`: the seller must supply the buyer's deposit memo. */
+  memoRequired: boolean;
+}
+
+/** `POST /links/:id/refunds` — the unsigned transaction for the seller's wallet. */
+export interface PreparedRefund {
+  refundId: string;
+  /** Base64 transaction envelope. The server never signs it. */
+  xdr: string;
+  networkPassphrase: string;
+  /** When the transaction's time bounds expire. The route currently returns an ISO string; accept epoch ms too. */
+  expiresAt: string | number;
+}
+
+export interface PrepareRefundInput {
+  /** `<txHash>:<operationId>` of the payment being refunded. */
+  payment: string;
+  amount: string;
+  memo?: string;
+  memoType?: "text" | "id" | "hash";
+}
+
+/** `GET /links/:id/refunds` — every refund of the link and its totals. */
+export interface RefundList {
+  refunds: Refund[];
+  summary: LinkRefundSummary;
 }
 
 export interface PaidWithItem {
@@ -315,7 +374,21 @@ export type ApiErrorCode =
   | "quote_expired" // 409 `quote_expired: <detail>`: the anchor quote lapsed before use
   | "quote_mismatch" // 409 `quote_mismatch`: the quote id does not match the link or amount
   | "request_in_progress" // 409: same Idempotency-Key still running, or key reused with a different body
-  | "challenge_rejected"; // anchor SEP-10 challenge refused (400/502)
+  | "challenge_rejected" // anchor SEP-10 challenge refused (400/502)
+  // Seller-signed refunds (issues 4.59, 4.60, 4.63):
+  | "refunds_disabled" // 501: this deployment has not enabled refunds
+  | "refund_destination_cannot_receive" // 422: the buyer's account cannot receive the refund; see `reason`
+  | "refund_exceeds_refundable" // 409: more than the payment has left; see `refundable`
+  | "refund_expired" // 409: the 300 s prepared transaction expired before it was signed
+  | "refund_not_prepared" // 409: the refund is no longer waiting to be signed
+  | "invalid_refund_amount" // 400: zero, negative, or more than 7 decimals
+  | "invalid_memo" // 400: a memo the network cannot encode
+  | "malformed_xdr" // 400: the wallet returned something the SDK cannot parse
+  | "invalid_operations" // 400: not exactly one payment operation
+  | "source_mismatch" // 400: an operation source differs from the transaction source
+  | "transaction_mismatch" // 400: the signed transaction is not the one that was prepared
+  | "fee_bump_not_supported" // 400: a fee-bump envelope was returned
+  | "memo_required"; // 400/422: the buyer's account needs a deposit memo
 
 const BY_REASON_409: Record<string, ApiErrorCode> = {
   insufficient_balance: "insufficient_balance",
@@ -329,6 +402,7 @@ const BY_REASON_409: Record<string, ApiErrorCode> = {
 const EXPLICIT: Record<string, ApiErrorCode> = {
   anchor_unavailable: "anchor_unavailable",
   offramp_disabled: "offramp_disabled",
+  refunds_disabled: "refunds_disabled",
   request_in_progress: "request_in_progress",
   idempotency_key_reuse: "request_in_progress",
   challenge_rejected: "challenge_rejected",
@@ -346,6 +420,18 @@ const BY_CODE: Record<string, ApiErrorCode> = {
   consent_required: "consent_required",
   unauthorized: "unauthorized",
   rate_limited: "rate_limited",
+  refund_destination_cannot_receive: "refund_destination_cannot_receive",
+  refund_exceeds_refundable: "refund_exceeds_refundable",
+  refund_expired: "refund_expired",
+  refund_not_prepared: "refund_not_prepared",
+  invalid_refund_amount: "invalid_refund_amount",
+  invalid_memo: "invalid_memo",
+  malformed_xdr: "malformed_xdr",
+  invalid_operations: "invalid_operations",
+  source_mismatch: "source_mismatch",
+  transaction_mismatch: "transaction_mismatch",
+  fee_bump_not_supported: "fee_bump_not_supported",
+  memo_required: "memo_required",
 };
 
 /**
@@ -456,6 +542,38 @@ export function describeError(err: CheckoutError): string {
       return "Your session has expired or is not valid. Sign in again to continue.";
     case "rate_limited":
       return "Too many requests. Wait a moment and try again.";
+    case "refunds_disabled":
+      return "Refunds are not enabled on this deployment.";
+    case "refund_destination_cannot_receive": {
+      const message = typeof err.details.message === "string" ? err.details.message : null;
+      return message ?? "The buyer's account cannot receive this refund yet.";
+    }
+    case "refund_exceeds_refundable": {
+      const refundable = typeof err.details.refundable === "string" ? err.details.refundable : null;
+      return refundable
+        ? `Only ${refundable} is still refundable for this payment.`
+        : "That is more than this payment still has refundable.";
+    }
+    case "refund_expired":
+      return "That prepared refund expired before it was signed. Start again to prepare a new one.";
+    case "refund_not_prepared":
+      return "This refund is no longer waiting to be signed. Check its status before trying again.";
+    case "invalid_refund_amount":
+      return "Enter a valid refund amount greater than zero, with at most 7 decimals.";
+    case "invalid_memo":
+      return "That memo cannot be encoded on Stellar. Check it with the buyer and try again.";
+    case "malformed_xdr":
+      return "The wallet returned a transaction that could not be read. Nothing was sent.";
+    case "invalid_operations":
+      return "The signed transaction did not contain exactly one payment. Nothing was sent.";
+    case "source_mismatch":
+      return "The signed transaction did not come from the seller's wallet. Nothing was sent.";
+    case "transaction_mismatch":
+      return "The signed transaction did not match the prepared refund. Start again and sign the exact transaction.";
+    case "fee_bump_not_supported":
+      return "The wallet returned a fee-bump transaction, which refunds do not support. Nothing was sent.";
+    case "memo_required":
+      return "The buyer's account needs a memo. Add their deposit memo and try again.";
     default:
       return "An unexpected error occurred. Please try again.";
   }
@@ -629,7 +747,7 @@ export const api = {
   createLink: (input: CreateLinkInput, idempotencyKey?: string) =>
     http<LinkWithRequest>("/links", { method: "POST", body: JSON.stringify(input), idempotencyKey }),
 
-  listLinks: () => http<{ links: PaymentLink[] }>("/links"),
+  listLinks: () => http<{ links: PaymentLinkWithRefunds[] }>("/links"),
 
   getLink: (id: string) => http<LinkWithRequest>(`/links/${id}`),
 
@@ -647,6 +765,33 @@ export const api = {
   getOfframpRequirements: (id: string) => http<OfframpRequirements>(`/links/${id}/offramp-requirements`),
 
   getDetail: (id: string) => http<LinkDetail>(`/links/${id}/detail`),
+
+  /** Individual payments recorded against a link. A refund names one of these. */
+  listRefundPayments: (id: string) => http<{ payments: RefundPayment[] }>(`/links/${id}/payments`),
+
+  /** Can the buyer's account receive `amount` of this link's asset? */
+  refundPreflight: (id: string, payment: string, amount: string) =>
+    http<RefundPreflight>(
+      `/links/${id}/refunds/preflight?payment=${encodeURIComponent(payment)}&amount=${encodeURIComponent(amount)}`,
+    ),
+
+  /** Build the unsigned refund transaction for the seller's wallet to sign. */
+  prepareRefund: (id: string, input: PrepareRefundInput, idempotencyKey?: string) =>
+    http<PreparedRefund>(`/links/${id}/refunds`, {
+      method: "POST",
+      body: JSON.stringify(input),
+      idempotencyKey,
+    }),
+
+  /** Relay the seller-signed refund. Confirmation still comes from the ledger. */
+  submitRefund: (id: string, refundId: string, signedXdr: string) =>
+    http<{ txHash: string }>(`/links/${id}/refunds/${refundId}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ signedXdr }),
+    }),
+
+  /** Every refund of the link, with the confirmed and pending totals. */
+  listRefunds: (id: string) => http<RefundList>(`/links/${id}/refunds`),
 
   getReceipt: (reference: string) => http<PublicReceipt>(`/r/${reference}`),
 

@@ -23,11 +23,12 @@ import KycPanel from "./KycPanel";
 import RegistrationForm from "./RegistrationForm";
 import DisclosuresPanel from "./DisclosuresPanel";
 import CashOutModal from "./CashOutModal";
+import RefundSheet from "./RefundSheet";
 import { PendingTransferModal } from "./TransferStep";
 import { useSellerWallet } from "./SessionGate";
 import Alerts from "./dashboard/Alerts";
 import CashOutView from "./dashboard/CashOutView";
-import { OFFRAMP_CURRENCY, OFFRAMP_ENABLED, OFFRAMP_IS_MOCK } from "./dashboard/config";
+import { OFFRAMP_CURRENCY, OFFRAMP_ENABLED, OFFRAMP_IS_MOCK, REFUNDS_ENABLED } from "./dashboard/config";
 import CreateLinkSheet, { type NewLink } from "./dashboard/CreateLinkSheet";
 import DevelopersView from "./dashboard/DevelopersView";
 import HomeView from "./dashboard/HomeView";
@@ -69,6 +70,8 @@ export default function Dashboard() {
   const [cashOutLinkId, setCashOutLinkId] = useState<string | null>(null);
   // Which pending link has the resume-transfer dialog open.
   const [pendingTransferLinkId, setPendingTransferLinkId] = useState<string | null>(null);
+  // Which link has the refund sheet open (issue 5.44).
+  const [refundLinkId, setRefundLinkId] = useState<string | null>(null);
 
   const [view, setView] = useState<View>("home");
   // The Developers area is mounted the first time it is opened and kept after,
@@ -319,6 +322,7 @@ export default function Dashboard() {
 
   // The link the modal is operating on; null when closed.
   const cashOutLink = cashOutLinkId ? (links.find((l) => l.id === cashOutLinkId) ?? null) : null;
+  const refundLink = refundLinkId ? (links.find((l) => l.id === refundLinkId) ?? null) : null;
 
   // Real anchor and not yet verified: never let the seller submit a cash-out
   // that can only fail (or worse, silently carry placeholder identity data).
@@ -339,6 +343,7 @@ export default function Dashboard() {
     onCopy: copyCheckout,
     onCashOut: (id: string) => setCashOutLinkId(id),
     onPendingTransfer: (id: string) => setPendingTransferLinkId(id),
+    onRefund: REFUNDS_ENABLED ? (id: string) => setRefundLinkId(id) : undefined,
     cashOutBlocked,
     anchorAuth,
     now,
@@ -433,6 +438,20 @@ export default function Dashboard() {
           isMock={OFFRAMP_IS_MOCK}
           onClose={() => setCashOutLinkId(null)}
           onSuccess={handleCashOutSuccess}
+        />
+      )}
+
+      {/* Refund a payment from the seller's wallet (issue 5.44) */}
+      {REFUNDS_ENABLED && refundLink && (
+        <RefundSheet
+          linkId={refundLink.id}
+          linkDestination={refundLink.destination}
+          asset={refundLink.asset}
+          onClose={() => setRefundLinkId(null)}
+          onSubmitted={() => {
+            setRefundLinkId(null);
+            void refresh();
+          }}
         />
       )}
 

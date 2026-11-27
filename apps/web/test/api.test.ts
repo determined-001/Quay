@@ -500,6 +500,19 @@ const EVERY_ERROR_CODE: Record<ApiErrorCode, true> = {
   quote_expired: true,
   request_in_progress: true,
   challenge_rejected: true,
+  refunds_disabled: true,
+  refund_destination_cannot_receive: true,
+  refund_exceeds_refundable: true,
+  refund_expired: true,
+  refund_not_prepared: true,
+  invalid_refund_amount: true,
+  invalid_memo: true,
+  malformed_xdr: true,
+  invalid_operations: true,
+  source_mismatch: true,
+  transaction_mismatch: true,
+  fee_bump_not_supported: true,
+  memo_required: true,
 };
 
 const ALL_ERROR_CODES = Object.keys(EVERY_ERROR_CODE) as ApiErrorCode[];

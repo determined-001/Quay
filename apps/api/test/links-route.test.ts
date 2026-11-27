@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { NOOP_LOGGER, OffRampDisabledError, type PaymentLink, type Seller, type SellerRepository, type TokenRevocationRepository } from "@checkout/core";
+import {
+  NOOP_LOGGER,
+  OffRampDisabledError,
+  type LinkPaymentRecord,
+  type PaymentLink,
+  type Refund,
+  type Seller,
+  type SellerRepository,
+  type TokenRevocationRepository,
+} from "@checkout/core";
 import type { Container } from "../src/services/container";
 import { SessionIssuer } from "../src/services/session";
 import { linkRoutes } from "../src/routes/links";
@@ -75,7 +84,9 @@ function fakeContainer(): Container {
           : null,
     } as unknown as Container["service"],
     logger: NOOP_LOGGER,
-    links: {} as Container["links"],
+    links: {
+      listPaymentsForLink: async () => [],
+    } as unknown as Container["links"],
     sellers: sellers as unknown as Container["sellers"],
     webhooks: { listDeliveriesByLinkId: async () => [] } as unknown as Container["webhooks"],
     config: { network: "testnet", horizonUrl: "https://horizon-testnet.stellar.org", sellerWallet: owner.wallet },
@@ -92,7 +103,9 @@ function fakeContainer(): Container {
     anchorAuth: null,
     db: {} as Container["db"],
     telemetry: { upsert: async () => {}, summary: async () => [], all: async () => [] } as unknown as Container["telemetry"],
-    refunds: {} as Container["refunds"],
+    refunds: {
+      listByLink: async () => [],
+    } as unknown as Container["refunds"],
     horizonStatus: () => ({ degraded: false, usingFallback: false, consecutiveFailures: 0 }),
     metricsToken: "test-metrics-token",
     ready: async () => true,
@@ -277,6 +290,128 @@ describe("POST /links/:id/cancel — ownership", () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(200);
+  });
+});
+
+const testPayment: LinkPaymentRecord = {
+  linkId: ownedLink.id,
+  txHash: "a".repeat(64),
+  operationId: "12345",
+  payer: "GBUYER",
+  amount: "10",
+  asset: ownedLink.asset,
+  ledger: 42,
+  createdAt: 1_700_000_000_000,
+};
+
+const testRefund: Refund = {
+  id: "rfd_1",
+  linkId: ownedLink.id,
+  sellerId: owner.id,
+  paymentTxHash: testPayment.txHash,
+  paymentOperationId: testPayment.operationId,
+  destination: "GBUYER",
+  destinationMuxedId: null,
+  memo: null,
+  memoType: null,
+  amount: "10",
+  asset: ownedLink.asset,
+  status: "confirmed",
+  txHash: "b".repeat(64),
+  failureReason: null,
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_000_001,
+};
+
+describe("refund read routes", () => {
+  const previous = process.env.REFUNDS_ENABLED;
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.REFUNDS_ENABLED;
+    else process.env.REFUNDS_ENABLED = previous;
+  });
+
+  it("GET /links attaches a refund summary to paid links", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    const paid = { ...ownedLink, status: "paid" as const, paidAmount: "10" };
+    container.service.listLinks = async () => [paid];
+    container.links.listPaymentsForLink = async () => [testPayment];
+    container.refunds.listByLink = async () => [testRefund];
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request("/", { headers: { authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { links: Array<Record<string, unknown>> };
+    expect(body.links[0]!.refundSummary).toEqual({
+      refundedAmount: "10",
+      pendingAmount: "0",
+      fullyRefunded: true,
+    });
+  });
+
+  it("GET /links/:id/payments returns the link's recorded payments", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    container.links.listPaymentsForLink = async () => [testPayment];
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/payments`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { payments: Array<Record<string, unknown>> };
+    expect(body.payments).toEqual([
+      {
+        linkId: ownedLink.id,
+        txHash: testPayment.txHash,
+        operationId: "12345",
+        payer: "GBUYER",
+        amount: "10",
+        asset: ownedLink.asset,
+        ledger: 42,
+        createdAt: testPayment.createdAt,
+      },
+    ]);
+  });
+
+  it("GET /links/:id/payments hides another seller's payments", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, other.id);
+
+    const res = await app.request(`/${ownedLink.id}/payments`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /links/:id/payments is gated with the rest of refunds", async () => {
+    delete process.env.REFUNDS_ENABLED;
+    const app = linkRoutes(fakeContainer(), async (_c, next) => next());
+    const res = await app.request(`/${ownedLink.id}/payments`);
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({ error: "refunds_disabled" });
+  });
+
+  it("GET /links/:id/refunds returns the refunds and their summary", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const container = fakeContainer();
+    container.links.listPaymentsForLink = async () => [testPayment];
+    container.refunds.listByLink = async () => [testRefund];
+    const app = linkRoutes(container, async (_c, next) => next());
+    const token = await tokenFor(container.auth.session, owner.id);
+
+    const res = await app.request(`/${ownedLink.id}/refunds`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { refunds: Refund[]; summary: Record<string, unknown> };
+    expect(body.refunds).toEqual([testRefund]);
+    expect(body.summary).toEqual({ refundedAmount: "10", pendingAmount: "0", fullyRefunded: true });
   });
 });
 

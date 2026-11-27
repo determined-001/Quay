@@ -2,16 +2,21 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import type { LinkRefundSummary } from "@checkout/core";
 import {
   api,
   CheckoutError,
   type WebhookDelivery,
   type PaymentLink,
   type OfframpPollStatus,
+  type RefundPayment,
 } from "../../../lib/api";
+import { hasRefundableAmount } from "../../../lib/refunds";
 import { TimelineClient, PendingTransferAction } from "./TimelineClient";
 import SessionGate from "../../components/SessionGate";
 import NetworkChip from "../../components/NetworkChip";
+import RefundSheet from "../../components/RefundSheet";
+import { REFUNDS_ENABLED } from "../../components/dashboard/config";
 import { addressUrl, explorerUrl } from "../../../lib/explorer";
 
 export interface TimelineEvent {
@@ -189,10 +194,14 @@ type DetailState =
       link: PaymentLink;
       deliveries: WebhookDelivery[];
       offrampPoll?: OfframpPollStatus | null;
+      /** Refund totals and payments, when the API exposes them (issue 5.45). */
+      refundSummary?: LinkRefundSummary | null;
+      payments?: RefundPayment[];
     };
 
 export function LinkDetailClient({ id }: { id: string }) {
   const [state, setState] = useState<DetailState>({ status: "loading" });
+  const [refundOpen, setRefundOpen] = useState(false);
 
   const loadDetail = useCallback(async () => {
     setState({ status: "loading" });
@@ -203,6 +212,8 @@ export function LinkDetailClient({ id }: { id: string }) {
         link: detail.link,
         deliveries: detail.deliveries,
         offrampPoll: detail.offrampPoll,
+        refundSummary: detail.refundSummary,
+        payments: detail.payments,
       });
     } catch (err) {
       if (err instanceof CheckoutError && err.status === 401) {
@@ -266,9 +277,10 @@ export function LinkDetailClient({ id }: { id: string }) {
     );
   }
 
-  const { link, deliveries, offrampPoll } = state;
+  const { link, deliveries, offrampPoll, refundSummary, payments } = state;
 
   const events = buildTimeline(link, deliveries, offrampPoll);
+  const canRefund = REFUNDS_ENABLED && hasRefundableAmount(link, refundSummary);
 
   return (
     <main className="shell">
@@ -294,6 +306,16 @@ export function LinkDetailClient({ id }: { id: string }) {
             <span className={`pill pill--${link.status}`}>
               {link.status.replace("offramp_", "off-ramp ").replace("_", " ")}
             </span>
+            {canRefund && (
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                style={{ marginTop: 10 }}
+                onClick={() => setRefundOpen(true)}
+              >
+                Refund
+              </button>
+            )}
             <div className="tl-amount mono">
               {link.amount} {link.asset.code}
             </div>
@@ -471,6 +493,20 @@ export function LinkDetailClient({ id }: { id: string }) {
         </p>
         <TimelineClient linkId={link.id} reference={link.reference} />
       </section>
+
+      {REFUNDS_ENABLED && refundOpen && (
+        <RefundSheet
+          linkId={link.id}
+          linkDestination={link.destination}
+          asset={link.asset}
+          payments={payments}
+          onClose={() => setRefundOpen(false)}
+          onSubmitted={() => {
+            setRefundOpen(false);
+            void loadDetail();
+          }}
+        />
+      )}
     </main>
   );
 }

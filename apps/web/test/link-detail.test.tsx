@@ -10,6 +10,7 @@ vi.mock("../lib/wallet", () => ({
   disconnectWallet: vi.fn(async () => {}),
   shortAddress: (addr: string) => addr.slice(0, 4) + "…" + addr.slice(-4),
   signChallenge: vi.fn(async () => "signed-challenge-xdr"),
+  signTransaction: vi.fn(async () => "signed-xdr"),
 }));
 
 import { api, CheckoutError, type LinkDetail, type PaymentLink } from "../lib/api";

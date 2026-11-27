@@ -5,7 +5,9 @@ import {
   cashOutQuoteQuerySchema,
   transferSentSchema,
   submitPaymentSchema,
+  linkRefundSummary,
   OffRampDisabledError,
+  type LinkPaymentRecord,
   type PaymentLink,
 } from "@checkout/core";
 import type { Container } from "../services/container";
@@ -15,6 +17,34 @@ import { buildAuthMiddleware, requireScope, type AuthVariables } from "../middle
 import { idempotency } from "../middleware/idempotency";
 import { getLogger } from "../request-context";
 import { env } from "../env";
+
+/** Refunds are opt-in, matching the API gate and the web's NEXT_PUBLIC flag. */
+function refundsEnabled(): boolean {
+  const raw = process.env.REFUNDS_ENABLED;
+  return raw === "1" || raw === "true";
+}
+
+/** The refund-facing shape of a recorded payment. Legacy rows have no operation id. */
+function toRefundPaymentView(payment: LinkPaymentRecord) {
+  return {
+    linkId: payment.linkId,
+    txHash: payment.txHash,
+    operationId: payment.operationId || null,
+    payer: payment.payer,
+    amount: payment.amount,
+    asset: payment.asset,
+    ledger: payment.ledger || null,
+    createdAt: payment.createdAt,
+  };
+}
+
+async function refundSummaryFor(c: Container, linkId: string) {
+  const [payments, refunds] = await Promise.all([
+    c.links.listPaymentsForLink(linkId),
+    c.refunds.listByLink(linkId),
+  ]);
+  return linkRefundSummary(payments, refunds);
+}
 
 export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
@@ -65,9 +95,20 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
   // `link.created` events symmetrically, the same way POST /:id/cash-out
   // includes linkId in every route-level line.)
 
-  // List the seller's links.
+  // List the seller's links. Paid links carry their refund totals when refunds
+  // are enabled, so the payments list can hide Refund once nothing is left
+  // (issue 5.44) without a request per row.
   app.get("/", auth, async (ctx) => {
-    return ctx.json({ links: await c.service.listLinks(ctx.get("seller").id) });
+    const links = await c.service.listLinks(ctx.get("seller").id);
+    if (!refundsEnabled()) return ctx.json({ links });
+    const withRefunds = await Promise.all(
+      links.map(async (link) =>
+        link.paidAmount
+          ? { ...link, refundSummary: await refundSummaryFor(c, link.id) }
+          : link,
+      ),
+    );
+    return ctx.json({ links: withRefunds });
   });
 
   const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -399,13 +440,54 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
     // SEP-24 `incomplete` reads as "waiting on you" in the UI, while the
     // mapped offrampStatus stays `pending`.
     const offrampExternalStatus = await c.service.getOffRampExternalStatus(result.link);
+    const refundData = await (async () => {
+      if (!refundsEnabled() || !result.link.paidAmount) return {};
+      const [payments, refunds] = await Promise.all([
+        c.links.listPaymentsForLink(result.link.id),
+        c.refunds.listByLink(result.link.id),
+      ]);
+      return {
+        payments: payments.map(toRefundPaymentView),
+        refundSummary: linkRefundSummary(payments, refunds),
+      };
+    })();
     return ctx.json({
       link: result.link,
       request: result.request,
       deliveries,
       offrampExternalStatus,
       offrampPoll,
+      ...refundData,
     });
+  });
+
+  // The payments a refund is made against (issue 4.58 / 5.44). Seller-only and
+  // gated exactly like the refund preflight: a refund names one of these rows.
+  app.get("/:id/payments", refundsDisabledGate(), auth, requireScope("refunds:initiate"), async (ctx) => {
+    const linkId = ctx.req.param("id");
+    const existing = await c.service.getLink(linkId);
+    if (!existing) return ctx.json({ error: "not_found" }, 404);
+    if (existing.link.sellerId !== ctx.get("seller").id) {
+      // 404, not 403: confirming the id would leak another seller's link.
+      return ctx.json({ error: "not_found" }, 404);
+    }
+    const payments = await c.links.listPaymentsForLink(linkId);
+    return ctx.json({ payments: payments.map(toRefundPaymentView) });
+  });
+
+  // Refund status for the seller's sheet and confirmation poll (issue 5.45).
+  app.get("/:id/refunds", refundsDisabledGate(), auth, requireScope("refunds:initiate"), async (ctx) => {
+    const linkId = ctx.req.param("id");
+    const existing = await c.service.getLink(linkId);
+    if (!existing) return ctx.json({ error: "not_found" }, 404);
+    if (existing.link.sellerId !== ctx.get("seller").id) {
+      return ctx.json({ error: "not_found" }, 404);
+    }
+    const [payments, refunds] = await Promise.all([
+      c.links.listPaymentsForLink(linkId),
+      c.refunds.listByLink(linkId),
+    ]);
+    return ctx.json({ refunds, summary: linkRefundSummary(payments, refunds) });
   });
 
   // Refund destination preflight (issue 4.63 / #534). Seller-only, same
@@ -484,8 +566,7 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
  */
 function refundsDisabledGate(): MiddlewareHandler {
   return async (ctx, next) => {
-    const raw = process.env.REFUNDS_ENABLED;
-    if (raw !== "1" && raw !== "true") return ctx.json({ error: "refunds_disabled" }, 501);
+    if (!refundsEnabled()) return ctx.json({ error: "refunds_disabled" }, 501);
     await next();
   };
 }

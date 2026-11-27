@@ -28,5 +28,13 @@ export const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
   ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
   : `Cash out to ${OFFRAMP_CURRENCY}`;
 
+/**
+ * Seller-signed refunds (issue 5.44). Off unless the deployment sets the flag,
+ * matching the API's REFUNDS_ENABLED gate. Read through a literal access so
+ * Next inlines it; a lookup by name would always be undefined in the browser.
+ */
+export const REFUNDS_ENABLED =
+  process.env.NEXT_PUBLIC_REFUNDS_ENABLED === "true" || process.env.NEXT_PUBLIC_REFUNDS_ENABLED === "1";
+
 export const INVOICES_ENABLED = process.env.NEXT_PUBLIC_INVOICES_ENABLED === "true";
 
