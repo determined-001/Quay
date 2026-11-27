@@ -38,6 +38,7 @@ const statusPath = resolve(root, "docs/STATUS.md");
 
 const HISTORY_DAYS = 90;
 const FETCH_TIMEOUT_MS = 15000;
+const COLD_START_RETRY_TIMEOUT_MS = 60000;
 const FAILURE_THRESHOLD = 2;
 
 function envUrl(vars, name) {
@@ -55,10 +56,10 @@ export function buildEnvironments(vars = process.env) {
       id: "testnet",
       label: "Testnet",
       // Back-compat: UPTIME_API_URL / UPTIME_WEB_URL are the original,
-      // unprefixed names this script has always read; always defaults to the
-      // public testnet deploy so `pnpm sweep` works with zero setup.
-      apiUrl: envUrl(vars, "UPTIME_TESTNET_API_URL") ?? envUrl(vars, "UPTIME_API_URL") ?? "https://quay-api.onrender.com",
-      webUrl: envUrl(vars, "UPTIME_TESTNET_WEB_URL") ?? envUrl(vars, "UPTIME_WEB_URL") ?? "https://quay-web.vercel.app",
+      // unprefixed names this script has always read; now opt-in like mainnet
+      // with no hardcoded fallback URL.
+      apiUrl: envUrl(vars, "UPTIME_TESTNET_API_URL") ?? envUrl(vars, "UPTIME_API_URL"),
+      webUrl: envUrl(vars, "UPTIME_TESTNET_WEB_URL") ?? envUrl(vars, "UPTIME_WEB_URL"),
       // Dedicated least-privilege key (links:read + links:write) for the
       // synthetic write check — POST /links has required auth since 6.x.
       apiKey: envUrl(vars, "UPTIME_API_KEY"),
@@ -109,7 +110,7 @@ export function buildTargets(environments) {
       kind: "API",
       label: `${env.label} — API`,
       env,
-      check: () => checkGet(`${env.apiUrl}/health`),
+      check: () => checkApiHealth(`${env.apiUrl}/health`),
     });
     if (env.webUrl) {
       targets.push({
@@ -148,6 +149,43 @@ export function buildTargets(environments) {
 async function checkGet(url) {
   const res = await fetchWithTimeout(url, { method: "GET" });
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+}
+
+/**
+ * Checks an API /health endpoint with tolerance for cold starts (issue 8.26).
+ * Free instances (such as Render) can sleep when idle and take ~30-40s to wake up.
+ * If the initial request times out (after FETCH_TIMEOUT_MS = 15s), we retry once
+ * with a longer timeout (COLD_START_RETRY_TIMEOUT_MS = 60s).
+ * The result is only recorded as up if the retry gets HTTP 200.
+ */
+export async function checkApiHealth(url, fetchImpl = fetchWithTimeout) {
+  const start = Date.now();
+  try {
+    const res = await fetchImpl(url, { method: "GET" }, FETCH_TIMEOUT_MS);
+    if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+    return;
+  } catch (err) {
+    const isTimeout =
+      err?.name === "AbortError" ||
+      err?.name === "TimeoutError" ||
+      /aborted|timeout/i.test(err?.message ?? "");
+    if (!isTimeout) {
+      throw err;
+    }
+    const elapsedMs = Date.now() - start;
+    console.log(
+      `[uptime] ${url} initial check timed out after ${elapsedMs}ms; retrying with ${COLD_START_RETRY_TIMEOUT_MS / 1000}s timeout for cold start...`,
+    );
+
+    const retryStart = Date.now();
+    const retryRes = await fetchImpl(url, { method: "GET" }, COLD_START_RETRY_TIMEOUT_MS);
+    const retryElapsedMs = Date.now() - retryStart;
+    if (retryRes.status === 200) {
+      console.log(`[uptime] ${url} cold start resolved in ${retryElapsedMs}ms (total ${Date.now() - start}ms)`);
+      return;
+    }
+    throw new Error(`${url} -> HTTP ${retryRes.status} on cold-start retry`);
+  }
 }
 
 /**
@@ -249,9 +287,9 @@ export async function checkSyntheticLink(apiUrl, apiKey, fetchImpl = fetchWithTi
   }
 }
 
-async function fetchWithTimeout(url, opts) {
+async function fetchWithTimeout(url, opts, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...opts, signal: controller.signal });
   } finally {

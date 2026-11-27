@@ -32,6 +32,16 @@ jobs:
         with:
           node-version: 22
 
+      # History persistence (issue 8.26): restore docs/uptime-state.json from the
+      # status branch so history accumulates across scheduled runs rather than
+      # resetting to the commit snapshot every run.
+      - name: Restore history from status branch
+        run: |
+          git fetch origin status --depth=1 2>/dev/null || true
+          if git rev-parse --verify origin/status >/dev/null 2>&1; then
+            git show origin/status:docs/uptime-state.json > docs/uptime-state.json 2>/dev/null || true
+          fi
+
       - name: Run checks
         id: uptime
         env:
