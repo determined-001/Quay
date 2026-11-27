@@ -435,6 +435,7 @@ green job.
 **Production go-live requirement:** Turning `PATH_PAYMENTS_ENABLED=true` on in
 production (issue 8.30) strictly requires this nightly job to be green. Path
 payments stay disabled on mainnet until this live testnet suite has passed.
+See [Paying in any asset](PAY-WITH-ANY-ASSET.md) for configuration and operator details.
 
 **Run it locally:**
 `RUN_LIVE_PATH_TESTS=1 pnpm --filter @checkout/api exec vitest run test/live/path-payment.live.test.ts`

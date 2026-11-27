@@ -660,9 +660,11 @@ The response carries `Cache-Control: no-store`.
 
 **Public — no auth.** The buyer submits a transaction signed by their own wallet.
 The API parses and validates the complete XDR before relaying it to Horizon. It
-accepts exactly one payment operation and verifies the destination, asset, amount,
-and required `MEMO_TEXT` against the link. It never marks the link paid directly;
-the ledger watcher remains the source of truth.
+accepts exactly one payment operation (a standard `payment` or, when
+`PATH_PAYMENTS_ENABLED` is on, a `path_payment_strict_receive`; see
+[`PAY-WITH-ANY-ASSET.md`](PAY-WITH-ANY-ASSET.md)) and verifies the destination,
+asset, amount, and required `MEMO_TEXT` against the link. It never marks the link
+paid directly; the ledger watcher remains the source of truth.
 
 While `PATH_PAYMENTS_ENABLED` is on, the one operation may instead be a
 strict-receive path payment (`path_payment_strict_receive`) built from a
