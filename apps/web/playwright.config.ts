@@ -77,6 +77,7 @@ export default defineConfig({
             // keypair (nothing looks this wallet up in test mode).
             DEFAULT_SELLER_WALLET: "GB4UZMDW2P4WITZ3DFPFIU6B7NRHBDDP5UQ2BUENI3LJQOX2YC2U7FJB",
             DEFAULT_SELLER_NAME: "E2E Seller",
+            INVOICES_ENABLED: "true",
           },
         },
         {
@@ -93,6 +94,7 @@ export default defineConfig({
             NEXT_PUBLIC_OFFRAMP_MODE: "mock",
             NEXT_PUBLIC_OFFRAMP_CURRENCY: "NGN",
             NEXT_TELEMETRY_DISABLED: "1",
+            NEXT_PUBLIC_INVOICES_ENABLED: "true",
           },
         },
       ],

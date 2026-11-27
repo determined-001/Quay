@@ -19,6 +19,7 @@ import { anchorCallbacksRoutes } from "./routes/anchor-callbacks";
 import { demoRoutes } from "./routes/demo";
 import { telemetryRoutes } from "./routes/telemetry";
 import { testOnlyRoutes } from "./routes/test-only";
+import { invoiceRoutes } from "./routes/invoices";
 import { rateLimit, MemoryStore } from "./middleware/rate-limit";
 import { RedisStore } from "./middleware/redis-store";
 import { requestContext } from "./request-context";
@@ -239,6 +240,7 @@ async function main(): Promise<void> {
   // themselves on TELEMETRY_TOKEN (404 when unset), so mounting them
   // unconditionally is safe.
   app.route("/telemetry", telemetryRoutes(container));
+  app.route("/invoices", invoiceRoutes(container));
 
   // E2E harness backdoors (issue 5.7): session minting and synthetic payment
   // injection for the Playwright suite. Mounted ONLY under E2E_TEST_MODE=1,

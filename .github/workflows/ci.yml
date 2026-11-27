@@ -117,7 +117,7 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm --filter @checkout/web exec playwright install --with-deps chromium
 
-      - name: E2E — payment loop (local stack, no network)
+      - name: E2E — payment and invoice loops (local stack, no network)
         run: pnpm e2e
 
       - name: Upload Playwright traces
