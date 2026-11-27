@@ -86,6 +86,11 @@ docs:check-env-docs` keeps it in step with the code.
 
 ### Added
 
+- Checkout offers the buyer the other assets they can pay with when path
+  payments are enabled (issue 5.47): the link asset first, then each quote with
+  its "about" and "at most" figures and a countdown, re-quoting when the quote
+  expires. The QR code still pays in the link asset.
+
 - The network a deployment settles on is now stated on the checkout masthead,
   the dashboard, the link detail header and the demo page: `Mainnet`, or
   `Testnet: no real money`. On mainnet the demo storefront keeps the product

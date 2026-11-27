@@ -8,7 +8,11 @@ const wallet = vi.hoisted(() => ({
   getWalletNetwork: vi.fn(),
   signTransaction: vi.fn(),
 }));
-const apiMock = vi.hoisted(() => ({ getLink: vi.fn(), submitPayment: vi.fn() }));
+const apiMock = vi.hoisted(() => ({
+  getLink: vi.fn(),
+  submitPayment: vi.fn(),
+  getPayOptions: vi.fn(),
+}));
 const sdk = vi.hoisted(() => ({ loadAccount: vi.fn(), memos: [] as string[] }));
 
 vi.mock("../lib/wallet", () => ({
@@ -50,15 +54,26 @@ vi.mock("@stellar/stellar-sdk", () => {
   };
 });
 
-import WalletPayButton from "../app/components/WalletPayButton";
-import { CheckoutError, type LinkWithRequest } from "../lib/api";
+import WalletPayButton, { type PaymentBuildContext } from "../app/components/WalletPayButton";
+import { countdownMilestone, formatPayOption, sameAsset } from "../app/components/PayWithChoice";
+import {
+  CheckoutError,
+  type LinkWithRequest,
+  type PayOption,
+  type PayOptions,
+} from "../lib/api";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
 const ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 const PASSPHRASE = "Test SDF Network ; September 2015";
+/** The 8.30 flag as the link response carries it (issue 5.47). */
+const ENABLED: NonNullable<LinkWithRequest["pay"]> = { pathPayments: true, maxSlippageBps: 50 };
 
-function link(over: Partial<LinkWithRequest["link"]> = {}): LinkWithRequest {
+function link(
+  over: Partial<LinkWithRequest["link"]> = {},
+  pay?: LinkWithRequest["pay"],
+): LinkWithRequest {
   return {
     link: { id: "lnk_1", status: "active", amount: "10", paidAmount: null, ...over },
     request: {
@@ -68,7 +83,26 @@ function link(over: Partial<LinkWithRequest["link"]> = {}): LinkWithRequest {
       asset: { code: "USDC", issuer: ISSUER },
       memo: "ref_1",
     },
+    ...(pay ? { pay } : {}),
   } as unknown as LinkWithRequest;
+}
+
+/** One 4.64 quote, with fresh timestamps so a long run never starts expired. */
+function payOption(over: Partial<PayOption> = {}): PayOption {
+  const now = Date.now();
+  return {
+    sourceAsset: { code: "XLM", issuer: null },
+    sourceAmount: "24.1234567",
+    sendMax: "24.3646913",
+    path: [],
+    quotedAt: now,
+    expiresAt: now + 30_000,
+    ...over,
+  };
+}
+
+function payOptions(options: PayOption[] = [payOption()]): PayOptions {
+  return { linkAsset: { code: "USDC", issuer: ISSUER }, amount: "10", options };
 }
 
 const fundedAccount = {
@@ -84,8 +118,15 @@ describe("WalletPayButton", () => {
   let root: Root;
   const onSubmitted = vi.fn();
 
-  async function mount(initial: LinkWithRequest = link()) {
-    await act(async () => root.render(<WalletPayButton initial={initial} onSubmitted={onSubmitted} />));
+  async function mount(
+    initial: LinkWithRequest = link(),
+    buildTransaction?: (context: PaymentBuildContext) => Promise<string>,
+  ) {
+    await act(async () =>
+      root.render(
+        <WalletPayButton initial={initial} onSubmitted={onSubmitted} buildTransaction={buildTransaction} />,
+      ),
+    );
   }
   async function pay() {
     const button = container.querySelector("button")!;
@@ -93,16 +134,22 @@ describe("WalletPayButton", () => {
       button.click();
     });
   }
+  const button = () => container.querySelector("button")!;
+  const radios = () =>
+    Array.from(container.querySelectorAll<HTMLInputElement>('input[type="radio"]'));
   const alertText = () => container.querySelector('[role="alert"]')?.textContent ?? null;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     sdk.memos.length = 0;
     wallet.connectWallet.mockResolvedValue("GBUYER");
     wallet.getWalletNetwork.mockResolvedValue({ network: "TESTNET", networkPassphrase: PASSPHRASE });
     wallet.signTransaction.mockResolvedValue("SIGNED_XDR");
     apiMock.getLink.mockResolvedValue(link());
     apiMock.submitPayment.mockResolvedValue({ txHash: "tx_abc" });
+    // Default: one quoted alternative, so the choice renders unless a test
+    // says otherwise.
+    apiMock.getPayOptions.mockResolvedValue(payOptions());
     sdk.loadAccount.mockResolvedValue(fundedAccount);
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -240,5 +287,191 @@ describe("WalletPayButton", () => {
   it("is disabled when told to be", async () => {
     await act(async () => root.render(<WalletPayButton initial={link()} disabled onSubmitted={onSubmitted} />));
     expect(container.querySelector("button")!.disabled).toBe(true);
+  });
+
+  describe("paying with another asset (issue 5.47)", () => {
+    it("does not ask for options or show a choice when path payments are off", async () => {
+      await mount();
+      await pay();
+
+      expect(apiMock.getPayOptions).not.toHaveBeenCalled();
+      expect(container.querySelector("fieldset")).toBeNull();
+      expect(onSubmitted).toHaveBeenCalledWith("tx_abc");
+    });
+
+    it("keeps the one-press flow when the account has no other options", async () => {
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      apiMock.getPayOptions.mockResolvedValue(payOptions([]));
+      await mount();
+      await pay();
+
+      expect(apiMock.getPayOptions).toHaveBeenCalledWith("lnk_1", "GBUYER");
+      expect(container.querySelector("fieldset")).toBeNull();
+      expect(onSubmitted).toHaveBeenCalledWith("tx_abc");
+    });
+
+    it("falls back to the link asset when the quote request fails", async () => {
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      apiMock.getPayOptions.mockRejectedValue(new CheckoutError("server_error", 503, "down"));
+      await mount();
+      await pay();
+
+      expect(container.querySelector("fieldset")).toBeNull();
+      expect(onSubmitted).toHaveBeenCalledWith("tx_abc");
+    });
+
+    it("lists the link asset first, then each quote with its maximum", async () => {
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      await mount();
+      await pay();
+
+      const fieldset = container.querySelector("fieldset")!;
+      expect(fieldset.querySelector("legend")!.textContent).toBe("Pay with");
+      const inputs = radios();
+      expect(inputs).toHaveLength(2);
+      expect(inputs[0]!.checked).toBe(true);
+      expect(inputs[0]!.closest("label")!.textContent).toBe("10 USDC");
+      expect(inputs[1]!.closest("label")!.textContent).toBe(
+        "about 24.1234567 XLM, at most 24.3646913 XLM",
+      );
+      expect(fieldset.textContent).toContain("Quote valid for");
+      expect(fieldset.textContent).toContain("The QR code always pays in USDC.");
+    });
+
+    it("exposes one labelled radio group with a polite status region", async () => {
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      await mount();
+      await pay();
+
+      const fieldset = container.querySelector("fieldset")!;
+      const inputs = radios();
+      expect(new Set(inputs.map((input) => input.name)).size).toBe(1);
+      // The group is entered at its first radio, so Tab and Shift+Tab move past
+      // the whole choice rather than through every option.
+      expect(document.activeElement).toBe(inputs[0]);
+
+      const status = fieldset.querySelector('[role="status"]')!;
+      expect(status.getAttribute("aria-live")).toBe("polite");
+      // The once-a-second clock must not be in the live region.
+      expect(status.textContent).not.toContain("Quote valid for");
+    });
+
+    it("moves the selection and the focus with the arrow keys", async () => {
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      await mount();
+      await pay();
+
+      radios()[0]!.focus();
+      await act(async () => {
+        radios()[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      });
+      expect(radios()[1]!.checked).toBe(true);
+      expect(document.activeElement).toBe(radios()[1]);
+
+      await act(async () => {
+        radios()[1]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+      });
+      expect(radios()[0]!.checked).toBe(true);
+      expect(document.activeElement).toBe(radios()[0]);
+
+      // Wrap-around, so the group never dead-ends.
+      await act(async () => {
+        radios()[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+      });
+      expect(radios()[1]!.checked).toBe(true);
+    });
+
+    it("passes the chosen option to the builder and submits its transaction", async () => {
+      const build = vi.fn(async (_context: PaymentBuildContext) => "UNSIGNED_XDR");
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      await mount(link(), build);
+      await pay();
+
+      await act(async () => radios()[1]!.click());
+      expect(button().textContent).toBe("Pay with XLM");
+
+      await pay();
+      const context = build.mock.calls[0]![0] as PaymentBuildContext;
+      expect(context.address).toBe("GBUYER");
+      expect(context.payOption?.sourceAsset).toEqual({ code: "XLM", issuer: null });
+      expect(context.payOption?.sendMax).toBe("24.3646913");
+      expect(wallet.signTransaction).toHaveBeenCalledWith("UNSIGNED_XDR", "GBUYER");
+      expect(apiMock.submitPayment).toHaveBeenCalledWith("lnk_1", "SIGNED_XDR");
+      expect(onSubmitted).toHaveBeenCalledWith("tx_abc");
+    });
+
+    it("passes no path option when the buyer keeps the link asset", async () => {
+      const build = vi.fn(async (_context: PaymentBuildContext) => "UNSIGNED_XDR");
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      await mount(link(), build);
+      await pay();
+
+      await act(async () => radios()[1]!.click());
+      await act(async () => radios()[0]!.click());
+      expect(button().textContent).toBe("Pay with USDC");
+
+      await pay();
+      expect((build.mock.calls[0]![0] as PaymentBuildContext).payOption).toBeNull();
+    });
+
+    it("re-quotes an expired quote and keeps the chosen asset", async () => {
+      const soon = Date.now() + 300;
+      const fresh = Date.now() + 60_000;
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      apiMock.getPayOptions
+        .mockResolvedValueOnce(payOptions([payOption({ expiresAt: soon })]))
+        .mockResolvedValueOnce(
+          payOptions([payOption({ sourceAmount: "25.0000000", sendMax: "25.2500000", expiresAt: fresh })]),
+        );
+
+      await mount();
+      await pay();
+      await act(async () => radios()[1]!.click());
+      expect(button().textContent).toBe("Pay with XLM");
+
+      // One tick of the countdown carries the quote past its deadline.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      });
+
+      expect(apiMock.getPayOptions).toHaveBeenCalledTimes(2);
+      expect(radios()[1]!.checked).toBe(true);
+      expect(radios()[1]!.closest("label")!.textContent).toBe(
+        "about 25.0000000 XLM, at most 25.2500000 XLM",
+      );
+      expect(button().textContent).toBe("Pay with XLM");
+    });
+
+    it("says plainly that a chosen asset cannot be paid yet, until 5.48 lands", async () => {
+      apiMock.getLink.mockResolvedValue(link({}, ENABLED));
+      await mount();
+      await pay();
+      await act(async () => radios()[1]!.click());
+      await pay();
+
+      expect(alertText()).toBe("Paying in XLM isn't available yet. Choose USDC to pay now.");
+      expect(wallet.signTransaction).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("PayWithChoice helpers", () => {
+  it("treats an asset as itself only when code and issuer both match", () => {
+    expect(sameAsset({ code: "XLM", issuer: null }, { code: "XLM", issuer: null })).toBe(true);
+    expect(sameAsset({ code: "USDC", issuer: ISSUER }, { code: "USDC", issuer: ISSUER })).toBe(true);
+    expect(sameAsset({ code: "USDC", issuer: ISSUER }, { code: "USDC", issuer: null })).toBe(false);
+    expect(sameAsset({ code: "USDC", issuer: ISSUER }, { code: "EURC", issuer: ISSUER })).toBe(false);
+  });
+
+  it("formats a quote as the about/at-most pair the buyer is shown", () => {
+    expect(formatPayOption(payOption())).toBe("about 24.1234567 XLM, at most 24.3646913 XLM");
+  });
+
+  it("announces only actionable thresholds, never the ticking clock", () => {
+    expect(countdownMilestone(120_000)).toBeNull();
+    expect(countdownMilestone(60_000)).toBe("Quote expires in under a minute.");
+    expect(countdownMilestone(30_000)).toBe("Quote expires in under 30 seconds.");
+    expect(countdownMilestone(10_000)).toBe("Quote expires in under 10 seconds.");
+    expect(countdownMilestone(0)).toBe("Quote expired — getting a new price.");
   });
 });
