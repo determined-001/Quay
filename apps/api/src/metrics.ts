@@ -223,6 +223,14 @@ const walletSubmissionsTotal = registry.counter(
   ["outcome"], // submitted | invalid_xdr | rejected
 );
 
+/** Refund relay attempts (issue 4.60) by outcome. `mismatch` is the one to
+ *  watch: it counts a signed XDR that was not the transaction 4.59 prepared. */
+const refundSubmissionsTotal = registry.counter(
+  "refund_submissions_total",
+  "Seller wallet refund transaction relay attempts by outcome.",
+  ["outcome"], // submitted | replayed | invalid_xdr | mismatch | expired | rejected
+);
+
 const webhookAttemptsTotal = registry.counter(
   "webhook_attempts_total",
   "Webhook delivery attempts (each retry counts separately) by result.",
@@ -313,6 +321,7 @@ export const metrics = {
   paymentsMatchedTotal,
   linkStatusTransitionsTotal,
   walletSubmissionsTotal,
+  refundSubmissionsTotal,
   webhookAttemptsTotal,
   anchorCallsTotal,
   watcherTickDurationSeconds,

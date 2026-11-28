@@ -81,6 +81,14 @@ export interface Refund {
   amount: string;
   asset: AssetRef;
   status: RefundStatus;
+  /**
+   * Hash of the transaction prepared for the seller to sign (issue 4.59). A
+   * Stellar transaction hash covers the envelope's contents and not its
+   * signatures, so signing does not change it: the signed XDR accepted by
+   * 4.60 must still hash to this. Null on a refund that was never prepared,
+   * which therefore cannot be submitted.
+   */
+  unsignedTxHash: string | null;
   /** Hash of the refund transaction; null while the refund is `prepared`. */
   txHash: string | null;
   /** Why the refund failed; null unless it is `failed`. */

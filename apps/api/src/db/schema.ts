@@ -116,6 +116,11 @@ export const refunds = sqliteTable("refunds", {
   assetIssuer: text("asset_issuer"), // null = native XLM
   /** prepared | submitted | confirmed | failed (REFUND_STATUSES). */
   status: text("status").notNull(),
+  /** Hash of the transaction prepared for the seller to sign (issue 4.59). A
+   *  Stellar hash covers the envelope contents, not its signatures, so the
+   *  signed XDR submitted in 4.60 must still hash to this. Null on a refund
+   *  that was never prepared. */
+  unsignedTxHash: text("unsigned_tx_hash"),
   /** The refund transaction's hash; null until submitted. Unique when set. */
   txHash: text("tx_hash"),
   failureReason: text("failure_reason"),

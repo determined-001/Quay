@@ -5,6 +5,7 @@ import {
   cashOutQuoteQuerySchema,
   transferSentSchema,
   submitPaymentSchema,
+  submitRefundSchema,
   OffRampDisabledError,
   type PaymentLink,
 } from "@checkout/core";
@@ -293,6 +294,49 @@ export function linkRoutes(c: Container, strictRateLimit: MiddlewareHandler): Ho
       throw err;
     }
   });
+
+  // Relay the refund transaction the seller signed in their own wallet (issue
+  // 4.60). `refunds:initiate` is opt-in like `offramp:initiate`, because this
+  // relays a transaction out of the seller's wallet. The service proves the
+  // envelope is exactly the transaction 4.59 prepared before Horizon sees it.
+  app.post(
+    "/:id/refunds/:refundId/submit",
+    strictRateLimit,
+    refundsDisabledGate(),
+    auth,
+    requireScope("refunds:initiate"),
+    async (ctx) => {
+      const parsed = submitRefundSchema.safeParse(await safeJson(ctx));
+      if (!parsed.success) return ctx.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+      const linkId = ctx.req.param("id");
+      try {
+        // Ownership first: a link id alone must not let one seller submit a
+        // refund against another seller's link (issue #41).
+        const existing = await c.service.getLink(linkId);
+        if (!existing) return ctx.json({ error: "not_found" }, 404);
+        if (existing.link.sellerId !== ctx.get("seller").id) {
+          // 404, not 403: telling a stranger "this exists but is not yours" confirms
+          // the id and leaks the link's existence (issue #41).
+          return ctx.json({ error: "not_found" }, 404);
+        }
+        const result = await c.service.submitRefund(
+          linkId,
+          ctx.req.param("refundId"),
+          parsed.data.signedXdr,
+          { logger: getLogger(ctx) },
+        );
+        return ctx.json(result, 200);
+      } catch (err) {
+        if (err instanceof HttpError) {
+          return ctx.json(
+            { error: err.message, ...(err.extra ?? {}) },
+            err.status as 400 | 404 | 409 | 501,
+          );
+        }
+        throw err;
+      }
+    },
+  );
 
   app.post("/:id/cash-out", strictRateLimit, auth, requireScope("offramp:initiate"), idempotent, async (ctx) => {
     const log = getLogger(ctx);

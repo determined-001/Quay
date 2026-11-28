@@ -26,6 +26,7 @@ function refund(over: Partial<Refund> = {}): Refund {
     amount: "0.5",
     asset: USDC,
     status: "prepared",
+    unsignedTxHash: null,
     txHash: null,
     failureReason: null,
     createdAt: 1_000,

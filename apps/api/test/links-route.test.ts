@@ -63,6 +63,10 @@ function fakeContainer(): Container {
       listLinks: async () => [ownedLink],
       cancelLink: async () => ({ ...ownedLink, status: "cancelled" as const }),
       refundPreflight: async () => ({ ok: true as const, destination: "GBUYER", memoRequired: false }),
+      submitRefund: async (_linkId: string, _refundId: string) => ({
+        refund: { id: "rfd_1", status: "submitted" } as any,
+        txHash: "tx_refund",
+      }),
       getCashOutTransfer: async (id: string) =>
         id === ownedLink.id
           ? {
@@ -243,6 +247,73 @@ describe("GET /links/:id/refunds/preflight", () => {
       reason: "no_trustline",
       message: "The buyer's account can't hold this asset. Ask them to add the required trustline or provide another address.",
     });
+  });
+});
+
+describe("POST /links/:id/refunds/:refundId/submit", () => {
+  const previous = process.env.REFUNDS_ENABLED;
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.REFUNDS_ENABLED;
+    else process.env.REFUNDS_ENABLED = previous;
+  });
+
+  const path = `/${ownedLink.id}/refunds/rfd_1/submit`;
+
+  function appFor(container = fakeContainer()) {
+    return { container, app: linkRoutes(container, async (_c, next) => next()) };
+  }
+
+  it.each([undefined, "0", "yes"])("returns 501 refunds_disabled when REFUNDS_ENABLED is %j", async (value) => {
+    if (value === undefined) delete process.env.REFUNDS_ENABLED;
+    else process.env.REFUNDS_ENABLED = value;
+    const res = await appFor().app.request(path, { method: "POST", body: JSON.stringify({ signedXdr: "x" }) });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({ error: "refunds_disabled" });
+  });
+
+  it("returns 401 when the caller is unauthenticated", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const res = await appFor().app.request(path, { method: "POST", body: JSON.stringify({ signedXdr: "x" }) });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for another seller's link", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const { container, app } = appFor();
+    const token = await tokenFor(container.auth.session, other.id);
+    const res = await app.request(path, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ signedXdr: "x" }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found" });
+  });
+
+  it("rejects a body without a signed XDR", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const { container, app } = appFor();
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(path, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ signedXdr: "" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("passes the signed XDR to the service and returns its hash", async () => {
+    process.env.REFUNDS_ENABLED = "1";
+    const { container, app } = appFor();
+    const token = await tokenFor(container.auth.session, owner.id);
+    const res = await app.request(path, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ signedXdr: "signed-xdr" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ txHash: "tx_refund" });
   });
 });
 

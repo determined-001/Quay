@@ -860,8 +860,12 @@ export interface LinkRepository {
   listPaymentsForLink(linkId: string): Promise<LinkPaymentRecord[]>;
 }
 
-/** The fields of a refund that change after it is created (issue 4.58). */
-export type RefundPatch = Partial<Pick<Refund, "status" | "txHash" | "failureReason">>;
+/** The fields of a refund that change after it is created (issue 4.58).
+ *  `unsignedTxHash` is here because 4.59 stores the prepared transaction's hash
+ *  after the row exists, and it is what 4.60 checks the signed XDR against. */
+export type RefundPatch = Partial<
+  Pick<Refund, "status" | "unsignedTxHash" | "txHash" | "failureReason">
+>;
 
 /**
  * Persistence for refunds (issue 4.58). Lists are newest first.

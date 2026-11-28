@@ -1,0 +1,1 @@
+ALTER TABLE `refunds` ADD `unsigned_tx_hash` text;

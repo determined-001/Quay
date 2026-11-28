@@ -13,6 +13,14 @@ export const submitPaymentSchema = z.object({
 });
 export type SubmitPaymentBody = z.infer<typeof submitPaymentSchema>;
 
+/** Body of POST /links/:id/refunds/:refundId/submit (issue 4.60): the refund
+ *  transaction the seller signed in their wallet. Bounded like the payment
+ *  body, because it is parsed before anything else can reject it. */
+export const submitRefundSchema = z.object({
+  signedXdr: z.string().trim().min(1).max(64_000),
+});
+export type SubmitRefundBody = z.infer<typeof submitRefundSchema>;
+
 export const createLinkSchema = z.object({
   title: z.string().trim().min(1).max(120),
   amount: z

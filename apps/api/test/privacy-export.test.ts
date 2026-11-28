@@ -71,6 +71,7 @@ async function seedSeller(
     amount: "2.5",
     asset: { code: "USDC", issuer: ISSUER },
     status: "confirmed",
+    unsignedTxHash: null,
     txHash: `refundtx_${tag}`,
     failureReason: null,
     createdAt: 1_700_000_000_500,

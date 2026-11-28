@@ -32,6 +32,9 @@ import {
   type PaymentLink,
   type PaymentRequest,
   type OfframpRequirementTypes,
+  type Refund,
+  type RefundMemoType,
+  type RefundRepository,
   type RailPort,
   type Seller,
   type SellerRepository,
@@ -54,6 +57,7 @@ import {
 import {
   isNotFound,
   isRetryable,
+  muxedFor,
   quoteStrictReceive,
   resolveAsset,
   sendMaxFor,
@@ -271,6 +275,12 @@ export class LinkService {
       sellers: SellerRepository;
       webhooks: WebhookRepository;
       rail: RailPort;
+      /**
+       * Refunds against a link's payments (issues 4.58–4.62). Optional because a
+       * deployment without refunds has nothing to submit; `submitRefund` then
+       * answers 501 `refunds_disabled` rather than pretending it can.
+       */
+      refunds?: RefundRepository;
       offramp: OffRampPort;
       offrampState: OffRampStateRepository;
       kyc: KycPort;
@@ -826,6 +836,211 @@ export class LinkService {
       metrics.walletSubmissionsTotal.inc({ outcome: "rejected" });
       log.warn({ event: "payment.submit.failed", linkId: link.id, error: detail, reason }, "wallet submit rejected");
       throw new HttpError(409, "payment_rejected", { reason, detail });
+    }
+  }
+
+  /**
+   * Relay the refund transaction the seller signed in their own wallet
+   * (issue 4.60).
+   *
+   * 4.59 builds the refund's transaction and stores it, unsigned, with its
+   * hash. The browser signs that XDR and hands it back here; this method's job
+   * is to prove the envelope is still that same transaction. Relaying whatever
+   * came back would let a tampered browser use Quay to submit a different
+   * transaction from the seller's account — the seller's wallet signs what it
+   * is shown, so the check has to happen here.
+   *
+   * A Stellar transaction's hash covers the envelope's contents (source,
+   * sequence, fee, time bounds, memo, operations) and not its signatures, so
+   * signing does not change it: the signed envelope must hash to exactly the
+   * prepared hash stored in 4.59. That is the strongest check; the field
+   * checks below are a second line of defence, kept because a named field
+   * mismatch is a far better error than "hashes differ".
+   *
+   * Nothing here marks the refund `confirmed`: confirmation comes from the
+   * ledger (2.15), exactly as the watcher owns a link's transition to `paid`
+   * (see `submitPayment`).
+   */
+  async submitRefund(
+    linkId: string,
+    refundId: string,
+    signedXdr: string,
+    opts: ServiceCallOptions = {},
+  ): Promise<{ refund: Refund; txHash: string }> {
+    const log = opts.logger ?? this.deps.logger!;
+    const refunds = this.deps.refunds;
+    if (!refunds) throw new HttpError(501, "refunds_disabled");
+
+    const link = await this.deps.links.findById(linkId);
+    if (!link) throw new HttpError(404, "Link not found");
+
+    const refund = await refunds.findById(refundId);
+    // An unknown id, a refund of a different link, and another seller's refund
+    // all read the same: the caller learns nothing about ids that are not
+    // theirs (issue #41).
+    if (!refund || refund.linkId !== link.id || refund.sellerId !== link.sellerId) {
+      throw new HttpError(404, "Refund not found");
+    }
+
+    let tx: Transaction;
+    try {
+      // Rejects malformed base64, another network's passphrase and fee-bump
+      // envelopes — all of which are "not the thing we asked you to sign".
+      tx = new Transaction(signedXdr, this.deps.stellar.networkPassphrase);
+    } catch (err) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "invalid_xdr" });
+      throw new HttpError(400, `invalid_xdr: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const hash = tx.hash().toString("hex");
+
+    // A repeat of the submission that already succeeded is not an error: the
+    // browser lost the response, not the transaction. Return what was stored,
+    // and refuse a *different* envelope for an already-submitted refund.
+    if (refund.status === "submitted" || refund.status === "confirmed") {
+      // The prepared hash is the transaction's own identity, and Horizon's
+      // `hash` answer is that same value; either can identify a replay.
+      const submittedHash = refund.unsignedTxHash ?? refund.txHash;
+      if (submittedHash !== null && submittedHash === hash) {
+        metrics.refundSubmissionsTotal.inc({ outcome: "replayed" });
+        return { refund, txHash: refund.txHash ?? hash };
+      }
+      throw new HttpError(409, "Refund already submitted", {
+        status: refund.status,
+        txHash: refund.txHash,
+      });
+    }
+    if (refund.status !== "prepared") {
+      // `failed` is terminal. A refund that failed must be asked for again so
+      // its amount is re-reserved (4.62), not retried as this row.
+      throw new HttpError(409, `Refund cannot be submitted (is "${refund.status}")`);
+    }
+
+    // The prepared transaction's own time bounds (which the hash also covers).
+    // A window that has closed cannot be submitted, and saying so here is
+    // clearer than Horizon's `tx_too_late`.
+    const timeBounds = tx.timeBounds;
+    if (timeBounds && timeBounds.maxTime !== "0" && Number(timeBounds.maxTime) * 1000 <= Date.now()) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "expired" });
+      throw new HttpError(409, "Refund transaction has expired");
+    }
+
+    // ---- exactly one payment operation, sourced by the seller's wallet -----
+    if (tx.operations.length !== 1) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(
+        400,
+        `Transaction must contain exactly one operation, got ${tx.operations.length}`,
+      );
+    }
+    const op = tx.operations[0]!;
+    if (op.type !== "payment") {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(400, `Transaction must be a single payment operation, got "${op.type}"`);
+    }
+    const payment = op as Operation.Payment;
+
+    // A per-operation source moves value out of an account other than the
+    // signer's. Nothing about a refund needs it.
+    if (payment.source && payment.source !== tx.source) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(400, "Refund operation must not override the transaction source account");
+    }
+    // The money goes back out of the seller's wallet, and only that wallet can
+    // produce the signature Horizon will accept.
+    if (tx.source !== link.destination) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(409, "Refund transaction source does not match the seller's wallet");
+    }
+
+    // ---- destination, asset, amount, memo ---------------------------------
+    const expectedDestination = refund.destinationMuxedId
+      ? muxedFor(refund.destination, refund.destinationMuxedId)
+      : refund.destination;
+    if (payment.destination !== expectedDestination) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(409, "Refund destination does not match the prepared refund");
+    }
+
+    const txAsset: AssetRef = payment.asset.isNative()
+      ? { code: "XLM", issuer: null }
+      : { code: payment.asset.getCode(), issuer: payment.asset.getIssuer() ?? null };
+    if (!assetEquals(txAsset, refund.asset)) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(
+        409,
+        `Asset mismatch: refund sends ${refund.asset.code}, transaction sends ${txAsset.code}`,
+      );
+    }
+
+    // Stroops, never strings: "1" and "1.0000000" are the same amount, and
+    // comparing the strings would reject a correct transaction.
+    if (!amountEquals(payment.amount, refund.amount)) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(
+        409,
+        `Amount mismatch: refund sends ${refund.amount}, transaction sends ${payment.amount}`,
+      );
+    }
+
+    // Both the memo's value and its type: a MEMO_ID that stringifies the same
+    // as the refund's text memo is a different memo to the destination.
+    if (!memoMatches(tx.memo, refund.memo, refund.memoType)) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(409, "Refund memo does not match the prepared refund");
+    }
+
+    // ---- the prepared transaction's hash ----------------------------------
+    // Without it there is nothing proving this envelope is the one the seller
+    // meant to sign, and the field checks above cannot supply that proof.
+    if (refund.unsignedTxHash === null) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(409, "Refund has no prepared transaction to match");
+    }
+    if (hash !== refund.unsignedTxHash) {
+      metrics.refundSubmissionsTotal.inc({ outcome: "mismatch" });
+      throw new HttpError(409, "Transaction does not match the prepared refund");
+    }
+
+    const server = new Horizon.Server(this.deps.stellar.horizonUrl);
+    try {
+      const res = await server.submitTransaction(tx);
+      metrics.refundSubmissionsTotal.inc({ outcome: "submitted" });
+      const updated = await refunds.update(refund.id, {
+        status: "submitted",
+        txHash: res.hash,
+        failureReason: null,
+      });
+      log.info(
+        { event: "refund.submitted", linkId: link.id, refundId: refund.id, txHash: res.hash },
+        "wallet-signed refund submitted",
+      );
+      return {
+        refund: updated ?? { ...refund, status: "submitted", txHash: res.hash, failureReason: null },
+        txHash: res.hash,
+      };
+    } catch (err) {
+      const detail =
+        typeof err === "object" && err !== null && "response" in err
+          ? JSON.stringify((err as { response?: { data?: unknown } }).response?.data ?? {})
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      const reason = horizonPaymentReason(err);
+      metrics.refundSubmissionsTotal.inc({ outcome: "rejected" });
+      // The transaction never reached the ledger, so the refund is `failed` and
+      // its amount counts as refundable again (`refundableAmount` ignores failed
+      // refunds): the seller can prepare a fresh one for the same payment.
+      const updated = await refunds.update(refund.id, { status: "failed", failureReason: reason });
+      log.warn(
+        { event: "refund.submit.failed", linkId: link.id, refundId: refund.id, error: detail, reason },
+        "wallet refund submit rejected",
+      );
+      throw new HttpError(409, "refund_rejected", {
+        reason,
+        detail,
+        ...(updated ? { refund: updated } : {}),
+      });
     }
   }
 
@@ -1976,6 +2191,47 @@ function memoText(memo: Memo): string | null {
   const v = memo.value;
   if (v === undefined || v === null) return null;
   return typeof v === "string" ? v : Buffer.from(v).toString("utf8");
+}
+
+/** Compare two amount strings in stroops; an unparseable one is a mismatch, not a throw. */
+function amountEquals(a: string, b: string): boolean {
+  try {
+    return toStroops(a) === toStroops(b);
+  } catch {
+    return false;
+  }
+}
+
+/** A uint64's leading zeros are not part of its value. */
+function asUint64(value: string): string {
+  return /^\d+$/.test(value) ? BigInt(value).toString() : value;
+}
+
+/**
+ * Is `memo` the refund's stored memo, in value *and* type? The type matters on
+ * its own: a MEMO_ID and a MEMO_TEXT that stringify the same are different
+ * memos to the destination. A memo parsed from XDR arrives as a Buffer for text
+ * and as raw bytes for hash, so compare content rather than the JS value.
+ */
+function memoMatches(memo: Memo, value: string | null, type: RefundMemoType | null): boolean {
+  if (value === null || type === null) return memo.type === "none";
+  const actual = memo.value;
+  if (memo.type === "text" && type === "text") {
+    const text =
+      typeof actual === "string"
+        ? actual
+        : Buffer.isBuffer(actual)
+          ? Buffer.from(actual).toString("utf8")
+          : null;
+    return text === value;
+  }
+  if (memo.type === "id" && type === "id") {
+    return actual !== undefined && actual !== null && asUint64(String(actual)) === asUint64(value);
+  }
+  if (memo.type === "hash" && type === "hash") {
+    return Buffer.isBuffer(actual) && Buffer.from(actual).toString("hex").toLowerCase() === value.toLowerCase();
+  }
+  return false;
 }
 
 export type HorizonPaymentReason =

@@ -311,6 +311,7 @@ export async function createTestContainer(): Promise<TestContainer> {
     sellers: repos.sellers,
     webhooks: repos.webhooks,
     rail,
+    refunds: new DrizzleRefundRepository(repos.db),
     offramp,
     offrampState,
     kyc: new NoKycRequired(),
