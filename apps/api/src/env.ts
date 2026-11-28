@@ -369,6 +369,14 @@ export const env = {
   // routes/test-only.ts for exactly what the synthetic payment does and does
   // not verify.
   e2eTestMode: process.env.E2E_TEST_MODE === "1",
+  // Seller-signed refunds (issue 8.29). Off unless explicitly switched on:
+  // every refund is built and signed by the seller's own wallet, and a
+  // half-built refund button on a live dashboard is a real-money risk. "1" or
+  // "true" is on; anything else, including unset, is off. Refund routes mount
+  // the 501 refunds_disabled gate from middleware/refunds-gate.ts while this is
+  // false, and render.mainnet.yaml keeps it off until issue 5.46 passes on
+  // testnet.
+  refundsEnabled: process.env.REFUNDS_ENABLED === "1" || process.env.REFUNDS_ENABLED === "true",
   // Optional comma-separated list of previous 32-byte hex keys used for decrypting
   // older KYC records during key rotation.
   kycEncryptionKeyPrevious: process.env.KYC_ENCRYPTION_KEY_PREVIOUS || undefined,

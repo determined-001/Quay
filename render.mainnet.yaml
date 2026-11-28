@@ -38,6 +38,9 @@
 #                                        error naming the cause
 #   NEXT_PUBLIC_OFFRAMP_MODE=none        or the dashboard offers a cash-out the
 #                                        API answers 501 to
+#   NEXT_PUBLIC_REFUNDS_ENABLED=false    refunds stay off until issue 5.46
+#                                        passes on testnet; the dashboard
+#                                        hides the refund UI
 #
 # Before the first real payment, run the preflight — it checks the things a
 # boot guard cannot see (does the seller account exist, is it funded, does it
@@ -108,6 +111,14 @@ services:
       # cash-out on later is config rather than a migration.
       - key: OFFRAMP
         value: none
+
+      # Refunds stay OFF on mainnet until issue 5.46 passes end to end on
+      # testnet. While this is 0 every refund route answers 501
+      # refunds_disabled, and the dashboard hides the refund UI via
+      # NEXT_PUBLIC_REFUNDS_ENABLED=false on the web deployment. Do not flip it
+      # early: a refund is a real payment out of the seller's wallet.
+      - key: REFUNDS_ENABLED
+        value: "0"
 
       # Cash-out to fiat. Uncomment ALL FOUR together, set OFFRAMP=anchor
       # above, set NEXT_PUBLIC_OFFRAMP_MODE=anchor on the web deployment, and

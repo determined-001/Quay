@@ -48,6 +48,12 @@ operator or integrator can observe are repeated here.
 
 ### New or changed environment variables
 
+- `REFUNDS_ENABLED` (API) and `NEXT_PUBLIC_REFUNDS_ENABLED` (web), both default
+  **off** (`1` or `true` turns them on). Seller-signed refunds are being built
+  over several PRs; while the flag is off every refund route answers
+  `501 refunds_disabled` and the dashboard hides the refund UI. `main` keeps it
+  off until the testnet end-to-end refund test passes (issue 5.46).
+
 - `KYC_ENCRYPTION_KEY` is **required** whenever `OFFRAMP` is `testanchor` or
   `anchor` (the API refuses to boot without it). `KYC_ENCRYPTION_KEY_PREVIOUS`
   is optional, for key rotation.

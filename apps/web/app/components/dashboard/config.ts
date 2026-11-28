@@ -24,6 +24,23 @@ export const OFFRAMP_IS_MOCK = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") 
  */
 export const OFFRAMP_ENABLED = (process.env.NEXT_PUBLIC_OFFRAMP_MODE ?? "mock") !== "none";
 
+/**
+ * Refunds are off unless the deployment turns them on (issue 8.29). The API
+ * answers 501 `refunds_disabled` on every refund route while REFUNDS_ENABLED
+ * is off, so the dashboard must not offer a button the backend will refuse.
+ *
+ * Default off matters here more than elsewhere: a refund is a real payment out
+ * of the seller's wallet, so "not yet configured" must never mean "on".
+ *
+ * Literal access, for the same reason as the values above: Next inlines only a
+ * literal `process.env.NEXT_PUBLIC_*` read at build time. A computed lookup
+ * (`process.env[name]`) is not inlined, leaves this `undefined` in the browser
+ * bundle, and the feature could never be turned on in production.
+ */
+export const REFUNDS_ENABLED =
+  process.env.NEXT_PUBLIC_REFUNDS_ENABLED === "1" ||
+  process.env.NEXT_PUBLIC_REFUNDS_ENABLED === "true";
+
 export const CASH_OUT_LABEL = OFFRAMP_IS_MOCK
   ? `Cash out to ${OFFRAMP_CURRENCY} (simulated)`
   : `Cash out to ${OFFRAMP_CURRENCY}`;
